@@ -1,0 +1,502 @@
+# Open Sesame - Development Environment
+# Usage: mise run <task>
+# Help:  mise run help
+
+[tools]
+# Core
+rust = "1.91"
+"cargo:cargo-deb" = "latest"
+"cargo:cross" = "latest"
+
+# Linting & Formatting
+"cargo:taplo-cli" = "0.10.0" # TOML formatter/linter
+shellcheck = "0.11.0"        # Shell script linter
+shfmt = "3.12.0"             # Shell script formatter
+actionlint = "1.7.7"         # GitHub Actions linter
+
+# Documentation
+markdownlint-cli2 = "0.18.1" # Markdown linter
+lychee = "0.20.1"            # Link checker
+
+# Git Hooks & Commits
+lefthook = "latest"                              # Git hooks manager
+"npm:@commitlint/cli" = "latest"                 # Commit message linter
+"npm:@commitlint/config-conventional" = "latest"
+
+[vars]
+bin = "sesame"
+dir_bin = ".local/bin"
+dir_cfg = ".config/open-sesame"
+dir_cache = ".cache/open-sesame"
+arch_amd64 = "x86_64-unknown-linux-gnu"
+arch_arm64 = "aarch64-unknown-linux-gnu"
+apt_deps = "liblzma-dev libxkbcommon-dev libfontconfig1-dev pkg-config"
+
+[env]
+RUST_BACKTRACE = "1"
+
+# =============================================================================
+# ATOMIC CARGO OPERATIONS (internal building blocks)
+# =============================================================================
+
+[tasks."cargo:fmt"]
+hide = true
+run = "cargo fmt"
+
+[tasks."cargo:fmt:check"]
+hide = true
+run = "cargo fmt --check"
+
+[tasks."cargo:clippy"]
+hide = true
+run = "cargo clippy -- -D warnings"
+
+[tasks."cargo:test"]
+hide = true
+run = "cargo test"
+
+[tasks."cargo:build"]
+hide = true
+run = "cargo build --release"
+
+[tasks."cargo:build:debug"]
+hide = true
+run = "cargo build"
+
+[tasks."cargo:build:debug-logging"]
+hide = true
+run = "cargo build --release --features debug-logging"
+
+[tasks."cargo:build:amd64"]
+hide = true
+env.TARGET = "{{vars.arch_amd64}}"
+run = "cargo build --release --target ${TARGET}"
+
+[tasks."cargo:build:arm64"]
+hide = true
+env.TARGET = "{{vars.arch_arm64}}"
+run = "cross build --release --target ${TARGET}"
+
+[tasks."cargo:deb"]
+hide = true
+run = "cargo deb --no-build"
+
+[tasks."cargo:deb:arm64"]
+hide = true
+env.TARGET = "{{vars.arch_arm64}}"
+run = "cargo deb --no-build --target ${TARGET}"
+
+[tasks."cargo:clean"]
+hide = true
+run = "cargo clean"
+
+# =============================================================================
+# QUALITY GATES (composable checkpoints)
+# =============================================================================
+
+[tasks.fmt]
+alias = [ "f" ]
+description = "Format code"
+depends = [ "cargo:fmt" ]
+
+[tasks.lint]
+alias = [ "l" ]
+description = "Lint code (clippy)"
+depends = [ "cargo:fmt", "cargo:clippy" ]
+
+[tasks.test]
+alias = [ "t" ]
+description = "Run all quality gates + tests"
+depends = [ "cargo:fmt", "cargo:clippy", "cargo:test" ]
+
+# =============================================================================
+# BUILD (all gated by quality checks)
+# =============================================================================
+
+[tasks.build]
+alias = [ "b" ]
+description = "Build release binary"
+depends = [ "test", "cargo:build" ]
+
+[tasks."build:debug"]
+alias = [ "bd" ]
+description = "Build debug binary"
+depends = [ "test", "cargo:build:debug" ]
+
+[tasks."build:amd64"]
+depends = [ "test", "cargo:build:amd64" ]
+description = "Build release binary (amd64)"
+
+[tasks."build:arm64"]
+depends = [ "test", "cargo:build:arm64" ]
+description = "Build release binary (arm64)"
+
+[tasks."build:deb"]
+alias = [ "bde" ]
+description = "Build .deb package"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run test
+mise run cargo:build
+mise run docs:man
+mise run docs:completions
+mise run cargo:deb
+"""
+
+[tasks."build:deb:debug"]
+description = "Build .deb with debug logging"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run test
+mise run cargo:build:debug-logging
+mise run cargo:deb
+"""
+
+[tasks."build:deb:arm64"]
+description = "Build .deb package (arm64)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run test
+mise run cargo:build:arm64
+mise run docs:man
+mise run docs:completions
+mise run cargo:deb:arm64
+"""
+
+[tasks."build:all"]
+alias = [ "ba" ]
+description = "Build all packages"
+depends = [ "build:deb", "build:deb:arm64" ]
+
+# =============================================================================
+# INSTALL (composed from build + install steps)
+# =============================================================================
+
+[tasks.install]
+alias = [ "i" ]
+description = "Build and install .deb"
+depends = [ "build:deb" ]
+env.BIN = "{{vars.bin}}"
+env.DIR_CFG = "{{vars.dir_cfg}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+pgrep -x "${BIN}" && pkill -x "${BIN}" && sleep 0.2 || true
+sudo dpkg -i "$(ls -t target/debian/*_amd64.deb | head -1)"
+mkdir -p ~/${DIR_CFG}/config.d
+[ -f ~/${DIR_CFG}/config.toml ] || ${BIN} --print-config > ~/${DIR_CFG}/config.toml
+${BIN} --version
+"""
+
+[tasks."install:debug"]
+alias = [ "id" ]
+description = "Nuclear clean + install debug .deb"
+env.BIN = "{{vars.bin}}"
+env.DIR_CFG = "{{vars.dir_cfg}}"
+env.DIR_CACHE = "{{vars.dir_cache}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run clean:all
+mise run build:deb:debug
+sudo dpkg -i "$(ls -t target/debian/*_amd64.deb | head -1)"
+mkdir -p ~/${DIR_CFG}/config.d
+${BIN} --print-config > ~/${DIR_CFG}/config.toml
+${BIN} --version
+echo "Debug logging enabled. View logs with:"
+echo "  tail -f ~/${DIR_CACHE}/debug.log"
+"""
+
+# =============================================================================
+# CLEAN
+# =============================================================================
+
+[tasks.clean]
+alias = [ "c" ]
+description = "Clean build artifacts (target/, docs/book/)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo clean 2>/dev/null && echo "✓ Cleaned target/" || true
+[ -d docs/book ] && rm -rf docs/book && echo "✓ Cleaned docs/book/" || true
+echo "✓ Clean complete"
+"""
+
+[tasks."clean:install"]
+alias = [ "ci" ]
+description = "Uninstall package (dpkg + ~/.local/bin)"
+env.BIN = "{{vars.bin}}"
+env.PKG = "open-sesame"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+pgrep -x "${BIN}" && pkill -x "${BIN}" && sleep 0.2 || true
+[ -f /usr/bin/${BIN} ] && sudo dpkg -r ${PKG} 2>/dev/null && echo "✓ Removed deb package" || echo "○ No deb installed"
+[ -f ~/.local/bin/${BIN} ] && rm -f ~/.local/bin/${BIN} && echo "✓ Removed ~/.local/bin/${BIN}" || true
+echo "✓ Uninstall complete"
+"""
+
+[tasks."clean:all"]
+alias = [ "ca" ]
+description = "Nuclear clean (uninstall + config + cache + build)"
+env.BIN = "{{vars.bin}}"
+env.PKG = "open-sesame"
+env.DIR_CFG = "{{vars.dir_cfg}}"
+env.DIR_CACHE = "{{vars.dir_cache}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+pgrep -x "${BIN}" && pkill -x "${BIN}" && sleep 0.2 || true
+[ -f /usr/bin/${BIN} ] && sudo dpkg -r ${PKG} 2>/dev/null && echo "✓ Removed deb package" || true
+[ -f ~/.local/bin/${BIN} ] && rm -f ~/.local/bin/${BIN} && echo "✓ Removed ~/.local/bin/${BIN}" || true
+[ -d ~/${DIR_CFG} ] && rm -rf ~/${DIR_CFG} && echo "✓ Removed ~/${DIR_CFG}" || true
+[ -d ~/${DIR_CACHE} ] && rm -rf ~/${DIR_CACHE} && echo "✓ Removed ~/${DIR_CACHE}" || true
+cargo clean 2>/dev/null && echo "✓ Cleaned target/" || true
+[ -d docs/book ] && rm -rf docs/book && echo "✓ Cleaned docs/book/" || true
+echo "✓ Nuclear clean complete"
+"""
+
+# =============================================================================
+# DEV SHORTCUTS
+# =============================================================================
+
+[tasks.dev]
+alias = [ "d" ]
+description = "Build debug + run"
+depends = [ "build:debug" ]
+env.BIN = "{{vars.bin}}"
+run = "./target/debug/${BIN}"
+
+[tasks."dev:run"]
+alias = [ "dr" ]
+description = "Run debug binary"
+env.BIN = "{{vars.bin}}"
+run = "./target/debug/${BIN}"
+
+# =============================================================================
+# SETUP
+# =============================================================================
+
+[tasks.setup]
+alias = [ "s" ]
+description = "Install tools + deps"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise install
+sudo apt install -y {{vars.apt_deps}}
+echo "✓ Setup complete"
+"""
+
+# =============================================================================
+# STATUS & CONFIG
+# =============================================================================
+
+[tasks.status]
+alias = [ "ss" ]
+description = "Show installation status"
+env.BIN = "{{vars.bin}}"
+env.DIR_CFG = "{{vars.dir_cfg}}"
+run = """
+#!/usr/bin/env bash
+echo "Open Sesame Status"
+echo "=================="
+command -v ${BIN} && echo "✓ $(which ${BIN}): $(${BIN} --version)" || echo "○ Not installed"
+[ -f ~/${DIR_CFG}/config.toml ] && echo "✓ Config: ~/${DIR_CFG}/config.toml" || echo "○ No config"
+"""
+
+[tasks."config:edit"]
+alias = [ "ce" ]
+description = "Edit config"
+env.DIR_CFG = "{{vars.dir_cfg}}"
+run = "${EDITOR:-nano} ~/${DIR_CFG}/config.toml"
+
+[tasks."config:show"]
+alias = [ "cs" ]
+description = "Show config"
+env.DIR_CFG = "{{vars.dir_cfg}}"
+run = "cat ~/${DIR_CFG}/config.toml 2>/dev/null || echo 'No config file'"
+
+# =============================================================================
+# DOCUMENTATION
+# =============================================================================
+
+[tasks."docs:man"]
+description = "Generate man pages via xtask"
+run = "cargo xtask man"
+
+[tasks."docs:completions"]
+description = "Generate shell completions via xtask"
+run = "cargo xtask completions"
+
+[tasks."docs:book"]
+description = "Build mdBook user guide"
+run = "cargo xtask book"
+
+[tasks."docs:api"]
+description = "Build rustdoc API documentation"
+run = "cargo xtask docs"
+
+[tasks."docs:all"]
+alias = [ "da" ]
+description = "Generate all documentation"
+run = "cargo xtask all"
+
+[tasks."docs:clean"]
+description = "Clean generated documentation"
+run = "cargo xtask clean"
+
+[tasks."docs:serve"]
+description = "Serve documentation locally for preview"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cargo xtask all
+echo "Starting documentation servers..."
+echo "API docs: http://localhost:8080/open_sesame/"
+echo "User guide: http://localhost:3000/"
+echo "Press Ctrl+C to stop"
+python3 -m http.server 8080 --directory target/doc &
+cd docs && mdbook serve --port 3000
+'''
+
+# =============================================================================
+# QUALITY ASSURANCE (linting, formatting, validation)
+# =============================================================================
+
+[tasks."qa:all"]
+alias = [ "qa" ]
+description = "Run all QA checks"
+depends = [ "lint", "qa:toml", "qa:markdown", "qa:shell", "qa:actions" ]
+
+[tasks."qa:toml"]
+description = "Lint and format TOML files"
+run = "taplo fmt --check && taplo lint"
+
+[tasks."qa:toml:fix"]
+description = "Fix TOML formatting"
+run = "taplo fmt"
+
+[tasks."qa:markdown"]
+description = "Lint markdown files"
+run = "markdownlint-cli2 '**/*.md' '#node_modules' '#target' '#tmp' '#TASKS*.md'"
+
+[tasks."qa:markdown:fix"]
+description = "Fix markdown issues"
+run = "markdownlint-cli2 --fix '**/*.md' '#node_modules' '#target' '#tmp' '#TASKS*.md'"
+
+[tasks."qa:links"]
+description = "Check links in markdown (offline)"
+run = "lychee --offline '**/*.md'"
+
+[tasks."qa:links:online"]
+description = "Check links in markdown (online)"
+run = "lychee '**/*.md'"
+
+[tasks."qa:shell"]
+description = "Lint shell scripts"
+run = "shellcheck scripts/* 2>/dev/null || echo 'No shell scripts found'"
+
+[tasks."qa:shell:fix"]
+description = "Format shell scripts"
+run = "shfmt -w scripts/* 2>/dev/null || echo 'No shell scripts found'"
+
+[tasks."qa:actions"]
+description = "Lint GitHub Actions workflows"
+run = "actionlint .github/workflows/*.yml 2>/dev/null || true"
+
+# =============================================================================
+# GIT HOOKS
+# =============================================================================
+
+[tasks."hooks:install"]
+description = "Install git hooks via lefthook"
+run = "lefthook install"
+
+[tasks."hooks:uninstall"]
+description = "Uninstall git hooks"
+run = "lefthook uninstall"
+
+[tasks."hooks:run"]
+description = "Run pre-commit hooks manually"
+run = "lefthook run pre-commit"
+
+# =============================================================================
+# HELP
+# =============================================================================
+
+[tasks.default]
+hide = true
+run = "mise run help"
+
+[tasks.help]
+alias = [ "h" ]
+description = "Show help"
+run = """
+#!/usr/bin/env bash
+cat << 'EOF'
+Open Sesame
+
+QUALITY GATES:
+  fmt              (f)    Format code
+  lint             (l)    Format + clippy
+  test             (t)    Format + clippy + test
+
+BUILD (all run quality gates first):
+  build            (b)    Release binary
+  build:debug      (bd)   Debug binary
+  build:deb        (bde)  .deb package
+  build:deb:debug         .deb with debug logging
+  build:all        (ba)   All packages
+
+INSTALL:
+  install          (i)    Build + install .deb
+  install:debug    (id)   Nuclear clean + debug .deb
+
+CLEAN:
+  clean            (c)    Build artifacts (target/, docs/book/)
+  clean:install    (ci)   Uninstall package (dpkg + ~/.local/bin)
+  clean:all        (ca)   Nuclear: uninstall + config + cache + build
+
+DEV:
+  dev              (d)    Build debug + run
+  dev:run          (dr)   Run debug binary
+
+QA (linting, formatting, validation):
+  qa:all           (qa)   Run all QA checks
+  qa:toml                 Lint TOML files
+  qa:toml:fix             Fix TOML formatting
+  qa:markdown             Lint markdown files
+  qa:markdown:fix         Fix markdown issues
+  qa:links                Check links (offline)
+  qa:links:online         Check links (online)
+  qa:shell                Lint shell scripts
+  qa:actions              Lint GitHub Actions
+
+GIT HOOKS:
+  hooks:install           Install lefthook git hooks
+  hooks:uninstall         Remove git hooks
+  hooks:run               Run pre-commit manually
+
+DOCUMENTATION:
+  docs:man                Generate man pages
+  docs:completions        Generate shell completions
+  docs:book               Build mdBook user guide
+  docs:api                Build rustdoc API docs
+  docs:all         (da)   Generate all documentation
+  docs:clean              Clean generated documentation
+  docs:serve              Serve docs locally for preview
+
+OTHER:
+  setup            (s)    Install tools + deps
+  status           (ss)   Show status
+  config:edit      (ce)   Edit config
+  config:show      (cs)   Show config
+
+QUICK START:
+  mise run setup && mise run hooks:install && mise run install
+EOF
+"""
