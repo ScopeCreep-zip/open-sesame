@@ -1,0 +1,24 @@
+[book]
+title = "Open Sesame User Guide"
+authors = [ "usrbinkat" ]
+description = "Vimium-style window switcher for COSMIC desktop"
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/ScopeCreep-zip/open-sesame"
+edit-url-template = "https://github.com/ScopeCreep-zip/open-sesame/edit/main/docs/{path}"
+site-url = "/open-sesame/book/"
+additional-css = [ "theme/custom.css" ]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+
+[preprocessor.links]
+# Enable mdBook link checking

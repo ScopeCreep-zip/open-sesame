@@ -1,0 +1,318 @@
+/* Custom styling for Open Sesame documentation */
+
+:root {
+    --sidebar-width: 280px;
+    --page-padding: 30px;
+    --content-max-width: 900px;
+}
+
+/* Improve readability with better line height and spacing */
+body {
+    line-height: 1.6;
+}
+
+.content {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: var(--page-padding);
+}
+
+/* Code blocks with better styling */
+pre {
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    background-color: var(--code-block-bg);
+    border: 1px solid var(--code-border);
+}
+
+/* Inline code */
+:not(pre) > code {
+    background: var(--inline-code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+    font-family: 'Source Code Pro', 'Fira Mono', Consolas, Monaco, monospace;
+}
+
+/* Headers with better spacing and visual hierarchy */
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+    line-height: 1.3;
+}
+
+h1 {
+    font-size: 2.2em;
+    border-bottom: 2px solid var(--fg);
+    padding-bottom: 0.3em;
+}
+
+h2 {
+    font-size: 1.8em;
+    border-bottom: 1px solid var(--sidebar-bg);
+    padding-bottom: 0.2em;
+}
+
+h3 {
+    font-size: 1.4em;
+}
+
+h4 {
+    font-size: 1.2em;
+}
+
+/* Navigation improvements */
+.sidebar {
+    background-color: var(--sidebar-bg);
+}
+
+.sidebar-scrollbox {
+    padding: 10px;
+}
+
+.chapter {
+    padding: 5px 10px;
+}
+
+.chapter.active {
+    background-color: var(--sidebar-active);
+    border-left: 3px solid var(--links);
+}
+
+/* Tables with better styling */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+
+table th {
+    background-color: var(--table-header-bg);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.75rem;
+    border-bottom: 2px solid var(--table-border-color);
+}
+
+table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--table-border-color);
+}
+
+table tr:hover {
+    background-color: var(--table-row-hover);
+}
+
+/* Blockquotes and admonitions */
+blockquote {
+    border-left: 4px solid var(--quote-border);
+    padding-left: 1rem;
+    margin: 1em 0;
+    background-color: var(--quote-bg);
+    border-radius: 0 4px 4px 0;
+}
+
+/* Note/Warning/Tip boxes */
+.warning, .note, .tip {
+    padding: 1rem;
+    margin: 1em 0;
+    border-radius: 4px;
+    border-left: 4px solid;
+}
+
+.note {
+    background-color: var(--note-bg);
+    border-left-color: var(--note-border);
+}
+
+.warning {
+    background-color: var(--warning-bg);
+    border-left-color: var(--warning-border);
+}
+
+.tip {
+    background-color: var(--tip-bg);
+    border-left-color: var(--tip-border);
+}
+
+/* Links */
+a {
+    color: var(--links);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Search bar */
+#searchbar {
+    width: 100%;
+    padding: 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--searchbar-border);
+    background-color: var(--searchbar-bg);
+    color: var(--fg);
+}
+
+#searchbar:focus {
+    outline: none;
+    border-color: var(--links);
+}
+
+/* Print styles */
+@media print {
+    .sidebar,
+    .nav-wrapper,
+    .mobile-nav-chapters,
+    .menu-bar {
+        display: none;
+    }
+
+    .content {
+        max-width: 100%;
+        margin: 0;
+        padding: 0;
+    }
+
+    pre {
+        page-break-inside: avoid;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+        page-break-after: avoid;
+    }
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    :root {
+        --page-padding: 15px;
+    }
+
+    h1 {
+        font-size: 1.8em;
+    }
+
+    h2 {
+        font-size: 1.5em;
+    }
+
+    h3 {
+        font-size: 1.3em;
+    }
+
+    table {
+        font-size: 0.9em;
+    }
+}
+
+/* Dark theme specific adjustments */
+.navy {
+    --code-block-bg: #1e1e1e;
+    --code-border: #2d2d2d;
+    --inline-code-bg: #2d2d2d;
+    --table-header-bg: #1a1a1a;
+    --table-border-color: #2d2d2d;
+    --table-row-hover: #252525;
+    --quote-border: #4a4a4a;
+    --quote-bg: #252525;
+    --note-bg: #1a2a3a;
+    --note-border: #2c5f9f;
+    --warning-bg: #3a2a1a;
+    --warning-border: #9f5f2c;
+    --tip-bg: #1a3a2a;
+    --tip-border: #2c9f5f;
+    --searchbar-border: #2d2d2d;
+    --searchbar-bg: #1e1e1e;
+}
+
+/* Light theme specific adjustments */
+.light {
+    --code-block-bg: #f6f6f6;
+    --code-border: #e0e0e0;
+    --inline-code-bg: #f0f0f0;
+    --table-header-bg: #f0f0f0;
+    --table-border-color: #e0e0e0;
+    --table-row-hover: #f9f9f9;
+    --quote-border: #ccc;
+    --quote-bg: #f9f9f9;
+    --note-bg: #e7f3ff;
+    --note-border: #2196f3;
+    --warning-bg: #fff3e0;
+    --warning-border: #ff9800;
+    --tip-bg: #e8f5e9;
+    --tip-border: #4caf50;
+    --searchbar-border: #ccc;
+    --searchbar-bg: #fff;
+}
+
+/* Rust theme specific adjustments */
+.rust {
+    --code-block-bg: #f6f7f6;
+    --code-border: #d9d9d9;
+    --inline-code-bg: #f0f0f0;
+    --table-header-bg: #e8e8e8;
+    --table-border-color: #d9d9d9;
+    --table-row-hover: #f5f5f5;
+    --quote-border: #c6c6c6;
+    --quote-bg: #f5f5f5;
+    --note-bg: #e7f3ff;
+    --note-border: #2196f3;
+    --warning-bg: #fff3e0;
+    --warning-border: #ff9800;
+    --tip-bg: #e8f5e9;
+    --tip-border: #4caf50;
+    --searchbar-border: #c6c6c6;
+    --searchbar-bg: #fff;
+}
+
+/* Improve code syntax highlighting readability */
+.hljs {
+    background-color: var(--code-block-bg) !important;
+}
+
+/* Command blocks with shell prompt styling */
+pre.language-bash::before,
+pre.language-sh::before {
+    content: "$ ";
+    color: var(--sidebar-fg);
+    user-select: none;
+}
+
+/* TOML config blocks */
+pre.language-toml {
+    border-left: 3px solid #9c4221;
+}
+
+/* Rust code blocks */
+pre.language-rust {
+    border-left: 3px solid #ce422b;
+}
+
+/* Improve keyboard shortcut styling */
+kbd {
+    background-color: var(--inline-code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 0.9em;
+    font-family: monospace;
+}
+
+/* Better list spacing */
+ul, ol {
+    padding-left: 2em;
+}
+
+li {
+    margin: 0.5em 0;
+}
+
+/* Nested lists */
+li > ul,
+li > ol {
+    margin-top: 0.5em;
+}
