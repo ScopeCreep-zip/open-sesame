@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Open Sesame - Vimium-style Window Switcher</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
+    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; border-radius: 4px; }
+    code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 2px; }
+    h1 { color: #333; }
+    .nav { display: flex; gap: 1rem; margin: 2rem 0; flex-wrap: wrap; }
+    .nav a { display: inline-block; padding: 0.75rem 1.5rem; background: #0066cc; color: white; text-decoration: none; border-radius: 4px; }
+    .nav a:hover { background: #0055aa; }
+  </style>
+</head>
+<body>
+  <h1>Open Sesame</h1>
+  <p>Vimium-style window switcher for COSMIC desktop. Type a letter to instantly switch to any window.</p>
+
+  <div class="nav">
+    <a href="book/">📖 User Guide</a>
+    <a href="doc/open_sesame/">📚 API Docs</a>
+    <a href="https://github.com/ScopeCreep-zip/open-sesame">🔗 GitHub</a>
+  </div>
+
+  <h2>Quick Install (Pop!_OS 24.04+)</h2>
+  <pre>
+# Add GPG key
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/open-sesame.gpg
+
+# Add repository
+echo "deb [signed-by=/etc/apt/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list
+
+# Install
+sudo apt update && sudo apt install open-sesame
+
+# Setup keybinding
+sesame --setup-keybinding
+  </pre>
+
+  <h2>Documentation</h2>
+  <ul>
+    <li><a href="book/">User Guide</a> - Installation, configuration, and usage</li>
+    <li><a href="doc/open_sesame/">API Documentation</a> - Library API reference for developers</li>
+  </ul>
+
+  <h2>Verify Package Signature</h2>
+  <pre>
+# Verify with GitHub Attestations
+gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
+  </pre>
+</body>
+</html>
