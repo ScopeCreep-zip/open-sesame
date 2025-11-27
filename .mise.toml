@@ -413,8 +413,13 @@ run = "actionlint .github/workflows/*.yml 2>/dev/null || true"
 # =============================================================================
 
 [tasks."ci:setup"]
-description = "CI install system dependencies"
-run = "sudo apt-get update && sudo apt-get install -y {{vars.apt_deps}}"
+description = "CI install system dependencies and rust components"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+sudo apt-get update && sudo apt-get install -y {{vars.apt_deps}}
+rustup component add rustfmt clippy
+"""
 
 [tasks."ci:setup:apt-repo"]
 description = "CI install APT repository tools"
