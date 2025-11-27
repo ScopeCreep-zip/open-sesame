@@ -1,0 +1,103 @@
+[workspace]
+members = [ ".", "xtask" ]
+resolver = "2"
+
+[package]
+name = "open-sesame"
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Vimium-style window switcher for COSMIC desktop with visual hints overlay"
+repository = "https://github.com/ScopeCreep-zip/open-sesame"
+homepage = "https://scopecreep-zip.github.io/open-sesame/"
+documentation = "https://scopecreep-zip.github.io/open-sesame/doc/open_sesame/"
+authors = [ "usrbinkat" ]
+readme = "README.md"
+keywords = [ "wayland", "cosmic", "window-switcher", "desktop", "launcher" ]
+categories = [ "gui", "command-line-utilities" ]
+
+[dependencies]
+# Wayland/COSMIC
+smithay-client-toolkit = { version = "0.20", features = [ "calloop" ] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = [ "client", "staging" ] }
+cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit" }
+
+# Graphics
+tiny-skia = "0.11"
+fontdue = "0.9"
+
+# Event loop
+calloop = "0.14"
+
+# Config
+toml = "0.9"
+ron = "0.9"
+serde = { version = "1", features = [ "derive" ] }
+dirs = "6"
+
+# Font resolution (freedesktop fontconfig)
+fontconfig = "0.6"
+
+# CLI
+clap = { version = "4", features = [ "derive" ] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
+tracing-appender = "0.2"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Unix/system
+libc = "0.2"
+
+[features]
+default = [  ]
+debug-logging = [  ] # Always log to file, regardless of RUST_LOG
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = [ "--cfg", "docsrs" ]
+
+[package.metadata.deb]
+maintainer = "usrbinkat <usrbinkat@users.noreply.github.com>"
+copyright = "2024, usrbinkat"
+extended-description = """
+Open Sesame - Vimium-style window switcher for COSMIC desktop.
+
+Shows a centered list of all windows with letter hints. Type a letter
+to instantly focus that window, or use arrow keys to navigate.
+
+Features:
+- Clean centered list UI with letter hints
+- Arrow key navigation with visual selection
+- Repeated letter hints for multiple windows (g, gg, ggg)
+- Focus-or-launch: type a key to focus or launch an app
+- Fast window activation via COSMIC protocols
+- Automatic COSMIC keybinding setup
+
+Setup:
+  sesame --setup-keybinding
+  # Or with custom key combo:
+  sesame --setup-keybinding alt+tab
+
+Configuration: ~/.config/open-sesame/config.toml"""
+section = "utils"
+priority = "optional"
+depends = "$auto, fontconfig"
+maintainer-scripts = "scripts/"
+assets = [
+  [ "target/release/sesame", "usr/bin/", "755" ],
+  [ "config.example.toml", "usr/share/doc/open-sesame/", "644" ],
+  [ "target/man/sesame.1.gz", "usr/share/man/man1/", "644" ],
+  [ "target/completions/sesame.bash", "usr/share/bash-completion/completions/sesame", "644" ],
+  [ "target/completions/_sesame", "usr/share/zsh/vendor-completions/", "644" ],
+  [ "target/completions/sesame.fish", "usr/share/fish/vendor_completions.d/", "644" ],
+]
+
+[[bin]]
+name = "sesame"
+path = "src/main.rs"
