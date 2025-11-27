@@ -1,0 +1,24 @@
+[package]
+name = "xtask"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# CLI framework
+clap = { version = "4", features = [ "derive" ] }
+
+# Man page generation
+clap_mangen = "0.2"
+
+# Shell completion generation
+clap_complete = "4"
+
+# Error handling
+anyhow = "1"
+
+# TOML parsing (for reading parent Cargo.toml version)
+toml = "0.9"
+
+# Filesystem operations
+flate2 = "1.0"
