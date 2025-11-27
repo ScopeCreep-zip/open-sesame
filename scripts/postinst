@@ -1,0 +1,29 @@
+#!/bin/bash
+# Post-installation script for open-sesame
+# Sets up COSMIC keybinding automatically
+
+set -e
+
+# Only run in configure stage
+case "$1" in
+    configure)
+        # Get the user who will use the application
+        # For system packages, we can't know which user, so we skip
+        # Users can run: sesame --setup-keybinding
+
+        echo ""
+        echo "open-sesame installed successfully!"
+        echo ""
+        echo "To setup the keybinding, run:"
+        echo "  sesame --setup-keybinding"
+        echo ""
+        echo "Or specify a custom key combo:"
+        echo "  sesame --setup-keybinding super+space"
+        echo "  sesame --setup-keybinding alt+tab"
+        echo ""
+        echo "Configuration: ~/.config/open-sesame/config.toml"
+        echo ""
+        ;;
+esac
+
+exit 0
