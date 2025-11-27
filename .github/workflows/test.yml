@@ -27,7 +27,7 @@ jobs:
 
       - uses: jdx/mise-action@v3
         with:
-          install: true
+          install_args: "rust"
           cache: true
 
       - run: mise run ci:test

@@ -39,7 +39,7 @@ jobs:
 
       - uses: jdx/mise-action@v3
         with:
-          install: true
+          install_args: "rust cargo:cargo-deb"
           cache: true
 
       - run: mise run ${{ matrix.build_task }}
@@ -108,7 +108,7 @@ jobs:
 
       - uses: jdx/mise-action@v3
         with:
-          install: true
+          install_args: "rust"
           cache: true
 
       - run: mise run ci:docs:all
@@ -152,7 +152,7 @@ jobs:
 
       - uses: jdx/mise-action@v3
         with:
-          install: true
+          install_args: "rust"
           cache: true
 
       - env:
