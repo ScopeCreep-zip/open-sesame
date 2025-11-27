@@ -409,6 +409,202 @@ description = "Lint GitHub Actions workflows"
 run = "actionlint .github/workflows/*.yml 2>/dev/null || true"
 
 # =============================================================================
+# CI (GitHub Actions entry points - mirrors local workflows)
+# =============================================================================
+
+[tasks."ci:setup"]
+description = "CI install system dependencies"
+run = "sudo apt-get update && sudo apt-get install -y {{vars.apt_deps}}"
+
+[tasks."ci:setup:apt-repo"]
+description = "CI install APT repository tools"
+run = "sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils"
+
+[tasks."ci:test"]
+description = "CI test job (fmt + clippy + test + build)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ci:setup
+mise run cargo:fmt:check
+mise run cargo:clippy
+mise run cargo:test
+mise run cargo:build
+"""
+
+[tasks."ci:docs"]
+description = "CI documentation job (rustdoc + man + completions + mdbook)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ci:setup
+cargo doc --no-deps --all-features
+mise run docs:man
+mise run docs:completions
+mise run docs:book
+test -f target/man/sesame.1.gz
+test -f target/completions/sesame.bash
+test -f target/completions/_sesame
+test -f target/completions/sesame.fish
+test -d docs/book/
+echo "✓ All documentation artifacts generated successfully"
+"""
+env.RUSTDOCFLAGS = "-D warnings"
+
+[tasks."ci:build:deb"]
+description = "CI build .deb package (no quality gates - assumes ci:test passed)"
+env.TARGET = "{{vars.arch_amd64}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ci:setup
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+cargo deb --no-build --target ${TARGET}
+"""
+
+[tasks."ci:build:deb:arm64"]
+description = "CI build .deb package for arm64"
+env.TARGET = "{{vars.arch_arm64}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ci:setup
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+cargo deb --no-build --target ${TARGET}
+"""
+
+[tasks."ci:docs:all"]
+description = "CI generate all documentation for release"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ci:setup
+cargo xtask all
+"""
+
+[tasks."ci:docs:combine"]
+description = "CI combine rustdoc and mdBook into single directory"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p combined-docs
+cp -r target/doc combined-docs/doc
+cp -r docs/book combined-docs/book
+"""
+
+[tasks."ci:release:rename-deb"]
+description = "CI rename .deb package with version and architecture"
+env.TARGET = "{{vars.arch_amd64}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${GITHUB_REF_NAME#v}"
+# shellcheck disable=SC2086
+mv target/${TARGET}/debian/*.deb "open-sesame_${VERSION}_amd64.deb"
+"""
+
+[tasks."ci:release:rename-deb:arm64"]
+description = "CI rename .deb package with version and architecture (arm64)"
+env.TARGET = "{{vars.arch_arm64}}"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${GITHUB_REF_NAME#v}"
+# shellcheck disable=SC2086
+mv target/${TARGET}/debian/*.deb "open-sesame_${VERSION}_arm64.deb"
+"""
+
+[tasks."ci:release:apt-repo"]
+description = "CI generate APT repository structure"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run ci:setup:apt-repo
+
+REPO_DIR="apt-repo"
+mkdir -p "$REPO_DIR"
+
+# Export public GPG key
+gpg --armor --export > "$REPO_DIR/gpg.key"
+
+# Distributions to generate indices for (Pop!_OS 24.04+ only)
+DISTS="noble"
+ARCHS="amd64 arm64"
+
+for dist in $DISTS; do
+  for arch in $ARCHS; do
+    DIST_DIR="$REPO_DIR/dists/$dist/main/binary-$arch"
+    mkdir -p "$DIST_DIR"
+
+    echo "Generating Packages for $dist/$arch..."
+
+    PACKAGES_FILE="$DIST_DIR/Packages"
+    true > "$PACKAGES_FILE"
+
+    # shellcheck disable=SC2231
+    for deb in packages/*_"${arch}".deb; do
+      if [[ -f "$deb" ]]; then
+        DEB_NAME=$(basename "$deb")
+        TAG_NAME="v${VERSION}"
+        DOWNLOAD_URL="${REPO_URL}/${TAG_NAME}/${DEB_NAME}"
+
+        dpkg-deb --info "$deb" | grep -E "^ (Package|Version|Architecture|Maintainer|Description|Section|Priority|Homepage):" | sed 's/^ //' >> "$PACKAGES_FILE"
+
+        SIZE=$(stat -c%s "$deb")
+        SHA256=$(sha256sum "$deb" | cut -d' ' -f1)
+        SHA512=$(sha512sum "$deb" | cut -d' ' -f1)
+        MD5=$(md5sum "$deb" | cut -d' ' -f1)
+
+        {
+          echo "Filename: $DOWNLOAD_URL"
+          echo "Size: $SIZE"
+          echo "SHA256: $SHA256"
+          echo "SHA512: $SHA512"
+          echo "MD5sum: $MD5"
+          echo ""
+        } >> "$PACKAGES_FILE"
+      fi
+    done
+
+    gzip -k "$PACKAGES_FILE"
+  done
+
+  RELEASE_DIR="$REPO_DIR/dists/$dist"
+  cd "$RELEASE_DIR"
+
+  apt-ftparchive release \
+    -o APT::FTPArchive::Release::Origin="Open Sesame" \
+    -o APT::FTPArchive::Release::Label="Open Sesame" \
+    -o APT::FTPArchive::Release::Suite="$dist" \
+    -o APT::FTPArchive::Release::Codename="$dist" \
+    -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+    -o APT::FTPArchive::Release::Components="main" \
+    . > Release
+
+  gpg --batch --yes --armor --detach-sign --output Release.gpg Release
+  gpg --batch --yes --armor --clearsign --output InRelease Release
+
+  cd - > /dev/null
+done
+
+# Combine APT repository with documentation
+SITE_DIR="gh-pages"
+mkdir -p "$SITE_DIR"
+
+cp -r "$REPO_DIR"/* "$SITE_DIR/"
+cp -r docs-site/* "$SITE_DIR/"
+cp .github/templates/index.html "$SITE_DIR/index.html"
+
+echo "Combined site generated successfully"
+echo "Site structure:"
+find "$SITE_DIR" -type f | head -30
+"""
+
+# =============================================================================
 # GIT HOOKS
 # =============================================================================
 
@@ -489,6 +685,19 @@ DOCUMENTATION:
   docs:all         (da)   Generate all documentation
   docs:clean              Clean generated documentation
   docs:serve              Serve docs locally for preview
+
+CI (GitHub Actions entry points):
+  ci:setup                Install system dependencies
+  ci:setup:apt-repo       Install APT repository tools
+  ci:test                 CI test job (fmt + clippy + test + build)
+  ci:docs                 CI documentation job
+  ci:build:deb            CI build .deb package (amd64)
+  ci:build:deb:arm64      CI build .deb package (arm64)
+  ci:docs:all             CI generate all documentation
+  ci:docs:combine         Combine rustdoc + mdBook
+  ci:release:rename-deb   Rename .deb with version (amd64)
+  ci:release:rename-deb:arm64  Rename .deb with version (arm64)
+  ci:release:apt-repo     Generate APT repository
 
 OTHER:
   setup            (s)    Install tools + deps

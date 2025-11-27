@@ -26,51 +26,27 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            build_task: ci:build:deb
+            rename_task: ci:release:rename-deb
           - arch: arm64
             runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            build_task: ci:build:deb:arm64
+            rename_task: ci:release:rename-deb:arm64
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+      - uses: jdx/mise-action@v3
         with:
-          targets: ${{ matrix.target }}
+          install: true
+          cache: true
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            liblzma-dev \
-            libxkbcommon-dev \
-            libfontconfig1-dev \
-            pkg-config
+      - run: mise run ${{ matrix.build_task }}
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
+      - run: mise run ${{ matrix.rename_task }}
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Generate documentation artifacts (man pages, completions)
-        run: cargo xtask man && cargo xtask completions
-
-      - name: Build .deb package
-        run: cargo deb --no-build --target ${{ matrix.target }}
-
-      - name: Rename package with architecture
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          # shellcheck disable=SC2086
-          mv target/${{ matrix.target }}/debian/*.deb \
-             "open-sesame_${VERSION}_${{ matrix.arch }}.deb"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.arch }}
           path: "*.deb"
@@ -85,14 +61,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: deb-*
           merge-multiple: true
 
-      - name: Generate attestations
-        uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v2
         with:
           subject-path: "*.deb"
 
@@ -107,18 +81,15 @@ jobs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: deb-*
           merge-multiple: true
 
-      - name: Extract version
-        id: version
+      - id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: "*.deb"
           generate_release_notes: true
@@ -133,39 +104,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            liblzma-dev \
-            libxkbcommon-dev \
-            libfontconfig1-dev \
-            pkg-config
+      - run: mise run ci:docs:all
 
-      - name: Install mdBook
-        run: cargo install mdbook
+      - run: mise run ci:docs:combine
 
-      - name: Generate all documentation
-        run: cargo xtask all
-
-      - name: Create combined docs directory
-        run: |
-          mkdir -p combined-docs
-
-          # Copy rustdoc API documentation
-          cp -r target/doc combined-docs/doc
-
-          # Copy mdBook user guide
-          cp -r docs/book combined-docs/book
-
-      - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: documentation
           path: combined-docs/
@@ -183,134 +133,38 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download package artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: deb-*
           path: packages/
           merge-multiple: true
 
-      - name: Download documentation
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: documentation
           path: docs-site/
 
-      - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v6
+      - uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
 
-      - name: Install APT tools
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
 
-      - name: Generate APT repository
-        env:
+      - env:
           VERSION: ${{ needs.release.outputs.version }}
           REPO_URL: https://github.com/${{ github.repository }}/releases/download
-        run: |
-          set -euo pipefail
+        run: mise run ci:release:apt-repo
 
-          REPO_DIR="apt-repo"
-          mkdir -p "$REPO_DIR"
-
-          # Export public GPG key
-          gpg --armor --export > "$REPO_DIR/gpg.key"
-
-          # Distributions to generate indices for (Pop!_OS 24.04+ only)
-          DISTS="noble"
-          ARCHS="amd64 arm64"
-
-          for dist in $DISTS; do
-            for arch in $ARCHS; do
-              DIST_DIR="$REPO_DIR/dists/$dist/main/binary-$arch"
-              mkdir -p "$DIST_DIR"
-
-              # Generate Packages file with absolute URLs to GitHub Releases
-              echo "Generating Packages for $dist/$arch..."
-
-              # Create Packages file
-              PACKAGES_FILE="$DIST_DIR/Packages"
-              true > "$PACKAGES_FILE"
-
-              # shellcheck disable=SC2231
-              for deb in packages/*_"${arch}".deb; do
-                if [[ -f "$deb" ]]; then
-                  DEB_NAME=$(basename "$deb")
-                  TAG_NAME="v${VERSION}"
-                  DOWNLOAD_URL="${REPO_URL}/${TAG_NAME}/${DEB_NAME}"
-
-                  # Extract package info
-                  dpkg-deb --info "$deb" | grep -E "^ (Package|Version|Architecture|Maintainer|Description|Section|Priority|Homepage):" | sed 's/^ //' >> "$PACKAGES_FILE"
-
-                  # Add size and checksums
-                  SIZE=$(stat -c%s "$deb")
-                  SHA256=$(sha256sum "$deb" | cut -d' ' -f1)
-                  SHA512=$(sha512sum "$deb" | cut -d' ' -f1)
-                  MD5=$(md5sum "$deb" | cut -d' ' -f1)
-
-                  {
-                    echo "Filename: $DOWNLOAD_URL"
-                    echo "Size: $SIZE"
-                    echo "SHA256: $SHA256"
-                    echo "SHA512: $SHA512"
-                    echo "MD5sum: $MD5"
-                    echo ""
-                  } >> "$PACKAGES_FILE"
-                fi
-              done
-
-              # Compress Packages file
-              gzip -k "$PACKAGES_FILE"
-            done
-
-            # Generate Release file for this distribution
-            RELEASE_DIR="$REPO_DIR/dists/$dist"
-            cd "$RELEASE_DIR"
-
-            apt-ftparchive release \
-              -o APT::FTPArchive::Release::Origin="Open Sesame" \
-              -o APT::FTPArchive::Release::Label="Open Sesame" \
-              -o APT::FTPArchive::Release::Suite="$dist" \
-              -o APT::FTPArchive::Release::Codename="$dist" \
-              -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
-              -o APT::FTPArchive::Release::Components="main" \
-              . > Release
-
-            # Sign Release file
-            gpg --batch --yes --armor --detach-sign --output Release.gpg Release
-            gpg --batch --yes --armor --clearsign --output InRelease Release
-
-            cd - > /dev/null
-          done
-
-          # Combine APT repository with documentation
-          SITE_DIR="gh-pages"
-          mkdir -p "$SITE_DIR"
-
-          # Copy APT repository files
-          cp -r "$REPO_DIR"/* "$SITE_DIR/"
-
-          # Copy documentation (rustdoc + mdBook)
-          cp -r docs-site/* "$SITE_DIR/"
-
-          # Copy index.html template
-          cp .github/templates/index.html "$SITE_DIR/index.html"
-
-          echo "Combined site generated successfully"
-          echo "Site structure:"
-          find "$SITE_DIR" -type f | head -30
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: gh-pages/
 
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4
 
   # ==========================================================================
@@ -322,8 +176,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Delete old releases
-        uses: dev-drprasad/delete-older-releases@v0.3.4
+      - uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
           keep_latest: 10
           delete_tags: false
