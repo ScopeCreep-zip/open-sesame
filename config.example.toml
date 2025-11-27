@@ -1,0 +1,182 @@
+# Open Sesame v3 Configuration
+# ================================
+#
+# Key-centric configuration: each shortcut is fully defined in one [keys.*] section.
+# No jumping between sections to configure one app - everything in one place.
+#
+# Config locations (XDG inheritance, later overrides earlier):
+#   /etc/open-sesame/config.toml         # System defaults
+#   ~/.config/open-sesame/config.toml    # User config
+#   ~/.config/open-sesame/config.d/*.toml # Overrides (alphabetical)
+#
+# Commands:
+#   sesame              # Launch interactive switcher
+#   sesame --list       # Show windows with assigned hints
+#   sesame --view       # Output composed config as TOML
+#   sesame --help       # Full usage info
+
+# =============================================================================
+# SETTINGS
+# =============================================================================
+
+[settings]
+
+# Delay (ms) before activating a match when multiple hints exist.
+# Allows time for typing gg, ggg without 'g' firing immediately.
+# Press Enter to activate without waiting.
+activation_delay = 200
+
+# Delay (ms) before showing full overlay.
+# During this time, only a subtle border is shown.
+# Set to 0 for immediate overlay display.
+overlay_delay = 720
+
+# Border width (pixels) for the focus indicator.
+border_width = 3.0
+
+# Border color (hex: #RRGGBB or #RRGGBBAA).
+# Default is a soft lavender-purple with ~70% opacity.
+border_color = "#b4a0ffb4"
+
+# Global env files loaded for all launched apps (direnv .env style)
+# Paths support ~/ expansion. Later files override earlier ones.
+# env_files = [
+#     "~/.config/open-sesame/global.env",
+#     "/etc/open-sesame/env.d/system.env",
+# ]
+
+# =============================================================================
+# KEY BINDINGS
+# =============================================================================
+#
+# Each [keys.<letter>] section defines one shortcut completely:
+#   apps   = List of app_ids that match this key
+#   launch = Command to run if no matching window (focus-or-launch)
+#
+# Multiple windows of the same app use repeated keys: g, gg, ggg
+# You can also type g1, g2, g3 as alternative input
+#
+# Find your app_ids: sesame --list
+
+# --- Terminals ---
+
+[keys.g]
+apps = [ "ghostty", "com.mitchellh.ghostty" ]
+launch = "ghostty"
+
+# --- Browsers ---
+
+[keys.f]
+apps = [ "firefox", "org.mozilla.firefox", "Firefox" ]
+launch = "firefox"
+
+[keys.e]
+apps = [ "microsoft-edge", "Microsoft-edge" ]
+launch = "microsoft-edge"
+
+[keys.c]
+apps = [ "chromium", "google-chrome", "Chromium", "Google-chrome" ]
+# No launch - just focus existing windows
+
+# --- Development ---
+
+[keys.v]
+# Multiple editors share one key - first match wins
+apps = [ "code", "Code", "cursor", "Cursor", "zed", "dev.zed.Zed" ]
+launch = "code"
+
+# --- File Managers ---
+
+[keys.n]
+apps = [ "nautilus", "org.gnome.Nautilus", "com.system76.CosmicFiles" ]
+launch = "nautilus"
+
+# --- Communication ---
+
+[keys.s]
+apps = [ "slack", "Slack" ]
+launch = "slack"
+
+[keys.d]
+apps = [ "discord", "Discord" ]
+launch = "discord"
+
+[keys.t]
+apps = [ "thunderbird", "Thunderbird" ]
+launch = "thunderbird"
+
+# --- Media ---
+
+[keys.m]
+apps = [ "spotify", "Spotify" ]
+launch = "spotify"
+
+# =============================================================================
+# ADVANCED LAUNCH CONFIGURATION
+# =============================================================================
+#
+# For more control over how apps launch, use the advanced format:
+#
+#   [keys.<letter>.launch]
+#   command = "/path/to/binary"   # Binary name or full path
+#   args = ["--flag", "value"]    # Command line arguments
+#   env_files = ["~/.env"]        # Load env vars from .env files
+#   env = { VAR = "value" }       # Explicit env vars (override env_files)
+#
+# Environment variable layering (later overrides earlier):
+#   1. Inherited (WAYLAND_DISPLAY, XDG_*, PATH, etc.)
+#   2. Global env_files from [settings]
+#   3. Per-app env_files from [keys.x.launch]
+#   4. Explicit env from [keys.x.launch]
+#
+# Env file format (direnv .env style):
+#   KEY=value
+#   KEY="value with spaces"
+#   KEY='literal value'
+#   export KEY=value
+#   # comments
+#
+# Examples:
+
+# Launch Chrome with a specific profile
+# [keys.w]
+# apps = ["google-chrome"]
+# [keys.w.launch]
+# command = "google-chrome"
+# args = ["--profile-directory=Work"]
+
+# Launch terminal with custom config and env
+# [keys.g]
+# apps = ["ghostty"]
+# [keys.g.launch]
+# command = "ghostty"
+# args = ["--config-file=/path/to/config"]
+# env_files = ["~/.config/ghostty/.env"]
+# env = { TERM = "xterm-256color" }
+
+# Launch app with full control
+# [keys.x]
+# apps = ["myapp"]
+# [keys.x.launch]
+# command = "/opt/myapp/bin/myapp"
+# args = ["--mode=production"]
+# env_files = [
+#     "~/.config/myapp/base.env",
+#     "~/.config/myapp/secrets.env",
+# ]
+# env = { DEBUG = "false" }
+
+# =============================================================================
+# ADDING NEW SHORTCUTS
+# =============================================================================
+#
+# 1. Find your app_id:
+#    sesame --list
+#
+# 2. Add a new section:
+#    [keys.x]
+#    apps = ["your-app-id"]
+#    launch = "your-app-command"
+#
+# 3. Verify:
+#    sesame --view
