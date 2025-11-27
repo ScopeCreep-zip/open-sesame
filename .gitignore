@@ -1,0 +1,9 @@
+/target
+/tmp
+/docs/book
+
+# Cache files
+.lycheecache
+
+# Task tracking (temporary)
+TASKS*.md

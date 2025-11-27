@@ -1,0 +1,66 @@
+# Taplo configuration for TOML formatting and linting
+# https://taplo.tamasfe.dev/configuration/
+
+# Exclude directories
+exclude = [
+  "target/**/*.toml",
+  ".cargo/**/*.toml",
+  "node_modules/**/*.toml",
+  ".git/**/*.toml",
+  ".cache/**/*.toml",
+  "tmp/**/*.toml",
+]
+
+[formatting]
+# Don't align entries - keeps diffs cleaner
+align_entries = false
+
+# Keep trailing commas in arrays for cleaner diffs
+array_trailing_comma = true
+
+# Don't auto-expand arrays
+array_auto_expand = false
+
+# Don't auto-collapse arrays
+array_auto_collapse = false
+
+# Keep arrays compact
+compact_arrays = false
+
+# Keep inline tables readable
+compact_inline_tables = false
+
+# Don't indent tables - keeps structure flat
+indent_tables = false
+
+# Don't indent entries under tables
+indent_entries = false
+
+# Don't reorder keys - preserve original order
+reorder_keys = false
+
+# Allow one blank line maximum
+allowed_blank_lines = 1
+
+# Use 2 spaces for indentation
+indent_string = "  "
+
+# Ensure trailing newline
+trailing_newline = true
+
+# Use LF line endings
+crlf = false
+
+# Schema validation
+[schema]
+enabled = true
+
+# Cargo.toml schema
+[[rule]]
+include = [ "Cargo.toml", "**/Cargo.toml" ]
+keys = [ "package", "dependencies", "dev-dependencies", "build-dependencies", "features", "workspace" ]
+
+# mise.toml schema
+[[rule]]
+include = [ ".mise.toml", "mise.toml" ]
+keys = [ "tools", "tasks", "env", "vars", "settings" ]

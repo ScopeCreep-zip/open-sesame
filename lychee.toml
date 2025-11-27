@@ -1,0 +1,73 @@
+# Lychee link checker configuration
+# https://github.com/lycheeverse/lychee
+
+# Display settings
+no_progress = true  # Don't show progress bar (better for CI/CD)
+format = "detailed" # Output format: compact, detailed, json, markdown, raw
+
+# Maximum number of concurrent requests
+max_concurrency = 10
+
+# User agent string
+user_agent = "Mozilla/5.0 (compatible; OpenSesame/1.0)"
+
+# Request timeout in seconds
+timeout = 20
+
+# Maximum number of retries
+max_retries = 2
+
+# Accept these status codes
+accept = [ 200, 201, 202, 203, 204, 206, 301, 302, 304, 401, 403 ]
+
+# Exclude patterns
+exclude = [
+  # Localhost and local network
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+  "^https?://192\\.168\\.",
+  "^https?://10\\.",
+
+  # Common development URLs
+  "^https?://example\\.com",
+  "^https?://test\\.com",
+
+  # GitHub edit/new links (will 404 for non-collaborators)
+  "^https://github\\.com/.*/edit/",
+  "^https://github\\.com/.*/new/",
+
+  # Anchors in markdown (handled separately)
+  "^#",
+
+  # crates.io API endpoints (rate limited)
+  "^https://crates\\.io/api/",
+]
+
+# Link checking behavior
+include_verbatim = true  # Check links in code blocks
+include_anchor = true    # Check anchors
+include_fragments = true # Check fragments
+
+# Network exclusions
+exclude_link_local = true # Skip link-local addresses (169.254.x.x)
+exclude_loopback = true   # Skip localhost and 127.0.0.1
+exclude_private = true    # Exclude private IPs
+exclude_mail = true       # Exclude mail addresses
+
+# Offline behavior
+skip_missing = true # Skip missing files when offline
+
+# Cache results
+cache = true
+
+# Exclude paths
+exclude_path = [
+  # Build artifacts and dependencies
+  "target",
+  "node_modules",
+  ".git",
+  ".cache",
+  "tmp",
+  # Backup directories
+  ".*\\.bak$",
+]

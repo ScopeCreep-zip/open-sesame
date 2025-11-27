@@ -1,0 +1,4 @@
+# Cargo configuration for Open Sesame
+
+[alias]
+xtask = "run --package xtask --"

@@ -1,0 +1,143 @@
+# lefthook.yml - Git hooks for Open Sesame
+# https://github.com/evilmartians/lefthook
+min_version: 1.12.0
+assert_lefthook_installed: true
+colors: true
+no_tty: false
+
+output:
+  - execution_info
+  - success
+  - failure
+  - summary
+
+# Pre-commit hook - Quality gates before committing
+pre-commit:
+  parallel: true
+  commands:
+    # Rust checks
+    rust-format:
+      glob: "*.rs"
+      run: cargo fmt --check
+      tags: [rust, format]
+      fail_text: |
+        Rust format check failed.
+        Fix with: cargo fmt
+
+    rust-clippy:
+      glob: "*.rs"
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      tags: [rust, lint]
+      fail_text: |
+        Clippy check failed.
+        Fix warnings before committing.
+
+    # TOML validation
+    toml-format:
+      glob: "*.toml"
+      run: taplo fmt --check {staged_files}
+      tags: [config, toml]
+      fail_text: |
+        TOML format check failed.
+        Fix with: taplo fmt
+
+    toml-lint:
+      glob: "*.toml"
+      run: taplo lint {staged_files}
+      tags: [config, toml]
+      fail_text: |
+        TOML validation failed.
+        Check syntax in TOML files.
+
+    # Markdown checks
+    markdown-lint:
+      glob: "*.md"
+      run: markdownlint-cli2 {staged_files}
+      tags: [docs, markdown]
+      fail_text: |
+        Markdown style check failed.
+        Fix with: markdownlint-cli2 --fix [files]
+
+    markdown-links:
+      glob: "*.md"
+      run: lychee --offline {staged_files}
+      tags: [docs, links]
+      skip:
+        - merge
+        - rebase
+      fail_text: |
+        Broken links detected in markdown files.
+        Run: lychee [files] for details.
+
+    # Shell script checks
+    shell-lint:
+      glob: "*.sh"
+      run: shellcheck {staged_files}
+      tags: [bash, lint]
+      fail_text: |
+        Shell script lint failed.
+        Fix issues reported by shellcheck.
+
+    shell-format:
+      glob: "*.sh"
+      run: shfmt -d {staged_files}
+      tags: [bash, format]
+      fail_text: |
+        Shell format check failed.
+        Fix with: shfmt -w [files]
+
+    # GitHub Actions
+    actions-lint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: actionlint {staged_files}
+      tags: [ci, github]
+      fail_text: |
+        GitHub Actions validation failed.
+        Check syntax in workflow files.
+
+# Pre-push hook - Heavier validation before pushing
+pre-push:
+  parallel: true
+  commands:
+    test-suite:
+      run: cargo test
+      tags: [test]
+      skip:
+        - rebase
+      fail_text: |
+        Tests failed.
+        Run: cargo test
+
+    cargo-check:
+      run: cargo check --all-targets --all-features
+      tags: [rust, check]
+      fail_text: |
+        Cargo check failed.
+        Run: cargo check --all-targets --all-features
+
+    link-check:
+      run: lychee --offline '**/*.md'
+      tags: [docs, links]
+      only:
+        - ref: main
+        - ref: master
+      fail_text: |
+        Link validation failed.
+        Run: lychee '**/*.md'
+
+# Commit message validation for conventional commits
+commit-msg:
+  commands:
+    conventional-commits:
+      run: npx --yes commitlint --edit {1}
+      fail_text: |
+        Commit message does not follow conventional commits format.
+        Format: <type>(<scope>): <subject>
+        Types: feat, fix, perf, revert, docs, style, refactor, test, build, ci, chore
+
+# Post-merge hook - Update after merging
+post-merge:
+  commands:
+    cargo-update:
+      run: cargo fetch
+      tags: [deps]
