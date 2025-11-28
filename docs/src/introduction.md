@@ -22,15 +22,31 @@ instantly switch to any window, or launch an application if it isn't running. No
 
 ## Quick Example
 
+**Add APT repository (one-time setup):**
+
 ```bash
-# Install (Pop!_OS 24.04+)
-sudo apt install open-sesame
-
-# Setup keybinding
-sesame --setup-keybinding
-
-# Press Alt+Space, type a letter to switch windows
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
 ```
+
+```bash
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
+```
+
+**Install and configure:**
+
+```bash
+sudo apt update && sudo apt install -y open-sesame
+```
+
+```bash
+sesame --setup-keybinding
+```
+
+Press **Alt+Space**, type a letter to switch windows.
+
+See [Installation Guide](./user-guide/installation.md) for alternative methods.
 
 ## How It Works
 
