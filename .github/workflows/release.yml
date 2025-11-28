@@ -2,14 +2,21 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Run semantic-release in dry-run mode'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   pages: write
   id-token: write
   attestations: write
+  issues: write
+  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,10 +24,65 @@ env:
 
 jobs:
   # ==========================================================================
+  # Semantic Release - analyze commits and create GitHub release with tag
+  # ==========================================================================
+  semantic-release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    outputs:
+      new_release: ${{ steps.release.outputs.new_release }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install semantic-release plugins
+        run: |
+          npm install --no-save \
+            semantic-release@24.2.9 \
+            @semantic-release/git@10.0.1 \
+            @semantic-release/changelog@6.0.3 \
+            @semantic-release/exec@7.1.0 \
+            @semantic-release/commit-analyzer@13.0.1 \
+            @semantic-release/release-notes-generator@14.1.0 \
+            @semantic-release/github@11.0.6 \
+            conventional-changelog-conventionalcommits@9.1.0
+
+      - name: Semantic Release
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+            npx semantic-release --dry-run 2>&1 | tee release-output.txt
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+          else
+            npx semantic-release 2>&1 | tee release-output.txt
+            if grep -q "Published release" release-output.txt; then
+              VERSION=$(grep -oP 'Published release \K[0-9]+\.[0-9]+\.[0-9]+' release-output.txt || true)
+              echo "new_release=true" >> "$GITHUB_OUTPUT"
+              echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+              echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+            else
+              echo "new_release=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  # ==========================================================================
   # Build .deb packages for each architecture
   # ==========================================================================
   build:
     name: Build ${{ matrix.arch }}
+    needs: semantic-release
+    if: needs.semantic-release.outputs.new_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -34,9 +96,13 @@ jobs:
             build_task: ci:build:deb:arm64
             rename_task: ci:release:rename-deb:arm64
     runs-on: ${{ matrix.runner }}
+    env:
+      GITHUB_REF_NAME: ${{ needs.semantic-release.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
 
       - uses: jdx/mise-action@v3
         with:
@@ -58,7 +124,8 @@ jobs:
   # ==========================================================================
   attest:
     name: Attest Build Provenance
-    needs: build
+    needs: [semantic-release, build]
+    if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -72,14 +139,16 @@ jobs:
           subject-path: "*.deb"
 
   # ==========================================================================
-  # Upload .deb assets to GitHub Release (created by semantic-release)
+  # Upload .deb assets to GitHub Release
   # ==========================================================================
-  release:
+  upload-assets:
     name: Upload Release Assets
-    needs: build
+    needs: [semantic-release, build]
+    if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+    env:
+      VERSION: ${{ needs.semantic-release.outputs.version }}
+      TAG: ${{ needs.semantic-release.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -89,27 +158,22 @@ jobs:
           pattern: deb-*
           merge-multiple: true
 
-      - id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate checksums
+      - name: Generate checksums and install instructions
         run: |
           sha256sum *.deb > SHA256SUMS.txt
           cat SHA256SUMS.txt
-
-      - name: Generate install instructions
-        run: |
           SHA_AMD64=$(grep amd64 SHA256SUMS.txt | cut -d' ' -f1)
           SHA_ARM64=$(grep arm64 SHA256SUMS.txt | cut -d' ' -f1)
-          sed -e "s/\${TAG}/${{ github.ref_name }}/g" \
-              -e "s/\${VERSION}/${{ steps.version.outputs.version }}/g" \
+          sed -e "s/\${TAG}/${TAG}/g" \
+              -e "s/\${VERSION}/${VERSION}/g" \
               -e "s/\${SHA256_AMD64}/${SHA_AMD64}/g" \
               -e "s/\${SHA256_ARM64}/${SHA_ARM64}/g" \
               .github/templates/RELEASE_BODY.md > install_instructions.md
 
-      - name: Upload assets to existing release
+      - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: |
             *.deb
             SHA256SUMS.txt
@@ -121,10 +185,14 @@ jobs:
   # ==========================================================================
   build-docs:
     name: Build Documentation
+    needs: semantic-release
+    if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
 
       - uses: jdx/mise-action@v3
         with:
@@ -144,9 +212,10 @@ jobs:
   # ==========================================================================
   # Generate and deploy APT repository + documentation to GitHub Pages
   # ==========================================================================
-  publish-apt:
-    name: Publish APT Repository & Documentation
-    needs: [build, release, build-docs]
+  publish:
+    name: Publish APT Repository & Docs
+    needs: [semantic-release, build, upload-assets, build-docs]
+    if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -189,7 +258,8 @@ jobs:
   # ==========================================================================
   cleanup:
     name: Cleanup Old Releases
-    needs: [release, publish-apt]
+    needs: [semantic-release, publish]
+    if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
