@@ -10,6 +10,8 @@ instantly switch to any window, or launch an application if it isn't running. No
 [![CI](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml/badge.svg)](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 
+![Open Sesame Screenshot](docs/src/open-sesame-screenshot.png)
+
 ---
 
 ## Quick Start
