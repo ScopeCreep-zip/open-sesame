@@ -416,7 +416,7 @@ run = "actionlint .github/workflows/*.yml 2>/dev/null || true"
 description = "CI install system dependencies and rust components"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 sudo apt-get update && sudo apt-get install -y {{vars.apt_deps}}
 rustup component add rustfmt clippy
 """
@@ -429,7 +429,7 @@ run = "sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils"
 description = "CI test job (fmt + clippy + test + build)"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mise run ci:setup
 mise run cargo:fmt:check
 mise run cargo:clippy
@@ -441,7 +441,7 @@ mise run cargo:build
 description = "CI documentation job (rustdoc + man + completions + mdbook)"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mise run ci:setup
 cargo doc --no-deps --all-features
 mise run docs:man
@@ -461,7 +461,7 @@ description = "CI build .deb package (no quality gates - assumes ci:test passed)
 env.TARGET = "{{vars.arch_amd64}}"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mise run ci:setup
 cargo build --release --target ${TARGET}
 mise run docs:man
@@ -474,7 +474,7 @@ description = "CI build .deb package for arm64"
 env.TARGET = "{{vars.arch_arm64}}"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mise run ci:setup
 cargo build --release --target ${TARGET}
 mise run docs:man
@@ -486,7 +486,7 @@ cargo deb --no-build --target ${TARGET}
 description = "CI generate all documentation for release"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mise run ci:setup
 cargo xtask all
 """
@@ -495,7 +495,7 @@ cargo xtask all
 description = "CI combine rustdoc and mdBook into single directory"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mkdir -p combined-docs
 cp -r target/doc combined-docs/doc
 cp -r docs/book combined-docs/book
@@ -506,7 +506,7 @@ description = "CI rename .deb package with version and architecture"
 env.TARGET = "{{vars.arch_amd64}}"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 VERSION="${GITHUB_REF_NAME#v}"
 # shellcheck disable=SC2086
 mv target/${TARGET}/debian/*.deb "open-sesame_${VERSION}_amd64.deb"
@@ -517,7 +517,7 @@ description = "CI rename .deb package with version and architecture (arm64)"
 env.TARGET = "{{vars.arch_arm64}}"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 VERSION="${GITHUB_REF_NAME#v}"
 # shellcheck disable=SC2086
 mv target/${TARGET}/debian/*.deb "open-sesame_${VERSION}_arm64.deb"
@@ -527,7 +527,7 @@ mv target/${TARGET}/debian/*.deb "open-sesame_${VERSION}_arm64.deb"
 description = "CI generate APT repository structure"
 run = """
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 mise run ci:setup:apt-repo
 
 REPO_DIR="apt-repo"
@@ -606,7 +606,7 @@ cp .github/templates/index.html "$SITE_DIR/index.html"
 
 echo "Combined site generated successfully"
 echo "Site structure:"
-find "$SITE_DIR" -type f | head -30
+find "$SITE_DIR" -type f | head -30 || true
 """
 
 # =============================================================================
