@@ -156,10 +156,7 @@ jobs:
           install_args: "rust"
           cache: true
 
-      - env:
-          VERSION: ${{ needs.release.outputs.version }}
-          REPO_URL: https://github.com/${{ github.repository }}/releases/download
-        run: mise run ci:release:apt-repo
+      - run: mise run ci:release:apt-repo
 
       - uses: actions/upload-pages-artifact@v3
         with:

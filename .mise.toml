@@ -531,10 +531,13 @@ set -euxo pipefail
 mise run ci:setup:apt-repo
 
 REPO_DIR="apt-repo"
-mkdir -p "$REPO_DIR"
+mkdir -p "$REPO_DIR/pool"
 
 # Export public GPG key
 gpg --armor --export > "$REPO_DIR/gpg.key"
+
+# Copy .deb packages to pool directory (APT Filename must be relative path)
+cp packages/*.deb "$REPO_DIR/pool/"
 
 # Distributions to generate indices for (Pop!_OS 24.04+ only)
 DISTS="noble"
@@ -551,11 +554,9 @@ for dist in $DISTS; do
     true > "$PACKAGES_FILE"
 
     # shellcheck disable=SC2231
-    for deb in packages/*_"${arch}".deb; do
+    for deb in "$REPO_DIR"/pool/*_"${arch}".deb; do
       if [[ -f "$deb" ]]; then
         DEB_NAME=$(basename "$deb")
-        TAG_NAME="v${VERSION}"
-        DOWNLOAD_URL="${REPO_URL}/${TAG_NAME}/${DEB_NAME}"
 
         dpkg-deb --info "$deb" | grep -E "^ (Package|Version|Architecture|Maintainer|Description|Section|Priority|Homepage):" | sed 's/^ //' >> "$PACKAGES_FILE"
 
@@ -565,7 +566,7 @@ for dist in $DISTS; do
         MD5=$(md5sum "$deb" | cut -d' ' -f1)
 
         {
-          echo "Filename: $DOWNLOAD_URL"
+          echo "Filename: pool/${DEB_NAME}"
           echo "Size: $SIZE"
           echo "SHA256: $SHA256"
           echo "SHA512: $SHA512"
