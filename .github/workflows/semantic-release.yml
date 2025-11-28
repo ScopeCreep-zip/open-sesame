@@ -1,0 +1,45 @@
+name: Semantic Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Run in dry-run mode (no release)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  MISE_AUTO_INSTALL: "false"
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: "npm:semantic-release npm:@semantic-release/git npm:@semantic-release/changelog npm:@semantic-release/exec npm:@semantic-release/commit-analyzer npm:@semantic-release/release-notes-generator npm:@semantic-release/github npm:conventional-changelog-conventionalcommits"
+          cache: true
+
+      - name: Semantic Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+            semantic-release --dry-run
+          else
+            semantic-release
+          fi

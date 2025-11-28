@@ -23,6 +23,16 @@ lefthook = "latest"                              # Git hooks manager
 "npm:@commitlint/cli" = "latest"                 # Commit message linter
 "npm:@commitlint/config-conventional" = "latest"
 
+# Semantic Release
+"npm:semantic-release" = "24.2.9"
+"npm:@semantic-release/git" = "10.0.1"
+"npm:@semantic-release/changelog" = "6.0.3"
+"npm:@semantic-release/exec" = "7.1.0"
+"npm:@semantic-release/commit-analyzer" = "13.0.1"
+"npm:@semantic-release/release-notes-generator" = "14.1.0"
+"npm:@semantic-release/github" = "11.0.6"
+"npm:conventional-changelog-conventionalcommits" = "9.1.0"
+
 [vars]
 bin = "sesame"
 dir_bin = ".local/bin"
@@ -611,6 +621,45 @@ find "$SITE_DIR" -type f | head -30 || true
 """
 
 # =============================================================================
+# SEMANTIC RELEASE
+# =============================================================================
+
+[tasks."release:ci"]
+description = "Run semantic-release in CI mode"
+run = "semantic-release"
+
+[tasks."release:dry-run"]
+alias = ["rd"]
+description = "Dry-run semantic-release for testing"
+run = "semantic-release --dry-run --branches $(git rev-parse --abbrev-ref HEAD)"
+
+[tasks."release:debug"]
+description = "Debug semantic-release with verbose output"
+run = "DEBUG=semantic-release:* semantic-release --dry-run --no-ci --branches $(git rev-parse --abbrev-ref HEAD)"
+
+[tasks."release:status"]
+description = "Show release status and version information"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+echo "Release Status"
+echo "=============="
+if [[ -f "VERSION" ]]; then
+  echo "Current version: $(cat VERSION)"
+else
+  VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= "\\(.*\\)"/\\1/')
+  echo "Current version: $VERSION (from Cargo.toml)"
+fi
+LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "no tags")
+echo "Latest git tag: $LATEST_TAG"
+echo "Current branch: $(git rev-parse --abbrev-ref HEAD)"
+if [[ "$LATEST_TAG" != "no tags" ]]; then
+  COMMITS_SINCE=$(git rev-list --count "$LATEST_TAG"..HEAD 2>/dev/null || echo "0")
+  echo "Commits since last tag: $COMMITS_SINCE"
+fi
+"""
+
+# =============================================================================
 # GIT HOOKS
 # =============================================================================
 
@@ -691,6 +740,12 @@ DOCUMENTATION:
   docs:all         (da)   Generate all documentation
   docs:clean              Clean generated documentation
   docs:serve              Serve docs locally for preview
+
+RELEASE (semantic-release automation):
+  release:dry-run  (rd)   Dry-run semantic-release
+  release:debug           Debug with verbose output
+  release:status          Show release status
+  release:ci              Run semantic-release in CI
 
 CI (GitHub Actions entry points):
   ci:setup                Install system dependencies

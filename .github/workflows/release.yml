@@ -72,10 +72,10 @@ jobs:
           subject-path: "*.deb"
 
   # ==========================================================================
-  # Create GitHub Release with .deb assets
+  # Upload .deb assets to GitHub Release (created by semantic-release)
   # ==========================================================================
   release:
-    name: Create GitHub Release
+    name: Upload Release Assets
     needs: build
     runs-on: ubuntu-latest
     outputs:
@@ -92,20 +92,29 @@ jobs:
       - id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate release body
+      - name: Generate checksums
         run: |
+          sha256sum *.deb > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Generate install instructions
+        run: |
+          SHA_AMD64=$(grep amd64 SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_ARM64=$(grep arm64 SHA256SUMS.txt | cut -d' ' -f1)
           sed -e "s/\${TAG}/${{ github.ref_name }}/g" \
               -e "s/\${VERSION}/${{ steps.version.outputs.version }}/g" \
-              .github/templates/RELEASE_BODY.md > release_body.md
+              -e "s/\${SHA256_AMD64}/${SHA_AMD64}/g" \
+              -e "s/\${SHA256_ARM64}/${SHA_ARM64}/g" \
+              .github/templates/RELEASE_BODY.md > install_instructions.md
 
-      - uses: softprops/action-gh-release@v2
+      - name: Upload assets to existing release
+        uses: softprops/action-gh-release@v2
         with:
-          files: "*.deb"
-          body_path: release_body.md
+          files: |
+            *.deb
+            SHA256SUMS.txt
+          body_path: install_instructions.md
           append_body: true
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # ==========================================================================
   # Build documentation (rustdoc + mdBook)
