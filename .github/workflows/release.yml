@@ -162,12 +162,12 @@ jobs:
         run: |
           sha256sum *.deb > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          SHA_AMD64=$(grep amd64 SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_ARM64=$(grep arm64 SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_X86_64=$(grep linux-x86_64 SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_AARCH64=$(grep linux-aarch64 SHA256SUMS.txt | cut -d' ' -f1)
           sed -e "s/\${TAG}/${TAG}/g" \
               -e "s/\${VERSION}/${VERSION}/g" \
-              -e "s/\${SHA256_AMD64}/${SHA_AMD64}/g" \
-              -e "s/\${SHA256_ARM64}/${SHA_ARM64}/g" \
+              -e "s/\${SHA256_X86_64}/${SHA_X86_64}/g" \
+              -e "s/\${SHA256_AARCH64}/${SHA_AARCH64}/g" \
               .github/templates/RELEASE_BODY.md > install_instructions.md
 
       - name: Upload assets to release

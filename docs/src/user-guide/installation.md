@@ -24,26 +24,14 @@ This method provides automatic updates through the standard APT package manager.
 
 Download the `.deb` package for your architecture from the [Releases page](https://github.com/ScopeCreep-zip/open-sesame/releases):
 
-**amd64 (Intel/AMD):**
+**Automatic architecture detection:**
 ```bash
-# Get latest version
-VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
+# Get latest tag and detect architecture
+TAG=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4)
+ARCH=$(uname -m)
 
 # Download, verify, and install
-curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_amd64.deb" \
-  -o /tmp/open-sesame.deb
-gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
-sudo dpkg -i /tmp/open-sesame.deb
-sesame --setup-keybinding
-```
-
-**arm64 (Raspberry Pi, ARM servers):**
-```bash
-# Get latest version
-VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
-
-# Download, verify, and install
-curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_arm64.deb" \
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-linux-${ARCH}.deb" \
   -o /tmp/open-sesame.deb
 gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
 sudo dpkg -i /tmp/open-sesame.deb
@@ -52,8 +40,8 @@ sesame --setup-keybinding
 
 **Available architectures:**
 
-- `amd64` - x86_64 / Intel/AMD 64-bit
-- `arm64` - ARM 64-bit (Raspberry Pi 4+, ARM servers)
+- `x86_64` - Intel/AMD 64-bit
+- `aarch64` - ARM 64-bit (Raspberry Pi 4+, ARM servers)
 
 ## Verify Package Authenticity
 
@@ -61,7 +49,7 @@ All packages include [SLSA Build Provenance](https://slsa.dev/) attestations for
 
 **Verify with GitHub CLI:**
 ```bash
-gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 ```
 
 **Verify SHA256 checksums:**

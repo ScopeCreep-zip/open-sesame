@@ -29,7 +29,7 @@ See release assets below for `.deb` packages (amd64/arm64) with SHA256 checksums
 
 All `.deb` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
 ```bash
-gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 ```
 
 ---

@@ -6,7 +6,8 @@ Open Sesame brings the efficiency of Vimium browser navigation to the entire COS
 instantly switch to any window, or launch an application if it isn't running. No mouse required.
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://github.com/ScopeCreep-zip/open-sesame/blob/main/LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/scopecreep-zip/opensesame)](https://github.com/scopecreep-zip/opensesame/releases)
+[![Latest Release](https://img.shields.io/github/v/release/ScopeCreep-zip/open-sesame)](https://github.com/ScopeCreep-zip/open-sesame/releases)
+[![CI](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml/badge.svg)](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml)
 
 ## Features
 

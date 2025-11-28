@@ -6,7 +6,8 @@ Open Sesame brings the efficiency of Vimium browser navigation to the entire COS
 instantly switch to any window, or launch an application if it isn't running. No mouse required.
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/scopecreep-zip/opensesame)](https://github.com/scopecreep-zip/opensesame/releases)
+[![Latest Release](https://img.shields.io/github/v/release/ScopeCreep-zip/open-sesame)](https://github.com/ScopeCreep-zip/open-sesame/releases)
+[![CI](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml/badge.svg)](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml)
 
 ---
 
@@ -89,20 +90,11 @@ sesame --setup-keybinding
 
 Download the `.deb` package for your architecture from [Releases](https://github.com/ScopeCreep-zip/open-sesame/releases):
 
-**amd64 (Intel/AMD):**
+**Automatic architecture detection:**
 ```bash
-VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
-curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_amd64.deb" \
-  -o /tmp/open-sesame.deb
-gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
-sudo dpkg -i /tmp/open-sesame.deb
-sesame --setup-keybinding
-```
-
-**arm64 (Raspberry Pi, ARM servers):**
-```bash
-VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
-curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_arm64.deb" \
+TAG=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4)
+ARCH=$(uname -m)
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-linux-${ARCH}.deb" \
   -o /tmp/open-sesame.deb
 gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
 sudo dpkg -i /tmp/open-sesame.deb
@@ -114,7 +106,7 @@ sesame --setup-keybinding
 All packages include [SLSA Build Provenance](https://slsa.dev/) attestations:
 
 ```bash
-gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 ```
 
 ### Building from Source
