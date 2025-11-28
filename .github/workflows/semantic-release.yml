@@ -15,9 +15,6 @@ permissions:
   issues: write
   pull-requests: write
 
-env:
-  MISE_AUTO_INSTALL: "false"
-
 jobs:
   release:
     name: Semantic Release
@@ -29,17 +26,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: jdx/mise-action@v3
+      - uses: actions/setup-node@v4
         with:
-          install_args: "npm:semantic-release npm:@semantic-release/git npm:@semantic-release/changelog npm:@semantic-release/exec npm:@semantic-release/commit-analyzer npm:@semantic-release/release-notes-generator npm:@semantic-release/github npm:conventional-changelog-conventionalcommits"
-          cache: true
+          node-version: '22'
+
+      - name: Install semantic-release plugins
+        run: |
+          npm install --no-save \
+            semantic-release@24.2.9 \
+            @semantic-release/git@10.0.1 \
+            @semantic-release/changelog@6.0.3 \
+            @semantic-release/exec@7.1.0 \
+            @semantic-release/commit-analyzer@13.0.1 \
+            @semantic-release/release-notes-generator@14.1.0 \
+            @semantic-release/github@11.0.6 \
+            conventional-changelog-conventionalcommits@9.1.0
 
       - name: Semantic Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ "${{ inputs.dry-run }}" == "true" ]]; then
-            semantic-release --dry-run
+            npx semantic-release --dry-run
           else
-            semantic-release
+            npx semantic-release
           fi

@@ -15,14 +15,14 @@ instantly switch to any window, or launch an application if it isn't running. No
 **Install and configure in 30 seconds:**
 
 ```bash
-# Add repository (Pop!_OS 24.04+)
-curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/open-sesame.gpg
-echo "deb [signed-by=/etc/apt/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list
+# Add GPG key and repository (Pop!_OS 24.04+)
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
 
-# Install
-sudo apt update && sudo apt install open-sesame
-
-# Setup keybinding (uses Alt+Space by default, or specify your own)
+# Install and configure
+sudo apt update && sudo apt install -y open-sesame
 sesame --setup-keybinding
 ```
 
@@ -74,17 +74,14 @@ Example: Press `Alt+Space`, type `f` → switches to Firefox (or launches it)
 **Pop!_OS 24.04+ with COSMIC Desktop:**
 
 ```bash
-# Add GPG key
-curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/open-sesame.gpg
+# Add GPG key and repository
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
 
-# Add repository
-echo "deb [signed-by=/etc/apt/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list
-
-# Install
-sudo apt update
-sudo apt install open-sesame
-
-# Setup keybinding
+# Install and configure
+sudo apt update && sudo apt install -y open-sesame
 sesame --setup-keybinding
 ```
 
@@ -92,23 +89,29 @@ sesame --setup-keybinding
 
 Download the `.deb` package for your architecture from [Releases](https://github.com/ScopeCreep-zip/open-sesame/releases):
 
+**amd64 (Intel/AMD):**
 ```bash
-# Download latest release (amd64)
-wget https://github.com/ScopeCreep-zip/open-sesame/releases/latest/download/open-sesame_amd64.deb
+VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_amd64.deb" \
+  -o /tmp/open-sesame.deb
+gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
+sudo dpkg -i /tmp/open-sesame.deb
+sesame --setup-keybinding
+```
 
-# Or ARM64
-# wget https://github.com/ScopeCreep-zip/open-sesame/releases/latest/download/open-sesame_arm64.deb
-
-# Install
-sudo dpkg -i open-sesame_*.deb
-
-# Setup keybinding
+**arm64 (Raspberry Pi, ARM servers):**
+```bash
+VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_arm64.deb" \
+  -o /tmp/open-sesame.deb
+gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
+sudo dpkg -i /tmp/open-sesame.deb
 sesame --setup-keybinding
 ```
 
 ### Verify Package Authenticity
 
-All packages include SLSA provenance attestations:
+All packages include [SLSA Build Provenance](https://slsa.dev/) attestations:
 
 ```bash
 gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
@@ -125,8 +128,8 @@ Requires COSMIC desktop environment and development tools.
 curl https://mise.run | sh
 
 # Clone repository
-git clone https://github.com/scopecreep-zip/opensesame.git
-cd opensesame
+git clone https://github.com/ScopeCreep-zip/open-sesame.git
+cd open-sesame
 
 # Install dependencies
 mise run setup

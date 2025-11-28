@@ -7,20 +7,14 @@ Open Sesame can be installed via APT repository, from GitHub releases, or built 
 **For Pop!_OS 24.04+ with COSMIC Desktop:**
 
 ```bash
-# Add GPG key
-curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | \
-  sudo gpg --dearmor -o /etc/apt/keyrings/open-sesame.gpg
+# Add GPG key and repository
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
 
-# Add repository
-echo "deb [signed-by=/etc/apt/keyrings/open-sesame.gpg] \
-  https://scopecreep-zip.github.io/open-sesame noble main" | \
-  sudo tee /etc/apt/sources.list.d/open-sesame.list
-
-# Install
-sudo apt update
-sudo apt install open-sesame
-
-# Setup keybinding
+# Install and configure
+sudo apt update && sudo apt install -y open-sesame
 sesame --setup-keybinding
 ```
 
@@ -30,35 +24,51 @@ This method provides automatic updates through the standard APT package manager.
 
 Download the `.deb` package for your architecture from the [Releases page](https://github.com/ScopeCreep-zip/open-sesame/releases):
 
+**amd64 (Intel/AMD):**
 ```bash
-# Download latest release (amd64)
-wget https://github.com/ScopeCreep-zip/open-sesame/releases/latest/download/open-sesame_amd64.deb
+# Get latest version
+VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
 
-# Or ARM64
-# wget https://github.com/ScopeCreep-zip/open-sesame/releases/latest/download/open-sesame_arm64.deb
+# Download, verify, and install
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_amd64.deb" \
+  -o /tmp/open-sesame.deb
+gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
+sudo dpkg -i /tmp/open-sesame.deb
+sesame --setup-keybinding
+```
 
-# Install
-sudo dpkg -i open-sesame_*.deb
+**arm64 (Raspberry Pi, ARM servers):**
+```bash
+# Get latest version
+VERSION=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d 'v')
 
-# Setup keybinding
+# Download, verify, and install
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame_${VERSION}_arm64.deb" \
+  -o /tmp/open-sesame.deb
+gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
+sudo dpkg -i /tmp/open-sesame.deb
 sesame --setup-keybinding
 ```
 
 **Available architectures:**
 
 - `amd64` - x86_64 / Intel/AMD 64-bit
-- `arm64` - ARM 64-bit (e.g., Raspberry Pi 4+)
+- `arm64` - ARM 64-bit (Raspberry Pi 4+, ARM servers)
 
 ## Verify Package Authenticity
 
-All packages include SLSA provenance attestations for supply chain security:
+All packages include [SLSA Build Provenance](https://slsa.dev/) attestations for supply chain security.
 
+**Verify with GitHub CLI:**
 ```bash
-# Install GitHub CLI if not already installed
-sudo apt install gh
-
-# Verify package signature
 gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
+```
+
+**Verify SHA256 checksums:**
+
+Each release includes a `SHA256SUMS.txt` file. Download it from the release page and verify:
+```bash
+sha256sum -c SHA256SUMS.txt
 ```
 
 ## Building from Source
@@ -72,8 +82,8 @@ Requires COSMIC desktop environment and development tools.
 curl https://mise.run | sh
 
 # Clone repository
-git clone https://github.com/scopecreep-zip/opensesame.git
-cd opensesame
+git clone https://github.com/ScopeCreep-zip/open-sesame.git
+cd open-sesame
 
 # Install dependencies (Rust toolchain, cargo-deb, etc.)
 mise run setup
@@ -169,7 +179,7 @@ If `apt install open-sesame` fails with "package not found":
 2. Check that the GPG key exists:
 
    ```bash
-   ls -la /etc/apt/keyrings/open-sesame.gpg
+   ls -la /usr/share/keyrings/open-sesame.gpg
    ```
 
 3. Update package lists:
