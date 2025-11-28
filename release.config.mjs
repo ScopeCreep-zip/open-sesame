@@ -31,7 +31,15 @@ export default {
       },
     ],
 
-    // Generate release notes from commits
+    // Prepend install instructions header (runs before release-notes-generator)
+    [
+      '@semantic-release/exec',
+      {
+        generateNotesCmd: 'cat .github/templates/RELEASE_HEADER.md',
+      },
+    ],
+
+    // Generate release notes from commits (appended after header)
     [
       '@semantic-release/release-notes-generator',
       {
