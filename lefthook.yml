@@ -116,14 +116,14 @@ pre-push:
         Run: cargo check --all-targets --all-features
 
     link-check:
-      run: lychee --offline '**/*.md'
+      run: mise exec -- lychee --offline '**/*.md'
       tags: [docs, links]
       only:
         - ref: main
         - ref: master
       fail_text: |
         Link validation failed.
-        Run: lychee '**/*.md'
+        Run: mise exec -- lychee '**/*.md'
 
 # Commit message validation for conventional commits
 commit-msg:

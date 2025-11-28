@@ -60,7 +60,7 @@ skip_missing = true # Skip missing files when offline
 # Cache results
 cache = true
 
-# Exclude paths
+# Exclude paths (lychee respects .gitignore by default, so TASKS*.md is already excluded)
 exclude_path = [
   # Build artifacts and dependencies
   "target",
@@ -68,6 +68,4 @@ exclude_path = [
   ".git",
   ".cache",
   "tmp",
-  # Backup directories
-  ".*\\.bak$",
 ]
