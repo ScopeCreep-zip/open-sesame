@@ -5,6 +5,7 @@
 [tools]
 # Core
 rust = "1.91"
+node = "22"
 "cargo:cargo-deb" = "latest"
 "cargo:cross" = "latest"
 
@@ -19,19 +20,19 @@ markdownlint-cli2 = "0.18.1" # Markdown linter
 lychee = "0.20.1"            # Link checker
 
 # Git Hooks & Commits
-lefthook = "latest"                              # Git hooks manager
-"npm:@commitlint/cli" = "latest"                 # Commit message linter
-"npm:@commitlint/config-conventional" = "latest"
+lefthook = "latest" # Git hooks manager
 
-# Semantic Release
-"npm:semantic-release" = "24.2.9"
-"npm:@semantic-release/git" = "10.0.1"
-"npm:@semantic-release/changelog" = "6.0.3"
-"npm:@semantic-release/exec" = "7.1.0"
-"npm:@semantic-release/commit-analyzer" = "13.0.1"
-"npm:@semantic-release/release-notes-generator" = "14.1.0"
-"npm:@semantic-release/github" = "11.0.6"
-"npm:conventional-changelog-conventionalcommits" = "9.1.0"
+# npm packages installed via `mise run setup:npm` for proper dependency resolution
+# "npm:@commitlint/cli" = "latest"                 # Commit message linter
+# "npm:@commitlint/config-conventional" = "latest"
+# "npm:semantic-release" = "24.2.9"
+# "npm:@semantic-release/git" = "10.0.1"
+# "npm:@semantic-release/changelog" = "6.0.3"
+# "npm:@semantic-release/exec" = "7.1.0"
+# "npm:@semantic-release/commit-analyzer" = "13.0.1"
+# "npm:@semantic-release/release-notes-generator" = "14.1.0"
+# "npm:@semantic-release/github" = "11.0.6"
+# "npm:conventional-changelog-conventionalcommits" = "9.1.0"
 
 [vars]
 bin = "sesame"
@@ -298,7 +299,26 @@ run = """
 set -euo pipefail
 mise install
 sudo apt install -y {{vars.apt_deps}}
+mise run setup:npm
 echo "✓ Setup complete"
+"""
+
+[tasks."setup:npm"]
+description = "Install npm packages for semantic-release and commitlint"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+npm install --no-save \
+  semantic-release@24.2.9 \
+  @semantic-release/git@10.0.1 \
+  @semantic-release/changelog@6.0.3 \
+  @semantic-release/exec@7.1.0 \
+  @semantic-release/commit-analyzer@13.0.1 \
+  @semantic-release/release-notes-generator@14.1.0 \
+  @semantic-release/github@11.0.6 \
+  conventional-changelog-conventionalcommits@9.1.0 \
+  @commitlint/cli@latest \
+  @commitlint/config-conventional@latest
 """
 
 # =============================================================================
@@ -392,11 +412,11 @@ run = "taplo fmt"
 
 [tasks."qa:markdown"]
 description = "Lint markdown files"
-run = "markdownlint-cli2 '**/*.md' '#node_modules' '#target' '#tmp' '#TASKS*.md'"
+run = "markdownlint-cli2 --config ${MISE_CONFIG_ROOT}/.markdownlint-cli2.yaml"
 
 [tasks."qa:markdown:fix"]
 description = "Fix markdown issues"
-run = "markdownlint-cli2 --fix '**/*.md' '#node_modules' '#target' '#tmp' '#TASKS*.md'"
+run = "markdownlint-cli2 --config ${MISE_CONFIG_ROOT}/.markdownlint-cli2.yaml --fix"
 
 [tasks."qa:links"]
 description = "Check links in markdown (offline)"
@@ -629,7 +649,7 @@ description = "Run semantic-release in CI mode"
 run = "semantic-release"
 
 [tasks."release:dry-run"]
-alias = ["rd"]
+alias = [ "rd" ]
 description = "Dry-run semantic-release for testing"
 run = "semantic-release --dry-run --branches $(git rev-parse --abbrev-ref HEAD)"
 

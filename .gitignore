@@ -1,6 +1,7 @@
 /target
 /tmp
 /docs/book
+/node_modules
 
 # Cache files
 .lycheecache

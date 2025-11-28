@@ -1,0 +1,18 @@
+# markdownlint-cli2 configuration
+# https://github.com/DavidAnson/markdownlint-cli2
+
+# Use .markdownlint.yaml for rule configuration
+config: .markdownlint.yaml
+
+# Files to ignore completely
+ignores:
+  - "node_modules/**"
+  - "target/**"
+  - "tmp/**"
+  - "TASKS*.md"
+  - "CHANGELOG.md"
+  - ".github/templates/**"
+
+# Globs to lint
+globs:
+  - "**/*.md"

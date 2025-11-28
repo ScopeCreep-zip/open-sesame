@@ -90,15 +90,20 @@ sesame --setup-keybinding
 
 Download the `.deb` package for your architecture from [Releases](https://github.com/ScopeCreep-zip/open-sesame/releases):
 
-**Automatic architecture detection:**
+**Download (auto-detects architecture):**
+
 ```bash
-TAG=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4)
-ARCH=$(uname -m)
-curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-linux-${ARCH}.deb" \
-  -o /tmp/open-sesame.deb
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/latest/download/open-sesame-linux-$(uname -m).deb" -o /tmp/open-sesame.deb
+```
+
+**Verify and install:**
+
+```bash
 gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
-sudo dpkg -i /tmp/open-sesame.deb
-sesame --setup-keybinding
+```
+
+```bash
+sudo dpkg -i /tmp/open-sesame.deb && sesame --setup-keybinding
 ```
 
 ### Verify Package Authenticity

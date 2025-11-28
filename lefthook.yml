@@ -52,7 +52,7 @@ pre-commit:
     # Markdown checks
     markdown-lint:
       glob: "*.md"
-      run: markdownlint-cli2 {staged_files}
+      run: markdownlint-cli2 --config .markdownlint-cli2.yaml {staged_files}
       tags: [docs, markdown]
       fail_text: |
         Markdown style check failed.
@@ -129,7 +129,7 @@ pre-push:
 commit-msg:
   commands:
     conventional-commits:
-      run: npx --yes commitlint --edit {1}
+      run: npx commitlint --edit {1}
       fail_text: |
         Commit message does not follow conventional commits format.
         Format: <type>(<scope>): <subject>

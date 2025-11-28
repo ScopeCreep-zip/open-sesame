@@ -40,21 +40,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: jdx/mise-action@v3
         with:
-          node-version: '22'
+          install_args: "node"
 
       - name: Install semantic-release plugins
-        run: |
-          npm install --no-save \
-            semantic-release@24.2.9 \
-            @semantic-release/git@10.0.1 \
-            @semantic-release/changelog@6.0.3 \
-            @semantic-release/exec@7.1.0 \
-            @semantic-release/commit-analyzer@13.0.1 \
-            @semantic-release/release-notes-generator@14.1.0 \
-            @semantic-release/github@11.0.6 \
-            conventional-changelog-conventionalcommits@9.1.0
+        run: mise run setup:npm
 
       - name: Semantic Release
         id: release
@@ -68,9 +59,11 @@ jobs:
             npx semantic-release 2>&1 | tee release-output.txt
             if grep -q "Published release" release-output.txt; then
               VERSION=$(grep -oP 'Published release \K[0-9]+\.[0-9]+\.[0-9]+' release-output.txt || true)
-              echo "new_release=true" >> "$GITHUB_OUTPUT"
-              echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-              echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+              {
+                echo "new_release=true"
+                echo "version=${VERSION}"
+                echo "tag=v${VERSION}"
+              } >> "$GITHUB_OUTPUT"
             else
               echo "new_release=false" >> "$GITHUB_OUTPUT"
             fi
@@ -160,7 +153,7 @@ jobs:
 
       - name: Generate checksums and install instructions
         run: |
-          sha256sum *.deb > SHA256SUMS.txt
+          sha256sum ./*.deb > SHA256SUMS.txt
           cat SHA256SUMS.txt
           SHA_X86_64=$(grep linux-x86_64 SHA256SUMS.txt | cut -d' ' -f1)
           SHA_AARCH64=$(grep linux-aarch64 SHA256SUMS.txt | cut -d' ' -f1)

@@ -24,18 +24,20 @@ This method provides automatic updates through the standard APT package manager.
 
 Download the `.deb` package for your architecture from the [Releases page](https://github.com/ScopeCreep-zip/open-sesame/releases):
 
-**Automatic architecture detection:**
-```bash
-# Get latest tag and detect architecture
-TAG=$(curl -s https://api.github.com/repos/ScopeCreep-zip/open-sesame/releases/latest | grep tag_name | cut -d'"' -f4)
-ARCH=$(uname -m)
+**Download (auto-detects architecture):**
 
-# Download, verify, and install
-curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-linux-${ARCH}.deb" \
-  -o /tmp/open-sesame.deb
+```bash
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/latest/download/open-sesame-linux-$(uname -m).deb" -o /tmp/open-sesame.deb
+```
+
+**Verify and install:**
+
+```bash
 gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
-sudo dpkg -i /tmp/open-sesame.deb
-sesame --setup-keybinding
+```
+
+```bash
+sudo dpkg -i /tmp/open-sesame.deb && sesame --setup-keybinding
 ```
 
 **Available architectures:**
@@ -48,6 +50,7 @@ sesame --setup-keybinding
 All packages include [SLSA Build Provenance](https://slsa.dev/) attestations for supply chain security.
 
 **Verify with GitHub CLI:**
+
 ```bash
 gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 ```
@@ -55,6 +58,7 @@ gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 **Verify SHA256 checksums:**
 
 Each release includes a `SHA256SUMS.txt` file. Download it from the release page and verify:
+
 ```bash
 sha256sum -c SHA256SUMS.txt
 ```
