@@ -1,0 +1,24 @@
+[package]
+name = "extension-host"
+description = "WASM extension host: wasmtime runtime, capability sandbox, extension lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types   = { workspace = true }
+core-config  = { workspace = true }
+core-ipc     = { workspace = true }
+extension-sdk = { workspace = true }
+wasmtime     = { workspace = true }
+wasmtime-wasi = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+thiserror    = { workspace = true }
+serde        = { workspace = true }
+anyhow       = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }
+tokio-test   = { workspace = true }

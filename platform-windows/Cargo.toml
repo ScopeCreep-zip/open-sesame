@@ -1,0 +1,19 @@
+[package]
+name = "platform-windows"
+description = "Windows API wrappers: Win32 hooks, UI Automation, Credential Manager, Group Policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+core-types  = { workspace = true }
+windows     = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tokio       = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }

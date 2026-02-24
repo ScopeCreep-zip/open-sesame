@@ -1,0 +1,16 @@
+[package]
+name = "extension-sdk"
+description = "Extension SDK: types, host function bindings, and WIT interfaces for PDS extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types  = { workspace = true }
+wit-bindgen = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }

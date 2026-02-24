@@ -1,5 +1,5 @@
 {
-  description = "Open Sesame - Vimium-style window switcher for COSMIC desktop";
+  description = "Open Sesame v2 — Programmable Desktop Suite";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -84,14 +84,60 @@
         let pkgs = pkgsFor system;
         in {
           default = pkgs.mkShell {
-            inputsFrom = [ self.packages.${system}.default ];
-            packages = with pkgs; [
+            nativeBuildInputs = with pkgs; [
               cargo
               rustc
               rust-analyzer
               clippy
               rustfmt
+              pkg-config
             ];
+
+            buildInputs = with pkgs; [
+              # SQLCipher (rusqlite bundled-sqlcipher)
+              openssl
+
+              # GTK4 UI (daemon-wm, daemon-launcher)
+              gtk4
+              gtk4-layer-shell
+              glib
+              cairo
+              pango
+              gdk-pixbuf
+              graphene
+              libadwaita
+
+              # Wayland (platform-linux)
+              wayland
+              wayland-protocols
+              libxkbcommon
+
+              # System libs
+              fontconfig
+              pcsclite
+            ];
+
+            # pkg-config needs to find .pc files from buildInputs
+            PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" (with pkgs; [
+              openssl.dev
+              gtk4.dev
+              gtk4-layer-shell.dev
+              glib.dev
+              cairo.dev
+              pango.dev
+              gdk-pixbuf.dev
+              graphene.dev
+              wayland.dev
+              wayland-protocols
+              libxkbcommon.dev
+              fontconfig.dev
+              pcsclite.dev
+            ]);
+
+            shellHook = ''
+              echo "open-sesame v2 devShell ready"
+              echo "  cargo check --workspace"
+            '';
           };
         });
     };

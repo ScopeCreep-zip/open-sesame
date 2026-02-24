@@ -1,0 +1,21 @@
+[package]
+name = "core-ipc"
+description = "IPC bus protocol, postcard framing, BusServer/BusClient for PDS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types  = { workspace = true }
+serde       = { workspace = true }
+postcard    = { workspace = true }
+tokio       = { workspace = true }
+uuid        = { workspace = true }
+bytes       = { workspace = true }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+tokio-test  = { workspace = true }
+tempfile    = { workspace = true }

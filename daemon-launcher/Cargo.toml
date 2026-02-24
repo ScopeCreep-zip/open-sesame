@@ -1,0 +1,42 @@
+[package]
+name = "daemon-launcher"
+description = "Application launcher daemon: fuzzy search, frecency, overlay UI, desktop entry discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types   = { workspace = true }
+core-config  = { workspace = true }
+core-ipc     = { workspace = true }
+core-fuzzy   = { workspace = true }
+core-profile = { workspace = true }
+core-secrets = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap         = { workspace = true }
+anyhow       = { workspace = true }
+serde        = { workspace = true }
+
+[features]
+default = []
+gtk = ["dep:gtk4", "dep:gtk4-layer-shell"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux              = { workspace = true }
+gtk4                        = { workspace = true, optional = true }
+gtk4-layer-shell            = { workspace = true, optional = true }
+freedesktop-desktop-entry   = { workspace = true }
+tracing-journald            = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos  = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+platform-windows = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio-test  = { workspace = true }

@@ -1,0 +1,37 @@
+[package]
+name = "platform-linux"
+description = "Linux API wrappers: evdev, uinput, Wayland protocols, D-Bus, Landlock, seccomp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+cosmic = ["dep:cosmic-client-toolkit", "dep:cosmic-protocols"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+core-types              = { workspace = true }
+evdev                   = { workspace = true }
+wayland-client          = { workspace = true }
+wayland-protocols       = { workspace = true }
+smithay-client-toolkit  = { workspace = true }
+zbus                    = { workspace = true }
+landlock                = { workspace = true }
+libseccomp              = { workspace = true }
+sd-notify               = { workspace = true }
+libc                    = { workspace = true }
+fontconfig              = { workspace = true }
+ron                     = { workspace = true }
+serde                   = { workspace = true }
+thiserror               = { workspace = true }
+tracing                 = { workspace = true }
+tokio                   = { workspace = true }
+
+# GPL-3.0 gated: feature-flagged to isolate license obligation
+cosmic-client-toolkit   = { workspace = true, optional = true }
+cosmic-protocols        = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }

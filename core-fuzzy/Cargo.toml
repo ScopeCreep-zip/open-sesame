@@ -1,0 +1,23 @@
+[package]
+name = "core-fuzzy"
+description = "Fuzzy matching (nucleo), frecency scoring, FTS5, and index abstractions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types  = { workspace = true }
+nucleo      = { workspace = true }
+rusqlite    = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+criterion   = { workspace = true }
+
+[[bench]]
+name = "fuzzy_bench"
+harness = false
