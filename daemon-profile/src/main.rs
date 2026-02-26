@@ -510,7 +510,7 @@ fn apply_sandbox() {
             "mkdir".into(), "rename".into(), "chmod".into(),
             "fchmod".into(), "fchown".into(),
             "fcntl".into(), "ioctl".into(), "fsync".into(),
-            "fdatasync".into(),
+            "fdatasync".into(), "getdents64".into(),
             // Memory
             "mmap".into(), "mprotect".into(), "munmap".into(),
             "madvise".into(), "brk".into(),

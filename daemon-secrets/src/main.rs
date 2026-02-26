@@ -703,7 +703,7 @@ fn apply_sandbox() {
             "fstat".into(), "stat".into(), "newfstatat".into(),
             "statx".into(), "access".into(), "unlink".into(),
             "fcntl".into(), "flock".into(), "fdatasync".into(),
-            "mkdir".into(),
+            "mkdir".into(), "getdents64".into(),
             // Memory (secrets needs mlock/munlock/madvise for zeroization)
             "mmap".into(), "mprotect".into(), "munmap".into(),
             "mlock".into(), "munlock".into(), "madvise".into(),

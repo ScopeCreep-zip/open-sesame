@@ -216,9 +216,11 @@ fn apply_sandbox() {
             path: std::path::PathBuf::from(&runtime_dir).join("pds"),
             access: FsAccess::ReadWrite,
         },
-        // Wayland socket access.
+        // Wayland socket access (use $WAYLAND_DISPLAY, default wayland-1 for COSMIC).
         LandlockRule {
-            path: std::path::PathBuf::from(&runtime_dir).join("wayland-0"),
+            path: std::path::PathBuf::from(&runtime_dir).join(
+                std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".into()),
+            ),
             access: FsAccess::ReadWrite,
         },
         // MRU state file.
@@ -248,6 +250,7 @@ fn apply_sandbox() {
             "flock".into(), "ftruncate".into(), "mkdir".into(),
             "rename".into(), "chmod".into(), "fchmod".into(),
             "fsync".into(), "fdatasync".into(), "ioctl".into(),
+            "getdents64".into(),
             // Memory
             "mmap".into(), "mprotect".into(), "munmap".into(),
             "madvise".into(), "brk".into(),
