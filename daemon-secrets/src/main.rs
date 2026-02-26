@@ -688,9 +688,11 @@ fn apply_sandbox() {
             path: PathBuf::from(&runtime_dir).join("pds"),
             access: FsAccess::ReadWrite,
         },
+        // D-Bus socket — non-directory fd, use ReadWriteFile to avoid
+        // PartiallyEnforced from directory-only landlock flags.
         LandlockRule {
             path: PathBuf::from(&runtime_dir).join("bus"),
-            access: FsAccess::ReadWrite,
+            access: FsAccess::ReadWriteFile,
         },
     ];
 
