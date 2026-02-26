@@ -1,8 +1,11 @@
 //! systemd integration helpers.
 
 /// Notify systemd that the daemon is ready (Type=notify).
+///
+/// `unset_environment` is false to preserve NOTIFY_SOCKET for
+/// subsequent watchdog keepalive pings.
 pub fn notify_ready() {
-    sd_notify::notify(true, &[sd_notify::NotifyState::Ready]).ok();
+    sd_notify::notify(false, &[sd_notify::NotifyState::Ready]).ok();
 }
 
 /// Send a watchdog keepalive to systemd.
