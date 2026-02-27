@@ -743,18 +743,14 @@ impl CosmicBackend {
 
         tracing::info!(window_id = %target_id, "cosmic: window activated");
 
-        // Protocol cleanup: destroy all objects before dropping EventQueue.
-        // Per cosmic-toplevel-info-unstable-v1.xml: destroy cosmic handles.
-        // Per cosmic-toplevel-management-unstable-v1.xml: destroy manager.
-        // Per ext-foreign-toplevel-list-v1.xml: stop → wait finished → destroy handles → destroy list.
-        cosmic_handle.destroy();
-        for (handle, _) in state.toplevels.drain(..) {
-            handle.destroy();
-        }
-        manager.destroy();
-        list.stop();
-        let _ = cosmic_roundtrip(&self.conn, &mut event_queue, &mut state);
-        list.destroy();
+        // DO NOT destroy protocol objects here. cosmic-comp panics
+        // (toplevel_management.rs:267 unreachable!()) when we destroy the
+        // cosmic_handle or manager while an activation is in flight. The
+        // panic kills the entire COSMIC desktop session.
+        //
+        // Letting the EventQueue drop without cleanup may cause a broken
+        // pipe on the shared Connection, but that only kills daemon-wm
+        // (which auto-restarts). A compositor panic kills every application.
         let _ = self.conn.flush();
 
         Ok(())
