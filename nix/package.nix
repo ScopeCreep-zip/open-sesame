@@ -10,6 +10,12 @@
   wayland-protocols,
   libxkbcommon,
   libseccomp,
+  glib,
+  gtk4,
+  cairo,
+  pango,
+  graphene,
+  gtk4-layer-shell,
 }:
 
 let
@@ -93,6 +99,12 @@ rustPlatform.buildRustPackage {
     wayland-protocols
     libxkbcommon
     libseccomp
+    glib
+    gtk4
+    cairo
+    pango
+    graphene
+    gtk4-layer-shell
   ];
 
   # Explicit --package flags for each binary crate. Using --workspace would
