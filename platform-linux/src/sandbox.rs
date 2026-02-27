@@ -67,8 +67,13 @@ pub fn apply_landlock(rules: &[LandlockRule]) -> core_types::Result<EnforcementS
         .create()
         .map_err(|e| core_types::Error::Platform(format!("landlock create failed: {e}")))?;
 
+    // File-only access flags: the landlock crate stats each PathBeneath fd and
+    // returns PartiallyEnforced if directory-only flags (ReadDir, MakeDir, etc.)
+    // are applied to non-directory inodes. We must strip them ourselves.
+    let access_file: landlock::BitFlags<AccessFs> = AccessFs::from_file(abi);
+
     for rule in rules {
-        let access = match rule.access {
+        let mut access = match rule.access {
             FsAccess::ReadOnly => AccessFs::from_read(abi),
             FsAccess::ReadWrite => AccessFs::from_all(abi),
             FsAccess::ReadWriteFile => AccessFs::from_file(abi),
@@ -78,6 +83,17 @@ pub fn apply_landlock(rules: &[LandlockRule]) -> core_types::Result<EnforcementS
             .map_err(|e| core_types::Error::Platform(format!(
                 "landlock PathFd::new({}) failed: {e}", rule.path.display()
             )))?;
+        // fstat the already-open fd to avoid TOCTOU vs the crate's internal stat.
+        // Strip directory-only flags on non-directory inodes to prevent the crate's
+        // PathBeneath::try_compat_inner from returning PartiallyEnforced.
+        {
+            use std::os::unix::io::{AsFd, AsRawFd};
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::fstat(path_fd.as_fd().as_raw_fd(), &mut stat) };
+            if rc == 0 && (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+                access &= access_file;
+            }
+        }
         ruleset = ruleset
             .add_rule(PathBeneath::new(path_fd, access))
             .map_err(|e| core_types::Error::Platform(format!(
