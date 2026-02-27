@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::warn!(error = %e, "failed to refresh window list");
                             }
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
                 });
                 Some(arc)

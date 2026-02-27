@@ -516,6 +516,10 @@ pub struct CosmicBackend {
     conn: wayland_client::Connection,
     #[allow(dead_code)]
     globals: wayland_client::globals::GlobalList,
+    /// Serializes all protocol operations (enumerate, activate) on the shared
+    /// connection. Concurrent bind/destroy cycles on the same wl_display corrupt
+    /// compositor state and can crash cosmic-comp.
+    op_lock: std::sync::Mutex<()>,
 }
 
 #[cfg(feature = "cosmic")]
@@ -556,7 +560,7 @@ impl CosmicBackend {
             ));
         }
 
-        Ok(Self { conn, globals })
+        Ok(Self { conn, globals, op_lock: std::sync::Mutex::new(()) })
     }
 
     /// Enumerate all windows using the 2-roundtrip COSMIC protocol flow.
@@ -565,6 +569,10 @@ impl CosmicBackend {
     /// Then request zcosmic_toplevel_handle for each via info.get_cosmic_toplevel().
     /// Roundtrip 2: receive cosmic state events (activation detection: state_value == 2).
     fn enumerate(&self) -> core_types::Result<Vec<Window>> {
+        let _guard = self.op_lock.lock().map_err(|e| {
+            core_types::Error::Platform(format!("op_lock poisoned: {e}"))
+        })?;
+
         use wayland_client::globals::registry_queue_init;
         use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1;
         use cosmic_client_toolkit::cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1;
@@ -666,6 +674,10 @@ impl CosmicBackend {
     /// Call manager.activate(cosmic_handle, seat).
     /// Roundtrip 3: ensure activation is processed.
     fn activate(&self, target_id: &WindowId) -> core_types::Result<()> {
+        let _guard = self.op_lock.lock().map_err(|e| {
+            core_types::Error::Platform(format!("op_lock poisoned: {e}"))
+        })?;
+
         use wayland_client::globals::registry_queue_init;
         use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1;
         use cosmic_client_toolkit::cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1;
