@@ -103,6 +103,15 @@ async fn main() -> anyhow::Result<()> {
     let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
     tracing::info!(default_profile = %default_profile_name, "config loaded");
 
+    // -- Ensure config dir exists (Landlock PathFd requires paths to exist) --
+    // After `sesame init --wipe-reset-destroy-all-data`, systemd may restart
+    // daemon-profile before `sesame init` recreates the config directory.
+    let config_dir = core_config::config_dir();
+    if !config_dir.exists() {
+        std::fs::create_dir_all(&config_dir)
+            .context("failed to create config directory")?;
+    }
+
     // -- Sandbox (Linux) --
     #[cfg(target_os = "linux")]
     apply_sandbox();

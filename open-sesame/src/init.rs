@@ -133,7 +133,23 @@ async fn init_services() -> anyhow::Result<()> {
         .args(["--user", "daemon-reload"])
         .status();
 
-    // Start the target (idempotent).
+    // Reset any failed units from prior crash-loops (e.g. daemon-profile
+    // crashed before config dir existed). Without this, `start` is a no-op
+    // on failed units and the daemon never retries.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "open-sesame.target"])
+        .status();
+    for unit in [
+        "open-sesame-profile", "open-sesame-secrets", "open-sesame-wm",
+        "open-sesame-launcher", "open-sesame-clipboard", "open-sesame-input",
+        "open-sesame-snippets",
+    ] {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "reset-failed", unit])
+            .status();
+    }
+
+    // Start the target (idempotent if already running).
     let start = std::process::Command::new("systemctl")
         .args(["--user", "start", "open-sesame.target"])
         .output()
