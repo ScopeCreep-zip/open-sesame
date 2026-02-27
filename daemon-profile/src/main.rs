@@ -103,18 +103,12 @@ async fn main() -> anyhow::Result<()> {
     let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
     tracing::info!(default_profile = %default_profile_name, "config loaded");
 
-    // -- Ensure config dir exists (Landlock PathFd requires paths to exist) --
-    // After `sesame init --wipe-reset-destroy-all-data`, systemd may restart
-    // daemon-profile before `sesame init` recreates the config directory.
-    let config_dir = core_config::config_dir();
-    if !config_dir.exists() {
-        std::fs::create_dir_all(&config_dir)
-            .context("failed to create config directory")?;
-    }
-
     // -- Sandbox (Linux) --
+    // apply_sandbox() ensures all Landlock target directories exist before
+    // opening PathFd handles. This handles the post-wipe restart case where
+    // systemd restarts daemon-profile before `sesame init` recreates dirs.
     #[cfg(target_os = "linux")]
-    apply_sandbox();
+    apply_sandbox()?;
 
     // -- IPC bus server: generate Noise IK keypair and bind the Unix socket --
     let socket_path = core_ipc::socket_path()
@@ -927,8 +921,14 @@ async fn sigterm() {
 }
 
 /// Apply Landlock + seccomp sandbox (Linux only).
+///
+/// Ensures all Landlock target directories exist before opening PathFd handles.
+/// After `sesame init --wipe-reset-destroy-all-data`, systemd may restart
+/// daemon-profile before `sesame init` recreates the wiped directories
+/// (`~/.config/pds/` and `$XDG_RUNTIME_DIR/pds/`). Landlock PathFd::new()
+/// requires every path in the ruleset to exist.
 #[cfg(target_os = "linux")]
-fn apply_sandbox() {
+fn apply_sandbox() -> anyhow::Result<()> {
     use platform_linux::sandbox::{
         apply_sandbox, FsAccess, LandlockRule, SeccompProfile,
     };
@@ -937,6 +937,15 @@ fn apply_sandbox() {
         .unwrap_or_else(|_| "/run/user/1000".into());
 
     let config_dir = core_config::config_dir();
+    let pds_runtime = PathBuf::from(&runtime_dir).join("pds");
+
+    // Ensure Landlock target directories exist before PathFd::new().
+    for dir in [&config_dir, &pds_runtime] {
+        if !dir.exists() {
+            std::fs::create_dir_all(dir)
+                .context(format!("failed to create {}", dir.display()))?;
+        }
+    }
 
     let rules = vec![
         LandlockRule {
@@ -944,7 +953,7 @@ fn apply_sandbox() {
             access: FsAccess::ReadWrite, // audit log writes here
         },
         LandlockRule {
-            path: PathBuf::from(&runtime_dir).join("pds"),
+            path: pds_runtime,
             access: FsAccess::ReadWrite,
         },
     ];
@@ -1000,9 +1009,10 @@ fn apply_sandbox() {
     match apply_sandbox(&rules, &seccomp) {
         Ok(status) => {
             tracing::info!(?status, "sandbox applied");
+            Ok(())
         }
         Err(e) => {
-            panic!("sandbox application failed: {e} — refusing to run unsandboxed");
+            anyhow::bail!("sandbox application failed: {e} — refusing to run unsandboxed");
         }
     }
 }
