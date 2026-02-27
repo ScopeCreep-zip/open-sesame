@@ -1,14 +1,20 @@
 //! COSMIC keybinding integration.
 //!
 //! Manages keybindings in COSMIC desktop's shortcut configuration file
-//! (`~/.config/cosmic/input-handling/shortcuts.ron`).
+//! (`~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`).
 //!
-//! Ported from v1 `src.v1/platform/cosmic_keys.rs` — production-tested.
+//! The compositor watches this file via `cosmic_config::calloop::ConfigWatchSource`
+//! and live-reloads keybindings on change — no logout required.
 
 use std::fs;
 use std::path::PathBuf;
 
 /// Path to COSMIC custom shortcuts config.
+///
+/// COSMIC reads custom keybindings from:
+///   `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`
+///
+/// The compositor watches this file and live-reloads on change (no logout needed).
 fn cosmic_shortcuts_path() -> core_types::Result<PathBuf> {
     let base = dirs::config_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
@@ -17,7 +23,7 @@ fn cosmic_shortcuts_path() -> core_types::Result<PathBuf> {
                 "cannot determine config directory: HOME not set".into(),
             )
         })?;
-    Ok(base.join("cosmic/input-handling/shortcuts.ron"))
+    Ok(base.join("cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom"))
 }
 
 /// Parse a key combo string like "super+space" into (modifiers, key).
@@ -169,7 +175,6 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
     println!("    alt+shift+tab -> sesame wm switch --backward");
     println!("    {launcher_key_combo:<14}-> sesame (overlay)");
     println!("  Config: {}", cosmic_shortcuts_path()?.display());
-    println!("  Note: log out and back in for changes to take effect.");
 
     Ok(())
 }
@@ -186,7 +191,6 @@ pub fn remove_keybinding() -> core_types::Result<()> {
     let new_content = remove_sesame_bindings(&content);
     write_shortcuts(&new_content)?;
     println!("Removed sesame keybindings.");
-    println!("  Note: log out and back in for changes to take effect.");
     Ok(())
 }
 
