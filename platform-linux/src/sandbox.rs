@@ -9,8 +9,8 @@
 //! seccomp-bpf: syscall filtering via libseccomp (C library).
 
 use landlock::{
-    Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus, ABI,
+    Access, AccessFs, AccessNet, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, Scope, ABI,
 };
 
 /// Filesystem access rights for Landlock rules.
@@ -51,11 +51,15 @@ pub enum EnforcementStatus {
 /// Returns an error if Landlock is not fully enforced — callers MUST treat
 /// non-full enforcement as fatal. There is no graceful degradation.
 pub fn apply_landlock(rules: &[LandlockRule]) -> core_types::Result<EnforcementStatus> {
-    let abi = ABI::V3; // Linux 5.19+: truncate support
+    let abi = ABI::V6; // Linux 6.12+: ioctl_dev, scope
 
     let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
-        .map_err(|e| core_types::Error::Platform(format!("landlock handle_access failed: {e}")))?
+        .map_err(|e| core_types::Error::Platform(format!("landlock handle_access(fs) failed: {e}")))?
+        .handle_access(AccessNet::from_all(abi))
+        .map_err(|e| core_types::Error::Platform(format!("landlock handle_access(net) failed: {e}")))?
+        .scope(Scope::from_all(abi))
+        .map_err(|e| core_types::Error::Platform(format!("landlock scope failed: {e}")))?
         .create()
         .map_err(|e| core_types::Error::Platform(format!("landlock create failed: {e}")))?;
 
