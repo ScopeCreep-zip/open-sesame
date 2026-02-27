@@ -8,6 +8,8 @@
 //!   1 — error (daemon unreachable, request failed, etc.)
 //!   2 — timeout waiting for response
 
+mod init;
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Table};
@@ -18,7 +20,7 @@ use std::time::Duration;
 use zeroize::Zeroize;
 
 /// Default RPC timeout.
-const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Open Sesame — Platform Orchestration CLI.
 #[derive(Parser)]
@@ -30,6 +32,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize Open Sesame: create config, start daemons, set master password.
+    Init {
+        /// Skip keybinding setup.
+        #[arg(long)]
+        no_keybinding: bool,
+
+        /// Destroy ALL Open Sesame data and reset to clean state.
+        #[arg(long)]
+        wipe_reset_destroy_all_data: bool,
+    },
+
     /// Show daemon status, active profiles, and lock state.
     Status,
 
@@ -329,6 +342,13 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
+        Command::Init { no_keybinding, wipe_reset_destroy_all_data } => {
+            if wipe_reset_destroy_all_data {
+                init::cmd_wipe()
+            } else {
+                init::cmd_init(no_keybinding).await
+            }
+        }
         Command::Status => cmd_status().await,
         Command::Unlock => cmd_unlock().await,
         Command::Lock => cmd_lock().await,
@@ -403,7 +423,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 // IPC connection helper
 // ============================================================================
 
-async fn connect() -> anyhow::Result<BusClient> {
+pub(crate) async fn connect() -> anyhow::Result<BusClient> {
     let socket_path = core_ipc::socket_path()
         .context("failed to resolve IPC socket path")?;
 
@@ -422,7 +442,7 @@ async fn connect() -> anyhow::Result<BusClient> {
 }
 
 /// Send an RPC request and wait for the correlated response.
-async fn rpc(
+pub(crate) async fn rpc(
     client: &BusClient,
     event: EventKind,
     security_level: SecurityLevel,

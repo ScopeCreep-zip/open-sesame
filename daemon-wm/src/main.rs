@@ -704,7 +704,7 @@ async fn sigterm() {
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
     use platform_linux::sandbox::{
-        apply_sandbox, FsAccess, LandlockRule, SeccompProfile,
+        apply_sandbox_with_scope, FsAccess, LandlockRule, LandlockScope, SeccompProfile,
     };
 
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
@@ -771,6 +771,37 @@ fn apply_sandbox() {
                 .join("cosmic"),
             access: FsAccess::ReadOnly,
         },
+        // Nix store (read-only, GTK4/GLib shared libs, schemas, locale data, XKB).
+        LandlockRule {
+            path: std::path::PathBuf::from("/nix/store"),
+            access: FsAccess::ReadOnly,
+        },
+        // /proc (read-only, xdg-desktop-portal needs /proc/PID/root for verification).
+        LandlockRule {
+            path: std::path::PathBuf::from("/proc"),
+            access: FsAccess::ReadOnly,
+        },
+        // D-Bus session socket (GTK4 portal communication).
+        LandlockRule {
+            path: std::path::PathBuf::from(&runtime_dir).join("bus"),
+            access: FsAccess::ReadWriteFile,
+        },
+        // System shared data (GTK schemas, icons, mime, locale).
+        LandlockRule {
+            path: std::path::PathBuf::from("/usr/share"),
+            access: FsAccess::ReadOnly,
+        },
+        // XKB system rules (evdev on non-NixOS).
+        LandlockRule {
+            path: std::path::PathBuf::from("/usr/share/X11/xkb"),
+            access: FsAccess::ReadOnly,
+        },
+        // GDK/GTK user data.
+        LandlockRule {
+            path: dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent")),
+            access: FsAccess::ReadOnly,
+        },
     ];
 
     let seccomp = SeccompProfile {
@@ -824,12 +855,14 @@ fn apply_sandbox() {
             "mlock".into(), "mlock2".into(),
             // Misc
             "exit_group".into(), "exit".into(), "getrandom".into(),
-            "restart_syscall".into(),
+            "restart_syscall".into(), "getcwd".into(),
             "pipe2".into(), "dup".into(), "ioctl".into(),
         ],
     };
 
-    match apply_sandbox(&rules, &seccomp) {
+    // daemon-wm needs D-Bus for GTK4 portal communication — use SignalOnly
+    // scope to allow abstract Unix sockets while still blocking cross-process signals.
+    match apply_sandbox_with_scope(&rules, &seccomp, LandlockScope::SignalOnly) {
         Ok(status) => {
             tracing::info!(?status, "sandbox applied");
         }

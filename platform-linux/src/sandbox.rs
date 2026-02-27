@@ -43,6 +43,22 @@ pub enum EnforcementStatus {
     NotEnforced,
 }
 
+/// Scope restrictions for Landlock V6.
+///
+/// `Full` enables both `AbstractUnixSocket` and `Signal` — use for daemons
+/// that do NOT need D-Bus or abstract Unix sockets (e.g., daemon-secrets).
+///
+/// `SignalOnly` enables only `Signal` — use for daemons that need D-Bus
+/// communication via abstract Unix sockets (e.g., daemon-wm with GTK4).
+#[derive(Debug, Clone, Copy, Default)]
+pub enum LandlockScope {
+    /// Block abstract Unix sockets AND cross-process signals.
+    #[default]
+    Full,
+    /// Block cross-process signals only. Allows abstract Unix sockets (D-Bus).
+    SignalOnly,
+}
+
 /// Apply Landlock filesystem sandbox with the given rules.
 ///
 /// Calls `landlock_restrict_self()` which implicitly sets `PR_SET_NO_NEW_PRIVS`.
@@ -50,19 +66,27 @@ pub enum EnforcementStatus {
 ///
 /// Returns an error if Landlock is not fully enforced — callers MUST treat
 /// non-full enforcement as fatal. There is no graceful degradation.
-pub fn apply_landlock(rules: &[LandlockRule]) -> core_types::Result<EnforcementStatus> {
+pub fn apply_landlock(
+    rules: &[LandlockRule],
+    scope: LandlockScope,
+) -> core_types::Result<EnforcementStatus> {
     // Use highest ABI the crate supports (V6) to handle all access types:
     // V5 IoctlDev, V6 Scope (AbstractUnixSocket, Signal), V4 AccessNet.
     // Kernel V7 is capped to V6 by landlock 0.4.4. Requesting V6 flags
     // with V6 kernel avoids PartiallyEnforced from unhandled access types.
     let abi = ABI::V6;
 
+    let scope_flags: landlock::BitFlags<Scope> = match scope {
+        LandlockScope::Full => Scope::from_all(abi),
+        LandlockScope::SignalOnly => Scope::Signal.into(),
+    };
+
     let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
         .map_err(|e| core_types::Error::Platform(format!("landlock handle_access(fs) failed: {e}")))?
         .handle_access(AccessNet::from_all(abi))
         .map_err(|e| core_types::Error::Platform(format!("landlock handle_access(net) failed: {e}")))?
-        .scope(Scope::from_all(abi))
+        .scope(scope_flags)
         .map_err(|e| core_types::Error::Platform(format!("landlock scope failed: {e}")))?
         .create()
         .map_err(|e| core_types::Error::Platform(format!("landlock create failed: {e}")))?;
@@ -181,7 +205,21 @@ pub fn apply_sandbox(
     landlock_rules: &[LandlockRule],
     seccomp_profile: &SeccompProfile,
 ) -> core_types::Result<EnforcementStatus> {
-    let status = apply_landlock(landlock_rules)?;
+    let status = apply_landlock(landlock_rules, LandlockScope::Full)?;
+    apply_seccomp(seccomp_profile)?;
+    Ok(status)
+}
+
+/// Apply the full sandbox stack with explicit Landlock scope control.
+///
+/// Use `LandlockScope::SignalOnly` for daemons that need D-Bus (GTK4).
+/// Use `LandlockScope::Full` for daemons that do not need D-Bus.
+pub fn apply_sandbox_with_scope(
+    landlock_rules: &[LandlockRule],
+    seccomp_profile: &SeccompProfile,
+    scope: LandlockScope,
+) -> core_types::Result<EnforcementStatus> {
+    let status = apply_landlock(landlock_rules, scope)?;
     apply_seccomp(seccomp_profile)?;
     Ok(status)
 }

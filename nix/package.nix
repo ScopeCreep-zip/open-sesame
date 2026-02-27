@@ -4,11 +4,13 @@
   rustPlatform,
   pkg-config,
   installShellFiles,
+  makeWrapper,
   openssl,
   fontconfig,
   wayland,
   wayland-protocols,
   libxkbcommon,
+  xkeyboard-config,
   libseccomp,
   glib,
   gtk4,
@@ -90,6 +92,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     installShellFiles
+    makeWrapper
   ];
 
   buildInputs = [
@@ -152,6 +155,10 @@ rustPlatform.buildRustPackage {
     #   --fish target/completions/sesame.fish
 
     install -Dm644 config.example.toml $out/share/doc/open-sesame/config.example.toml
+
+    # daemon-wm uses GTK4/libxkbcommon which needs evdev rules at runtime.
+    wrapProgram $out/bin/daemon-wm \
+      --set XKB_CONFIG_ROOT "${xkeyboard-config}/etc/X11/xkb"
 
     runHook postInstall
   '';
