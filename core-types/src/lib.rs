@@ -257,7 +257,7 @@ impl Timestamp {
 // Security Protocol Types
 // ============================================================================
 
-/// Why an unlock request was rejected (SEC-007 fix).
+/// Why an unlock request was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnlockRejectedReason {
     /// System is already unlocked. Distinct from wrong password.
@@ -400,7 +400,7 @@ pub enum EventKind {
         daemon_id: DaemonId,
         reason: String,
     },
-    /// Key rotation: daemon-profile announces a new pubkey for a daemon (H-018).
+    /// Key rotation: daemon-profile announces a new pubkey for a daemon.
     /// Daemons must re-read their keypair and reconnect within the grace period.
     KeyRotationPending {
         /// The daemon whose key is being rotated.
@@ -410,7 +410,7 @@ pub enum EventKind {
         /// Grace period in seconds before old key is revoked.
         grace_period_s: u32,
     },
-    /// Key rotation completed: the registry has been updated (H-018).
+    /// Key rotation completed: the registry has been updated.
     KeyRotationComplete {
         daemon_name: String,
     },
@@ -421,6 +421,27 @@ pub enum EventKind {
     PolicyApplied {
         source: String,
         locked_keys: Vec<String>,
+    },
+
+    /// Audit event: a secret operation was attempted or completed.
+    /// Emitted by daemon-secrets after each secret RPC for persistent audit logging.
+    /// SECURITY: NEVER includes the secret value. Only metadata.
+    SecretOperationAudit {
+        /// The type of operation: "get", "set", "delete", "list"
+        action: String,
+        /// Trust profile the operation targeted
+        profile: TrustProfileName,
+        /// Secret key name (None for list operations)
+        #[serde(default)]
+        key: Option<String>,
+        /// `DaemonId` of the requester
+        requester: DaemonId,
+        /// Server-verified name of the requester (if known)
+        #[serde(default)]
+        requester_name: Option<String>,
+        /// Outcome: "success", "denied-locked", "denied-profile-not-active",
+        /// "denied-acl", "rate-limited", "not-found", "denied-invalid-key", "failed", "empty"
+        outcome: String,
     },
 
     // -- RPC: Secrets (all scoped by trust profile name) --
@@ -434,7 +455,7 @@ pub enum EventKind {
         /// (default). With `ipc-field-encryption` feature on daemon-secrets,
         /// this is additionally AES-256-GCM encrypted per-field.
         value: SensitiveBytes,
-        /// Typed denial reason (Step 2.9). `None` = success, `Some` = denied.
+        /// Typed denial reason. `None` = success, `Some` = denied.
         #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
@@ -448,7 +469,7 @@ pub enum EventKind {
     },
     SecretSetResponse {
         success: bool,
-        /// Typed denial reason (Step 2.9). `None` = success, `Some` = denied.
+        /// Typed denial reason. `None` = success, `Some` = denied.
         #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
@@ -458,7 +479,7 @@ pub enum EventKind {
     },
     SecretDeleteResponse {
         success: bool,
-        /// Typed denial reason (Step 2.9). `None` = success, `Some` = denied.
+        /// Typed denial reason. `None` = success, `Some` = denied.
         #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
@@ -467,7 +488,7 @@ pub enum EventKind {
     },
     SecretListResponse {
         keys: Vec<String>,
-        /// Typed denial reason (Step 2.9). `None` = success, `Some` = denied.
+        /// Typed denial reason. `None` = success, `Some` = denied.
         #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
@@ -515,7 +536,7 @@ pub enum EventKind {
     UnlockResponse {
         success: bool,
     },
-    /// Typed rejection for unlock when preconditions are not met (SEC-007 fix).
+    /// Typed rejection for unlock when preconditions are not met.
     /// Distinct from `UnlockResponse` { success: false } to avoid ambiguity
     /// between "wrong password" and "already unlocked".
     UnlockRejected {
@@ -737,6 +758,7 @@ impl_event_debug! {
         SecretDeleteResponse { success, denial },
         SecretList { profile },
         SecretListResponse { keys, denial },
+        SecretOperationAudit { action, profile, key, requester, requester_name, outcome },
         ProfileActivate { target, profile_name },
         ProfileActivateResponse { success },
         ProfileDeactivate { target, profile_name },
@@ -892,6 +914,47 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+// ============================================================================
+// Secret Key Validation
+// ============================================================================
+
+/// Validate a secret key name.
+///
+/// Rejects keys that are empty, contain path traversal patterns, path
+/// separators, or exceed 256 characters. Applied at both the CLI trust
+/// boundary and in daemon-secrets as defense-in-depth.
+///
+/// # Errors
+///
+/// Returns `Error::Validation` if the key is empty, too long, contains
+/// path traversal (`..`), or path separators (`/`, `\`).
+pub fn validate_secret_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(Error::Validation("secret key must not be empty".into()));
+    }
+    if key.len() > 256 {
+        return Err(Error::Validation(format!(
+            "secret key exceeds 256 characters (got {})", key.len()
+        )));
+    }
+    if key.contains("..") {
+        return Err(Error::Validation(
+            "secret key must not contain '..' (path traversal)".into(),
+        ));
+    }
+    if key.contains('/') || key.contains('\\') {
+        return Err(Error::Validation(
+            "secret key must not contain path separators ('/' or '\\')".into(),
+        ));
+    }
+    if key.contains('\0') {
+        return Err(Error::Validation(
+            "secret key must not contain null bytes".into(),
+        ));
+    }
+    Ok(())
+}
 
 // ============================================================================
 // TrustProfileName — validated, path-safe trust profile identifier
@@ -1298,6 +1361,43 @@ mod tests {
     fn trust_profile_name_display() {
         let name = TrustProfileName::try_from("work").unwrap();
         assert_eq!(format!("{name}"), "work");
+    }
+
+    // -- validate_secret_key --
+
+    #[test]
+    fn secret_key_valid() {
+        assert!(validate_secret_key("api-key").is_ok());
+        assert!(validate_secret_key("a").is_ok());
+        assert!(validate_secret_key(&"x".repeat(256)).is_ok());
+    }
+
+    #[test]
+    fn secret_key_rejects_empty() {
+        assert!(validate_secret_key("").is_err());
+    }
+
+    #[test]
+    fn secret_key_rejects_too_long() {
+        assert!(validate_secret_key(&"x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn secret_key_rejects_path_traversal() {
+        assert!(validate_secret_key("..").is_err());
+        assert!(validate_secret_key("foo/../bar").is_err());
+    }
+
+    #[test]
+    fn secret_key_rejects_separators() {
+        assert!(validate_secret_key("foo/bar").is_err());
+        assert!(validate_secret_key("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn secret_key_rejects_null_bytes() {
+        assert!(validate_secret_key("foo\0bar").is_err());
+        assert!(validate_secret_key("\0").is_err());
     }
 
     // -- ConflictPolicy --

@@ -39,7 +39,7 @@ pub struct Message<T> {
     pub payload: T,
     /// Access control level for this message.
     pub security_level: SecurityLevel,
-    /// Server-stamped verified sender name from Noise IK registry lookup (R-008).
+    /// Server-stamped verified sender name from Noise IK registry lookup.
     ///
     /// Set by `route_frame()` in the bus server — never trust client-supplied values.
     /// `None` for unregistered clients (CLI, Open clearance).

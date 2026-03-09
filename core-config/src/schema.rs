@@ -167,7 +167,7 @@ pub struct SecretsConfig {
     pub provider: Option<String>,
     /// Pre-resolved secrets for this profile.
     pub secrets: BTreeMap<String, SecretRef>,
-    /// Per-daemon access control for secrets in this profile (H-020, NIST AC-3).
+    /// Per-daemon access control for secrets in this profile.
     ///
     /// Maps daemon names to lists of allowed secret key names.
     /// - Present with empty list: no access.

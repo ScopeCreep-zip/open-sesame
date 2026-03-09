@@ -1,7 +1,7 @@
 //! Integration tests for per-daemon keypair persistence.
 //!
 //! Uses `Mutex<Option<PathBuf>>` runtime directory override instead of
-//! `unsafe { set_var(...) }` to avoid race conditions with parallel tests (P7).
+//! `unsafe { set_var(...) }` to avoid race conditions with parallel tests.
 
 use core_ipc::{generate_keypair, noise};
 
@@ -11,14 +11,13 @@ async fn daemon_keypair_persistence() {
     let pds_dir = dir.path().join("pds");
     std::fs::create_dir_all(&pds_dir).unwrap();
 
-    // Set override instead of mutating env (P7: no set_var race).
+    // Set override instead of mutating env (no set_var race).
     noise::set_runtime_dir_override(pds_dir.clone());
 
     noise::create_keys_dir().await.unwrap();
 
-    // -- T-KEY-015: Keys directory permissions: 0700 --
     // SECURITY INVARIANT: The keys directory must have 0700 permissions to
-    // prevent other users from reading daemon private keys (NIST AC-6).
+    // prevent other users from reading daemon private keys.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -30,7 +29,7 @@ async fn daemon_keypair_persistence() {
         );
     }
 
-    // -- T-KEY-002: Roundtrip: write + read --
+    // Roundtrip: write + read.
     let kp = generate_keypair().unwrap();
     noise::write_daemon_keypair("test-daemon", kp.as_inner()).await.unwrap();
 
@@ -41,9 +40,8 @@ async fn daemon_keypair_persistence() {
     let pub_only = noise::read_daemon_public_key("test-daemon").await.unwrap();
     assert_eq!(pub_only, public);
 
-    // -- T-KEY-003: Private key file permissions: 0600 --
     // SECURITY INVARIANT: Private key files must have 0600 permissions —
-    // never world-readable (NIST AC-6).
+    // never world-readable.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -58,9 +56,8 @@ async fn daemon_keypair_persistence() {
         );
     }
 
-    // -- T-KEY-004: Checksum tamper detection --
     // SECURITY INVARIANT: A tampered checksum must produce an error containing
-    // "TAMPER DETECTED" — corrupted keypairs must never be silently accepted (NIST SI-7).
+    // "TAMPER DETECTED" — corrupted keypairs must never be silently accepted.
     let checksum_path = pds_dir.join("keys").join("test-daemon.checksum");
     assert!(checksum_path.exists(), "checksum file should exist");
 
@@ -77,13 +74,12 @@ async fn daemon_keypair_persistence() {
         "error should mention tamper detection, got: {err_msg}"
     );
 
-    // -- T-KEY-005: Missing keypair returns error --
+    // Missing keypair returns error.
     let result = noise::read_daemon_keypair("nonexistent").await;
     assert!(result.is_err(), "reading nonexistent keypair must fail");
 
-    // -- T-KEY-016: Bus keypair writes all files with correct perms --
     // SECURITY INVARIANT: Bus keypair write must create bus.pub, bus.key (0600),
-    // and bus.checksum for tamper detection (NIST SI-7, AC-6).
+    // and bus.checksum for tamper detection.
     let bus_kp = generate_keypair().unwrap();
     noise::write_bus_keypair(bus_kp.as_inner()).await.unwrap();
 
@@ -100,7 +96,7 @@ async fn daemon_keypair_persistence() {
             0o600,
             "bus.key must have 0600 permissions"
         );
-        // T-KEY-017: bus.pub must have explicit 0644 permissions (defense-in-depth).
+        // bus.pub must have explicit 0644 permissions (defense-in-depth).
         let meta = std::fs::metadata(pds_dir.join("bus.pub")).unwrap();
         assert_eq!(
             meta.permissions().mode() & 0o777,
@@ -109,7 +105,7 @@ async fn daemon_keypair_persistence() {
         );
     }
 
-    // -- T-KEY-018: Per-daemon .pub file permissions: 0644 --
+    // Per-daemon .pub file permissions: 0644.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

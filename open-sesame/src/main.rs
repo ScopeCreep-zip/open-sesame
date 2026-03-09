@@ -186,6 +186,10 @@ enum SecretCmd {
 
         /// Secret key name.
         key: String,
+
+        /// Skip confirmation prompt (for non-interactive/scripted use).
+        #[arg(long)]
+        yes: bool,
     },
 
     /// List secret keys (never values).
@@ -362,7 +366,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Secret(sub) => match sub {
             SecretCmd::Set { profile, key } => cmd_secret_set(&profile, &key).await,
             SecretCmd::Get { profile, key } => cmd_secret_get(&profile, &key).await,
-            SecretCmd::Delete { profile, key } => cmd_secret_delete(&profile, &key).await,
+            SecretCmd::Delete { profile, key, yes } => cmd_secret_delete(&profile, &key, yes).await,
             SecretCmd::List { profile } => cmd_secret_list(&profile).await,
         },
         Command::Audit(sub) => match sub {
@@ -690,6 +694,7 @@ fn cmd_profile_show(name: &str) -> anyhow::Result<()> {
 }
 
 async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<()> {
+    validate_secret_key(key)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -740,6 +745,7 @@ async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<()> {
 }
 
 async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
+    validate_secret_key(key)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -778,21 +784,34 @@ async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_secret_delete(profile: &str, key: &str) -> anyhow::Result<()> {
+async fn cmd_secret_delete(profile: &str, key: &str, skip_confirm: bool) -> anyhow::Result<()> {
+    validate_secret_key(key)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Confirm deletion.
-    let confirmed = dialoguer::Confirm::new()
-        .with_prompt(format!("Delete secret '{key}' from profile '{profile}'?"))
-        .default(false)
-        .interact()
-        .context("failed to read confirmation")?;
+    // Confirm deletion with TTY and non-TTY support.
+    if !skip_confirm {
+        let confirmed = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            dialoguer::Confirm::new()
+                .with_prompt(format!("Delete secret '{key}' from profile '{profile}'?"))
+                .default(false)
+                .interact()
+                .context("failed to read confirmation")?
+        } else {
+            // Non-TTY: read a line from stdin and check for "y" or "yes".
+            eprintln!("Delete secret '{key}' from profile '{profile}'? [y/N]");
+            let mut buf = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut buf)
+                .context("failed to read confirmation from stdin")?;
+            let answer = buf.trim().to_lowercase();
+            answer == "y" || answer == "yes"
+        };
 
-    if !confirmed {
-        println!("Cancelled.");
-        return Ok(());
+        if !confirmed {
+            println!("Cancelled.");
+            return Ok(());
+        }
     }
 
     let event = EventKind::SecretDelete {
@@ -1368,8 +1387,14 @@ async fn cmd_snippet_add(profile: &str, trigger: &str, template: &str) -> anyhow
 }
 
 // ============================================================================
-// Secret denial reason formatting (Step 2.10)
+// Secret denial reason formatting
 // ============================================================================
+
+/// Validate a secret key name at the CLI trust boundary.
+/// Delegates to the canonical implementation in core-types.
+fn validate_secret_key(key: &str) -> anyhow::Result<()> {
+    core_types::validate_secret_key(key).map_err(|e| anyhow::anyhow!("{e}"))
+}
 
 fn format_denial_reason(reason: &core_types::SecretDenialReason, key: &str, profile: &TrustProfileName) -> String {
     use core_types::SecretDenialReason;

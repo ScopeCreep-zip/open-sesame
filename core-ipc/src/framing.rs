@@ -116,7 +116,7 @@ mod tests {
     }
 
     // SECURITY INVARIANT: Frames exceeding MAX_FRAME_SIZE must be rejected on
-    // read to prevent OOM from malformed or malicious length prefixes (NIST SC-5).
+    // read to prevent OOM from malformed or malicious length prefixes.
     #[tokio::test]
     async fn oversized_frame_rejected_on_read() {
         let oversized_len: u32 = MAX_FRAME_SIZE + 1;

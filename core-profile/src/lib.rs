@@ -92,6 +92,15 @@ pub enum AuditAction {
     KeyRotationStarted { daemon_name: String, generation: u64 },
     KeyRotationCompleted { daemon_name: String, generation: u64 },
     KeyRevoked { daemon_name: String, reason: String, generation: u64 },
+    /// A secret operation was performed (or denied). Logged for forensic audit trail.
+    SecretOperationAudited {
+        action: String,
+        profile: core_types::TrustProfileName,
+        key: Option<String>,
+        requester: core_types::DaemonId,
+        requester_name: Option<String>,
+        outcome: String,
+    },
 }
 
 #[cfg(test)]

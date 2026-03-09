@@ -79,7 +79,7 @@ mod tests {
         assert_ne!(key1.as_bytes(), key2.as_bytes());
     }
 
-    // ===== T1.4: Master Password Never Stored =====
+    // ===== Master Password Never Stored =====
 
     #[test]
     fn derived_key_does_not_contain_password_bytes() {

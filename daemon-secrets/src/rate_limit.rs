@@ -1,4 +1,4 @@
-//! Per-requester rate limiting for secret operations (H-016, NIST SC-5, AC-10).
+//! Per-requester rate limiting for secret operations.
 //!
 //! Token bucket: 10 requests/second, burst of 20.
 //! Keyed on `verified_sender_name` (server-stamped from Noise IK registry),
@@ -64,7 +64,7 @@ mod tests {
 
     // SECURITY INVARIANT: The 21st request in a burst must be denied.
     // Rate limiting is the primary defense against secret enumeration
-    // attacks (NIST SC-5).
+    // attacks.
     #[test]
     fn rate_002_burst_exhaustion_denies() {
         let mut limiter = SecretRateLimiter::new();
@@ -79,7 +79,7 @@ mod tests {
 
     // SECURITY INVARIANT: Each daemon must have an independent rate limit
     // bucket. Exhausting one daemon's quota must not affect another daemon's
-    // ability to access secrets (NIST AC-10).
+    // ability to access secrets.
     #[test]
     fn rate_003_cross_daemon_independence() {
         let mut limiter = SecretRateLimiter::new();

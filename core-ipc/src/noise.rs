@@ -20,7 +20,7 @@ use crate::transport::PeerCredentials;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Compute an integrity-detection checksum for a keypair (H-022, NIST SI-7).
+/// Compute an integrity-detection checksum for a keypair.
 ///
 /// Uses BLAKE3 keyed hash with the public key as the 32-byte key and
 /// the private key as the data. Detects partial corruption or partial tampering
@@ -59,7 +59,7 @@ pub fn generate_keypair() -> core_types::Result<ZeroizingKeypair> {
     Ok(ZeroizingKeypair::new(keypair))
 }
 
-/// Zeroize-on-drop wrapper for `snow::Keypair` (P2 security fix).
+/// Zeroize-on-drop wrapper for `snow::Keypair`.
 ///
 /// `snow::Keypair` has no `Drop` impl, so the private key persists in freed
 /// memory if not explicitly zeroized. This wrapper guarantees zeroization on
@@ -212,7 +212,7 @@ pub async fn write_bus_keypair(keypair: &snow::Keypair) -> core_types::Result<()
         compile_error!("bus.key writing requires Unix file permissions (mode 0600). Non-Unix platforms are not supported in MVP.");
     }
 
-    // H-022: Write tamper-detection checksum (NIST SI-7).
+    // Write tamper-detection checksum.
     {
         let pub_array: [u8; 32] = keypair.public.clone().try_into().map_err(|_| {
             core_types::Error::Platform("bus public key is not 32 bytes".into())
@@ -250,7 +250,7 @@ pub async fn create_keys_dir() -> core_types::Result<()> {
             dir.display()
         ))
     })?;
-    // R-002: Restrict to owner-only (0700) — create_dir_all inherits umask
+    // Restrict to owner-only (0700) — create_dir_all inherits umask
     // (typically 0022 → 0755), which would let any local user enumerate daemons.
     #[cfg(unix)]
     {
@@ -333,7 +333,7 @@ pub async fn write_daemon_keypair(
         compile_error!("daemon keypair writing requires Unix file permissions (mode 0600)");
     }
 
-    // H-022: Write tamper-detection checksum (NIST SI-7).
+    // Write tamper-detection checksum.
     {
         let pub_array: [u8; 32] = keypair.public.clone().try_into().map_err(|_| {
             core_types::Error::Platform(format!("{daemon_name} public key is not 32 bytes"))
@@ -388,7 +388,7 @@ pub async fn read_daemon_keypair(
         ))
     })?;
 
-    // H-022: Tamper detection (NIST SI-7).
+    // Tamper detection.
     let checksum_path = dir.join(format!("{daemon_name}.checksum"));
     match tokio::fs::read(&checksum_path).await {
         Ok(stored_checksum) => {
@@ -403,7 +403,7 @@ pub async fn read_daemon_keypair(
             tracing::debug!(daemon = daemon_name, "keypair integrity verified");
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Backward compatibility: no checksum file from pre-H-022 installation.
+            // Backward compatibility: no checksum file from older installation.
             tracing::warn!(
                 daemon = daemon_name,
                 "no checksum file found — keypair integrity cannot be verified. \
@@ -985,7 +985,7 @@ mod tests {
 
     // SECURITY INVARIANT: ZeroizingKeypair::into_inner must leave the wrapper's
     // private key zeroed so that the original allocation does not retain key material
-    // after ownership transfer (NIST SC-12).
+    // after ownership transfer.
     #[test]
     fn zeroizing_keypair_into_inner_zeroes_source() {
         let kp = generate_keypair().unwrap();

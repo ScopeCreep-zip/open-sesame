@@ -302,7 +302,7 @@ mod tests {
         assert!(hash.is_empty());
     }
 
-    // ===== T1.3: Audit Chain Integrity (Deleted/Reordered Entries) =====
+    // ===== Audit Chain Integrity (Deleted/Reordered Entries) =====
 
     #[test]
     fn audit_chain_detects_deleted_entry() {

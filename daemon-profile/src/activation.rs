@@ -1,7 +1,7 @@
 //! Profile activation/deactivation transaction with confirmed RPC and rollback.
 //!
 //! Coordinates the multi-step process of activating or deactivating a profile
-//! across daemons. Uses confirmed RPC (D-002) instead of fire-and-forget broadcast
+//! across daemons. Uses confirmed RPC instead of fire-and-forget broadcast
 //! for security-critical steps — daemon-profile waits for daemon-secrets to confirm
 //! each operation before proceeding.
 //!

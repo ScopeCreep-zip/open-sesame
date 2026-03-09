@@ -16,14 +16,14 @@ pub struct DaemonClearance {
     pub security_level: SecurityLevel,
     /// Monotonic generation counter. Incremented on every key change (rotation
     /// or crash-revocation). Used by two-phase rotation to detect concurrent
-    /// revocations and avoid double-rotation (P0 liveness fix).
+    /// revocations and avoid double-rotation.
     pub generation: u64,
 }
 
 /// Maps X25519 static public keys to daemon identities and clearance levels.
 ///
 /// Populated once at `daemon-profile` startup; mutable via `RwLock` for
-/// rotation (H-018) and revocation (H-019) at runtime.
+/// rotation and revocation at runtime.
 #[derive(Debug, Clone, Default)]
 pub struct ClearanceRegistry {
     entries: HashMap<[u8; 32], DaemonClearance>,
@@ -56,7 +56,7 @@ impl ClearanceRegistry {
         self.entries.get(pubkey)
     }
 
-    /// Update a daemon's public key in the registry (key rotation, H-018).
+    /// Update a daemon's public key in the registry (key rotation).
     ///
     /// Removes the old entry and inserts the new one with the same name/level
     /// and an incremented generation counter.
@@ -71,7 +71,7 @@ impl ClearanceRegistry {
         }
     }
 
-    /// Revoke a daemon's public key (remove from registry, H-019).
+    /// Revoke a daemon's public key (remove from registry).
     /// Returns the removed entry (including generation) so callers can
     /// re-register with the incremented generation.
     pub fn revoke(&mut self, pubkey: &[u8; 32]) -> Option<DaemonClearance> {

@@ -40,11 +40,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("daemon-launcher starting");
 
-    // -- Process hardening (NIST SC-4, SI-11) --
+    // -- Process hardening --
     #[cfg(target_os = "linux")]
     platform_linux::security::harden_process();
 
-    // Config hot-reload (M-6).
+    // Config hot-reload.
     let config = core_config::load_config(None)
         .context("failed to load config")?;
     let config_paths = core_config::resolve_config_paths(None);
@@ -81,14 +81,14 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = SearchEngine::new(matcher, frecency, profile.clone());
     engine.refresh_frecency().ok(); // Non-fatal if DB is empty.
 
-    // Connect to IPC bus: read keypair BEFORE sandbox (H-017, NIST AC-6).
+    // Connect to IPC bus: read keypair BEFORE sandbox.
     let socket_path = core_ipc::socket_path()
         .context("failed to resolve IPC socket path")?;
     let server_pub = core_ipc::noise::read_bus_public_key().await
         .context("daemon-profile is not running (no bus public key found)")?;
     let daemon_id = DaemonId::new();
 
-    // Connect with keypair retry (H-019: daemon-profile may regenerate on crash-restart).
+    // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
         "daemon-launcher", daemon_id, &socket_path, &server_pub, 5,
         std::time::Duration::from_millis(500),
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     drop(_client_keypair);
 
     // Sandbox (Linux) — seccomp only; no Landlock because child processes inherit
-    // Landlock rules, which would break arbitrary application launches (H-017).
+    // Landlock rules, which would break arbitrary application launches.
     #[cfg(target_os = "linux")]
     apply_sandbox();
 
@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // H-018: Key rotation — reconnect with new keypair (R-006: shared handler).
+                    // Key rotation — reconnect with new keypair.
                     EventKind::KeyRotationPending { daemon_name, new_pubkey, grace_period_s }
                         if daemon_name == "daemon-launcher" =>
                     {
@@ -268,7 +268,7 @@ async fn sigterm() {
 /// `LaunchExecute`, Landlock inheritance would restrict those applications to the
 /// launcher's filesystem view, breaking them. seccomp is acceptable because
 /// daemon-launcher has `Internal` clearance (not `SecretsOnly`) and does not
-/// handle raw secret values (H-017, NIST AC-6, CM-7).
+/// handle raw secret values.
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
     use platform_linux::sandbox::{

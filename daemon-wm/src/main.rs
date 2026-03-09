@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("daemon-wm starting");
 
-    // -- Process hardening (NIST SC-4, SI-11) --
+    // -- Process hardening --
     #[cfg(target_os = "linux")]
     platform_linux::security::harden_process();
 
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         "wm config loaded"
     );
 
-    // Config hot-reload (M-6).
+    // Config hot-reload.
     let config_paths = core_config::resolve_config_paths(None);
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
     let (_config_watcher, config_state) = core_config::ConfigWatcher::with_callback(
@@ -71,14 +71,14 @@ async fn main() -> anyhow::Result<()> {
     // Mutable config for hot-reload.
     let wm_config = Arc::new(Mutex::new(wm_config));
 
-    // Connect to IPC bus: read keypair BEFORE sandbox (H-017, NIST AC-6).
+    // Connect to IPC bus: read keypair BEFORE sandbox.
     let socket_path = core_ipc::socket_path()
         .context("failed to resolve IPC socket path")?;
     let server_pub = core_ipc::noise::read_bus_public_key().await
         .context("daemon-profile is not running (no bus public key found)")?;
     let daemon_id = DaemonId::new();
 
-    // Connect with keypair retry (H-019: daemon-profile may regenerate on crash-restart).
+    // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
         "daemon-wm", daemon_id, &socket_path, &server_pub, 5,
         std::time::Duration::from_millis(500),
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     drop(_client_keypair);
 
     // Sandbox (Linux) — applied AFTER keypair read + connect, BEFORE IPC traffic.
-    // Per-daemon Landlock key file isolation (H-017, NIST AC-6).
+    // Per-daemon Landlock key file isolation.
     #[cfg(target_os = "linux")]
     apply_sandbox();
 
@@ -412,7 +412,7 @@ async fn main() -> anyhow::Result<()> {
                         None
                     }
 
-                    // H-018: Key rotation — reconnect with new keypair (R-006: shared handler).
+                    // Key rotation — reconnect with new keypair.
                     EventKind::KeyRotationPending { daemon_name, new_pubkey, grace_period_s }
                         if daemon_name == "daemon-wm" =>
                     {
@@ -723,7 +723,7 @@ fn apply_sandbox() {
     let keys_dir = pds_dir.join("keys");
 
     let rules = vec![
-        // H-017: Per-daemon key file isolation (NIST AC-6). Only daemon-wm's keypair.
+        // Per-daemon key file isolation. Only daemon-wm's keypair.
         LandlockRule {
             path: keys_dir.join("daemon-wm.key"),
             access: FsAccess::ReadOnly,

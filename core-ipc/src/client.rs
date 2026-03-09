@@ -84,7 +84,10 @@ impl BusClient {
         .await?;
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(256);
-        let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(256);
+        // Capacity 1024: was 256, caused backpressure drops when daemon-secrets
+        // blocked on synchronous SQLCipher I/O. Increased alongside spawn_blocking
+        // migration. Acceptable memory overhead for fewer than 10 daemon clients.
+        let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(1024);
         let pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -111,7 +114,7 @@ impl BusClient {
                     }
                     Some(mut payload) = outbound_rx.recv() => {
                         let result = transport.write_encrypted_frame(&mut writer, &payload).await;
-                        // Zeroize plaintext postcard buffer after encryption (H-009).
+                        // Zeroize plaintext postcard buffer after encryption.
                         zeroize::Zeroize::zeroize(&mut payload);
                         if let Err(e) = result {
                             tracing::debug!(error = %e, "encrypted write failed, closing client");
@@ -205,7 +208,7 @@ impl BusClient {
     pub async fn recv(&mut self) -> Option<Message<EventKind>> {
         let mut payload = self.inbound_rx.recv().await?;
         let result = decode_frame(&payload);
-        // Zeroize raw postcard bytes — may contain serialized secret values (H-009).
+        // Zeroize raw postcard bytes — may contain serialized secret values.
         zeroize::Zeroize::zeroize(&mut payload);
         match result {
             Ok(msg) => Some(msg),
@@ -228,7 +231,7 @@ impl BusClient {
         self.epoch
     }
 
-    /// Connect to the IPC bus with keypair re-read on each attempt (H-019).
+    /// Connect to the IPC bus with keypair re-read on each attempt.
     ///
     /// On crash-restart, daemon-profile may regenerate the daemon's keypair.
     /// Each retry re-reads the keypair from disk to pick up the new one.

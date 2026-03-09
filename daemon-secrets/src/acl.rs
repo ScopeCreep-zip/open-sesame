@@ -1,11 +1,11 @@
-//! Per-secret access control (H-020, NIST AC-3, AC-6).
+//! Per-secret access control.
 //!
 //! Pure functions over `core_config::Config` — no I/O, no state.
 //! Extracted from `main.rs` for testability.
 
 use core_types::{DaemonId, TrustProfileName};
 
-/// Check if a daemon is allowed to access a specific secret key within a profile (H-020).
+/// Check if a daemon is allowed to access a specific secret key within a profile.
 ///
 /// Policy from config `[profiles.<name>.secrets.access]`:
 /// - Profile not in config AND any profile has ACL policy: DENIED (fail-closed).
@@ -61,7 +61,7 @@ pub(crate) fn check_secret_access(
     allowed_keys.iter().any(|k| k == key)
 }
 
-/// Check if a daemon is allowed to list secret keys within a profile (H-020).
+/// Check if a daemon is allowed to list secret keys within a profile.
 ///
 /// Policy from config `[profiles.<name>.secrets.access]`:
 /// - Profile not in config AND any profile has ACL policy: DENIED (fail-closed).
@@ -121,7 +121,7 @@ pub(crate) fn check_secret_list_access(
     true
 }
 
-/// Check if a requester is expected to issue secret operations (H-014, R-009).
+/// Check if a requester is expected to issue secret operations.
 ///
 /// Uses `verified_sender_name` stamped by the bus server from the Noise IK
 /// registry — NOT self-declared capabilities. Expected requesters:
@@ -198,7 +198,7 @@ mod tests {
     }
 
     // ========================================================================
-    // check_secret_access — 8 branches (T-ACL-001 through T-ACL-008)
+    // check_secret_access — 8 branches
     // ========================================================================
 
     // SECURITY INVARIANT: When no ACL policy exists anywhere in config,
@@ -213,8 +213,8 @@ mod tests {
     }
 
     // SECURITY INVARIANT: When ACL policy is active on ANY profile, access to
-    // a nonexistent profile must be DENIED (fail-closed, P2). An attacker must
-    // not bypass ACL by requesting a profile that doesn't exist in config.
+    // a nonexistent profile must be DENIED (fail-closed). An attacker must not
+    // bypass ACL by requesting a profile that doesn't exist in config.
     #[test]
     fn acl_002_profile_missing_acl_elsewhere_denies() {
         let mut access = BTreeMap::new();
@@ -298,7 +298,7 @@ mod tests {
     }
 
     // ========================================================================
-    // check_secret_list_access — 7 branches (T-ACL-009 through T-ACL-015)
+    // check_secret_list_access — 7 branches
     // ========================================================================
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
     }
 
     // SECURITY INVARIANT: Fail-closed for list access on nonexistent profiles
-    // when ACL is active elsewhere (same P2 semantics as check_secret_access).
+    // when ACL is active elsewhere (same fail-closed semantics as check_secret_access).
     #[test]
     fn acl_010_list_profile_missing_acl_elsewhere_denies() {
         let mut access = BTreeMap::new();

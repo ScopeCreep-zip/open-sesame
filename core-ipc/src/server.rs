@@ -53,13 +53,13 @@ struct ServerState {
     next_conn_id: AtomicU64,
     epoch: Instant,
     /// Maps public keys to daemon identities and security clearance levels.
-    /// `RwLock` allows key rotation (H-018) and revocation (H-019) at runtime.
+    /// `RwLock` allows key rotation and revocation at runtime.
     registry: RwLock<ClearanceRegistry>,
-    /// Confirmed RPC routing: maps `correlation_id` -> channel for host-side waiters (D-002).
+    /// Confirmed RPC routing: maps `correlation_id` -> channel for host-side waiters.
     /// When a correlated response matches a registered confirmation, the raw frame is
     /// sent to the confirmation channel instead of the normal host delivery path.
     confirmations: RwLock<HashMap<Uuid, mpsc::Sender<Vec<u8>>>>,
-    /// Maps verified daemon name -> connection ID for O(1) unicast (D-006).
+    /// Maps verified daemon name -> connection ID for O(1) unicast.
     /// Populated when `route_frame()` processes `DaemonStarted` with a `verified_sender_name`.
     /// Invalidated on connection disconnect.
     name_to_conn: RwLock<HashMap<String, u64>>,
@@ -362,7 +362,7 @@ impl BusServer {
         }
     }
 
-    /// Access the clearance registry for mutation (key rotation H-018, revocation H-019).
+    /// Access the clearance registry for mutation (key rotation, revocation).
     pub async fn registry_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, ClearanceRegistry> {
         self.state.registry.write().await
     }
@@ -377,7 +377,7 @@ impl BusServer {
         self.state.pending_requests.write().await.remove(correlation_id)
     }
 
-    /// Register a confirmation route for confirmed RPC (D-002).
+    /// Register a confirmation route for confirmed RPC.
     ///
     /// When a response with matching `correlation_id` arrives at `route_frame()`,
     /// the raw frame is sent to `confirm_tx` instead of the normal host delivery path.
@@ -394,7 +394,7 @@ impl BusServer {
         }
     }
 
-    /// Send a frame to a named daemon via O(1) lookup (D-006).
+    /// Send a frame to a named daemon via O(1) lookup.
     ///
     /// Resolves `daemon_name` to a connection ID via `name_to_conn`, then delegates
     /// to `send_to()`. Returns `Ok(())` on success, `Err` if the daemon is not
@@ -481,7 +481,7 @@ async fn handle_connection(
     {
         Ok(t) => t,
         Err(e) => {
-            // H-015: structured handshake failure audit.
+            // Structured handshake failure audit.
             tracing::error!(
                 audit = "connection-lifecycle",
                 event_type = "handshake-failed",
@@ -503,7 +503,6 @@ async fn handle_connection(
         .expect("Curve25519 public key is exactly 32 bytes");
 
     // Registry lookup: cryptographic identity -> (name, clearance).
-    // H-021: capture verified_name for sender identity verification.
     let (security_clearance, verified_name) = {
         let reg = state.registry.read().await;
         if let Some(entry) = reg.lookup(&client_pubkey) {
@@ -554,7 +553,7 @@ async fn handle_connection(
                 match result {
                     Ok(mut payload) => {
                         route_frame(&state, conn_id, &payload).await;
-                        // Zeroize decrypted postcard buffer — may contain secret values (H-009).
+                        // Zeroize decrypted postcard buffer — may contain secret values.
                         zeroize::Zeroize::zeroize(&mut payload);
                     }
                     Err(e) => {
@@ -578,7 +577,7 @@ async fn handle_connection(
             }
             Some(mut payload) = outbound_rx.recv() => {
                 let result = transport.write_encrypted_frame(&mut writer, &payload).await;
-                // Zeroize plaintext postcard buffer after encryption (H-009).
+                // Zeroize plaintext postcard buffer after encryption.
                 zeroize::Zeroize::zeroize(&mut payload);
                 if let Err(e) = result {
                     tracing::debug!(conn_id, error = %e, "encrypted write failed, closing");
@@ -591,7 +590,7 @@ async fn handle_connection(
 
     state.connections.write().await.remove(&conn_id);
     state.pending_requests.write().await.retain(|_, cid| *cid != conn_id);
-    // D-006: Clean up name_to_conn on disconnect.
+    // Clean up name_to_conn on disconnect.
     state.name_to_conn.write().await.retain(|_, cid| *cid != conn_id);
     let session_ms = connected_at.elapsed().as_millis();
     tracing::debug!(
@@ -647,10 +646,9 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
     {
         let mut conns = state.connections.write().await;
         if let Some(conn) = conns.get_mut(&sender_conn_id) {
-            // H-021: Sender identity verification (NIST IA-9, SC-23).
-            // First message: record the self-declared DaemonId.
-            // Subsequent messages: verify consistency — a connection must not
-            // change its DaemonId mid-session (impersonation attempt).
+            // Sender identity verification: first message records the self-declared
+            // DaemonId. Subsequent messages verify consistency — a connection must
+            // not change its DaemonId mid-session (impersonation attempt).
             if let Some(known_id) = conn.daemon_id {
                 if known_id != msg.sender {
                     tracing::warn!(
@@ -685,7 +683,7 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
                 }
             }
 
-            // Sender clearance enforcement (NIST AC-4, AC-6): a daemon may only
+            // Sender clearance enforcement: a daemon may only
             // emit messages at or below its own clearance level. This prevents a
             // compromised low-clearance daemon from injecting high-clearance messages.
             if conn.security_clearance < msg.security_level {
@@ -707,17 +705,17 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
                 return;
             }
 
-            // R-008: Capture verified_name from Noise IK registry lookup.
+            // Capture verified_name from Noise IK registry lookup.
             verified_name = conn.verified_name.clone();
         } else {
             verified_name = None;
         }
     }
 
-    // D-006: Populate name_to_conn on DaemonStarted for O(1) unicast lookup.
+    // Populate name_to_conn on DaemonStarted for O(1) unicast lookup.
     // Reject duplicate registrations: if a daemon name is already mapped to a
     // LIVE connection, log a security audit and keep the existing mapping.
-    // This prevents name squatting via compromised Noise IK keys (P1-004).
+    // This prevents name squatting via compromised Noise IK keys.
     if let EventKind::DaemonStarted { .. } = &msg.payload
         && let Some(ref name) = verified_name
     {
@@ -751,7 +749,7 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
         }
     }
 
-    // R-008: Stamp server-verified sender identity onto the message.
+    // Stamp server-verified sender identity onto the message.
     // This prevents daemons from self-declaring any name via capabilities.
     // Re-encode after stamping so downstream receivers get the verified name.
     // Note: re-encode adds serialization overhead on every routed frame. For a
@@ -766,7 +764,7 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
     };
 
     if let Some(corr_id) = msg.correlation_id {
-        // D-002: Check confirmed RPC routing table FIRST.
+        // Check confirmed RPC routing table FIRST.
         // If the host registered a confirmation for this correlation_id,
         // deliver to the confirmation channel instead of normal routing.
         let confirm_tx = state.confirmations.read().await.get(&corr_id).cloned();

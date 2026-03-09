@@ -26,7 +26,7 @@ use core_profile::{
 use core_ipc::Message;
 use core_types::{DaemonId, EventKind, SecurityLevel, TrustProfileName};
 
-/// Known daemons and their security clearance levels (IA-9, AC-4, CM-7).
+/// Known daemons and their security clearance levels.
 const KNOWN_DAEMONS: &[(&str, SecurityLevel)] = &[
     ("daemon-secrets", SecurityLevel::SecretsOnly),
     ("daemon-wm", SecurityLevel::Internal),
@@ -39,13 +39,20 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
-/// Key rotation interval (NIST IA-5(1), SC-12). Default: 1 hour.
+/// Key rotation interval. Default: 1 hour.
 const KEY_ROTATION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Grace period (seconds) for daemons to reconnect with new keys after rotation.
 const KEY_ROTATION_GRACE: u32 = 30;
 
-/// Tracks which `DaemonId` is associated with each daemon name (H-019).
+/// Deterministic UUID v5 namespace for profile IDs.
+/// Pre-computed: uuid5(NAMESPACE_URL, "https://scopecreep.zip/open-sesame/profiles").
+const PROFILE_NS: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77,
+    0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66, 0x8b,
+]);
+
+/// Tracks which `DaemonId` is associated with each daemon name.
 /// Detects crash-restarts when a new `DaemonStarted` arrives for an already-registered name.
 struct DaemonTracker {
     /// daemon_name -> last known `DaemonId`
@@ -92,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("daemon-profile starting");
 
-    // -- Process hardening (NIST SC-4, SI-11) --
+    // -- Process hardening --
     #[cfg(target_os = "linux")]
     platform_linux::security::harden_process();
 
@@ -101,6 +108,13 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to load config")?;
 
     let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
+    // Collect all configured profile names so ProfileList can report them
+    // regardless of activation state.
+    let mut config_profile_names: Vec<TrustProfileName> = config
+        .profiles
+        .keys()
+        .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
+        .collect();
     tracing::info!(default_profile = %default_profile_name, "config loaded");
 
     // -- Sandbox (Linux) --
@@ -118,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
     core_ipc::noise::write_bus_keypair(bus_keypair.as_inner()).await
         .context("failed to write bus public key")?;
 
-    // -- Per-daemon keypair generation and clearance registry (IA-9, AC-4) --
+    // -- Per-daemon keypair generation and clearance registry --
     core_ipc::noise::create_keys_dir().await
         .context("failed to create keys directory")?;
 
@@ -192,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
     // -- Lock state: tracks daemon-secrets lock/unlock (S-4) --
     let mut locked = true;
 
-    // -- Confirmed RPC channel (D-002) --
+    // -- Confirmed RPC channel --
     // Used by activation/deactivation/reconciliation to wait for daemon-secrets responses.
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<Vec<u8>>(16);
 
@@ -205,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
     bus.register(
         daemon_id,
         host_peer,
-        SecurityLevel::Internal, // host handles StatusRequest/ProfileList — not secrets (CM-7)
+        SecurityLevel::Internal, // host handles StatusRequest/ProfileList — not secrets
         vec![],
         host_tx,
     ).await;
@@ -280,15 +294,15 @@ async fn main() -> anyhow::Result<()> {
     // -- Reconciliation counter: reconcile every other watchdog tick (30s) --
     let mut watchdog_tick_count: u64 = 0;
 
-    // -- Key rotation timer (H-018, NIST IA-5(1), SC-12) --
+    // -- Key rotation timer --
     let mut rotation_timer = tokio::time::interval(KEY_ROTATION_INTERVAL);
     rotation_timer.tick().await; // Consume the first immediate tick.
 
-    // R-001: Non-blocking rotation — grace period runs in a spawned task,
+    // Non-blocking rotation — grace period runs in a spawned task,
     // completion signaled via channel so the main select! loop stays responsive.
     let (rotation_done_tx, mut rotation_done_rx) = mpsc::channel::<()>(1);
 
-    // -- Daemon crash-restart tracker (H-019) --
+    // -- Daemon crash-restart tracker --
     let mut daemon_tracker = DaemonTracker::new();
 
     // -- Main event loop --
@@ -298,7 +312,7 @@ async fn main() -> anyhow::Result<()> {
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
 
-                // D-006: Reconcile with daemon-secrets every 30s (every other tick).
+                // Reconcile with daemon-secrets every 30s (every other tick).
                 watchdog_tick_count += 1;
                 if watchdog_tick_count.is_multiple_of(2) {
                     reconcile_secrets_state(
@@ -367,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
                     &mut locked,
                     &confirm_tx,
                     &mut confirm_rx,
+                    &config_profile_names,
                 ).await {
                     let reply = Message::new(
                         daemon_id,
@@ -376,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
                     ).with_correlation(msg.msg_id);
 
                     if let Ok(mut reply_bytes) = core_ipc::encode_frame(&reply) {
-                        // M11 fix: unicast RPC responses to the original requester only.
+                        // Unicast RPC responses to the original requester only.
                         // bus.publish() would broadcast to ALL connected daemons, leaking
                         // secret values (e.g., SecretGetResponse) to non-requesting clients.
                         if let Some(origin_conn) = bus.take_pending_request(&msg.msg_id).await {
@@ -396,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
                                 "response has no tracked origin -- dropping to prevent potential secret broadcast"
                             );
                         }
-                        // Zeroize postcard buffer — may contain serialized secret values (H-009).
+                        // Zeroize postcard buffer — may contain serialized secret values.
                         zeroize::Zeroize::zeroize(&mut reply_bytes);
                     }
                 }
@@ -441,6 +456,13 @@ async fn main() -> anyhow::Result<()> {
                     context_engine = ContextEngine::new(new_rules, new_default_id);
                     // Update the default_profile_name used by RPC handlers.
                     default_profile_name = new_default_name;
+                    // Refresh config_profile_names on hot-reload so
+                    // `sesame profile list` reflects newly added/removed profiles.
+                    config_profile_names = guard
+                        .profiles
+                        .keys()
+                        .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
+                        .collect();
                     tracing::info!(
                         default_profile = %default_profile_name,
                         "context engine rebuilt from reloaded config"
@@ -484,15 +506,21 @@ async fn handle_bus_message<W: std::io::Write>(
     locked: &mut bool,
     confirm_tx: &mpsc::Sender<Vec<u8>>,
     confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
+    config_profile_names: &[TrustProfileName],
 ) -> Option<EventKind> {
     match &msg.payload {
-        // H-019: Track daemon start/restart for key revocation.
-        EventKind::DaemonStarted { daemon_id: announced_id, capabilities, .. } => {
-            // R-008: Use server-verified name from Noise IK registry, not self-declared
-            // capabilities. Fall back to capabilities only for unregistered clients.
-            let name = msg.verified_sender_name.clone()
-                .or_else(|| capabilities.first().cloned())
-                .unwrap_or_else(|| "unknown".into());
+        // Track daemon start/restart for key revocation.
+        EventKind::DaemonStarted { daemon_id: announced_id, .. } => {
+            // Require server-verified name from Noise IK registry. Never fall back
+            // to self-declared capabilities -- those are spoofable by any client.
+            let Some(name) = msg.verified_sender_name.clone() else {
+                tracing::warn!(
+                    audit = "security",
+                    sender = %announced_id,
+                    "DaemonStarted from unverified sender — ignoring (no verified_sender_name)"
+                );
+                return None;
+            };
             if let Some(old_id) = daemon_tracker.track(&name, *announced_id) {
                 tracing::warn!(
                     audit = "security",
@@ -503,7 +531,7 @@ async fn handle_bus_message<W: std::io::Write>(
                     "daemon restart detected — revoking old key and generating new keypair"
                 );
 
-                // SEC-006 fix: daemon-secrets restarts locked with no active profiles.
+                // daemon-secrets restarts locked with no active profiles.
                 if name == "daemon-secrets" {
                     *locked = true;
                     active_profiles.clear();
@@ -533,7 +561,7 @@ async fn handle_bus_message<W: std::io::Write>(
                             if let Err(e) = core_ipc::noise::write_daemon_keypair(daemon_name, new_keypair.as_inner()).await {
                                 tracing::error!(error = %e, daemon = daemon_name, "failed to write revocation keypair");
                             } else {
-                                // Revoke old key, re-register with incremented generation (P0).
+                                // Revoke old key, re-register with incremented generation.
                                 let mut reg = bus.registry_mut().await;
                                 let next_gen = if let Some((old_key, _)) = reg.find_by_name(daemon_name) {
                                     let old_key = *old_key;
@@ -559,9 +587,8 @@ async fn handle_bus_message<W: std::io::Write>(
                                     generation: next_gen,
                                 });
 
-                                // R-003: Announce KeyRotationPending to the restarted daemon
-                                // so it reconnects with the new key. Without this, the daemon
-                                // would use its old (revoked) key and fail handshake.
+                                // Announce KeyRotationPending so the restarted daemon
+                                // reconnects with the new key.
                                 let rotation_event = EventKind::KeyRotationPending {
                                     daemon_name: daemon_name.into(),
                                     new_pubkey,
@@ -596,11 +623,18 @@ async fn handle_bus_message<W: std::io::Write>(
         }
 
         EventKind::ProfileList => {
-            let profiles = active_profiles.iter().map(|name| {
+            // Iterate config profiles (not just active_profiles) so that
+            // `sesame profile list` shows all configured profiles.
+            // Use deterministic UUIDs (UUID v5) so ProfileIds are stable across
+            // calls and restarts, matching the IDs used in build_activation_rules().
+            let profiles = config_profile_names.iter().map(|name| {
+                let id = core_types::ProfileId::from_uuid(
+                    uuid::Uuid::new_v5(&PROFILE_NS, name.as_ref().as_bytes()),
+                );
                 core_types::ProfileSummary {
-                    id: core_types::ProfileId::new(),
+                    id,
                     name: name.clone(),
-                    is_active: true,
+                    is_active: active_profiles.contains(name),
                     is_default: name == &*default_profile_name,
                 }
             }).collect();
@@ -677,7 +711,7 @@ async fn handle_bus_message<W: std::io::Write>(
 
         EventKind::UnlockResponse { success: true } => {
             *locked = false;
-            active_profiles.clear(); // Spec Section 3.5 step 3b: fresh unlock = no profiles active.
+            active_profiles.clear(); // Fresh unlock = no profiles active.
             tracing::info!("secrets daemon unlocked, lock state updated, active profiles cleared");
             None
         }
@@ -689,11 +723,39 @@ async fn handle_bus_message<W: std::io::Write>(
             None
         }
 
+        // Receive secret operation audit events from daemon-secrets and
+        // persist them in the hash-chained audit log.
+        EventKind::SecretOperationAudit {
+            action,
+            profile,
+            key,
+            requester,
+            requester_name,
+            outcome,
+        } => {
+            if let Err(e) = audit.append(AuditAction::SecretOperationAudited {
+                action: action.clone(),
+                profile: profile.clone(),
+                key: key.clone(),
+                requester: *requester,
+                requester_name: requester_name.clone(),
+                outcome: outcome.clone(),
+            }) {
+                tracing::error!(
+                    error = %e,
+                    action = %action,
+                    profile = %profile,
+                    "failed to write secret operation audit entry"
+                );
+            }
+            None
+        }
+
         _ => None,
     }
 }
 
-/// Reconcile daemon-profile's view of lock/active-profiles with daemon-secrets (D-006).
+/// Reconcile daemon-profile's view of lock/active-profiles with daemon-secrets.
 ///
 /// Sends `SecretsStateRequest` via confirmed RPC and overwrites local state with
 /// the authoritative response. On timeout, fails closed: assume locked, empty active set.
@@ -716,7 +778,7 @@ async fn reconcile_secrets_state(
     let _guard = bus.register_confirmation(msg_id, confirm_tx.clone()).await;
 
     // Drain stale messages from confirm_rx to prevent consuming a leftover
-    // response from a previous timed-out confirmed RPC (P0-002 fix).
+    // response from a previous timed-out confirmed RPC.
     while confirm_rx.try_recv().is_ok() {}
 
     let frame = match core_ipc::encode_frame(&msg) {
@@ -800,11 +862,11 @@ async fn reconcile_secrets_state(
 }
 
 /// Snapshot of daemon generations at phase 1 start.
-/// Used by phase 2 to skip daemons that were revoked during the grace period (P0).
+/// Used by phase 2 to skip daemons that were revoked during the grace period.
 static ROTATION_BASELINE: tokio::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
     tokio::sync::Mutex::const_new(None);
 
-/// Key rotation phase 1 (R-001): generate keypairs, write to disk, announce pending.
+/// Key rotation phase 1: generate keypairs, write to disk, announce pending.
 ///
 /// Returns immediately — does NOT sleep. The grace period is handled by a
 /// spawned background task that signals phase 2 via channel.
@@ -818,7 +880,7 @@ async fn rotate_keys_phase1<W: std::io::Write>(
         .expect("valid noise params");
     let builder = snow::Builder::new(noise_params);
 
-    // Snapshot generations BEFORE writing any new keys (P0).
+    // Snapshot generations BEFORE writing any new keys.
     let baseline = bus.registry_mut().await.snapshot_generations();
 
     for &(daemon_name, _security_level) in KNOWN_DAEMONS {
@@ -859,13 +921,13 @@ async fn rotate_keys_phase1<W: std::io::Write>(
         });
     }
 
-    // Store baseline for phase 2 (P0).
+    // Store baseline for phase 2.
     *ROTATION_BASELINE.lock().await = Some(baseline);
 
     Ok(())
 }
 
-/// Key rotation phase 2 (R-001 + R-004): atomic registry swap + announce completion.
+/// Key rotation phase 2: atomic registry swap + announce completion.
 ///
 /// Called after the grace period expires. Reads all new pubkeys first, then
 /// acquires the registry write lock ONCE for an atomic batch update.
@@ -877,7 +939,7 @@ async fn rotate_keys_phase2<W: std::io::Write>(
     let baseline = ROTATION_BASELINE.lock().await.take()
         .context("phase 2 called without phase 1 baseline")?;
 
-    // Collect all new pubkeys before taking the lock (R-004: avoid per-daemon lock churn).
+    // Collect all new pubkeys before taking the lock (avoid per-daemon lock churn).
     let mut new_keys: Vec<(&str, [u8; 32], SecurityLevel)> = Vec::new();
     for &(daemon_name, security_level) in KNOWN_DAEMONS {
         let pubkey = core_ipc::noise::read_daemon_public_key(daemon_name)
@@ -887,7 +949,7 @@ async fn rotate_keys_phase2<W: std::io::Write>(
     }
 
     // Single lock acquisition — atomic swap, skipping daemons that were
-    // already revoked-and-re-keyed during the grace period (P0 fix).
+    // already revoked-and-re-keyed during the grace period.
     {
         let mut reg = bus.registry_mut().await;
         for &(daemon_name, new_pubkey, security_level) in &new_keys {
@@ -997,14 +1059,8 @@ fn build_activation_rules(
             default_id
         } else {
             // UUID v5 in a project-specific namespace keyed on profile name — deterministic.
-            // Pre-computed: uuid5(NAMESPACE_URL, "https://scopecreep.zip/open-sesame/profiles").
-            const PROFILE_NS: uuid::Uuid = uuid::Uuid::from_bytes([
-                0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77,
-                0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66, 0x8b,
-            ]);
-            let ns = PROFILE_NS;
             core_types::ProfileId::from_uuid(
-                uuid::Uuid::new_v5(&ns, name.as_bytes()),
+                uuid::Uuid::new_v5(&PROFILE_NS, name.as_bytes()),
             )
         };
 

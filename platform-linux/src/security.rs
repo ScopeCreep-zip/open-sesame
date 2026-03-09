@@ -1,4 +1,4 @@
-//! Process-level security hardening (NIST SC-4, SI-11).
+//! Process-level security hardening.
 //!
 //! Called early in daemon startup before any key material is loaded.
 
@@ -52,7 +52,7 @@ mod tests {
 
     // SECURITY INVARIANT: After harden_process(), the process must not be
     // dumpable. PR_GET_DUMPABLE == 0 prevents ptrace-attach by non-root
-    // and prevents core dumps from containing process memory (NIST SC-4).
+    // and prevents core dumps from containing process memory.
     #[test]
     fn harden_process_disables_dumpable() {
         harden_process();
@@ -62,7 +62,7 @@ mod tests {
 
     // SECURITY INVARIANT: After harden_process(), RLIMIT_CORE must be zero
     // (both soft and hard limits). This prevents core dumps even if dumpable
-    // is re-enabled by setuid (NIST SC-4, belt-and-suspenders).
+    // is re-enabled by setuid (belt-and-suspenders).
     #[test]
     fn harden_process_sets_rlimit_core_zero() {
         harden_process();

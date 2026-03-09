@@ -266,7 +266,7 @@ async fn request_timeout() {
     );
 }
 
-// ===== T1.5: IPC Authentication — Noise Handshake Rejection =====
+// ===== IPC Authentication — Noise Handshake Rejection =====
 
 #[tokio::test]
 async fn noise_handshake_rejects_wrong_key() {
@@ -290,7 +290,7 @@ async fn noise_handshake_rejects_wrong_key() {
     );
 }
 
-// ===== T1.2: Secret Value Never Broadcast =====
+// ===== Secret Value Never Broadcast =====
 
 #[tokio::test]
 async fn secret_response_not_received_by_bystander() {
@@ -361,7 +361,7 @@ async fn secret_response_not_received_by_bystander() {
     let bystander_result = tokio::time::timeout(Duration::from_millis(200), bystander.recv()).await;
     assert!(
         bystander_result.is_err(),
-        "bystander must not receive correlated response (M11 unicast)"
+        "bystander must not receive correlated response (unicast routing)"
     );
 }
 
@@ -438,10 +438,9 @@ async fn multiple_clients_receive_broadcast() {
     assert!(matches!(msg_b.payload, EventKind::ConfigReloaded { .. }));
 }
 
-// ===== T-ACL-017: Clearance escalation blocking =====
+// ===== Clearance escalation blocking =====
 // SECURITY INVARIANT: A client registered at Open clearance must not be able
-// to send Internal-level messages. The bus server must silently drop the frame
-// (NIST AC-4, AC-6).
+// to send Internal-level messages. The bus server must silently drop the frame.
 #[tokio::test]
 async fn clearance_escalation_blocked() {
     let dir = tempfile::tempdir().unwrap();
@@ -489,10 +488,9 @@ async fn clearance_escalation_blocked() {
     );
 }
 
-// ===== T-ACL-018: Sender identity change mid-session =====
+// ===== Sender identity change mid-session =====
 // SECURITY INVARIANT: Once a connection's DaemonId is bound on its first
-// message, any subsequent message with a different DaemonId must be dropped
-// (NIST IA-9, SC-23).
+// message, any subsequent message with a different DaemonId must be dropped.
 #[tokio::test]
 async fn sender_identity_change_blocked() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
@@ -546,10 +544,10 @@ async fn sender_identity_change_blocked() {
     );
 }
 
-// ===== T-ACL-020: verified_sender_name stamping =====
+// ===== verified_sender_name stamping =====
 // SECURITY INVARIANT: Messages routed through the bus must have
 // `verified_sender_name` stamped by the server from the Noise IK registry
-// lookup, not self-declared (NIST IA-9).
+// lookup, not self-declared.
 #[tokio::test]
 async fn verified_sender_name_stamped() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;

@@ -14,6 +14,7 @@ use core_crypto::{EncryptionKey, SecureBytes};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::store::{BoxFuture, SecretsStore};
 
@@ -27,6 +28,9 @@ pub struct SqlCipherStore {
     entry_key: SecureBytes,
     /// DB file path (for diagnostics).
     db_path: PathBuf,
+    /// Tracks whether pragma_rekey_clear() has already been called,
+    /// preventing redundant PRAGMA rekey in Drop.
+    cleared: AtomicBool,
 }
 
 impl SqlCipherStore {
@@ -116,6 +120,7 @@ impl SqlCipherStore {
             conn: Mutex::new(conn),
             entry_key,
             db_path: db_path.to_owned(),
+            cleared: AtomicBool::new(false),
         })
     }
 
@@ -179,6 +184,8 @@ impl SqlCipherStore {
                 "PRAGMA rekey clear failed — C-level key buffer may not be zeroized"
             );
         }
+        // Mark as cleared so Drop does not fire redundantly.
+        self.cleared.store(true, Ordering::Release);
     }
 
     /// Current Unix timestamp in seconds.
@@ -295,6 +302,10 @@ impl std::fmt::Debug for SqlCipherStore {
 
 impl Drop for SqlCipherStore {
     fn drop(&mut self) {
+        // Skip if pragma_rekey_clear() was already called explicitly.
+        if self.cleared.load(Ordering::Acquire) {
+            return;
+        }
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = conn.execute_batch("PRAGMA rekey = '';") {
             let _ = e;
@@ -391,7 +402,7 @@ mod tests {
         assert_eq!(val.as_bytes(), b"v");
     }
 
-    // ===== T1.1: Cross-Profile Vault Isolation =====
+    // ===== Cross-Profile Vault Isolation =====
 
     #[tokio::test]
     async fn cross_profile_keys_are_independent() {
@@ -485,7 +496,7 @@ mod tests {
         );
     }
 
-    // ===== T1.6: Encrypted DB Contains No Plaintext Key Names =====
+    // ===== Encrypted DB Contains No Plaintext Key Names =====
 
     #[tokio::test]
     async fn db_file_contains_no_key_names_in_plaintext() {
@@ -517,7 +528,7 @@ mod tests {
         }
     }
 
-    // ===== T1.7: Nonce Uniqueness =====
+    // ===== Nonce Uniqueness =====
 
     #[tokio::test]
     async fn encrypt_same_value_produces_different_ciphertext() {
