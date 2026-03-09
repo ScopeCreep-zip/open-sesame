@@ -282,7 +282,7 @@ async fn sigterm() {
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
     use platform_linux::sandbox::{
-        apply_sandbox, LandlockRule, SeccompProfile,
+        apply_seccomp, SeccompProfile,
     };
 
     let seccomp = SeccompProfile {
@@ -331,12 +331,10 @@ fn apply_sandbox() {
         ],
     };
 
-    // No Landlock rules — seccomp only (see doc comment above).
-    let rules: Vec<LandlockRule> = vec![];
-
-    match apply_sandbox(&rules, &seccomp) {
-        Ok(status) => {
-            tracing::info!(?status, "sandbox applied (seccomp only, no Landlock)");
+    // Seccomp only — no Landlock because child processes inherit Landlock rules.
+    match apply_seccomp(&seccomp) {
+        Ok(()) => {
+            tracing::info!("sandbox applied (seccomp only, no Landlock)");
         }
         Err(e) => {
             panic!("sandbox application failed: {e} — refusing to run unsandboxed");

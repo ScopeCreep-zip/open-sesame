@@ -38,7 +38,7 @@ enum Command {
         #[arg(long)]
         no_keybinding: bool,
 
-        /// Destroy ALL Open Sesame data and reset to clean state.
+        /// Destroy ALL Open Sesame data and reset to clean state. Requires typing "destroy all data" to confirm.
         #[arg(long)]
         wipe_reset_destroy_all_data: bool,
 
