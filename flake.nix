@@ -96,7 +96,7 @@
           config = lib.mkIf cfg.enable {
             home.packages = [ cfg.package ];
 
-            xdg.configFile."open-sesame/config.toml" = lib.mkIf (cfg.settings != { }) {
+            xdg.configFile."pds/config.toml" = lib.mkIf (cfg.settings != { }) {
               source = tomlFormat.generate "open-sesame-config" cfg.settings;
             };
 

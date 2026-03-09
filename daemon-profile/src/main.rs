@@ -684,6 +684,10 @@ async fn handle_bus_message<W: std::io::Write>(
         }
 
         EventKind::ProfileActivate { profile_name, target } => {
+            if !config_profile_names.contains(profile_name) {
+                tracing::warn!(profile = %profile_name, "activate requested but profile not in config");
+                return Some(EventKind::ProfileActivateResponse { success: false });
+            }
             match activation::activate(*target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await {
                 Ok(duration_ms) => {
                     active_profiles.insert(profile_name.clone());  // TrustProfileName: Clone
@@ -741,7 +745,10 @@ async fn handle_bus_message<W: std::io::Write>(
         }
 
         EventKind::SetDefaultProfile { profile_name } => {
-            // TrustProfileName is validated at deserialization — no scattered check needed.
+            if !config_profile_names.contains(profile_name) {
+                tracing::warn!(profile = %profile_name, "set default requested but profile not in config");
+                return Some(EventKind::SetDefaultProfileResponse { success: false });
+            }
             tracing::info!(
                 previous = %default_profile_name,
                 new = %profile_name,
