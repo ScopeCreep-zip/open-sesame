@@ -248,6 +248,10 @@ enum WmCmd {
         /// Start in launcher mode (full overlay immediately, no border-only phase).
         #[arg(long)]
         launcher: bool,
+
+        /// Start with backward direction (previous window in MRU order).
+        #[arg(long)]
+        backward: bool,
     },
 }
 
@@ -392,7 +396,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             WmCmd::List => cmd_wm_list().await,
             WmCmd::Switch { backward } => cmd_wm_switch(backward).await,
             WmCmd::Focus { window_id } => cmd_wm_focus(&window_id).await,
-            WmCmd::Overlay { launcher } => cmd_wm_overlay(launcher).await,
+            WmCmd::Overlay { launcher, backward } => cmd_wm_overlay(launcher, backward).await,
         },
         Command::Launch(sub) => match sub {
             LaunchCmd::Search { query, max_results, profile } => {
@@ -1128,10 +1132,12 @@ async fn cmd_wm_focus(window_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_wm_overlay(launcher: bool) -> anyhow::Result<()> {
+async fn cmd_wm_overlay(launcher: bool, backward: bool) -> anyhow::Result<()> {
     let client = connect().await?;
     let event = if launcher {
         EventKind::WmActivateOverlayLauncher
+    } else if backward {
+        EventKind::WmActivateOverlayBackward
     } else {
         EventKind::WmActivateOverlay
     };

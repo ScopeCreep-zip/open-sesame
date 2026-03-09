@@ -399,6 +399,20 @@ async fn main() -> anyhow::Result<()> {
                         None // WmOverlayShown published by handle_action
                     }
 
+                    EventKind::WmActivateOverlayBackward => {
+                        tracing::info!("overlay activation (backward) requested via IPC");
+                        let action = wm_state.on_activate();
+                        handle_action(
+                            &action, &mut wm_state, &wm_config, &windows,
+                            &mut current_hints, &mut current_windows,
+                            &overlay_cmd_tx,
+                            #[cfg(target_os = "linux")] &backend,
+                            &mut client,
+                            &mut border_tick, &mut activation_tick,
+                        ).await;
+                        None
+                    }
+
                     EventKind::WmActivateOverlayLauncher => {
                         tracing::info!("launcher-mode overlay activation requested via IPC");
                         let action = wm_state.on_activate_launcher();

@@ -152,7 +152,7 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
     let switcher_backward = format_keybinding(
         &["Alt".to_string(), "Shift".to_string()],
         "tab",
-        "sesame wm switch --backward",
+        "sesame wm overlay --backward",
     );
 
     let mut content = read_shortcuts()?;
@@ -172,7 +172,7 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
     );
     println!("Keybindings configured:");
     println!("    alt+tab       -> sesame wm overlay");
-    println!("    alt+shift+tab -> sesame wm switch --backward");
+    println!("    alt+shift+tab -> sesame wm overlay --backward");
     println!("    {launcher_key_combo:<14}-> sesame wm overlay --launcher");
     println!("  Config: {}", cosmic_shortcuts_path()?.display());
 

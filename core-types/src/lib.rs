@@ -1195,8 +1195,10 @@ pub enum EventKind {
     WmActivateWindowResponse {
         success: bool,
     },
-    /// Trigger the window switcher overlay.
+    /// Trigger the window switcher overlay (forward direction).
     WmActivateOverlay,
+    /// Trigger the window switcher overlay (backward direction).
+    WmActivateOverlayBackward,
     /// Trigger the overlay in launcher mode (skip border-only, start in `FullOverlay`).
     WmActivateOverlayLauncher,
     WmOverlayShown,
@@ -1482,6 +1484,7 @@ impl_event_debug! {
         WmActivateWindow { window_id },
         WmActivateWindowResponse { success },
         WmActivateOverlay,
+        WmActivateOverlayBackward,
         WmActivateOverlayLauncher,
         WmOverlayShown,
         WmOverlayDismissed,

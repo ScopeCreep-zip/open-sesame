@@ -702,3 +702,93 @@ async fn verified_sender_name_stamped() {
         "verified_sender_name must be stamped from registry, not self-declared"
     );
 }
+
+// ===== Unregistered CLI can publish at Internal to reach daemons =====
+// SecurityLevel ordering: Open < Internal < ProfileScoped < SecretsOnly.
+// Unregistered clients get SecretsOnly (highest) clearance.
+// daemon-wm is registered at Internal clearance.
+// Publishing at Internal works because:
+//   - Sender check: SecretsOnly >= Internal → allowed
+//   - Recipient check: Internal >= Internal → delivered
+#[tokio::test]
+async fn unregistered_client_overlay_reaches_daemon_wm() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("bus.sock");
+    let server_kp = generate_keypair().unwrap();
+    let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
+
+    // Register only daemon-wm (Internal clearance).
+    let daemon_kp = generate_keypair().unwrap();
+    let mut registry = ClearanceRegistry::new();
+    let mut daemon_pub = [0u8; 32];
+    daemon_pub.copy_from_slice(daemon_kp.public());
+    registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
+
+    let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
+    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // daemon-wm: registered, Internal clearance.
+    let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
+
+    // CLI: unregistered ephemeral key → SecretsOnly clearance.
+    let cli = connect_client(did(2), &sock, &server_pub).await;
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // CLI publishes WmActivateOverlay at Internal level.
+    cli.publish(EventKind::WmActivateOverlay, SecurityLevel::Internal)
+        .await
+        .unwrap();
+
+    // daemon-wm (Internal) should receive it: Internal >= Internal.
+    let msg = tokio::time::timeout(Duration::from_millis(500), daemon_wm.recv())
+        .await
+        .expect("daemon-wm must receive WmActivateOverlay from CLI")
+        .expect("channel closed");
+
+    assert!(
+        matches!(msg.payload, EventKind::WmActivateOverlay),
+        "expected WmActivateOverlay, got {:?}",
+        msg.payload
+    );
+}
+
+// ===== Negative: SecretsOnly-level messages don't reach Internal daemons =====
+// Publishing at SecretsOnly level means only SecretsOnly-clearance recipients
+// can receive it. daemon-wm (Internal) is below SecretsOnly, so it's excluded.
+#[tokio::test]
+async fn secrets_only_message_not_delivered_to_internal_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("bus.sock");
+    let server_kp = generate_keypair().unwrap();
+    let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
+
+    let daemon_kp = generate_keypair().unwrap();
+    let mut registry = ClearanceRegistry::new();
+    let mut daemon_pub = [0u8; 32];
+    daemon_pub.copy_from_slice(daemon_kp.public());
+    registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
+
+    let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
+    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
+    let cli = connect_client(did(2), &sock, &server_pub).await;
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // CLI (SecretsOnly) publishes at SecretsOnly level — daemon-wm (Internal)
+    // cannot receive it because Internal < SecretsOnly.
+    cli.publish(EventKind::WmActivateOverlay, SecurityLevel::SecretsOnly)
+        .await
+        .unwrap();
+
+    // daemon-wm must NOT receive it (recipient clearance Internal < SecretsOnly).
+    let result = tokio::time::timeout(Duration::from_millis(200), daemon_wm.recv()).await;
+    assert!(
+        result.is_err(),
+        "SecretsOnly-level message must not reach Internal-clearance daemon"
+    );
+}
