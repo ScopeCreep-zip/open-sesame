@@ -1221,6 +1221,8 @@ pub enum EventKind {
     },
     LaunchExecuteResponse {
         pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     // -- RPC: Clipboard --
@@ -1487,7 +1489,7 @@ impl_event_debug! {
         LaunchQuery { query, max_results, profile },
         LaunchQueryResponse { results },
         LaunchExecute { entry_id, profile },
-        LaunchExecuteResponse { pid },
+        LaunchExecuteResponse { pid, error },
         ClipboardHistory { profile, limit },
         ClipboardHistoryResponse { entries },
         ClipboardClear { profile },

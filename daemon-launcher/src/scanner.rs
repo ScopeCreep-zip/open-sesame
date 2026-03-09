@@ -8,6 +8,14 @@
 //! and must be called via `tokio::task::spawn_blocking`.
 
 use core_fuzzy::MatchItem;
+use std::collections::HashSet;
+
+/// A cached desktop entry with the Exec line preserved for post-sandbox launching.
+#[derive(Debug, Clone)]
+pub struct CachedEntry {
+    pub id: String,
+    pub exec: String,
+}
 
 /// Scan all XDG desktop entry paths and return launchable items.
 ///
@@ -15,17 +23,20 @@ use core_fuzzy::MatchItem;
 /// - `NoDisplay=true` → skipped (non-launchable, e.g. D-Bus activatable only)
 /// - `Hidden=true` → skipped (explicitly hidden by packager)
 /// - No `Exec=` field → skipped (not a launchable application)
+/// - Duplicate IDs → only the first occurrence is kept
 ///
 /// This function is blocking. Call via `tokio::task::spawn_blocking`.
 pub fn scan() -> Vec<MatchItem> {
     let locales = freedesktop_desktop_entry::get_languages_from_env();
     let entries = freedesktop_desktop_entry::desktop_entries(&locales);
 
+    let mut seen = HashSet::new();
     entries
         .into_iter()
         .filter(|e| !e.no_display())
         .filter(|e| !e.hidden())
         .filter(|e| e.exec().is_some())
+        .filter(|e| seen.insert(e.id().to_owned()))
         .map(|e| {
             let id = e.id().to_owned();
             let name = e
@@ -57,6 +68,31 @@ pub fn scan() -> Vec<MatchItem> {
                 name,
                 extra: extra_parts.join(" "),
             }
+        })
+        .collect()
+}
+
+/// Scan desktop entries and cache their Exec lines for post-sandbox launching.
+///
+/// Same filtering as `scan()`, but also captures the raw Exec field so that
+/// `launch_entry()` does not need filesystem access after sandbox is applied.
+///
+/// This function is blocking. Call via `tokio::task::spawn_blocking`.
+pub fn scan_cached() -> Vec<CachedEntry> {
+    let locales = freedesktop_desktop_entry::get_languages_from_env();
+    let entries = freedesktop_desktop_entry::desktop_entries(&locales);
+
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter(|e| !e.no_display())
+        .filter(|e| !e.hidden())
+        .filter(|e| e.exec().is_some())
+        .filter(|e| seen.insert(e.id().to_owned()))
+        .map(|e| {
+            let id = e.id().to_owned();
+            let exec = e.exec().unwrap().to_owned();
+            CachedEntry { id, exec }
         })
         .collect()
 }

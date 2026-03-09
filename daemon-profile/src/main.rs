@@ -710,6 +710,10 @@ async fn handle_bus_message<W: std::io::Write>(
         }
 
         EventKind::ProfileDeactivate { profile_name, target } => {
+            if !config_profile_names.contains(profile_name) {
+                tracing::warn!(profile = %profile_name, "deactivate requested but profile not in config");
+                return Some(EventKind::ProfileDeactivateResponse { success: false });
+            }
             if !active_profiles.contains(profile_name) {
                 tracing::warn!(profile = %profile_name, "deactivate requested but profile not active");
                 return Some(EventKind::ProfileDeactivateResponse { success: false });

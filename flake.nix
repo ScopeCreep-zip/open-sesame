@@ -52,31 +52,35 @@
               default = { };
               example = lib.literalExpression ''
                 {
-                  settings = {
-                    activation_key = "alt+space";
-                    overlay_delay = 720;
-                    quick_switch_threshold = 250;
-                    background_color = "#000000c8";
-                    card_color = "#1e1e1ef0";
-                    text_color = "#ffffffff";
-                    hint_color = "#646464ff";
+                  global = {
+                    default_profile = "default";
                   };
-                  keys.g = {
-                    apps = [ "ghostty" "com.mitchellh.ghostty" ];
-                    launch = "ghostty";
-                  };
-                  keys.f = {
-                    apps = [ "firefox" "org.mozilla.firefox" ];
-                    launch = "firefox";
+                  profiles.default = {
+                    name = "default";
+                    wm = {
+                      hint_keys = "asdfghjkl";
+                      overlay_delay_ms = 150;
+                      key_bindings.g = {
+                        apps = [ "ghostty" "com.mitchellh.ghostty" ];
+                        launch = "ghostty";
+                      };
+                      key_bindings.f = {
+                        apps = [ "firefox" "org.mozilla.firefox" ];
+                        launch = "firefox";
+                      };
+                    };
                   };
                 }
               '';
               description = ''
-                Configuration for Open Sesame, written to
-                {file}`~/.config/open-sesame/config.toml`.
+                Configuration for Open Sesame (v2 schema), written to
+                {file}`~/.config/pds/config.toml`.
 
-                See {command}`sesame --print-config` for default values
-                and https://scopecreep-zip.github.io/open-sesame/ for documentation.
+                The structure must match the application's Config format:
+                top-level keys are `config_version`, `global`, `profiles`,
+                `crypto`, `agents`, and `extensions`.
+
+                See https://scopecreep-zip.github.io/open-sesame/ for documentation.
               '';
             };
 
@@ -97,7 +101,20 @@
             home.packages = [ cfg.package ];
 
             xdg.configFile."pds/config.toml" = lib.mkIf (cfg.settings != { }) {
-              source = tomlFormat.generate "open-sesame-config" cfg.settings;
+              source = tomlFormat.generate "open-sesame-config" (
+                lib.recursiveUpdate {
+                  config_version = 3;
+                  global = {
+                    default_profile = "default";
+                    ipc = { };
+                    logging = { };
+                  };
+                  profiles = { };
+                  crypto = { };
+                  agents = { };
+                  extensions = { };
+                } cfg.settings
+              );
             };
 
             # Grouping target — start/stop all daemons together.

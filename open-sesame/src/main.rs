@@ -715,6 +715,7 @@ fn cmd_profile_show(name: &str) -> anyhow::Result<()> {
 
 async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<()> {
     validate_secret_key(key)?;
+    validate_profile_in_config(profile)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -766,6 +767,7 @@ async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<()> {
 
 async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
     validate_secret_key(key)?;
+    validate_profile_in_config(profile)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -806,6 +808,7 @@ async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
 
 async fn cmd_secret_delete(profile: &str, key: &str, skip_confirm: bool) -> anyhow::Result<()> {
     validate_secret_key(key)?;
+    validate_profile_in_config(profile)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -856,6 +859,7 @@ async fn cmd_secret_delete(profile: &str, key: &str, skip_confirm: bool) -> anyh
 }
 
 async fn cmd_secret_list(profile: &str) -> anyhow::Result<()> {
+    validate_profile_in_config(profile)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1166,9 +1170,10 @@ async fn cmd_launch_run(entry_id: &str, profile: Option<&str>) -> anyhow::Result
     };
 
     match rpc(&client, event, SecurityLevel::Internal).await? {
-        EventKind::LaunchExecuteResponse { pid } => {
+        EventKind::LaunchExecuteResponse { pid, error } => {
             if pid == 0 {
-                anyhow::bail!("launch failed — desktop entry not found or spawn error");
+                let detail = error.as_deref().unwrap_or("unknown error");
+                anyhow::bail!("launch failed: {detail}");
             }
             println!("Launched {} (PID {})", entry_id.green(), pid);
         }
@@ -1416,6 +1421,17 @@ fn validate_secret_key(key: &str) -> anyhow::Result<()> {
     core_types::validate_secret_key(key).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Validate that a profile exists in config before sending an RPC.
+/// Fails fast at the CLI boundary with a clear error message.
+fn validate_profile_in_config(profile: &str) -> anyhow::Result<()> {
+    let config = core_config::load_config(None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !config.profiles.contains_key(profile) {
+        anyhow::bail!("profile '{}' not found in config", profile);
+    }
+    Ok(())
+}
+
 fn format_denial_reason(reason: &core_types::SecretDenialReason, key: &str, profile: &TrustProfileName) -> String {
     use core_types::SecretDenialReason;
     match reason {
@@ -1457,6 +1473,12 @@ async fn cmd_env(profile: &str, prefix: Option<&str>, command: &[String]) -> any
         anyhow::bail!("no command specified");
     }
 
+    if command.first().is_some_and(|c| c.starts_with('-')) {
+        eprintln!("hint: use '--' to separate sesame options from the command, e.g.:");
+        eprintln!("  sesame env -p {} -- {}", profile, command.join(" "));
+    }
+
+    validate_profile_in_config(profile)?;
     let client = connect().await?;
     let profile = TrustProfileName::try_from(profile)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
