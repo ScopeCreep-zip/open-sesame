@@ -179,6 +179,18 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Seed MRU from current window list if empty (first launch or after crash).
+    #[cfg(target_os = "linux")]
+    if let Some(ref b) = backend {
+        match b.list_windows().await {
+            Ok(win_list) => {
+                mru::seed_if_empty(&win_list);
+                *windows.lock().await = win_list;
+            }
+            Err(e) => tracing::warn!(error = %e, "initial window enumeration failed"),
+        }
+    }
+
     // -- Overlay lifecycle --
     // State machine lives on the tokio thread. Overlay GTK4 surface on a
     // dedicated thread, communicating via channels.
@@ -653,17 +665,29 @@ async fn handle_action(
                 }
             }
 
-            if let Some(prev_id) = mru::previous_window() {
-                tracing::info!(previous = %prev_id, "quick-switch to previous window");
+            #[cfg(target_os = "linux")]
+            if let Some(backend) = backend {
+                let win_list = windows.lock().await;
+                let prev_id = mru::previous_window();
 
-                #[cfg(target_os = "linux")]
-                if let Some(backend) = backend {
-                    let win_list = windows.lock().await;
-                    if let Some(w) = win_list.iter().find(|w| w.id.to_string() == prev_id)
-                        && let Err(e) = backend.activate_window(&w.id).await
-                    {
+                // Find the target: MRU previous if it still exists, else first non-focused.
+                let target = prev_id.as_ref()
+                    .and_then(|pid| win_list.iter().find(|w| w.id.to_string() == *pid))
+                    .or_else(|| win_list.iter().find(|w| !w.is_focused));
+
+                if let Some(w) = target {
+                    let target_id = w.id.to_string();
+                    let origin = win_list.iter()
+                        .find(|w| w.is_focused)
+                        .map(|w| w.id.to_string());
+                    tracing::info!(target = %target_id, "quick-switch activating");
+                    if let Err(e) = backend.activate_window(&w.id).await {
                         tracing::warn!(error = %e, "quick-switch activate failed");
                     }
+                    drop(win_list);
+                    mru::save(origin.as_deref(), &target_id);
+                } else {
+                    tracing::warn!("quick-switch: no target window available");
                 }
             }
 

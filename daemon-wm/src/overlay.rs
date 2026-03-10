@@ -178,7 +178,7 @@ fn run_gtk4_overlay(
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
     window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    window.set_keyboard_mode(KeyboardMode::None);
 
     // Transparent background via CSS.
     let css_provider = gtk4::CssProvider::new();
@@ -252,6 +252,7 @@ fn run_gtk4_overlay(
             gdk::Key::Down => Some(OverlayEvent::SelectionDown),
             gdk::Key::Up => Some(OverlayEvent::SelectionUp),
             gdk::Key::BackSpace => Some(OverlayEvent::Backspace),
+            gdk::Key::space => Some(OverlayEvent::SelectionDown),
             _ => {
                 if let Some(ch) = keyval.to_unicode() {
                     if ch.is_alphanumeric() {
@@ -310,6 +311,7 @@ fn run_gtk4_overlay(
                         st.input_buffer.clear();
                         st.selection = 0;
                     }
+                    window_cmd.set_keyboard_mode(KeyboardMode::Exclusive);
                     window_cmd.set_visible(true);
                     da_cmd.queue_draw();
                 }
@@ -320,6 +322,7 @@ fn run_gtk4_overlay(
                         st.windows = windows;
                         st.hints = hints;
                     }
+                    window_cmd.set_keyboard_mode(KeyboardMode::Exclusive);
                     window_cmd.set_visible(true);
                     da_cmd.queue_draw();
                 }
@@ -340,6 +343,7 @@ fn run_gtk4_overlay(
                         st.windows.clear();
                         st.hints.clear();
                     }
+                    window_cmd.set_keyboard_mode(KeyboardMode::None);
                     window_cmd.set_visible(false);
                 }
                 OverlayCmd::HideAndSync => {
@@ -351,6 +355,7 @@ fn run_gtk4_overlay(
                         st.windows.clear();
                         st.hints.clear();
                     }
+                    window_cmd.set_keyboard_mode(KeyboardMode::None);
                     window_cmd.set_visible(false);
                     // Flush the unmap to the compositor and wait for
                     // confirmation so the exclusive layer surface is gone

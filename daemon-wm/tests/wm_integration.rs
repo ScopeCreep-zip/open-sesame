@@ -440,13 +440,14 @@ fn state_launcher_mode_skips_border() {
 }
 
 #[test]
-fn state_launcher_mode_from_non_idle_is_noop() {
+fn state_launcher_mode_from_non_idle_cycles_selection() {
     let mut state = WmState::FullOverlay {
         input_buffer: String::new(),
         selection: 0,
         window_count: 5,
     };
-    assert_eq!(state.on_activate_launcher(), Action::None);
+    assert_eq!(state.on_activate_launcher(), Action::Redraw);
+    assert_eq!(state.selection(), Some(1));
 }
 
 // ============================================================================

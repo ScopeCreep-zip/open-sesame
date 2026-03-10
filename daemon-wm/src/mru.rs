@@ -106,6 +106,35 @@ pub fn previous_window() -> Option<String> {
     load().previous
 }
 
+/// Seed MRU state from a window list if the file is empty or missing.
+///
+/// Sets current = focused window, previous = first non-focused window.
+/// No-op if MRU state already has valid entries.
+pub fn seed_if_empty(windows: &[core_types::Window]) {
+    let state = load();
+    if state.current.is_some() || state.previous.is_some() {
+        return;
+    }
+
+    let focused = windows.iter().find(|w| w.is_focused);
+    let first_other = windows.iter().find(|w| !w.is_focused);
+
+    match (focused, first_other) {
+        (Some(cur), Some(prev)) => {
+            save(Some(&prev.id.to_string()), &cur.id.to_string());
+        }
+        (Some(cur), None) => {
+            // Only one window — set it as current with no previous.
+            save(None, &cur.id.to_string());
+        }
+        (None, Some(first)) => {
+            // No focused window detected — use first as current.
+            save(None, &first.id.to_string());
+        }
+        (None, None) => {}
+    }
+}
+
 /// Reorder a window list for MRU display: move current window to end.
 ///
 /// The closure returns a `String` rather than `&str` because ID types

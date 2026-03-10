@@ -68,6 +68,11 @@ impl WmState {
     }
 
     /// Activation key pressed — begin the overlay sequence.
+    ///
+    /// When already showing (BorderOnly/FullOverlay/PendingActivation),
+    /// re-activation advances the selection instead of being a no-op.
+    /// This matches traditional alt+tab behavior where repeated presses
+    /// cycle through the window list.
     pub fn on_activate(&mut self) -> Action {
         match self {
             Self::Idle => {
@@ -77,11 +82,36 @@ impl WmState {
                 };
                 Action::ShowBorder
             }
-            _ => Action::None,
+            Self::BorderOnly { .. } => {
+                // Skip border phase, go straight to full overlay with
+                // selection at index 1 (second window, same as Tab).
+                *self = Self::FullOverlay {
+                    input_buffer: String::new(),
+                    selection: 1,
+                    window_count: 0,
+                };
+                Action::ShowOverlay
+            }
+            Self::FullOverlay {
+                selection,
+                window_count,
+                ..
+            } => {
+                if *window_count > 0 {
+                    *selection = (*selection + 1) % *window_count;
+                }
+                Action::Redraw
+            }
+            Self::PendingActivation { .. } => {
+                // Already committed to a target — ignore re-activation.
+                Action::None
+            }
         }
     }
 
     /// Launcher mode activation -- go directly to FullOverlay (skip border phase).
+    ///
+    /// Re-activation while visible cycles selection (same as `on_activate`).
     pub fn on_activate_launcher(&mut self) -> Action {
         match self {
             Self::Idle => {
@@ -92,7 +122,25 @@ impl WmState {
                 };
                 Action::ShowOverlay
             }
-            _ => Action::None,
+            Self::BorderOnly { .. } => {
+                *self = Self::FullOverlay {
+                    input_buffer: String::new(),
+                    selection: 1,
+                    window_count: 0,
+                };
+                Action::ShowOverlay
+            }
+            Self::FullOverlay {
+                selection,
+                window_count,
+                ..
+            } => {
+                if *window_count > 0 {
+                    *selection = (*selection + 1) % *window_count;
+                }
+                Action::Redraw
+            }
+            Self::PendingActivation { .. } => Action::None,
         }
     }
 
@@ -408,21 +456,23 @@ mod tests {
     }
 
     #[test]
-    fn double_activate_is_noop() {
+    fn double_activate_transitions_to_full_overlay() {
         let mut state = WmState::new();
         state.on_activate();
         let action = state.on_activate();
-        assert_eq!(action, Action::None);
+        assert_eq!(action, Action::ShowOverlay);
+        assert!(matches!(state, WmState::FullOverlay { selection: 1, .. }));
     }
 
     #[test]
-    fn activate_from_full_overlay_is_noop() {
+    fn activate_from_full_overlay_cycles_selection() {
         let mut state = WmState::FullOverlay {
             input_buffer: String::new(),
             selection: 0,
             window_count: 5,
         };
-        assert_eq!(state.on_activate(), Action::None);
+        assert_eq!(state.on_activate(), Action::Redraw);
+        assert_eq!(state.selection(), Some(1));
     }
 
     // ========================================================================
