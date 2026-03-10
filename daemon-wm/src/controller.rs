@@ -133,11 +133,22 @@ impl Snapshot {
         mru::reorder(&mut win_list, |w| w.id.to_string());
         win_list.truncate(config.max_visible_windows as usize);
 
-        // Find the origin window index after reorder (typically first in
-        // MRU-sorted order since current() is position 0 in the stack).
-        let origin_index = mru_state.current().and_then(|current_id| {
-            win_list.iter().position(|w| w.id.to_string() == current_id)
-        });
+        // Rotate origin (MRU current, typically index 0) to the end of the
+        // list. This gives the picker a natural display order:
+        //   top    = MRU previous (switch target)
+        //   ...    = remaining windows in MRU order
+        //   bottom = origin (currently focused, lowest priority)
+        let origin_index = if let Some(current_id) = mru_state.current() {
+            if let Some(pos) = win_list.iter().position(|w| w.id.to_string() == current_id) {
+                let origin = win_list.remove(pos);
+                win_list.push(origin);
+                Some(win_list.len() - 1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let app_ids: Vec<&str> = win_list.iter().map(|w| w.app_id.as_str()).collect();
         let app_hints = hints::assign_app_hints(&app_ids, &config.hint_keys, &config.key_bindings);
