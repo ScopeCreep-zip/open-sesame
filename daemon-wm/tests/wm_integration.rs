@@ -286,12 +286,24 @@ fn controller_launcher_skips_armed() {
 }
 
 #[test]
-fn controller_launcher_release_activates() {
+fn controller_launcher_modifier_release_is_noop() {
     let mut ctrl = OverlayController::new();
     let windows = test_windows();
     ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
     ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    // Launcher mode ignores modifier release.
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+    assert!(cmds.is_empty());
+    assert!(!ctrl.is_idle());
+}
+
+#[test]
+fn controller_launcher_confirm_activates() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+    ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
     assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
     assert!(ctrl.is_idle());
 }

@@ -100,7 +100,14 @@ struct OverlayState {
     theme: OverlayTheme,
     show_app_id: bool,
     show_title: bool,
+    /// When the overlay was last activated. Used to skip modifier polling
+    /// during a grace period while the compositor establishes keyboard focus.
+    activated_at: Option<std::time::Instant>,
 }
+
+/// Grace period (ms) after activation before modifier polling begins.
+/// Gives the compositor time to forward modifier state to our surface.
+const MODIFIER_POLL_GRACE_MS: u128 = 150;
 
 impl OverlayState {
     fn new(theme: OverlayTheme, show_app_id: bool, show_title: bool) -> Self {
@@ -113,6 +120,7 @@ impl OverlayState {
             theme,
             show_app_id,
             show_title,
+            activated_at: None,
         }
     }
 }
@@ -328,7 +336,10 @@ fn run_gtk4_overlay(
                         st.phase = OverlayPhase::BorderOnly;
                         st.input_buffer.clear();
                         st.selection = 0;
+                        st.activated_at = Some(std::time::Instant::now());
                     }
+                    // Reset modifier poll flag for this activation cycle.
+                    *modifier_released_sent.borrow_mut() = false;
                     // Restore full input region so overlay captures input.
                     if let Some(surface) = window_cmd.surface() {
                         surface.set_input_region(&gtk4::cairo::Region::create_rectangle(
@@ -344,7 +355,12 @@ fn run_gtk4_overlay(
                         st.phase = OverlayPhase::Full;
                         st.windows = windows;
                         st.hints = hints;
+                        if st.activated_at.is_none() {
+                            st.activated_at = Some(std::time::Instant::now());
+                        }
                     }
+                    // Reset modifier poll flag for this activation cycle.
+                    *modifier_released_sent.borrow_mut() = false;
                     // Restore full input region so overlay captures input.
                     if let Some(surface) = window_cmd.surface() {
                         surface.set_input_region(&gtk4::cairo::Region::create_rectangle(
@@ -370,6 +386,7 @@ fn run_gtk4_overlay(
                         st.selection = 0;
                         st.windows.clear();
                         st.hints.clear();
+                        st.activated_at = None;
                     }
                     // Release keyboard grab and commit transparent frame.
                     // Surface stays mapped to avoid layer surface destroy.
@@ -394,6 +411,7 @@ fn run_gtk4_overlay(
                         st.selection = 0;
                         st.windows.clear();
                         st.hints.clear();
+                        st.activated_at = None;
                     }
                     // Release keyboard grab and commit transparent frame.
                     window_cmd.set_keyboard_mode(KeyboardMode::None);
@@ -436,8 +454,14 @@ fn run_gtk4_overlay(
         // never see the key-release event and get stuck. Poll the
         // current modifier state and synthesize ModifierReleased if
         // Alt/Meta is no longer held.
-        let phase = state_poll.borrow().phase;
-        if phase != OverlayPhase::Hidden {
+        let st = state_poll.borrow();
+        let phase = st.phase;
+        let within_grace = st.activated_at
+            .map(|t| t.elapsed().as_millis() < MODIFIER_POLL_GRACE_MS)
+            .unwrap_or(false);
+        drop(st);
+
+        if phase != OverlayPhase::Hidden && !within_grace {
             let alt_held = window_poll.surface()
                 .and_then(|surface| surface.display().default_seat())
                 .and_then(|seat| seat.keyboard())
