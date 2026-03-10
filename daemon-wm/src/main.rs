@@ -232,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
                 handle_action(
                     &action, &mut wm_state, &wm_config, &windows,
                     &mut current_hints, &mut current_windows,
-                    &overlay_cmd_tx,
+                    &overlay_cmd_tx, &mut overlay_event_rx,
                     #[cfg(target_os = "linux")] &backend,
                     &mut client,
                     &mut border_tick, &mut activation_tick,
@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
                 handle_action(
                     &action, &mut wm_state, &wm_config, &windows,
                     &mut current_hints, &mut current_windows,
-                    &overlay_cmd_tx,
+                    &overlay_cmd_tx, &mut overlay_event_rx,
                     #[cfg(target_os = "linux")] &backend,
                     &mut client,
                     &mut border_tick, &mut activation_tick,
@@ -275,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
                                 handle_action(
                                     &action, &mut wm_state, &wm_config, &windows,
                                     &mut current_hints, &mut current_windows,
-                                    &overlay_cmd_tx,
+                                    &overlay_cmd_tx, &mut overlay_event_rx,
                                     #[cfg(target_os = "linux")] &backend,
                                     &mut client,
                                     &mut border_tick, &mut activation_tick,
@@ -289,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                                     handle_action(
                                         &match_action, &mut wm_state, &wm_config, &windows,
                                         &mut current_hints, &mut current_windows,
-                                        &overlay_cmd_tx,
+                                        &overlay_cmd_tx, &mut overlay_event_rx,
                                         #[cfg(target_os = "linux")] &backend,
                                         &mut client,
                                         &mut border_tick, &mut activation_tick,
@@ -329,12 +329,13 @@ async fn main() -> anyhow::Result<()> {
                         OverlayEvent::ModifierReleased => {
                             wm_state.on_modifier_release(cfg.quick_switch_threshold_ms, cfg.overlay_delay_ms)
                         }
+                        OverlayEvent::SurfaceUnmapped => Action::None,
                     }
                 };
                 handle_action(
                     &action, &mut wm_state, &wm_config, &windows,
                     &mut current_hints, &mut current_windows,
-                    &overlay_cmd_tx,
+                    &overlay_cmd_tx, &mut overlay_event_rx,
                     #[cfg(target_os = "linux")] &backend,
                     &mut client,
                     &mut border_tick, &mut activation_tick,
@@ -391,7 +392,7 @@ async fn main() -> anyhow::Result<()> {
                         handle_action(
                             &action, &mut wm_state, &wm_config, &windows,
                             &mut current_hints, &mut current_windows,
-                            &overlay_cmd_tx,
+                            &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
                             &mut client,
                             &mut border_tick, &mut activation_tick,
@@ -405,7 +406,7 @@ async fn main() -> anyhow::Result<()> {
                         handle_action(
                             &action, &mut wm_state, &wm_config, &windows,
                             &mut current_hints, &mut current_windows,
-                            &overlay_cmd_tx,
+                            &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
                             &mut client,
                             &mut border_tick, &mut activation_tick,
@@ -419,7 +420,7 @@ async fn main() -> anyhow::Result<()> {
                         handle_action(
                             &action, &mut wm_state, &wm_config, &windows,
                             &mut current_hints, &mut current_windows,
-                            &overlay_cmd_tx,
+                            &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
                             &mut client,
                             &mut border_tick, &mut activation_tick,
@@ -531,6 +532,7 @@ async fn handle_action(
     current_hints: &mut Vec<String>,
     current_windows: &mut Vec<Window>,
     overlay_cmd_tx: &std::sync::mpsc::Sender<OverlayCmd>,
+    overlay_event_rx: &mut tokio::sync::mpsc::Receiver<OverlayEvent>,
     #[cfg(target_os = "linux")] backend: &Option<Arc<Box<dyn platform_linux::compositor::CompositorBackend>>>,
     client: &mut BusClient,
     border_tick: &mut Option<tokio::time::Interval>,
@@ -597,6 +599,24 @@ async fn handle_action(
         }
 
         Action::ActivateWindow(idx) => {
+            // Hide overlay and wait for Wayland roundtrip confirmation BEFORE
+            // activating the target window. The overlay holds a layer-shell
+            // surface with KeyboardMode::Exclusive; cosmic-comp's
+            // exclusive_layer_surface_layer() rejects toplevel focus while it
+            // exists, causing a connection teardown.
+            *wm_state = WmState::Idle;
+            send_overlay(OverlayCmd::HideAndSync);
+            *border_tick = None;
+            *activation_tick = None;
+
+            // Wait for the GTK4 thread to confirm the surface is unmapped
+            // (display.sync() roundtrip completed).
+            while let Some(ev) = overlay_event_rx.recv().await {
+                if matches!(ev, OverlayEvent::SurfaceUnmapped) {
+                    break;
+                }
+            }
+
             if let Some(window) = current_windows.get(*idx) {
                 let origin = current_windows.iter()
                     .find(|w| w.is_focused)
@@ -614,15 +634,6 @@ async fn handle_action(
                 tracing::info!(window_id = %target_id, app_id = %window.app_id, "window activated via overlay");
             }
 
-            // Reset state machine to Idle — prevents double activation from
-            // PendingActivation timeout tick firing after we've already activated.
-            *wm_state = WmState::Idle;
-
-            // Hide overlay and reset.
-            send_overlay(OverlayCmd::Hide);
-
-            *border_tick = None;
-            *activation_tick = None;
             *current_hints = Vec::new();
             *current_windows = Vec::new();
 
@@ -630,6 +641,18 @@ async fn handle_action(
         }
 
         Action::QuickSwitch => {
+            // Hide overlay and wait for Wayland roundtrip — same as ActivateWindow.
+            *wm_state = WmState::Idle;
+            send_overlay(OverlayCmd::HideAndSync);
+            *border_tick = None;
+            *activation_tick = None;
+
+            while let Some(ev) = overlay_event_rx.recv().await {
+                if matches!(ev, OverlayEvent::SurfaceUnmapped) {
+                    break;
+                }
+            }
+
             if let Some(prev_id) = mru::previous_window() {
                 tracing::info!(previous = %prev_id, "quick-switch to previous window");
 
@@ -643,13 +666,6 @@ async fn handle_action(
                     }
                 }
             }
-
-            *wm_state = WmState::Idle;
-
-            send_overlay(OverlayCmd::Hide);
-
-            *border_tick = None;
-            *activation_tick = None;
 
             client.publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal).await.ok();
         }
@@ -828,6 +844,26 @@ fn apply_sandbox() {
         LandlockRule {
             path: std::path::PathBuf::from("/dev/dri"),
             access: FsAccess::ReadWrite,
+        },
+        // sysfs (GPU driver discovery): Mesa's DRI loader resolves kernel
+        // driver names via /sys/dev/char/226:* → /sys/devices/pci*/*/drm/*
+        // → device/driver symlink. Four subtrees cover all GPU topologies
+        // without exposing unrelated kernel state.
+        LandlockRule {
+            path: std::path::PathBuf::from("/sys/dev/char"),
+            access: FsAccess::ReadOnly,
+        },
+        LandlockRule {
+            path: std::path::PathBuf::from("/sys/class/drm"),
+            access: FsAccess::ReadOnly,
+        },
+        LandlockRule {
+            path: std::path::PathBuf::from("/sys/devices"),
+            access: FsAccess::ReadOnly,
+        },
+        LandlockRule {
+            path: std::path::PathBuf::from("/sys/bus"),
+            access: FsAccess::ReadOnly,
         },
         // GTK4 user CSS (theme overrides).
         LandlockRule {

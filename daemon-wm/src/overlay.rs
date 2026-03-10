@@ -36,6 +36,11 @@ pub enum OverlayCmd {
     },
     /// Hide the overlay and return to idle.
     Hide,
+    /// Hide the overlay, flush the Wayland unmap to the compositor via a
+    /// display sync, then send `OverlayEvent::SurfaceUnmapped` as
+    /// acknowledgment. Use this before activating a different window so the
+    /// compositor no longer sees our exclusive-keyboard layer-shell surface.
+    HideAndSync,
     /// Update theme from config.
     UpdateTheme(Box<OverlayTheme>),
     /// Shut down the overlay thread.
@@ -59,6 +64,9 @@ pub enum OverlayEvent {
     Escape,
     /// Modifier (Alt) released.
     ModifierReleased,
+    /// Acknowledgment: the layer-shell surface has been unmapped and the
+    /// compositor has confirmed via display sync. Safe to activate a window.
+    SurfaceUnmapped,
 }
 
 /// Minimal window info passed to the overlay for display.
@@ -266,6 +274,7 @@ fn run_gtk4_overlay(
     });
 
     // Detect Alt key release for quick-switch.
+    let event_tx_cmd = event_tx.clone();
     let event_tx_release = event_tx;
     key_controller.connect_key_released(move |_ctrl, keyval, _keycode, _modifiers| {
         if matches!(
@@ -332,6 +341,25 @@ fn run_gtk4_overlay(
                         st.hints.clear();
                     }
                     window_cmd.set_visible(false);
+                }
+                OverlayCmd::HideAndSync => {
+                    {
+                        let mut st = state_cmd.borrow_mut();
+                        st.phase = OverlayPhase::Hidden;
+                        st.input_buffer.clear();
+                        st.selection = 0;
+                        st.windows.clear();
+                        st.hints.clear();
+                    }
+                    window_cmd.set_visible(false);
+                    // Flush the unmap to the compositor and wait for
+                    // confirmation so the exclusive layer surface is gone
+                    // before the caller activates a different window.
+                    if let Some(display) = gdk::Display::default() {
+                        display.sync();
+                        display.flush();
+                    }
+                    let _ = event_tx_cmd.blocking_send(OverlayEvent::SurfaceUnmapped);
                 }
                 OverlayCmd::UpdateTheme(theme) => {
                     {
