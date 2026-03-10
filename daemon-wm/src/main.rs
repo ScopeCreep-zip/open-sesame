@@ -580,6 +580,11 @@ async fn handle_action(
             // Stop border tick, we're now in full overlay.
             *border_tick = None;
 
+            // Send border frame immediately as a non-blocking visual hint
+            // while we prepare the full window list. The state machine is
+            // already in FullOverlay so keyboard exclusivity is held.
+            send_overlay(OverlayCmd::ShowBorder);
+
             let cfg = wm_config.lock().await;
             let mut win_list = windows.lock().await.clone();
 

@@ -2,12 +2,12 @@
 //!
 //! Four operational states controlling the overlay lifecycle:
 //!
-//! - `Idle`: No overlay visible. Transitions to `BorderOnly` on activation key.
-//! - `BorderOnly`: Focused window border highlight shown. After `overlay_delay_ms`
-//!   AND >= 2 rendered frames, transitions to `FullOverlay`. Alt-release during
-//!   this state triggers quick-switch to previous window.
+//! - `Idle`: No overlay visible. Activation goes directly to `FullOverlay`.
+//! - `BorderOnly`: Legacy state reachable only from internal transitions
+//!   (e.g. slow modifier release from border). Not entered from `on_activate()`.
 //! - `FullOverlay`: Window list with hint labels and input buffer. Hint matching,
-//!   selection movement, search, Enter to confirm, Escape to cancel.
+//!   selection movement, search, Enter to confirm, Escape to cancel. Tracks
+//!   `entered_at` for quick-switch detection on fast Alt release.
 //! - `PendingActivation`: Target window selected, waiting `activation_delay_ms`
 //!   before activating. Continued typing can change the target. Backspace
 //!   returns to `FullOverlay`.
@@ -29,6 +29,7 @@ pub enum WmState {
         input_buffer: String,
         selection: usize,
         window_count: usize,
+        entered_at: Instant,
     },
     PendingActivation {
         target: usize,
@@ -69,11 +70,15 @@ impl WmState {
 
     /// Activation key pressed — show the overlay immediately.
     ///
-    /// Goes directly to FullOverlay (no border-only phase) so the overlay
-    /// acquires KeyboardMode::Exclusive immediately and captures the Alt
-    /// release event. Without this, rapid Alt+Tab releases Alt before the
-    /// overlay has keyboard focus, losing the release and leaving the
-    /// overlay stuck on screen.
+    /// Goes directly to FullOverlay so the overlay acquires
+    /// KeyboardMode::Exclusive immediately and captures the Alt release
+    /// event. The `entered_at` timestamp enables quick-switch: if the user
+    /// releases Alt within `quick_switch_threshold_ms`, `on_modifier_release`
+    /// returns `QuickSwitch` instead of `ActivateWindow` — no GUI shown.
+    ///
+    /// The rendering pipeline sends a non-blocking border frame first
+    /// (visual hint while the window list loads), but the state machine
+    /// is already in FullOverlay so keyboard exclusivity is held throughout.
     ///
     /// When already showing, re-activation advances the selection.
     pub fn on_activate(&mut self) -> Action {
@@ -83,6 +88,7 @@ impl WmState {
                     input_buffer: String::new(),
                     selection: 0,
                     window_count: 0,
+                    entered_at: Instant::now(),
                 };
                 Action::ShowOverlay
             }
@@ -91,6 +97,7 @@ impl WmState {
                     input_buffer: String::new(),
                     selection: 1,
                     window_count: 0,
+                    entered_at: Instant::now(),
                 };
                 Action::ShowOverlay
             }
@@ -111,39 +118,9 @@ impl WmState {
         }
     }
 
-    /// Launcher mode activation -- go directly to FullOverlay (skip border phase).
-    ///
-    /// Re-activation while visible cycles selection (same as `on_activate`).
+    /// Launcher mode activation — delegates to `on_activate`.
     pub fn on_activate_launcher(&mut self) -> Action {
-        match self {
-            Self::Idle => {
-                *self = Self::FullOverlay {
-                    input_buffer: String::new(),
-                    selection: 0,
-                    window_count: 0,
-                };
-                Action::ShowOverlay
-            }
-            Self::BorderOnly { .. } => {
-                *self = Self::FullOverlay {
-                    input_buffer: String::new(),
-                    selection: 1,
-                    window_count: 0,
-                };
-                Action::ShowOverlay
-            }
-            Self::FullOverlay {
-                selection,
-                window_count,
-                ..
-            } => {
-                if *window_count > 0 {
-                    *selection = (*selection + 1) % *window_count;
-                }
-                Action::Redraw
-            }
-            Self::PendingActivation { .. } => Action::None,
-        }
+        self.on_activate()
     }
 
     /// Frame rendered in border-only mode.
@@ -161,6 +138,7 @@ impl WmState {
                         input_buffer: String::new(),
                         selection: 0,
                         window_count: 0,
+                        entered_at: *entered_at,
                     };
                     Action::ShowOverlay
                 } else {
@@ -189,24 +167,24 @@ impl WmState {
         }
     }
 
-    /// Alt key released — quick-switch if still in border-only mode.
+    /// Alt key released — quick-switch or activate based on timing.
     ///
-    /// `quick_switch_threshold_ms`: if released within this time, quick-switch.
-    /// `overlay_delay_ms`: if released after this time, force overlay.
+    /// If released within `quick_switch_threshold_ms` of entering FullOverlay
+    /// (and no user interaction occurred), returns `QuickSwitch` — no GUI shown.
+    /// Otherwise activates the current selection.
     pub fn on_modifier_release(&mut self, quick_switch_threshold_ms: u32, _overlay_delay_ms: u32) -> Action {
         match self {
             Self::BorderOnly { entered_at, .. } => {
                 let elapsed = entered_at.elapsed().as_millis() as u32;
                 if elapsed < quick_switch_threshold_ms {
-                    // Quick switch — user tapped and released quickly.
                     *self = Self::Idle;
                     Action::QuickSwitch
                 } else {
-                    // Past overlay delay but not enough frames yet — force overlay.
                     *self = Self::FullOverlay {
                         input_buffer: String::new(),
                         selection: 0,
                         window_count: 0,
+                        entered_at: *entered_at,
                     };
                     Action::ShowOverlay
                 }
@@ -214,15 +192,26 @@ impl WmState {
             Self::FullOverlay {
                 selection,
                 window_count,
-                ..
+                entered_at,
+                input_buffer,
             } => {
                 if *window_count == 0 {
                     *self = Self::Idle;
                     return Action::Dismiss;
                 }
-                let target = *selection;
-                *self = Self::Idle;
-                Action::ActivateWindow(target)
+                let elapsed = entered_at.elapsed().as_millis() as u32;
+                // Quick-switch: fast release with no user interaction.
+                if elapsed < quick_switch_threshold_ms
+                    && *selection == 0
+                    && input_buffer.is_empty()
+                {
+                    *self = Self::Idle;
+                    Action::QuickSwitch
+                } else {
+                    let target = *selection;
+                    *self = Self::Idle;
+                    Action::ActivateWindow(target)
+                }
             }
             Self::PendingActivation { target, .. } => {
                 let target = *target;
@@ -241,6 +230,7 @@ impl WmState {
                     input_buffer: ch.to_string(),
                     selection: 0,
                     window_count: 0,
+                    entered_at: Instant::now(),
                 };
                 Action::ShowOverlay
             }
@@ -274,6 +264,7 @@ impl WmState {
                     input_buffer: buf,
                     selection: 0,
                     window_count: 0,
+                    entered_at: Instant::now(),
                 };
                 Action::ShowOverlay
             }
@@ -288,6 +279,7 @@ impl WmState {
                 input_buffer: String::new(),
                 selection: 1,
                 window_count: 0,
+                entered_at: Instant::now(),
             };
             return Action::ShowOverlay;
         }
@@ -313,6 +305,7 @@ impl WmState {
                 input_buffer: String::new(),
                 selection: usize::MAX,
                 window_count: 0,
+                entered_at: Instant::now(),
             };
             return Action::ShowOverlay;
         }
@@ -445,8 +438,28 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Helper to construct a FullOverlay with entered_at = now.
+    fn full_overlay(input: &str, selection: usize, window_count: usize) -> WmState {
+        WmState::FullOverlay {
+            input_buffer: input.into(),
+            selection,
+            window_count,
+            entered_at: Instant::now(),
+        }
+    }
+
+    /// Helper to construct a FullOverlay with a past entered_at.
+    fn full_overlay_aged(input: &str, selection: usize, window_count: usize, age: Duration) -> WmState {
+        WmState::FullOverlay {
+            input_buffer: input.into(),
+            selection,
+            window_count,
+            entered_at: Instant::now() - age,
+        }
+    }
+
     // ========================================================================
-    // Activation (Idle -> BorderOnly)
+    // Activation (Idle -> FullOverlay)
     // ========================================================================
 
     #[test]
@@ -469,13 +482,17 @@ mod tests {
 
     #[test]
     fn activate_from_full_overlay_cycles_selection() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 5,
-        };
+        let mut state = full_overlay("", 0, 5);
         assert_eq!(state.on_activate(), Action::Redraw);
         assert_eq!(state.selection(), Some(1));
+    }
+
+    #[test]
+    fn launcher_delegates_to_activate() {
+        let mut state = WmState::new();
+        let action = state.on_activate_launcher();
+        assert_eq!(action, Action::ShowOverlay);
+        assert!(matches!(state, WmState::FullOverlay { selection: 0, .. }));
     }
 
     // ========================================================================
@@ -500,14 +517,13 @@ mod tests {
             entered_at: Instant::now(),
             frame_count: 0,
         };
-        // Even with 2 frames, 99999ms delay prevents transition.
         state.on_frame(99999);
         assert_eq!(state.on_frame(99999), Action::None);
         assert!(matches!(state, WmState::BorderOnly { .. }));
     }
 
     // ========================================================================
-    // TASK-01: Modifier release in FullOverlay / PendingActivation
+    // Modifier release: quick-switch vs activate
     // ========================================================================
 
     #[test]
@@ -533,24 +549,53 @@ mod tests {
     }
 
     #[test]
-    fn fast_release_from_full_overlay_activates() {
-        // on_activate() now goes straight to FullOverlay,
-        // so a quick Alt release activates selection 0.
+    fn fast_release_from_full_overlay_quick_switches() {
+        // on_activate() → FullOverlay with entered_at=now.
+        // Quick Alt release → QuickSwitch (no GUI).
         let mut state = WmState::new();
         state.on_activate();
         state.set_window_count(3);
+        let action = state.on_modifier_release(250, 500);
+        assert_eq!(action, Action::QuickSwitch);
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn slow_release_from_full_overlay_activates() {
+        // After threshold, release activates the current selection.
+        let mut state = full_overlay_aged("", 0, 3, Duration::from_millis(300));
         let action = state.on_modifier_release(250, 500);
         assert_eq!(action, Action::ActivateWindow(0));
         assert!(state.is_idle());
     }
 
     #[test]
+    fn release_after_interaction_activates_even_if_fast() {
+        // User typed a char — no longer eligible for quick-switch.
+        let mut state = WmState::new();
+        state.on_activate();
+        state.set_window_count(3);
+        state.on_char('g');
+        let action = state.on_modifier_release(250, 500);
+        assert_eq!(action, Action::ActivateWindow(0));
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn release_after_tab_activates_even_if_fast() {
+        // User tabbed — selection != 0, not eligible for quick-switch.
+        let mut state = WmState::new();
+        state.on_activate();
+        state.set_window_count(3);
+        state.on_selection_down(); // selection=1
+        let action = state.on_modifier_release(250, 500);
+        assert_eq!(action, Action::ActivateWindow(1));
+        assert!(state.is_idle());
+    }
+
+    #[test]
     fn alt_release_full_overlay_activates_selected() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 2,
-            window_count: 5,
-        };
+        let mut state = full_overlay_aged("", 2, 5, Duration::from_millis(500));
         let action = state.on_modifier_release(250, 500);
         assert_eq!(action, Action::ActivateWindow(2));
         assert!(state.is_idle());
@@ -558,11 +603,7 @@ mod tests {
 
     #[test]
     fn alt_release_full_overlay_empty_dismisses() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 0,
-        };
+        let mut state = full_overlay("", 0, 0);
         let action = state.on_modifier_release(250, 500);
         assert_eq!(action, Action::Dismiss);
         assert!(state.is_idle());
@@ -588,7 +629,7 @@ mod tests {
     }
 
     // ========================================================================
-    // TASK-02: Character input in BorderOnly
+    // Character input
     // ========================================================================
 
     #[test]
@@ -611,11 +652,7 @@ mod tests {
 
     #[test]
     fn char_input_and_backspace() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 3,
-        };
+        let mut state = full_overlay("", 0, 3);
         state.on_char('a');
         assert_eq!(state.input_buffer(), Some("a"));
         state.on_char('b');
@@ -626,11 +663,7 @@ mod tests {
 
     #[test]
     fn max_input_length_enforced() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: "a".repeat(MAX_INPUT_LENGTH),
-            selection: 0,
-            window_count: 3,
-        };
+        let mut state = full_overlay(&"a".repeat(MAX_INPUT_LENGTH), 0, 3);
         let action = state.on_char('x');
         assert_eq!(action, Action::None);
         assert_eq!(state.input_buffer().unwrap().len(), MAX_INPUT_LENGTH);
@@ -638,11 +671,7 @@ mod tests {
 
     #[test]
     fn max_input_length_allows_backspace_then_push() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: "a".repeat(MAX_INPUT_LENGTH),
-            selection: 0,
-            window_count: 3,
-        };
+        let mut state = full_overlay(&"a".repeat(MAX_INPUT_LENGTH), 0, 3);
         state.on_backspace();
         assert_eq!(state.input_buffer().unwrap().len(), MAX_INPUT_LENGTH - 1);
         let action = state.on_char('z');
@@ -651,7 +680,7 @@ mod tests {
     }
 
     // ========================================================================
-    // TASK-03: Tab / Shift+Tab in BorderOnly
+    // Tab / Shift+Tab in BorderOnly
     // ========================================================================
 
     #[test]
@@ -673,18 +702,13 @@ mod tests {
         };
         let action = state.on_selection_up();
         assert_eq!(action, Action::ShowOverlay);
-        // selection is usize::MAX, clamped by set_window_count.
         state.set_window_count(5);
         assert_eq!(state.selection(), Some(4));
     }
 
     #[test]
     fn set_window_count_clamps_selection() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 10,
-            window_count: 0,
-        };
+        let mut state = full_overlay("", 10, 0);
         state.set_window_count(3);
         assert_eq!(state.selection(), Some(2));
     }
@@ -692,9 +716,9 @@ mod tests {
     #[test]
     fn tab_after_activate_cycles() {
         let mut state = WmState::new();
-        state.on_activate(); // now in FullOverlay, selection=0
+        state.on_activate();
         state.set_window_count(3);
-        state.on_selection_down(); // selection=1
+        state.on_selection_down();
         assert_eq!(state.selection(), Some(1));
     }
 
@@ -704,33 +728,21 @@ mod tests {
 
     #[test]
     fn selection_wraps_around_down() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 2,
-            window_count: 3,
-        };
+        let mut state = full_overlay("", 2, 3);
         state.on_selection_down();
         assert_eq!(state.selection(), Some(0));
     }
 
     #[test]
     fn selection_wraps_around_up() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 3,
-        };
+        let mut state = full_overlay("", 0, 3);
         state.on_selection_up();
         assert_eq!(state.selection(), Some(2));
     }
 
     #[test]
     fn selection_down_with_zero_windows() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 0,
-        };
+        let mut state = full_overlay("", 0, 0);
         let action = state.on_selection_down();
         assert_eq!(action, Action::Redraw);
         assert_eq!(state.selection(), Some(0));
@@ -738,11 +750,7 @@ mod tests {
 
     #[test]
     fn selection_up_with_zero_windows() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 0,
-        };
+        let mut state = full_overlay("", 0, 0);
         let action = state.on_selection_up();
         assert_eq!(action, Action::Redraw);
         assert_eq!(state.selection(), Some(0));
@@ -754,21 +762,13 @@ mod tests {
 
     #[test]
     fn confirm_in_empty_overlay_is_noop() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 0,
-        };
+        let mut state = full_overlay("", 0, 0);
         assert_eq!(state.on_confirm(), Action::None);
     }
 
     #[test]
     fn confirm_activates_selection() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 2,
-            window_count: 5,
-        };
+        let mut state = full_overlay("", 2, 5);
         let action = state.on_confirm();
         assert_eq!(action, Action::ActivateWindow(2));
         assert!(matches!(state, WmState::PendingActivation { target: 2, .. }));
@@ -791,11 +791,7 @@ mod tests {
 
     #[test]
     fn hint_match_transitions_to_pending() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 5,
-        };
+        let mut state = full_overlay("", 0, 5);
         let action = state.on_hint_match(3);
         assert_eq!(action, Action::ActivateWindow(3));
         assert!(matches!(state, WmState::PendingActivation { target: 3, .. }));
@@ -829,11 +825,7 @@ mod tests {
 
     #[test]
     fn escape_from_full_overlay() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: "abc".into(),
-            selection: 2,
-            window_count: 5,
-        };
+        let mut state = full_overlay("abc", 2, 5);
         assert_eq!(state.on_escape(), Action::Dismiss);
         assert!(state.is_idle());
     }
@@ -884,11 +876,7 @@ mod tests {
 
     #[test]
     fn backspace_empty_buffer_stays_in_overlay() {
-        let mut state = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 3,
-        };
+        let mut state = full_overlay("", 0, 3);
         let action = state.on_backspace();
         assert_eq!(action, Action::Redraw);
         assert_eq!(state.input_buffer(), Some(""));
@@ -933,14 +921,13 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn scenario_quick_alt_tab_activates_first() {
-        // on_activate() goes straight to FullOverlay with selection=0.
-        // Quick release activates the first window (MRU order).
+    fn scenario_quick_alt_tab_quick_switches() {
+        // Fast alt+tab+release → QuickSwitch (no GUI).
         let mut state = WmState::new();
         state.on_activate();
         state.set_window_count(3);
         let action = state.on_modifier_release(250, 500);
-        assert_eq!(action, Action::ActivateWindow(0));
+        assert_eq!(action, Action::QuickSwitch);
         assert!(state.is_idle());
     }
 
@@ -948,15 +935,13 @@ mod tests {
     fn scenario_hold_tab_release() {
         let mut state = WmState::new();
         state.on_activate();
-        // Already in FullOverlay, set window count.
         assert!(matches!(state, WmState::FullOverlay { .. }));
         state.set_window_count(5);
-        // Tab twice.
         state.on_selection_down();
         assert_eq!(state.selection(), Some(1));
         state.on_selection_down();
         assert_eq!(state.selection(), Some(2));
-        // Release alt.
+        // Tab interaction means selection != 0 → ActivateWindow, not QuickSwitch.
         let action = state.on_modifier_release(250, 500);
         assert_eq!(action, Action::ActivateWindow(2));
         assert!(state.is_idle());
@@ -967,11 +952,9 @@ mod tests {
         let mut state = WmState::new();
         state.on_activate();
         state.set_window_count(5);
-        // Type a character.
         let action = state.on_char('g');
         assert_eq!(action, Action::Redraw);
         assert_eq!(state.input_buffer(), Some("g"));
-        // Hint match found.
         let action = state.on_hint_match(2);
         assert_eq!(action, Action::ActivateWindow(2));
         assert!(matches!(state, WmState::PendingActivation { target: 2, .. }));
@@ -980,15 +963,27 @@ mod tests {
     #[test]
     fn scenario_tab_then_release() {
         let mut state = WmState::new();
-        state.on_activate(); // FullOverlay, selection=0
+        state.on_activate();
         state.set_window_count(3);
-        // Tab twice.
-        state.on_selection_down(); // selection=1
-        state.on_selection_down(); // selection=2
+        state.on_selection_down();
+        state.on_selection_down();
         assert_eq!(state.selection(), Some(2));
-        // Release alt.
         let action = state.on_modifier_release(250, 500);
         assert_eq!(action, Action::ActivateWindow(2));
+    }
+
+    #[test]
+    fn scenario_slow_alt_tab_activates_first() {
+        // Held past threshold with no interaction → ActivateWindow(0).
+        let mut state = WmState::FullOverlay {
+            input_buffer: String::new(),
+            selection: 0,
+            window_count: 3,
+            entered_at: Instant::now() - Duration::from_millis(500),
+        };
+        let action = state.on_modifier_release(250, 500);
+        assert_eq!(action, Action::ActivateWindow(0));
+        assert!(state.is_idle());
     }
 
     // ========================================================================
@@ -1013,12 +1008,7 @@ mod tests {
             frame_count: 0,
         };
         assert!(border.is_overlay_visible());
-        let overlay = WmState::FullOverlay {
-            input_buffer: String::new(),
-            selection: 0,
-            window_count: 0,
-        };
-        assert!(overlay.is_overlay_visible());
+        assert!(full_overlay("", 0, 0).is_overlay_visible());
         let pending = WmState::PendingActivation {
             target: 0,
             pending_key: None,

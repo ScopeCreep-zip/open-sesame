@@ -18,6 +18,26 @@ fn make_bindings(entries: &[(&str, &[&str])]) -> BTreeMap<String, WmKeyBinding> 
     }).collect()
 }
 
+/// Helper to construct a FullOverlay with entered_at = now.
+fn full_overlay(input: &str, selection: usize, window_count: usize) -> WmState {
+    WmState::FullOverlay {
+        input_buffer: input.into(),
+        selection,
+        window_count,
+        entered_at: Instant::now(),
+    }
+}
+
+/// Helper to construct a FullOverlay with a past entered_at.
+fn full_overlay_aged(input: &str, selection: usize, window_count: usize, age: Duration) -> WmState {
+    WmState::FullOverlay {
+        input_buffer: input.into(),
+        selection,
+        window_count,
+        entered_at: Instant::now() - age,
+    }
+}
+
 // ============================================================================
 // Hint Assignment
 // ============================================================================
@@ -119,7 +139,6 @@ fn app_hints_groups_by_app() {
     let result = assign_app_hints(&apps, "fgcasdjkl", &empty);
     assert_eq!(result.len(), 4);
 
-    // Firefox windows should get "f" and "ff".
     let ff_hints: Vec<&str> = result.iter()
         .filter(|(_, idx)| apps[*idx] == "firefox")
         .map(|(h, _)| h.as_str())
@@ -127,7 +146,6 @@ fn app_hints_groups_by_app() {
     assert!(ff_hints.contains(&"f"));
     assert!(ff_hints.contains(&"ff"));
 
-    // Ghostty should get "g".
     let g_hints: Vec<&str> = result.iter()
         .filter(|(_, idx)| apps[*idx] == "ghostty")
         .map(|(h, _)| h.as_str())
@@ -144,20 +162,13 @@ fn mru_file_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mru");
 
-    // Write state.
     std::fs::write(&path, "prev-window\ncurr-window").unwrap();
 
-    // Read and parse manually (testing parse logic, not file I/O).
     let contents = std::fs::read_to_string(&path).unwrap();
     let lines: Vec<&str> = contents.lines().collect();
     assert_eq!(lines[0], "prev-window");
     assert_eq!(lines[1], "curr-window");
 }
-
-// MRU file I/O tests (save/load/seed_if_empty/previous_window) live in
-// daemon-wm/src/mru.rs unit tests where they can use set_test_cache_dir()
-// for thread-safe temp directory isolation. Integration tests here only
-// cover the parse logic via direct file writes (mru_file_roundtrip above).
 
 // ============================================================================
 // State Machine
@@ -179,99 +190,78 @@ fn state_border_to_overlay_requires_frames_and_delay() {
         entered_at: Instant::now(),
         frame_count: 0,
     };
-
-    // Frame 1 with 0ms delay — not enough frames.
     let action = state.on_frame(0);
     assert_eq!(action, Action::None);
-
-    // Frame 2 with 0ms delay — transition.
     let action = state.on_frame(0);
     assert_eq!(action, Action::ShowOverlay);
 }
 
 #[test]
-fn state_fast_release_from_overlay_activates() {
+fn state_fast_release_quick_switches() {
     let mut state = WmState::new();
     state.on_activate();
     state.set_window_count(3);
-    // Release activates selection 0.
+    // Fast release with no interaction → QuickSwitch.
+    let action = state.on_modifier_release(250, 500);
+    assert_eq!(action, Action::QuickSwitch);
+    assert!(state.is_idle());
+}
+
+#[test]
+fn state_slow_release_activates() {
+    let mut state = full_overlay_aged("", 0, 3, Duration::from_millis(300));
     let action = state.on_modifier_release(250, 500);
     assert_eq!(action, Action::ActivateWindow(0));
     assert!(state.is_idle());
 }
 
 #[test]
-fn state_slow_release_forces_overlay() {
+fn state_slow_release_from_border_forces_overlay() {
     let mut state = WmState::BorderOnly {
         entered_at: Instant::now() - Duration::from_millis(200),
         frame_count: 0,
     };
-    // Release after overlay_delay_ms=150 has passed.
     let action = state.on_modifier_release(100, 150);
     assert_eq!(action, Action::ShowOverlay);
 }
 
 #[test]
 fn state_escape_returns_to_idle() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 0, 5);
     assert_eq!(state.on_escape(), Action::Dismiss);
     assert!(state.is_idle());
 }
 
 #[test]
 fn state_selection_wraps_down() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 4,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 4, 5);
     state.on_selection_down();
     assert_eq!(state.selection(), Some(0));
 }
 
 #[test]
 fn state_selection_wraps_up() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 0, 5);
     state.on_selection_up();
     assert_eq!(state.selection(), Some(4));
 }
 
 #[test]
 fn state_confirm_on_empty_is_noop() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 0,
-    };
+    let mut state = full_overlay("", 0, 0);
     assert_eq!(state.on_confirm(), Action::None);
 }
 
 #[test]
 fn state_confirm_activates_selection() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 2,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 2, 5);
     let action = state.on_confirm();
     assert_eq!(action, Action::ActivateWindow(2));
 }
 
 #[test]
 fn state_hint_match_transitions() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 0, 5);
     let action = state.on_hint_match(3);
     assert_eq!(action, Action::ActivateWindow(3));
     assert!(matches!(state, WmState::PendingActivation { target: 3, .. }));
@@ -292,11 +282,7 @@ fn state_backspace_from_pending_returns_to_overlay() {
 
 #[test]
 fn state_char_input_appends_to_buffer() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 3,
-    };
+    let mut state = full_overlay("", 0, 3);
     state.on_char('a');
     state.on_char('b');
     assert_eq!(state.input_buffer(), Some("ab"));
@@ -330,16 +316,12 @@ fn state_activation_not_yet_timed_out() {
 }
 
 // ============================================================================
-// TASK-01: Alt release in FullOverlay / PendingActivation
+// Alt release in FullOverlay / PendingActivation
 // ============================================================================
 
 #[test]
 fn state_alt_release_full_overlay_activates() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 2,
-        window_count: 5,
-    };
+    let mut state = full_overlay_aged("", 2, 5, Duration::from_millis(500));
     let action = state.on_modifier_release(250, 500);
     assert_eq!(action, Action::ActivateWindow(2));
     assert!(state.is_idle());
@@ -359,7 +341,7 @@ fn state_alt_release_pending_activates() {
 }
 
 // ============================================================================
-// TASK-02: Char in BorderOnly
+// Char in BorderOnly
 // ============================================================================
 
 #[test]
@@ -374,7 +356,7 @@ fn state_char_in_border_transitions_to_overlay() {
 }
 
 // ============================================================================
-// TASK-03: Tab in BorderOnly
+// Tab in BorderOnly
 // ============================================================================
 
 #[test]
@@ -401,7 +383,7 @@ fn state_shift_tab_in_border_transitions() {
 }
 
 // ============================================================================
-// TASK-06: Config-driven key_for_app
+// Config-driven key_for_app
 // ============================================================================
 
 #[test]
@@ -436,18 +418,16 @@ fn assign_app_hints_with_config_overrides() {
     let apps = vec!["firefox", "ghostty"];
     let result = assign_app_hints(&apps, "xgasdjkl", &bindings);
     let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
-    // firefox should get 'x' from config override
     assert!(hint_strs.contains(&"x"));
-    // ghostty falls back to auto 'g'
     assert!(hint_strs.contains(&"g"));
 }
 
 // ============================================================================
-// TASK-08: Launcher mode activation
+// Launcher mode activation
 // ============================================================================
 
 #[test]
-fn state_launcher_mode_skips_border() {
+fn state_launcher_mode_activates() {
     let mut state = WmState::new();
     let action = state.on_activate_launcher();
     assert_eq!(action, Action::ShowOverlay);
@@ -456,41 +436,31 @@ fn state_launcher_mode_skips_border() {
 
 #[test]
 fn state_launcher_mode_from_non_idle_cycles_selection() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 0, 5);
     assert_eq!(state.on_activate_launcher(), Action::Redraw);
     assert_eq!(state.selection(), Some(1));
 }
 
 // ============================================================================
-// TASK-16: Backspace from PendingActivation preserves input
+// Backspace from PendingActivation preserves input
 // ============================================================================
 
 #[test]
 fn backspace_from_pending_preserves_input_minus_last() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 5,
-    };
+    let mut state = full_overlay("", 0, 5);
     state.on_char('g');
     state.on_char('g');
     assert_eq!(state.input_buffer(), Some("gg"));
-    // Simulate hint match -> PendingActivation
     let action = state.on_hint_match(2);
     assert_eq!(action, Action::ActivateWindow(2));
     assert!(matches!(state, WmState::PendingActivation { .. }));
-    // Backspace should return to FullOverlay with "g" (input minus last char)
     let action = state.on_backspace();
     assert_eq!(action, Action::ShowOverlay);
     assert_eq!(state.input_buffer(), Some("g"));
 }
 
 // ============================================================================
-// TASK-17: Escape from PendingActivation
+// Escape from PendingActivation
 // ============================================================================
 
 #[test]
@@ -506,7 +476,7 @@ fn escape_from_pending_activation_dismisses() {
 }
 
 // ============================================================================
-// TASK-09: Launch-or-focus hints
+// Launch-or-focus hints
 // ============================================================================
 
 #[test]
@@ -598,77 +568,63 @@ fn wm_config_warns_on_extreme_delay() {
 // Keyboard navigation failure mode scenarios
 // ============================================================================
 
-/// Alt+Space repeated should cycle through windows (re-activation while visible).
+/// Alt+Space repeated should cycle through windows.
 #[test]
 fn scenario_alt_space_repeat_cycles() {
     let mut state = WmState::new();
-    // First activation: Idle → FullOverlay (launcher mode)
     let action = state.on_activate_launcher();
     assert_eq!(action, Action::ShowOverlay);
     state.set_window_count(4);
     assert_eq!(state.selection(), Some(0));
 
-    // Second press while overlay visible: cycles selection
     let action = state.on_activate_launcher();
     assert_eq!(action, Action::Redraw);
     assert_eq!(state.selection(), Some(1));
 
-    // Third press
     let action = state.on_activate_launcher();
     assert_eq!(action, Action::Redraw);
     assert_eq!(state.selection(), Some(2));
 
-    // Wraps around
     state.on_activate_launcher();
     state.on_activate_launcher();
     assert_eq!(state.selection(), Some(0));
 }
 
-/// Alt+Tab repeated should cycle selection in FullOverlay.
+/// Alt+Tab repeated should cycle selection.
 #[test]
 fn scenario_alt_tab_repeat_cycles() {
     let mut state = WmState::new();
-    // First: Idle → FullOverlay with selection=0
     assert_eq!(state.on_activate(), Action::ShowOverlay);
     state.set_window_count(3);
 
-    // Second: cycles to 1
     let action = state.on_activate();
     assert_eq!(action, Action::Redraw);
     assert_eq!(state.selection(), Some(1));
 
-    // Third: cycles to 2
     let action = state.on_activate();
     assert_eq!(action, Action::Redraw);
     assert_eq!(state.selection(), Some(2));
 
-    // Fourth: wraps to 0
     let action = state.on_activate();
     assert_eq!(action, Action::Redraw);
     assert_eq!(state.selection(), Some(0));
 }
 
-/// Quick alt+tab activates first window (selection 0).
+/// Quick alt+tab → QuickSwitch (no GUI).
 #[test]
-fn scenario_quick_alt_tab_activates_first() {
+fn scenario_quick_alt_tab_quick_switches() {
     let mut state = WmState::new();
     state.on_activate();
     state.set_window_count(3);
-    // Fast release activates selection 0
     let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::ActivateWindow(0));
+    assert_eq!(action, Action::QuickSwitch);
     assert!(state.is_idle());
 }
 
 /// Tab key repeats in FullOverlay should wrap correctly.
 #[test]
 fn scenario_tab_repeat_wraps() {
-    let mut state = WmState::FullOverlay {
-        input_buffer: String::new(),
-        selection: 0,
-        window_count: 3,
-    };
-    // Simulate rapid Tab presses
+    let mut state = full_overlay("", 0, 3);
     state.on_selection_down(); // 1
     state.on_selection_down(); // 2
     state.on_selection_down(); // 0 (wrapped)
@@ -687,7 +643,6 @@ fn scenario_alt_release_during_pending() {
     let action = state.on_hint_match(1);
     assert_eq!(action, Action::ActivateWindow(1));
     assert!(matches!(state, WmState::PendingActivation { target: 1, .. }));
-    // Alt release should finalize
     let action = state.on_modifier_release(250, 500);
     assert_eq!(action, Action::ActivateWindow(1));
     assert!(state.is_idle());
