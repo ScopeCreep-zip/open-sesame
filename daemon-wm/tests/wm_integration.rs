@@ -1,13 +1,13 @@
 //! Integration tests for daemon-wm modules.
 //!
-//! Tests hint assignment, hint matching, MRU state parsing, and state machine
-//! transitions. These tests do NOT require a running daemon or Wayland compositor.
+//! Tests hint assignment, hint matching, MRU state parsing, controller
+//! lifecycle, and config validation. These tests do NOT require a running
+//! daemon or Wayland compositor.
 
 use core_config::WmKeyBinding;
+use daemon_wm::controller::{Command, Event, OverlayController};
 use daemon_wm::hints::{assign_hints, assign_app_hints, match_input, MatchResult, auto_key_for_app, key_for_app};
-use daemon_wm::state::{WmState, Action};
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
 
 fn make_bindings(entries: &[(&str, &[&str])]) -> BTreeMap<String, WmKeyBinding> {
     entries.iter().map(|(k, apps)| {
@@ -18,24 +18,71 @@ fn make_bindings(entries: &[(&str, &[&str])]) -> BTreeMap<String, WmKeyBinding> 
     }).collect()
 }
 
-/// Helper to construct a FullOverlay with entered_at = now.
-fn full_overlay(input: &str, selection: usize, window_count: usize) -> WmState {
-    WmState::FullOverlay {
-        input_buffer: input.into(),
-        selection,
-        window_count,
-        entered_at: Instant::now(),
+fn test_config() -> core_config::WmConfig {
+    core_config::WmConfig {
+        quick_switch_threshold_ms: 250,
+        activation_delay_ms: 200,
+        max_visible_windows: 20,
+        hint_keys: "asdfghjkl".into(),
+        key_bindings: [
+            ("g", vec!["com.mitchellh.ghostty"], Some("ghostty")),
+            ("f", vec!["firefox"], Some("firefox")),
+            ("e", vec!["microsoft-edge"], Some("microsoft-edge")),
+        ]
+        .into_iter()
+        .map(|(k, apps, launch)| {
+            (
+                k.to_string(),
+                WmKeyBinding {
+                    apps: apps.into_iter().map(String::from).collect(),
+                    launch: launch.map(String::from),
+                },
+            )
+        })
+        .collect(),
+        ..Default::default()
     }
 }
 
-/// Helper to construct a FullOverlay with a past entered_at.
-fn full_overlay_aged(input: &str, selection: usize, window_count: usize, age: Duration) -> WmState {
-    WmState::FullOverlay {
-        input_buffer: input.into(),
-        selection,
-        window_count,
-        entered_at: Instant::now() - age,
-    }
+fn test_windows() -> Vec<core_types::Window> {
+    vec![
+        core_types::Window {
+            id: core_types::WindowId::new(),
+            app_id: core_types::AppId::new("com.mitchellh.ghostty"),
+            title: "Terminal".into(),
+            workspace_id: core_types::WorkspaceId::new(),
+            monitor_id: core_types::MonitorId::new(),
+            geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+            is_focused: true,
+            is_minimized: false,
+            is_fullscreen: false,
+            profile_id: core_types::ProfileId::new(),
+        },
+        core_types::Window {
+            id: core_types::WindowId::new(),
+            app_id: core_types::AppId::new("firefox"),
+            title: "Firefox".into(),
+            workspace_id: core_types::WorkspaceId::new(),
+            monitor_id: core_types::MonitorId::new(),
+            geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+            is_focused: false,
+            is_minimized: false,
+            is_fullscreen: false,
+            profile_id: core_types::ProfileId::new(),
+        },
+        core_types::Window {
+            id: core_types::WindowId::new(),
+            app_id: core_types::AppId::new("microsoft-edge"),
+            title: "Edge".into(),
+            workspace_id: core_types::WorkspaceId::new(),
+            monitor_id: core_types::MonitorId::new(),
+            geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+            is_focused: false,
+            is_minimized: false,
+            is_fullscreen: false,
+            profile_id: core_types::ProfileId::new(),
+        },
+    ]
 }
 
 // ============================================================================
@@ -171,215 +218,208 @@ fn mru_file_roundtrip() {
 }
 
 // ============================================================================
-// State Machine
+// Controller: Forward Activation
 // ============================================================================
 
 #[test]
-fn state_idle_to_full_overlay() {
-    let mut state = WmState::new();
-    assert!(state.is_idle());
-    let action = state.on_activate();
-    assert_eq!(action, Action::ShowOverlay);
-    assert!(state.is_overlay_visible());
-    assert!(matches!(state, WmState::FullOverlay { selection: 0, .. }));
+fn controller_activate_emits_show_border() {
+    let mut ctrl = OverlayController::new();
+    let cmds = ctrl.handle(Event::Activate, &test_windows(), &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+    assert!(!ctrl.is_idle());
+    assert!(ctrl.next_deadline().is_some());
 }
 
 #[test]
-fn state_border_to_overlay_requires_frames_and_delay() {
-    let mut state = WmState::BorderOnly {
-        entered_at: Instant::now(),
-        frame_count: 0,
-    };
-    let action = state.on_frame(0);
-    assert_eq!(action, Action::None);
-    let action = state.on_frame(0);
-    assert_eq!(action, Action::ShowOverlay);
+fn controller_fast_release_quick_switches() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::HideAndSync)));
+    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(ctrl.is_idle());
 }
 
 #[test]
-fn state_fast_release_quick_switches() {
-    let mut state = WmState::new();
-    state.on_activate();
-    state.set_window_count(3);
-    // Fast release with no interaction → QuickSwitch.
-    let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::QuickSwitch);
-    assert!(state.is_idle());
-}
-
-#[test]
-fn state_slow_release_activates() {
-    let mut state = full_overlay_aged("", 0, 3, Duration::from_millis(300));
-    let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::ActivateWindow(0));
-    assert!(state.is_idle());
-}
-
-#[test]
-fn state_slow_release_from_border_forces_overlay() {
-    let mut state = WmState::BorderOnly {
-        entered_at: Instant::now() - Duration::from_millis(200),
-        frame_count: 0,
-    };
-    let action = state.on_modifier_release(100, 150);
-    assert_eq!(action, Action::ShowOverlay);
-}
-
-#[test]
-fn state_escape_returns_to_idle() {
-    let mut state = full_overlay("", 0, 5);
-    assert_eq!(state.on_escape(), Action::Dismiss);
-    assert!(state.is_idle());
-}
-
-#[test]
-fn state_selection_wraps_down() {
-    let mut state = full_overlay("", 4, 5);
-    state.on_selection_down();
-    assert_eq!(state.selection(), Some(0));
-}
-
-#[test]
-fn state_selection_wraps_up() {
-    let mut state = full_overlay("", 0, 5);
-    state.on_selection_up();
-    assert_eq!(state.selection(), Some(4));
-}
-
-#[test]
-fn state_confirm_on_empty_is_noop() {
-    let mut state = full_overlay("", 0, 0);
-    assert_eq!(state.on_confirm(), Action::None);
-}
-
-#[test]
-fn state_confirm_activates_selection() {
-    let mut state = full_overlay("", 2, 5);
-    let action = state.on_confirm();
-    assert_eq!(action, Action::ActivateWindow(2));
-}
-
-#[test]
-fn state_hint_match_transitions() {
-    let mut state = full_overlay("", 0, 5);
-    let action = state.on_hint_match(3);
-    assert_eq!(action, Action::ActivateWindow(3));
-    assert!(matches!(state, WmState::PendingActivation { target: 3, .. }));
-}
-
-#[test]
-fn state_backspace_from_pending_returns_to_overlay() {
-    let mut state = WmState::PendingActivation {
-        target: 0,
-        pending_key: None,
-        entered_at: Instant::now(),
-        input_buffer: String::new(),
-    };
-    let action = state.on_backspace();
-    assert_eq!(action, Action::ShowOverlay);
-    assert!(matches!(state, WmState::FullOverlay { .. }));
-}
-
-#[test]
-fn state_char_input_appends_to_buffer() {
-    let mut state = full_overlay("", 0, 3);
-    state.on_char('a');
-    state.on_char('b');
-    assert_eq!(state.input_buffer(), Some("ab"));
-    state.on_backspace();
-    assert_eq!(state.input_buffer(), Some("a"));
-}
-
-#[test]
-fn state_activation_timeout() {
-    let mut state = WmState::PendingActivation {
-        target: 2,
-        pending_key: None,
-        entered_at: Instant::now() - Duration::from_millis(300),
-        input_buffer: String::new(),
-    };
-    let action = state.check_activation_timeout(200);
-    assert_eq!(action, Action::ActivateWindow(2));
-    assert!(state.is_idle());
-}
-
-#[test]
-fn state_activation_not_yet_timed_out() {
-    let mut state = WmState::PendingActivation {
-        target: 2,
-        pending_key: None,
-        entered_at: Instant::now(),
-        input_buffer: String::new(),
-    };
-    let action = state.check_activation_timeout(5000);
-    assert_eq!(action, Action::None);
+fn controller_fast_release_no_windows_dismisses() {
+    let mut ctrl = OverlayController::new();
+    ctrl.handle(Event::Activate, &[], &test_config());
+    let cmds = ctrl.handle(Event::ModifierReleased, &[], &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::Hide)));
+    assert!(ctrl.is_idle());
 }
 
 // ============================================================================
-// Alt release in FullOverlay / PendingActivation
+// Controller: Backward Activation
 // ============================================================================
 
 #[test]
-fn state_alt_release_full_overlay_activates() {
-    let mut state = full_overlay_aged("", 2, 5, Duration::from_millis(500));
-    let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::ActivateWindow(2));
-    assert!(state.is_idle());
+fn controller_backward_emits_show_border() {
+    let mut ctrl = OverlayController::new();
+    let cmds = ctrl.handle(Event::ActivateBackward, &test_windows(), &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+    assert!(!ctrl.is_idle());
 }
 
 #[test]
-fn state_alt_release_pending_activates() {
-    let mut state = WmState::PendingActivation {
-        target: 1,
-        pending_key: None,
-        entered_at: Instant::now(),
-        input_buffer: String::new(),
-    };
-    let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::ActivateWindow(1));
-    assert!(state.is_idle());
+fn controller_backward_fast_release_activates() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::ActivateBackward, &windows, &test_config());
+    // Selection != 0, so release always activates (no quick-switch).
+    let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(ctrl.is_idle());
 }
 
 // ============================================================================
-// Char in BorderOnly
+// Controller: Launcher Activation
 // ============================================================================
 
 #[test]
-fn state_char_in_border_transitions_to_overlay() {
-    let mut state = WmState::BorderOnly {
-        entered_at: Instant::now(),
-        frame_count: 0,
-    };
-    let action = state.on_char('g');
-    assert_eq!(action, Action::ShowOverlay);
-    assert_eq!(state.input_buffer(), Some("g"));
-}
-
-// ============================================================================
-// Tab in BorderOnly
-// ============================================================================
-
-#[test]
-fn state_tab_in_border_transitions_to_overlay() {
-    let mut state = WmState::BorderOnly {
-        entered_at: Instant::now(),
-        frame_count: 0,
-    };
-    let action = state.on_selection_down();
-    assert_eq!(action, Action::ShowOverlay);
-    assert_eq!(state.selection(), Some(1));
+fn controller_launcher_skips_armed() {
+    let mut ctrl = OverlayController::new();
+    let cmds = ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
+    // No dwell deadline — already in Picking.
+    assert!(ctrl.next_deadline().is_none());
 }
 
 #[test]
-fn state_shift_tab_in_border_transitions() {
-    let mut state = WmState::BorderOnly {
-        entered_at: Instant::now(),
-        frame_count: 0,
-    };
-    let action = state.on_selection_up();
-    assert_eq!(action, Action::ShowOverlay);
-    state.set_window_count(5);
-    assert_eq!(state.selection(), Some(4));
+fn controller_launcher_release_activates() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+    ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(ctrl.is_idle());
+}
+
+// ============================================================================
+// Controller: Dwell Timeout
+// ============================================================================
+
+#[test]
+fn controller_dwell_timeout_shows_picker() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    let cmds = ctrl.handle(Event::DwellTimeout, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
+    assert!(!ctrl.is_idle());
+}
+
+// ============================================================================
+// Controller: Char Input
+// ============================================================================
+
+#[test]
+fn controller_char_launches_app_when_no_window() {
+    let mut ctrl = OverlayController::new();
+    let windows = vec![test_windows()[0].clone()]; // only ghostty
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command } if command == "microsoft-edge")));
+    assert!(ctrl.is_idle());
+}
+
+#[test]
+fn controller_char_activates_on_exact_hint() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(ctrl.is_idle());
+}
+
+// ============================================================================
+// Controller: Navigation
+// ============================================================================
+
+#[test]
+fn controller_tab_in_armed_shows_picker() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    let cmds = ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
+}
+
+#[test]
+fn controller_selection_cycles_in_picking() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    ctrl.handle(Event::DwellTimeout, &windows, &test_config());
+    let cmds = ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. })));
+}
+
+// ============================================================================
+// Controller: Escape
+// ============================================================================
+
+#[test]
+fn controller_escape_from_armed_dismisses() {
+    let mut ctrl = OverlayController::new();
+    ctrl.handle(Event::Activate, &test_windows(), &test_config());
+    let cmds = ctrl.handle(Event::Escape, &test_windows(), &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::Hide)));
+    assert!(ctrl.is_idle());
+}
+
+#[test]
+fn controller_escape_from_idle_is_noop() {
+    let mut ctrl = OverlayController::new();
+    let cmds = ctrl.handle(Event::Escape, &[], &test_config());
+    assert!(cmds.is_empty());
+}
+
+// ============================================================================
+// Controller: Confirm
+// ============================================================================
+
+#[test]
+fn controller_confirm_in_picking_activates() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    ctrl.handle(Event::DwellTimeout, &windows, &test_config());
+    let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(ctrl.is_idle());
+}
+
+// ============================================================================
+// Controller: Re-activation cycles
+// ============================================================================
+
+#[test]
+fn controller_reactivate_in_picking_cycles_and_updates() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+    let cmds = ctrl.handle(Event::Activate, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. })));
+}
+
+// ============================================================================
+// Controller: Release after interaction
+// ============================================================================
+
+#[test]
+fn controller_release_after_tab_activates_selection() {
+    let mut ctrl = OverlayController::new();
+    let windows = test_windows();
+    ctrl.handle(Event::Activate, &windows, &test_config());
+    ctrl.handle(Event::DwellTimeout, &windows, &test_config());
+    ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    ctrl.handle(Event::SelectionDown, &windows, &test_config());
+    let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
 }
 
 // ============================================================================
@@ -420,59 +460,6 @@ fn assign_app_hints_with_config_overrides() {
     let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
     assert!(hint_strs.contains(&"x"));
     assert!(hint_strs.contains(&"g"));
-}
-
-// ============================================================================
-// Launcher mode activation
-// ============================================================================
-
-#[test]
-fn state_launcher_mode_activates() {
-    let mut state = WmState::new();
-    let action = state.on_activate_launcher();
-    assert_eq!(action, Action::ShowOverlay);
-    assert!(matches!(state, WmState::FullOverlay { .. }));
-}
-
-#[test]
-fn state_launcher_mode_from_non_idle_cycles_selection() {
-    let mut state = full_overlay("", 0, 5);
-    assert_eq!(state.on_activate_launcher(), Action::Redraw);
-    assert_eq!(state.selection(), Some(1));
-}
-
-// ============================================================================
-// Backspace from PendingActivation preserves input
-// ============================================================================
-
-#[test]
-fn backspace_from_pending_preserves_input_minus_last() {
-    let mut state = full_overlay("", 0, 5);
-    state.on_char('g');
-    state.on_char('g');
-    assert_eq!(state.input_buffer(), Some("gg"));
-    let action = state.on_hint_match(2);
-    assert_eq!(action, Action::ActivateWindow(2));
-    assert!(matches!(state, WmState::PendingActivation { .. }));
-    let action = state.on_backspace();
-    assert_eq!(action, Action::ShowOverlay);
-    assert_eq!(state.input_buffer(), Some("g"));
-}
-
-// ============================================================================
-// Escape from PendingActivation
-// ============================================================================
-
-#[test]
-fn escape_from_pending_activation_dismisses() {
-    let mut state = WmState::PendingActivation {
-        target: 2,
-        pending_key: None,
-        entered_at: Instant::now(),
-        input_buffer: String::new(),
-    };
-    assert_eq!(state.on_escape(), Action::Dismiss);
-    assert!(state.is_idle());
 }
 
 // ============================================================================
@@ -562,88 +549,4 @@ fn wm_config_warns_on_extreme_delay() {
         }),
         "expected warning for extreme delay: {diagnostics:?}"
     );
-}
-
-// ============================================================================
-// Keyboard navigation failure mode scenarios
-// ============================================================================
-
-/// Alt+Space repeated should cycle through windows.
-#[test]
-fn scenario_alt_space_repeat_cycles() {
-    let mut state = WmState::new();
-    let action = state.on_activate_launcher();
-    assert_eq!(action, Action::ShowOverlay);
-    state.set_window_count(4);
-    assert_eq!(state.selection(), Some(0));
-
-    let action = state.on_activate_launcher();
-    assert_eq!(action, Action::Redraw);
-    assert_eq!(state.selection(), Some(1));
-
-    let action = state.on_activate_launcher();
-    assert_eq!(action, Action::Redraw);
-    assert_eq!(state.selection(), Some(2));
-
-    state.on_activate_launcher();
-    state.on_activate_launcher();
-    assert_eq!(state.selection(), Some(0));
-}
-
-/// Alt+Tab repeated should cycle selection.
-#[test]
-fn scenario_alt_tab_repeat_cycles() {
-    let mut state = WmState::new();
-    assert_eq!(state.on_activate(), Action::ShowOverlay);
-    state.set_window_count(3);
-
-    let action = state.on_activate();
-    assert_eq!(action, Action::Redraw);
-    assert_eq!(state.selection(), Some(1));
-
-    let action = state.on_activate();
-    assert_eq!(action, Action::Redraw);
-    assert_eq!(state.selection(), Some(2));
-
-    let action = state.on_activate();
-    assert_eq!(action, Action::Redraw);
-    assert_eq!(state.selection(), Some(0));
-}
-
-/// Quick alt+tab → QuickSwitch (no GUI).
-#[test]
-fn scenario_quick_alt_tab_quick_switches() {
-    let mut state = WmState::new();
-    state.on_activate();
-    state.set_window_count(3);
-    let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::QuickSwitch);
-    assert!(state.is_idle());
-}
-
-/// Tab key repeats in FullOverlay should wrap correctly.
-#[test]
-fn scenario_tab_repeat_wraps() {
-    let mut state = full_overlay("", 0, 3);
-    state.on_selection_down(); // 1
-    state.on_selection_down(); // 2
-    state.on_selection_down(); // 0 (wrapped)
-    assert_eq!(state.selection(), Some(0));
-    state.on_selection_down(); // 1
-    assert_eq!(state.selection(), Some(1));
-}
-
-/// Alt release in PendingActivation should still activate target.
-#[test]
-fn scenario_alt_release_during_pending() {
-    let mut state = WmState::new();
-    state.on_activate_launcher();
-    state.set_window_count(3);
-    state.on_char('g');
-    let action = state.on_hint_match(1);
-    assert_eq!(action, Action::ActivateWindow(1));
-    assert!(matches!(state, WmState::PendingActivation { target: 1, .. }));
-    let action = state.on_modifier_release(250, 500);
-    assert_eq!(action, Action::ActivateWindow(1));
-    assert!(state.is_idle());
 }
