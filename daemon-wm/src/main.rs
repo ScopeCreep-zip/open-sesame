@@ -211,6 +211,11 @@ async fn main() -> anyhow::Result<()> {
     let mut border_tick: Option<tokio::time::Interval> = None;
     // PendingActivation timeout timer.
     let mut activation_tick: Option<tokio::time::Interval> = None;
+    // Deferred overlay display timer: waits for quick_switch_threshold before
+    // showing the overlay, so fast alt+tab can quick-switch without any GUI.
+    let mut display_tick: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+    // Pre-computed overlay data waiting for display_tick to fire.
+    let mut pending_display: Option<(Vec<WindowInfo>, Vec<String>)> = None;
 
     // Platform readiness.
     #[cfg(target_os = "linux")]
@@ -248,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
                     #[cfg(target_os = "linux")] &backend,
                     &mut client,
                     &mut border_tick, &mut activation_tick,
+                    &mut display_tick, &mut pending_display,
                 ).await;
             }
 
@@ -270,7 +276,39 @@ async fn main() -> anyhow::Result<()> {
                     #[cfg(target_os = "linux")] &backend,
                     &mut client,
                     &mut border_tick, &mut activation_tick,
+                    &mut display_tick, &mut pending_display,
                 ).await;
+            }
+
+            // Deferred overlay display: show border + full overlay after
+            // quick_switch_threshold so fast alt+tab can switch without GUI.
+            Some(()) = async {
+                if let Some(ref mut sleep) = display_tick {
+                    sleep.await;
+                    Some(())
+                } else {
+                    std::future::pending::<Option<()>>().await
+                }
+            } => {
+                display_tick = None;
+                if let Some((overlay_windows, hint_strings)) = pending_display.take() {
+                    let send_overlay = |cmd: OverlayCmd| -> bool {
+                        if overlay_cmd_tx.send(cmd).is_err() {
+                            tracing::error!("overlay thread has exited unexpectedly");
+                            false
+                        } else {
+                            true
+                        }
+                    };
+                    send_overlay(OverlayCmd::ShowBorder);
+                    if !send_overlay(OverlayCmd::ShowFull {
+                        windows: overlay_windows,
+                        hints: hint_strings,
+                    }) {
+                        wm_state = WmState::Idle;
+                    }
+                    client.publish(EventKind::WmOverlayShown, SecurityLevel::Internal).await.ok();
+                }
             }
 
             // Overlay keyboard events.
@@ -292,6 +330,7 @@ async fn main() -> anyhow::Result<()> {
                                     #[cfg(target_os = "linux")] &backend,
                                     &mut client,
                                     &mut border_tick, &mut activation_tick,
+                                    &mut display_tick, &mut pending_display,
                                 ).await;
                                 // Now check for hint match with populated hints.
                                 if let Some(input) = wm_state.input_buffer() {
@@ -306,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
                                         #[cfg(target_os = "linux")] &backend,
                                         &mut client,
                                         &mut border_tick, &mut activation_tick,
+                                        &mut display_tick, &mut pending_display,
                                     ).await;
                                 }
                                 continue;
@@ -352,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
                     #[cfg(target_os = "linux")] &backend,
                     &mut client,
                     &mut border_tick, &mut activation_tick,
+                    &mut display_tick, &mut pending_display,
                 ).await;
             }
 
@@ -409,6 +450,7 @@ async fn main() -> anyhow::Result<()> {
                             #[cfg(target_os = "linux")] &backend,
                             &mut client,
                             &mut border_tick, &mut activation_tick,
+                            &mut display_tick, &mut pending_display,
                         ).await;
                         None // WmOverlayShown published by handle_action
                     }
@@ -423,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
                             #[cfg(target_os = "linux")] &backend,
                             &mut client,
                             &mut border_tick, &mut activation_tick,
+                            &mut display_tick, &mut pending_display,
                         ).await;
                         None
                     }
@@ -437,6 +480,7 @@ async fn main() -> anyhow::Result<()> {
                             #[cfg(target_os = "linux")] &backend,
                             &mut client,
                             &mut border_tick, &mut activation_tick,
+                            &mut display_tick, &mut pending_display,
                         ).await;
                         None
                     }
@@ -550,6 +594,8 @@ async fn handle_action(
     client: &mut BusClient,
     border_tick: &mut Option<tokio::time::Interval>,
     activation_tick: &mut Option<tokio::time::Interval>,
+    display_tick: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    pending_display: &mut Option<(Vec<WindowInfo>, Vec<String>)>,
 ) {
     // TASK-12: Detect overlay thread crash on channel send failure.
     let send_overlay = |cmd: OverlayCmd| -> bool {
@@ -580,11 +626,6 @@ async fn handle_action(
             // Stop border tick, we're now in full overlay.
             *border_tick = None;
 
-            // Send border frame immediately as a non-blocking visual hint
-            // while we prepare the full window list. The state machine is
-            // already in FullOverlay so keyboard exclusivity is held.
-            send_overlay(OverlayCmd::ShowBorder);
-
             let cfg = wm_config.lock().await;
             let mut win_list = windows.lock().await.clone();
 
@@ -606,10 +647,10 @@ async fn handle_action(
                 window_count = win_list.len(),
                 hints = ?hint_strings,
                 apps = ?app_ids,
-                "overlay showing full window list"
+                "overlay pre-computed, deferring display"
             );
 
-            // Store for hint matching.
+            // Store for hint matching (available immediately for keyboard events).
             *current_hints = hint_strings.clone();
             *current_windows = win_list.clone();
 
@@ -617,20 +658,20 @@ async fn handle_action(
                 app_id: w.app_id.to_string(),
                 title: w.title.clone(),
             }).collect();
-            if !send_overlay(OverlayCmd::ShowFull {
-                windows: overlay_windows,
-                hints: hint_strings,
-            }) {
-                *wm_state = WmState::Idle;
-            }
+
+            // Defer visual display until after quick_switch_threshold.
+            // If the user releases Alt before this fires, QuickSwitch
+            // handles it without any GUI flash.
+            let threshold = cfg.quick_switch_threshold_ms;
+            *pending_display = Some((overlay_windows, hint_strings));
+            *display_tick = Some(Box::pin(
+                tokio::time::sleep(std::time::Duration::from_millis(threshold as u64)),
+            ));
         }
 
         Action::ActivateWindow(idx) => {
-            // Hide overlay and wait for Wayland roundtrip confirmation BEFORE
-            // activating the target window. The overlay holds a layer-shell
-            // surface with KeyboardMode::Exclusive; cosmic-comp's
-            // exclusive_layer_surface_layer() rejects toplevel focus while it
-            // exists, causing a connection teardown.
+            *display_tick = None;
+            *pending_display = None;
             *wm_state = WmState::Idle;
             send_overlay(OverlayCmd::HideAndSync);
             *border_tick = None;
@@ -670,7 +711,8 @@ async fn handle_action(
         }
 
         Action::QuickSwitch => {
-            // Hide overlay and wait for Wayland roundtrip — same as ActivateWindow.
+            *display_tick = None;
+            *pending_display = None;
             *wm_state = WmState::Idle;
             send_overlay(OverlayCmd::HideAndSync);
             *border_tick = None;
@@ -726,6 +768,8 @@ async fn handle_action(
         }
 
         Action::Dismiss => {
+            *display_tick = None;
+            *pending_display = None;
             *wm_state = WmState::Idle;
 
             send_overlay(OverlayCmd::Hide);
@@ -739,6 +783,17 @@ async fn handle_action(
         }
 
         Action::Redraw => {
+            // User interacted — if overlay display was deferred, show it now.
+            if let Some((overlay_windows, hint_strings)) = pending_display.take() {
+                *display_tick = None;
+                send_overlay(OverlayCmd::ShowBorder);
+                send_overlay(OverlayCmd::ShowFull {
+                    windows: overlay_windows,
+                    hints: hint_strings,
+                });
+                client.publish(EventKind::WmOverlayShown, SecurityLevel::Internal).await.ok();
+            }
+
             // Send updated input/selection to overlay for redraw.
             let input = wm_state.input_buffer().unwrap_or("").to_string();
             let selection = wm_state.selection().unwrap_or(0);
@@ -753,7 +808,8 @@ async fn handle_action(
         Action::LaunchApp(cmd) => {
             tracing::info!(command = %cmd, "launch-or-focus: launching app");
 
-            // Hide overlay and reset to idle.
+            *display_tick = None;
+            *pending_display = None;
             *wm_state = WmState::Idle;
             send_overlay(OverlayCmd::Hide);
             *border_tick = None;
