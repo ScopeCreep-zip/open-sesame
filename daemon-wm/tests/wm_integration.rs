@@ -14,6 +14,7 @@ fn make_bindings(entries: &[(&str, &[&str])]) -> BTreeMap<String, WmKeyBinding> 
         (k.to_string(), WmKeyBinding {
             apps: apps.iter().map(|s| s.to_string()).collect(),
             launch: None,
+            tags: Vec::new(),
         })
     }).collect()
 }
@@ -36,6 +37,7 @@ fn test_config() -> core_config::WmConfig {
                 WmKeyBinding {
                     apps: apps.into_iter().map(String::from).collect(),
                     launch: launch.map(String::from),
+                    tags: Vec::new(),
                 },
             )
         })
@@ -332,7 +334,7 @@ fn controller_char_launches_app_when_no_window() {
     let windows = vec![test_windows()[0].clone()]; // only ghostty
     ctrl.handle(Event::Activate, &windows, &test_config());
     let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command } if command == "microsoft-edge")));
+    assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")));
     assert!(ctrl.is_idle());
 }
 
@@ -484,6 +486,7 @@ fn launch_for_key_returns_command() {
     bindings.insert("g".to_string(), WmKeyBinding {
         apps: vec!["ghostty".to_string()],
         launch: Some("ghostty".to_string()),
+        tags: Vec::new(),
     });
     assert_eq!(launch_for_key('g', &bindings), Some("ghostty"));
     assert_eq!(launch_for_key('z', &bindings), None);

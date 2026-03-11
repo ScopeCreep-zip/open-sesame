@@ -150,6 +150,16 @@ pub fn launch_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) 
     key_bindings.get(&key_str).and_then(|b| b.launch.as_deref())
 }
 
+/// Look up the launch profile tags for a key character.
+#[must_use]
+pub fn tags_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) -> Vec<String> {
+    let key_str = key.to_lowercase().to_string();
+    key_bindings
+        .get(&key_str)
+        .map(|b| b.tags.clone())
+        .unwrap_or_default()
+}
+
 /// Assign hints to windows grouped by app, using configured key mappings.
 ///
 /// Hint key priority:
@@ -275,6 +285,7 @@ mod tests {
         bindings.insert("f".to_string(), WmKeyBinding {
             apps: vec!["app-f".into()],
             launch: Some("app-f".into()),
+            tags: Vec::new(),
         });
         assert_eq!(launch_for_key('f', &bindings), Some("app-f"));
         assert_eq!(launch_for_key('F', &bindings), Some("app-f"));
@@ -289,5 +300,36 @@ mod tests {
         assert!(hint_strs.contains(&"v"), "vivaldi should get 'v'");
         assert!(hint_strs.contains(&"g"), "ghostty should get 'g'");
         assert!(hint_strs.contains(&"m"), "microsoft-edge should get 'm'");
+    }
+
+    #[test]
+    fn tags_for_key_found() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert("g".to_string(), WmKeyBinding {
+            apps: vec!["ghostty".into()],
+            launch: Some("ghostty".into()),
+            tags: vec!["dev-rust".into(), "ai-tools".into()],
+        });
+        let tags = tags_for_key('g', &bindings);
+        assert_eq!(tags, vec!["dev-rust", "ai-tools"]);
+    }
+
+    #[test]
+    fn tags_for_key_not_found() {
+        let bindings = BTreeMap::new();
+        let tags = tags_for_key('z', &bindings);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn tags_for_key_no_tags_on_binding() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert("f".to_string(), WmKeyBinding {
+            apps: vec!["firefox".into()],
+            launch: Some("firefox".into()),
+            tags: Vec::new(),
+        });
+        let tags = tags_for_key('f', &bindings);
+        assert!(tags.is_empty());
     }
 }

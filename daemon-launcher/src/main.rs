@@ -169,14 +169,14 @@ async fn main() -> anyhow::Result<()> {
                         })
                     }
 
-                    EventKind::LaunchExecute { entry_id, profile } => {
+                    EventKind::LaunchExecute { entry_id, profile, tags } => {
                         // Record the launch for frecency.
                         if let Err(e) = engine.record_launch(entry_id) {
                             tracing::warn!(entry_id, error = %e, "frecency record failed");
                         }
 
                         // Look up the Exec line from the pre-sandbox cache.
-                        match launch_entry(entry_id, profile.as_ref().map(|p| p.as_ref()), &entry_cache) {
+                        match launch_entry(entry_id, profile.as_ref().map(|p| p.as_ref()), tags, &entry_cache, &client).await {
                             Ok(pid) => Some(EventKind::LaunchExecuteResponse { pid, error: None }),
                             Err(e) => {
                                 tracing::error!(entry_id, error = %e, "launch failed");
@@ -383,10 +383,16 @@ fn resolve_entry<'a>(
 /// strips field codes, and spawns the process.
 /// If `profile` is provided, `SESAME_PROFILE` is injected into the child environment
 /// so the launched application (or sesame SDK) can request profile-scoped secrets.
-fn launch_entry(
+///
+/// Launch profile `tags` are resolved to compose environment variables, secrets,
+/// and optional devshell wrapping. Tags support qualified cross-profile references
+/// (`"work:corp"` resolves `corp` in the `work` trust profile).
+async fn launch_entry(
     entry_id: &str,
     profile: Option<&str>,
+    tags: &[String],
     cache: &HashMap<String, scanner::CachedEntry>,
+    client: &BusClient,
 ) -> anyhow::Result<u32> {
     let cached = resolve_entry(entry_id, cache)
         .ok_or_else(|| anyhow::anyhow!("desktop entry '{entry_id}' not found in {} cached entries", cache.len()))?;
@@ -397,20 +403,141 @@ fn launch_entry(
         anyhow::bail!("empty Exec line for '{entry_id}'");
     }
 
-    let mut cmd = std::process::Command::new(&parts[0]);
-    cmd.args(&parts[1..])
+    // Resolve launch profiles from config
+    let default_profile = profile.unwrap_or("default");
+    let config = core_config::load_config(None).unwrap_or_default();
+
+    let mut composed_env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut all_secrets: Vec<(String, String)> = Vec::new(); // (secret_name, trust_profile_name)
+    let mut devshell: Option<String> = None;
+
+    if !tags.is_empty() {
+        for tag in tags {
+            let (tp_name, lp_name) = parse_tag(tag, default_profile);
+
+            let tp = config.profiles.get(&tp_name).ok_or_else(|| {
+                anyhow::anyhow!("trust profile '{tp_name}' not found in config")
+            })?;
+
+            let lp = tp.launch_profiles.get(&lp_name).ok_or_else(|| {
+                anyhow::anyhow!("launch profile '{lp_name}' not found in profile '{tp_name}'")
+            })?;
+
+            // Merge env (later tag wins on conflict)
+            for (k, v) in &lp.env {
+                composed_env.insert(k.clone(), v.clone());
+            }
+
+            // Last devshell wins
+            if lp.devshell.is_some() {
+                devshell.clone_from(&lp.devshell);
+            }
+
+            // Collect secrets with their owning trust profile
+            for secret in &lp.secrets {
+                if !all_secrets.iter().any(|(s, _)| s == secret) {
+                    all_secrets.push((secret.clone(), tp_name.clone()));
+                }
+            }
+        }
+    }
+
+    // Fetch secrets via IPC (all-or-nothing)
+    for (secret_name, tp_name) in &all_secrets {
+        let tp = core_types::TrustProfileName::try_from(tp_name.as_str())
+            .map_err(|e| anyhow::anyhow!("invalid trust profile name: {e}"))?;
+
+        let response = client.request(
+            EventKind::SecretGet {
+                profile: tp,
+                key: secret_name.clone(),
+            },
+            SecurityLevel::Internal,
+            std::time::Duration::from_secs(5),
+        ).await.map_err(|e| {
+            tracing::error!(error = %e, "secret fetch IPC failed");
+            anyhow::anyhow!("failed to fetch a required secret — launch aborted")
+        })?;
+
+        match response.payload {
+            EventKind::SecretGetResponse { key: _, value, denial } => {
+                if let Some(reason) = denial {
+                    tracing::error!(secret = %secret_name, ?reason, "secret fetch denied");
+                    anyhow::bail!("a required secret is unavailable — launch aborted");
+                }
+                let env_var = secret_name_to_env_var(secret_name);
+                let secret_str = String::from_utf8(value.as_bytes().to_vec())
+                    .context("secret value is not valid UTF-8")?;
+                composed_env.insert(env_var, secret_str);
+            }
+            other => {
+                tracing::error!(?other, "unexpected response to SecretGet");
+                anyhow::bail!("failed to fetch a required secret — launch aborted");
+            }
+        }
+    }
+
+    // Build command — wrap in devshell if configured
+    let (program, args) = if let Some(ref ds) = devshell {
+        let mut nix_args = vec![
+            "develop".to_string(),
+            ds.clone(),
+            "-c".to_string(),
+        ];
+        nix_args.extend(parts.iter().cloned());
+        ("nix".to_string(), nix_args)
+    } else {
+        (parts[0].clone(), parts[1..].to_vec())
+    };
+
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    if let Some(p) = profile {
-        cmd.env("SESAME_PROFILE", p);
+    // Inject composed env vars from launch profiles
+    for (k, v) in &composed_env {
+        cmd.env(k, v);
+    }
+
+    // Inject default SESAME_ vars (after composed env, cannot be overridden)
+    cmd.env("SESAME_PROFILE", default_profile);
+    cmd.env("SESAME_APP_ID", &cached.id);
+    if let Ok(sock) = core_ipc::socket_path() {
+        cmd.env("SESAME_SOCKET", sock.to_string_lossy().as_ref());
     }
 
     let child = cmd.spawn()
         .context("failed to spawn process")?;
 
+    tracing::info!(
+        entry_id,
+        pid = child.id(),
+        ?tags,
+        ?devshell,
+        env_count = composed_env.len(),
+        secret_count = all_secrets.len(),
+        "launched with profiles"
+    );
+
     Ok(child.id())
+}
+
+/// Parse a tag into (profile_name, launch_profile_name).
+/// Unqualified: `"dev-rust"` → (default_profile, "dev-rust").
+/// Qualified: `"work:corp"` → ("work", "corp").
+fn parse_tag<'a>(tag: &'a str, default_profile: &'a str) -> (String, String) {
+    match tag.split_once(':') {
+        Some((profile, name)) => (profile.to_string(), name.to_string()),
+        None => (default_profile.to_string(), tag.to_string()),
+    }
+}
+
+/// Transform a secret name to an environment variable name.
+/// Uppercase, hyphens to underscores.
+fn secret_name_to_env_var(name: &str) -> String {
+    name.to_uppercase().replace('-', "_")
 }
 
 #[cfg(test)]
@@ -451,5 +578,27 @@ mod tests {
     fn resolve_no_match() {
         let cache = test_cache();
         assert!(resolve_entry("nonexistent", &cache).is_none());
+    }
+
+    #[test]
+    fn secret_name_to_env_var_basic() {
+        assert_eq!(secret_name_to_env_var("github-token"), "GITHUB_TOKEN");
+        assert_eq!(secret_name_to_env_var("anthropic-api-key"), "ANTHROPIC_API_KEY");
+        assert_eq!(secret_name_to_env_var("simple"), "SIMPLE");
+        assert_eq!(secret_name_to_env_var("a-b-c"), "A_B_C");
+    }
+
+    #[test]
+    fn parse_tag_unqualified() {
+        let (profile, name) = parse_tag("dev-rust", "default");
+        assert_eq!(profile, "default");
+        assert_eq!(name, "dev-rust");
+    }
+
+    #[test]
+    fn parse_tag_qualified() {
+        let (profile, name) = parse_tag("work:corp", "default");
+        assert_eq!(profile, "work");
+        assert_eq!(name, "corp");
     }
 }

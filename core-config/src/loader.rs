@@ -137,6 +137,16 @@ fn merge_profile(base: &mut crate::schema::ProfileConfig, overlay: &crate::schem
     if overlay.wm.max_visible_windows != crate::schema::WmConfig::default().max_visible_windows {
         base.wm.max_visible_windows = overlay.wm.max_visible_windows;
     }
+
+    // Key bindings: overlay entries override matching keys, base entries preserved.
+    for (key, binding) in &overlay.wm.key_bindings {
+        base.wm.key_bindings.insert(key.clone(), binding.clone());
+    }
+
+    // Launch profiles: overlay entries override matching names, base entries preserved.
+    for (name, lp) in &overlay.launch_profiles {
+        base.launch_profiles.insert(name.clone(), lp.clone());
+    }
 }
 
 /// Helpers for detecting default values.
@@ -333,5 +343,89 @@ mod tests {
             base.profiles["work"].color.as_deref(),
             Some("#ff0000")
         );
+    }
+
+    #[test]
+    fn merge_preserves_default_key_bindings() {
+        let mut base = Config::default();
+        base.profiles.insert("default".into(), crate::schema::ProfileConfig::default());
+        let overlay = Config::default();
+        merge_config(&mut base, &overlay);
+        let default_wm = crate::schema::WmConfig::default();
+        assert_eq!(
+            base.profiles["default"].wm.key_bindings.len(),
+            default_wm.key_bindings.len()
+        );
+    }
+
+    #[test]
+    fn merge_overlay_key_binding_overrides_default() {
+        let mut base = Config::default();
+        base.profiles.insert("default".into(), crate::schema::ProfileConfig::default());
+        let mut overlay = Config::default();
+        let mut overlay_profile = crate::schema::ProfileConfig::default();
+        overlay_profile.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
+            apps: vec!["custom-app".into()],
+            launch: Some("custom-app".into()),
+            tags: vec!["my-tag".into()],
+        });
+        overlay.profiles.insert("default".into(), overlay_profile);
+        merge_config(&mut base, &overlay);
+        let binding = &base.profiles["default"].wm.key_bindings["g"];
+        assert_eq!(binding.apps, vec!["custom-app"]);
+        assert_eq!(binding.tags, vec!["my-tag"]);
+    }
+
+    #[test]
+    fn merge_preserves_launch_profiles() {
+        let mut base = Config::default();
+        let mut base_profile = crate::schema::ProfileConfig::default();
+        base_profile.launch_profiles.insert("dev-rust".into(), crate::schema::LaunchProfile {
+            env: [("RUST_LOG".into(), "debug".into())].into(),
+            ..Default::default()
+        });
+        base.profiles.insert("default".into(), base_profile);
+
+        let mut overlay = Config::default();
+        let mut overlay_profile = crate::schema::ProfileConfig::default();
+        overlay_profile.launch_profiles.insert("ai-tools".into(), crate::schema::LaunchProfile {
+            secrets: vec!["anthropic-api-key".into()],
+            ..Default::default()
+        });
+        overlay.profiles.insert("default".into(), overlay_profile);
+
+        merge_config(&mut base, &overlay);
+        assert!(base.profiles["default"].launch_profiles.contains_key("dev-rust"));
+        assert!(base.profiles["default"].launch_profiles.contains_key("ai-tools"));
+    }
+
+    #[test]
+    fn full_config_with_launch_profiles_roundtrips() {
+        let toml_str = r#"
+            config_version = 3
+
+            [global]
+            default_profile = "default"
+
+            [profiles.default]
+            name = "default"
+
+            [profiles.default.launch_profiles.dev-rust]
+            env = { RUST_LOG = "debug" }
+            secrets = ["github-token"]
+            devshell = "/workspace#rust"
+
+            [profiles.default.wm.key_bindings.g]
+            apps = ["ghostty"]
+            launch = "ghostty"
+            tags = ["dev-rust"]
+        "#;
+        let parsed: Config = toml::from_str(toml_str).unwrap();
+        assert!(parsed.profiles["default"].launch_profiles.contains_key("dev-rust"));
+        let lp = &parsed.profiles["default"].launch_profiles["dev-rust"];
+        assert_eq!(lp.env["RUST_LOG"], "debug");
+        assert_eq!(lp.secrets, vec!["github-token"]);
+        assert_eq!(lp.devshell.as_deref(), Some("/workspace#rust"));
+        assert_eq!(parsed.profiles["default"].wm.key_bindings["g"].tags, vec!["dev-rust"]);
     }
 }

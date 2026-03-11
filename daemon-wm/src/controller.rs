@@ -59,6 +59,7 @@ pub enum Command {
     /// Launch an application via IPC.
     LaunchApp {
         command: String,
+        tags: Vec<String>,
     },
     /// Publish an IPC event.
     Publish(EventKind, SecurityLevel),
@@ -562,10 +563,11 @@ impl OverlayController {
                     let key = input.chars().next().unwrap();
                     if let Some(cmd) = hints::launch_for_key(key, key_bindings) {
                         let command = cmd.to_string();
+                        let tags = hints::tags_for_key(key, key_bindings);
                         self.phase = Phase::Idle;
                         return vec![
                             Command::Hide,
-                            Command::LaunchApp { command },
+                            Command::LaunchApp { command, tags },
                             Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
                         ];
                     }
@@ -743,6 +745,7 @@ mod tests {
                     WmKeyBinding {
                         apps: apps.into_iter().map(String::from).collect(),
                         launch: launch.map(String::from),
+                        tags: Vec::new(),
                     },
                 )
             })
@@ -938,7 +941,7 @@ mod tests {
         let windows = vec![test_windows()[0].clone()]; // only ghostty
         ctrl.handle(Event::Activate, &windows, &test_config());
         let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command } if command == "microsoft-edge")));
+        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")));
         assert!(ctrl.is_idle());
     }
 
@@ -961,7 +964,7 @@ mod tests {
         assert!(matches!(ctrl.phase, Phase::Picking { .. }));
         let cmds = ctrl.handle(Event::Char('f'), &windows, &test_config());
         assert!(
-            cmds.iter().any(|c| matches!(c, Command::LaunchApp { command } if command == "firefox")),
+            cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "firefox")),
             "expected LaunchApp for firefox, got: {cmds:?}"
         );
         assert!(ctrl.is_idle());

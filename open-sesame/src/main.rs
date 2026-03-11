@@ -1332,6 +1332,7 @@ async fn cmd_launch_run(entry_id: &str, profile: Option<&str>) -> anyhow::Result
     let event = EventKind::LaunchExecute {
         entry_id: entry_id.to_owned(),
         profile,
+        tags: Vec::new(),
     };
 
     match rpc(&client, event, SecurityLevel::Internal).await? {

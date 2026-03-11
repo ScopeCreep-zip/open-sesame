@@ -1220,6 +1220,9 @@ pub enum EventKind {
         /// Trust profile context — injected as `SESAME_PROFILE` env var in spawned process.
         #[serde(default)]
         profile: Option<TrustProfileName>,
+        /// Launch profile tags to compose for environment injection.
+        #[serde(default)]
+        tags: Vec<String>,
     },
     LaunchExecuteResponse {
         pid: u32,
@@ -1490,7 +1493,7 @@ impl_event_debug! {
         WmOverlayDismissed,
         LaunchQuery { query, max_results, profile },
         LaunchQueryResponse { results },
-        LaunchExecute { entry_id, profile },
+        LaunchExecute { entry_id, profile, tags },
         LaunchExecuteResponse { pid, error },
         ClipboardHistory { profile, limit },
         ClipboardHistoryResponse { entries },

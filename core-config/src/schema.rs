@@ -134,6 +134,10 @@ pub struct ProfileConfig {
     pub launcher: LauncherConfig,
     pub audit: AuditConfig,
 
+    /// Named launch profiles for composable app environment injection.
+    #[serde(default)]
+    pub launch_profiles: BTreeMap<String, LaunchProfile>,
+
     /// Platform-specific overrides.
     #[serde(default)]
     pub platform: PlatformOverrides,
@@ -153,6 +157,7 @@ impl Default for ProfileConfig {
             wm: WmConfig::default(),
             launcher: LauncherConfig::default(),
             audit: AuditConfig::default(),
+            launch_profiles: BTreeMap::new(),
             platform: PlatformOverrides::default(),
         }
     }
@@ -229,6 +234,28 @@ pub struct WmKeyBinding {
     /// Command to launch if no matching window exists (launch-or-focus).
     #[serde(default)]
     pub launch: Option<String>,
+    /// Launch profile tags to compose at launch time.
+    /// Supports qualified cross-profile references: `"work:corp"`.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// A named, composable launch profile for environment injection.
+///
+/// Defines environment variables, secrets, and optional Nix devshell
+/// to inject when launching applications tagged with this profile.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaunchProfile {
+    /// Static environment variables to inject.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Secret names to fetch from the vault and inject as env vars.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+    /// Nix flake devshell reference (e.g., "/workspace/project#rust").
+    #[serde(default)]
+    pub devshell: Option<String>,
 }
 
 /// Window manager overlay configuration for a profile.
@@ -302,6 +329,7 @@ impl Default for WmConfig {
                     WmKeyBinding {
                         apps: apps.into_iter().map(String::from).collect(),
                         launch: launch.map(String::from),
+                        tags: Vec::new(),
                     },
                 )
             })
@@ -571,4 +599,57 @@ pub struct ExtensionsPolicyConfig {
     pub require_signature: bool,
     /// Trusted signer public keys (hex-encoded).
     pub trusted_signers: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_profile_deserializes_from_toml() {
+        let toml_str = r#"
+            env = { RUST_LOG = "debug", CARGO_HOME = "/workspace/.cargo" }
+            secrets = ["github-token", "crates-io-token"]
+            devshell = "/workspace/myproject#rust"
+        "#;
+        let lp: LaunchProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(lp.env["RUST_LOG"], "debug");
+        assert_eq!(lp.secrets, vec!["github-token", "crates-io-token"]);
+        assert_eq!(lp.devshell.as_deref(), Some("/workspace/myproject#rust"));
+    }
+
+    #[test]
+    fn launch_profile_defaults_empty() {
+        let lp = LaunchProfile::default();
+        assert!(lp.env.is_empty());
+        assert!(lp.secrets.is_empty());
+        assert!(lp.devshell.is_none());
+    }
+
+    #[test]
+    fn wm_key_binding_with_tags() {
+        let toml_str = r#"
+            apps = ["ghostty"]
+            launch = "ghostty"
+            tags = ["dev-rust", "ai-tools"]
+        "#;
+        let kb: WmKeyBinding = toml::from_str(toml_str).unwrap();
+        assert_eq!(kb.tags, vec!["dev-rust", "ai-tools"]);
+    }
+
+    #[test]
+    fn wm_key_binding_without_tags_defaults_empty() {
+        let toml_str = r#"
+            apps = ["firefox"]
+            launch = "firefox"
+        "#;
+        let kb: WmKeyBinding = toml::from_str(toml_str).unwrap();
+        assert!(kb.tags.is_empty());
+    }
+
+    #[test]
+    fn profile_config_without_launch_profiles_defaults_empty() {
+        let pc = ProfileConfig::default();
+        assert!(pc.launch_profiles.is_empty());
+    }
 }

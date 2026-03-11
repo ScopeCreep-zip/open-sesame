@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
                     execute_commands(
                         cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                         #[cfg(target_os = "linux")] &backend,
-                        &mut client,
+                        &mut client, &config_state,
                     ).await;
                 }
             }
@@ -268,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
                 execute_commands(
                     cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                     #[cfg(target_os = "linux")] &backend,
-                    &mut client,
+                    &mut client, &config_state,
                 ).await;
             }
 
@@ -325,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
                         execute_commands(
                             cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
-                            &mut client,
+                            &mut client, &config_state,
                         ).await;
                         None
                     }
@@ -340,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
                         execute_commands(
                             cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
-                            &mut client,
+                            &mut client, &config_state,
                         ).await;
                         None
                     }
@@ -355,7 +355,7 @@ async fn main() -> anyhow::Result<()> {
                         execute_commands(
                             cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
-                            &mut client,
+                            &mut client, &config_state,
                         ).await;
                         None
                     }
@@ -460,6 +460,7 @@ async fn execute_commands(
     overlay_event_rx: &mut tokio::sync::mpsc::Receiver<OverlayEvent>,
     #[cfg(target_os = "linux")] backend: &Option<Arc<Box<dyn platform_linux::compositor::CompositorBackend>>>,
     client: &mut BusClient,
+    config_state: &std::sync::Arc<std::sync::RwLock<core_config::Config>>,
 ) {
     for cmd in commands {
         match cmd {
@@ -508,12 +509,21 @@ async fn execute_commands(
 
                 tracing::info!(target = %target_id, app_id = %window.app_id, "window activated via overlay");
             }
-            Command::LaunchApp { command } => {
-                tracing::info!(command = %command, "launch-or-focus: launching app");
+            Command::LaunchApp { command, tags } => {
+                tracing::info!(command = %command, ?tags, "launch-or-focus: launching app");
+                let active_profile = {
+                    let cfg_guard = config_state.read().ok();
+                    cfg_guard.and_then(|c| {
+                        core_types::TrustProfileName::try_from(
+                            c.global.default_profile.as_ref()
+                        ).ok()
+                    })
+                };
                 client.publish(
                     EventKind::LaunchExecute {
                         entry_id: command,
-                        profile: None,
+                        profile: active_profile,
+                        tags,
                     },
                     SecurityLevel::Internal,
                 ).await.ok();

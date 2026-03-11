@@ -215,6 +215,7 @@ async fn launch_execute_response_roundtrip() {
                 EventKind::LaunchExecute {
                     entry_id: "firefox".into(),
                     profile: Some(TrustProfileName::try_from("default").unwrap()),
+                    tags: Vec::new(),
                 },
                 SecurityLevel::Internal,
                 Duration::from_secs(2),
@@ -271,6 +272,7 @@ async fn launch_execute_error_roundtrip() {
                 EventKind::LaunchExecute {
                     entry_id: "nonexistent".into(),
                     profile: None,
+                    tags: Vec::new(),
                 },
                 SecurityLevel::Internal,
                 Duration::from_secs(2),

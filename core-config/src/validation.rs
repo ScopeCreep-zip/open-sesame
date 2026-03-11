@@ -38,6 +38,7 @@ pub fn validate(config: &Config) -> Vec<ConfigDiagnostic> {
     check_circular_inheritance(config, &mut diagnostics);
     check_extends_references(config, &mut diagnostics);
     check_wm_config(config, &mut diagnostics);
+    check_launch_profiles(config, &mut diagnostics);
 
     diagnostics
 }
@@ -172,6 +173,80 @@ fn check_wm_config(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic>) {
     }
 }
 
+fn check_launch_profiles(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic>) {
+    for (profile_name, profile) in &config.profiles {
+        for (key, binding) in &profile.wm.key_bindings {
+            for tag in &binding.tags {
+                // Parse qualified tags: "work:corp" → check "work" profile for "corp"
+                let (tp_name, lp_name) = match tag.split_once(':') {
+                    Some((p, n)) => (p, n),
+                    None => (profile_name.as_str(), tag.as_str()),
+                };
+
+                if let Some(target_profile) = config.profiles.get(tp_name) {
+                    if !target_profile.launch_profiles.contains_key(lp_name) {
+                        diagnostics.push(ConfigDiagnostic {
+                            severity: DiagnosticSeverity::Warning,
+                            file: None,
+                            line: None,
+                            column: None,
+                            message: format!(
+                                "profile '{profile_name}': key binding '{key}' references \
+                                 launch profile '{lp_name}' which is not defined in profile '{tp_name}'"
+                            ),
+                            remediation: Some(format!(
+                                "define [profiles.{tp_name}.launch_profiles.{lp_name}] \
+                                 or remove '{tag}' from the tags list"
+                            )),
+                        });
+                    }
+                } else {
+                    diagnostics.push(ConfigDiagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        file: None,
+                        line: None,
+                        column: None,
+                        message: format!(
+                            "profile '{profile_name}': key binding '{key}' tag '{tag}' \
+                             references trust profile '{tp_name}' which is not defined"
+                        ),
+                        remediation: Some(format!(
+                            "define [profiles.{tp_name}] or remove '{tag}' from the tags list"
+                        )),
+                    });
+                }
+            }
+
+            // Warn if multiple tagged profiles define devshells.
+            let devshell_count = binding.tags.iter()
+                .filter(|t| {
+                    let (tp_name, lp_name) = match t.split_once(':') {
+                        Some((p, n)) => (p, n),
+                        None => (profile_name.as_str(), t.as_str()),
+                    };
+                    config.profiles.get(tp_name)
+                        .and_then(|tp| tp.launch_profiles.get(lp_name))
+                        .and_then(|lp| lp.devshell.as_ref())
+                        .is_some()
+                })
+                .count();
+            if devshell_count > 1 {
+                diagnostics.push(ConfigDiagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    file: None,
+                    line: None,
+                    column: None,
+                    message: format!(
+                        "profile '{profile_name}': key binding '{key}' has {devshell_count} tags \
+                         with devshells — only the last will be used"
+                    ),
+                    remediation: Some("remove devshell from all but one tag".into()),
+                });
+            }
+        }
+    }
+}
+
 fn check_extends_references(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic>) {
     for (name, profile) in &config.profiles {
         if let Some(ref parent) = profile.extends
@@ -273,5 +348,88 @@ mod tests {
             .filter(|d| d.severity == DiagnosticSeverity::Error)
             .collect();
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn warns_on_missing_launch_profile_tag() {
+        let mut config = Config::default();
+        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
+        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
+            apps: vec!["ghostty".into()],
+            launch: Some("ghostty".into()),
+            tags: vec!["nonexistent".into()],
+        });
+        config.profiles.insert("default".into(), pc);
+        let diags = validate(&config);
+        assert!(
+            diags.iter().any(|d| d.severity == DiagnosticSeverity::Warning
+                && d.message.contains("nonexistent")),
+            "expected warning about missing launch profile, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_missing_cross_profile_tag() {
+        let mut config = Config::default();
+        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
+        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
+            apps: vec!["ghostty".into()],
+            launch: Some("ghostty".into()),
+            tags: vec!["work:corp".into()],
+        });
+        config.profiles.insert("default".into(), pc);
+        let diags = validate(&config);
+        assert!(
+            diags.iter().any(|d| d.severity == DiagnosticSeverity::Warning
+                && d.message.contains("work")),
+            "expected warning about missing trust profile, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_multiple_devshells() {
+        let mut config = Config::default();
+        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
+        pc.launch_profiles.insert("a".into(), crate::schema::LaunchProfile {
+            devshell: Some("/workspace#a".into()),
+            ..Default::default()
+        });
+        pc.launch_profiles.insert("b".into(), crate::schema::LaunchProfile {
+            devshell: Some("/workspace#b".into()),
+            ..Default::default()
+        });
+        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
+            apps: vec!["ghostty".into()],
+            launch: Some("ghostty".into()),
+            tags: vec!["a".into(), "b".into()],
+        });
+        config.profiles.insert("default".into(), pc);
+        let diags = validate(&config);
+        assert!(
+            diags.iter().any(|d| d.severity == DiagnosticSeverity::Warning
+                && d.message.contains("devshell")),
+            "expected warning about multiple devshells, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_warning_for_valid_tags() {
+        let mut config = Config::default();
+        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
+        pc.launch_profiles.insert("dev-rust".into(), crate::schema::LaunchProfile {
+            env: [("RUST_LOG".into(), "debug".into())].into(),
+            ..Default::default()
+        });
+        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
+            apps: vec!["ghostty".into()],
+            launch: Some("ghostty".into()),
+            tags: vec!["dev-rust".into()],
+        });
+        config.profiles.insert("default".into(), pc);
+        let diags = validate(&config);
+        let launch_warnings: Vec<_> = diags.iter()
+            .filter(|d| d.message.contains("launch profile") || d.message.contains("tag"))
+            .collect();
+        assert!(launch_warnings.is_empty(), "unexpected launch profile warnings: {launch_warnings:?}");
     }
 }
