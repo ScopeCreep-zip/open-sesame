@@ -55,18 +55,40 @@
                   key_bindings.g = {
                     apps = [ "ghostty" "com.mitchellh.ghostty" ];
                     launch = "ghostty";
-                  };
-                  key_bindings.f = {
-                    apps = [ "firefox" "org.mozilla.firefox" ];
-                    launch = "firefox";
+                    tags = [ "dev" "work:corp" ];
                   };
                 }
               '';
               description = ''
                 Window manager key bindings and WM settings for the default profile.
                 Keys are placed under `profiles.default.wm` in the generated config.
+              '';
+            };
 
-                See https://scopecreep-zip.github.io/open-sesame/ for documentation.
+            profiles = lib.mkOption {
+              type = lib.types.attrsOf tomlFormat.type;
+              default = { };
+              example = lib.literalExpression ''
+                {
+                  default = {
+                    launch_profiles.dev = {
+                      env = { RUST_LOG = "debug"; };
+                      secrets = [ "github-token" ];
+                    };
+                  };
+                  work = {
+                    launch_profiles.corp = {
+                      env = { CORP_ENV = "production"; };
+                      secrets = [ "corp-api-key" ];
+                    };
+                  };
+                }
+              '';
+              description = ''
+                Additional profile configuration. Each key is a trust profile name.
+                Values are merged into `profiles.<name>` in the generated config.
+                The "default" profile's `wm` section comes from `settings` above;
+                use this for `launch_profiles` and additional profiles/vaults.
               '';
             };
 
@@ -86,23 +108,41 @@
           config = lib.mkIf cfg.enable {
             home.packages = [ cfg.package ];
 
-            xdg.configFile."pds/config.toml" = lib.mkIf (cfg.settings != { }) {
-              source = tomlFormat.generate "open-sesame-config" {
-                config_version = 3;
-                global = {
-                  default_profile = "default";
-                  ipc = { };
-                  logging = { };
-                };
-                profiles.default = {
+            xdg.configFile."pds/config.toml" =
+              let
+                hasConfig = cfg.settings != { } || cfg.profiles != { };
+                # Build the profiles attrset: start with default (wm from settings),
+                # then deep-merge any explicit profile overrides.
+                defaultProfile = {
                   name = "default";
                   wm = cfg.settings;
                 };
-                crypto = { };
-                agents = { };
-                extensions = { };
+                # Merge explicit default profile attrs (e.g. launch_profiles) into the
+                # base default profile, then add all other named profiles.
+                explicitDefault = cfg.profiles.default or { };
+                mergedDefault = defaultProfile // explicitDefault // {
+                  # Preserve wm from settings even if profiles.default is set.
+                  wm = cfg.settings;
+                };
+                otherProfiles = lib.filterAttrs (n: _: n != "default") cfg.profiles;
+                # Add `name` field to each non-default profile.
+                namedOtherProfiles = lib.mapAttrs (name: value: { inherit name; } // value) otherProfiles;
+                allProfiles = { default = mergedDefault; } // namedOtherProfiles;
+              in
+              lib.mkIf hasConfig {
+                source = tomlFormat.generate "open-sesame-config" {
+                  config_version = 3;
+                  global = {
+                    default_profile = "default";
+                    ipc = { };
+                    logging = { };
+                  };
+                  profiles = allProfiles;
+                  crypto = { };
+                  agents = { };
+                  extensions = { };
+                };
               };
-            };
 
             # Grouping target — start/stop all daemons together.
             # Pulled in by graphical-session.target so daemons start on login.
