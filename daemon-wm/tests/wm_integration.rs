@@ -281,10 +281,14 @@ fn controller_backward_fast_release_activates() {
 #[test]
 fn controller_launcher_skips_armed() {
     let mut ctrl = OverlayController::new();
-    let cmds = ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
+    let windows = test_windows();
+    let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+    // Launcher now enters brief Armed phase for keyboard focus acquisition.
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+    assert!(ctrl.next_deadline().is_some());
+    // DwellTimeout transitions to Picking.
+    let cmds = ctrl.handle(Event::DwellTimeout, &windows, &test_config());
     assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
-    // No dwell deadline — already in Picking.
-    assert!(ctrl.next_deadline().is_none());
 }
 
 #[test]
@@ -415,6 +419,7 @@ fn controller_reactivate_in_picking_cycles_and_updates() {
     let mut ctrl = OverlayController::new();
     let windows = test_windows();
     ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+    ctrl.handle(Event::DwellTimeout, &windows, &test_config());
     let cmds = ctrl.handle(Event::Activate, &windows, &test_config());
     assert!(cmds.iter().any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. })));
 }

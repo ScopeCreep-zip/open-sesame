@@ -75,7 +75,7 @@ pub enum Event {
     Activate,
     /// Alt+Shift+Tab / backward activation.
     ActivateBackward,
-    /// Alt+Space / launcher mode (skip Armed, go straight to Picking).
+    /// Alt+Space / launcher mode (brief Armed dwell for keyboard focus, then Picking).
     ActivateLauncher,
     /// Modifier (Alt) released.
     ModifierReleased,
@@ -257,7 +257,7 @@ enum ActivationMode {
     Forward,
     /// Alt+Shift+Tab: Armed, selection at least-recently-used non-origin.
     Backward,
-    /// Alt+Space: Skip Armed, go directly to Picking.
+    /// Alt+Space: brief Armed dwell for keyboard focus, then Picking.
     Launcher,
 }
 
@@ -380,20 +380,22 @@ impl OverlayController {
                         ]
                     }
                     ActivationMode::Launcher => {
+                        // Enter Armed with a short dwell to let the compositor
+                        // grant keyboard exclusivity before the user's first
+                        // keypress. on_char works in Armed, so fast typists
+                        // are handled. DwellTimeout then transitions to Picking.
                         let selection = snap.initial_forward();
-                        let cmds = vec![
-                            Command::ShowPicker {
-                                windows: snap.overlay_windows.clone(),
-                                hints: snap.hints.clone(),
-                            },
-                            Command::Publish(EventKind::WmOverlayShown, SecurityLevel::Internal),
-                        ];
-                        self.phase = Phase::Picking {
+                        self.phase = Phase::Armed {
+                            entered_at: Instant::now(),
                             snap,
                             selection,
                             input: String::new(),
+                            dwell_ms: config.overlay_delay_ms.min(100),
                         };
-                        cmds
+                        vec![
+                            Command::ShowBorder,
+                            Command::Publish(EventKind::WmOverlayShown, SecurityLevel::Internal),
+                        ]
                     }
                 }
             }
@@ -837,19 +839,30 @@ mod tests {
     // === Launcher activation ===
 
     #[test]
-    fn launcher_skips_armed_goes_to_picking() {
+    fn launcher_enters_armed_with_short_dwell() {
         let mut ctrl = OverlayController::new();
         let cmds = ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
+        assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+        assert!(matches!(ctrl.phase, Phase::Armed { .. }));
+        // Short dwell means a deadline is set.
+        assert!(ctrl.next_deadline().is_some());
+    }
+
+    #[test]
+    fn launcher_dwell_transitions_to_picking() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        let cmds = ctrl.handle(Event::DwellTimeout, &windows, &test_config());
         assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
         assert!(matches!(ctrl.phase, Phase::Picking { .. }));
-        assert!(ctrl.next_deadline().is_none());
     }
 
     #[test]
     fn launcher_initial_selection_is_not_origin() {
         let mut ctrl = OverlayController::new();
         ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
-        if let Phase::Picking { selection, snap, .. } = &ctrl.phase {
+        if let Phase::Armed { selection, snap, .. } = &ctrl.phase {
             assert_ne!(Some(*selection), snap.origin_index);
         }
     }
@@ -882,6 +895,7 @@ mod tests {
         let mut ctrl = OverlayController::new();
         let windows = test_windows();
         ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        ctrl.handle(Event::DwellTimeout, &windows, &test_config());
 
         let snap_len = if let Phase::Picking { snap, .. } = &ctrl.phase {
             snap.windows.len()
@@ -961,7 +975,8 @@ mod tests {
         // Only ghostty and edge — no firefox window.
         let windows = vec![test_windows()[0].clone(), test_windows()[2].clone()];
         ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
-        assert!(matches!(ctrl.phase, Phase::Picking { .. }));
+        assert!(matches!(ctrl.phase, Phase::Armed { .. }));
+        // Char input works in Armed phase (the fix: keyboard focus acquired).
         let cmds = ctrl.handle(Event::Char('f'), &windows, &test_config());
         assert!(
             cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "firefox")),
@@ -975,6 +990,7 @@ mod tests {
         let mut ctrl = OverlayController::new();
         let windows = test_windows(); // includes firefox
         ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        // Char input in Armed phase — keyboard focus already acquired.
         let cmds = ctrl.handle(Event::Char('f'), &windows, &test_config());
         assert!(
             cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
@@ -1085,6 +1101,8 @@ mod tests {
         let mut ctrl = OverlayController::new();
         let windows = test_windows();
         ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        // DwellTimeout transitions Armed → Picking.
+        ctrl.handle(Event::DwellTimeout, &windows, &test_config());
 
         // Navigate to origin by cycling all the way around.
         let snap_len = if let Phase::Picking { snap, .. } = &ctrl.phase {
