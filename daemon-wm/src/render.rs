@@ -327,6 +327,7 @@ pub fn draw_full_overlay(
     theme: &OverlayTheme,
     show_app_id: bool,
     show_title: bool,
+    staged_launch: Option<&str>,
 ) {
     let layout = Layout::new(1.0);
 
@@ -363,7 +364,11 @@ pub fn draw_full_overlay(
         .collect();
 
     if visible.is_empty() && !input.is_empty() {
-        draw_no_matches(cr, width, height, input, &layout, theme);
+        if let Some(command) = staged_launch {
+            draw_launch_staged(cr, width, height, command, &layout, theme);
+        } else {
+            draw_no_matches(cr, width, height, input, &layout, theme);
+        }
         return;
     }
 
@@ -628,6 +633,44 @@ fn draw_no_matches(
     rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
     theme.card_border.set_source(cr);
     cr.set_line_width(layout.border_width);
+    let _ = cr.stroke();
+
+    cr.move_to(cx + pad, cy + pad);
+    theme.text_primary.set_source(cr);
+    pangocairo::functions::show_layout(cr, &pango_layout);
+}
+
+fn draw_launch_staged(
+    cr: &gtk4::cairo::Context,
+    width: f64,
+    height: f64,
+    command: &str,
+    layout: &Layout,
+    theme: &OverlayTheme,
+) {
+    let pango_layout = pangocairo::functions::create_layout(cr);
+    let mut font = gtk4::pango::FontDescription::new();
+    font.set_family("Sans");
+    font.set_absolute_size(layout.text_size * 1.2 * gtk4::pango::SCALE as f64);
+    pango_layout.set_font_description(Some(&font));
+
+    let message = format!("Launch {command}");
+    pango_layout.set_text(&message);
+    let (tw, th) = pango_layout.pixel_size();
+
+    let pad = layout.padding * 2.0;
+    let cw = tw as f64 + pad * 2.0;
+    let ch = th as f64 + pad * 2.0;
+    let cx = (width - cw) / 2.0;
+    let cy = (height - ch) / 2.0;
+
+    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
+    theme.card_background.set_source(cr);
+    let _ = cr.fill();
+
+    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
+    theme.badge_matched_background.set_source(cr);
+    cr.set_line_width(layout.border_width * 2.0);
     let _ = cr.stroke();
 
     cr.move_to(cx + pad, cy + pad);

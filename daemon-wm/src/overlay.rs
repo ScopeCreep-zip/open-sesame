@@ -124,6 +124,8 @@ struct OverlayState {
     received_key_event: bool,
     /// Error message to display in LaunchError phase.
     error_message: String,
+    /// Staged launch command — shown in picker instead of "no matches".
+    staged_launch: Option<String>,
 }
 
 /// Grace period (ms) after activation before modifier polling begins.
@@ -144,6 +146,7 @@ impl OverlayState {
             activated_at: None,
             received_key_event: false,
             error_message: String::new(),
+            staged_launch: None,
         }
     }
 }
@@ -261,6 +264,7 @@ fn run_gtk4_overlay(
                     &st.theme,
                     st.show_app_id,
                     st.show_title,
+                    st.staged_launch.as_deref(),
                 );
             }
             OverlayPhase::Launching => {
@@ -378,6 +382,7 @@ fn run_gtk4_overlay(
                         st.selection = 0;
                         st.activated_at = Some(std::time::Instant::now());
                         st.received_key_event = false;
+                        st.staged_launch = None;
                     }
                     // Reset modifier poll flag for this activation cycle.
                     *modifier_released_sent.borrow_mut() = false;
@@ -416,6 +421,9 @@ fn run_gtk4_overlay(
                     {
                         let mut st = state_cmd.borrow_mut();
                         st.input_buffer = input;
+                        // Clear staged launch — if still staged, ShowLaunchStaged
+                        // will arrive after this in the same command batch.
+                        st.staged_launch = None;
                         st.selection = selection;
                     }
                     da_cmd.queue_draw();
@@ -430,6 +438,7 @@ fn run_gtk4_overlay(
                         st.hints.clear();
                         st.activated_at = None;
                         st.received_key_event = false;
+                        st.staged_launch = None;
                     }
                     // Release keyboard grab and commit transparent frame.
                     // Surface stays mapped to avoid layer surface destroy.
@@ -456,6 +465,7 @@ fn run_gtk4_overlay(
                         st.hints.clear();
                         st.activated_at = None;
                         st.received_key_event = false;
+                        st.staged_launch = None;
                     }
                     // Release keyboard grab and commit transparent frame.
                     window_cmd.set_keyboard_mode(KeyboardMode::None);
@@ -477,12 +487,12 @@ fn run_gtk4_overlay(
                     let _ = event_tx_cmd.blocking_send(OverlayEvent::SurfaceUnmapped);
                 }
                 OverlayCmd::ShowLaunchStaged { command } => {
-                    // Show staged intent — picker stays visible with a
-                    // status indicator. Phase stays Full so keyboard
-                    // events still route to the controller.
+                    // Picker stays visible — update the staged launch indicator
+                    // so the renderer shows "Launch <command>" instead of
+                    // "No matches". The picker provides trust and context.
                     {
                         let mut st = state_cmd.borrow_mut();
-                        st.error_message = format!("Launch: {command} (release Alt to confirm)");
+                        st.staged_launch = Some(command);
                     }
                     da_cmd.queue_draw();
                 }
