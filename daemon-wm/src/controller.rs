@@ -22,7 +22,7 @@ use crate::hints::{self, MatchResult};
 use crate::mru;
 use crate::overlay::WindowInfo;
 use core_config::WmConfig;
-use core_types::{EventKind, SecurityLevel, Window};
+use core_types::{EventKind, LaunchDenial, SecurityLevel, Window};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -56,11 +56,18 @@ pub enum Command {
         window: Window,
         origin: Option<String>,
     },
-    /// Launch an application via IPC.
+    /// Launch an application via IPC (request-response, not fire-and-forget).
     LaunchApp {
         command: String,
         tags: Vec<String>,
     },
+    /// Show a launch error toast in the overlay.
+    ShowLaunchError {
+        message: String,
+        denial: Option<LaunchDenial>,
+    },
+    /// Show "Launching..." spinner/status in the overlay.
+    ShowLaunching,
     /// Publish an IPC event.
     Publish(EventKind, SecurityLevel),
 }
@@ -93,6 +100,12 @@ pub enum Event {
     Escape,
     /// The dwell timer expired (main loop polls `next_deadline()`).
     DwellTimeout,
+    /// Launch request completed (success or failure). Fed back from main loop.
+    LaunchResult {
+        success: bool,
+        error: Option<String>,
+        denial: Option<LaunchDenial>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +262,11 @@ enum Phase {
         selection: usize,
         input: String,
     },
+    /// Waiting for LaunchExecuteResponse from daemon-launcher.
+    Launching,
+    /// Launch failed — showing error toast. Any key dismisses.
+    /// Error details are already forwarded to the overlay via ShowLaunchError.
+    LaunchError,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -329,6 +347,9 @@ impl OverlayController {
             Event::Confirm => self.on_confirm(),
             Event::Escape => self.on_escape(),
             Event::DwellTimeout => self.on_dwell_timeout(),
+            Event::LaunchResult { success, error, denial } => {
+                self.on_launch_result(success, error, denial)
+            }
         }
     }
 
@@ -431,6 +452,7 @@ impl OverlayController {
                     selection: *selection,
                 }]
             }
+            Phase::Launching | Phase::LaunchError => Vec::new(),
         }
     }
 
@@ -460,7 +482,10 @@ impl OverlayController {
             Phase::Picking { selection, snap, .. } => {
                 self.activate_index(selection, &snap)
             }
-            Phase::Idle => Vec::new(),
+            other @ (Phase::Idle | Phase::Launching | Phase::LaunchError) => {
+                self.phase = other;
+                Vec::new()
+            }
         }
     }
 
@@ -525,6 +550,13 @@ impl OverlayController {
                 input.push(ch);
                 self.check_hint_or_launch()
             }
+            Phase::LaunchError => {
+                self.phase = Phase::Idle;
+                vec![
+                    Command::Hide,
+                    Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
+                ]
+            }
             _ => Vec::new(),
         }
     }
@@ -566,11 +598,10 @@ impl OverlayController {
                     if let Some(cmd) = hints::launch_for_key(key, key_bindings) {
                         let command = cmd.to_string();
                         let tags = hints::tags_for_key(key, key_bindings);
-                        self.phase = Phase::Idle;
+                        self.phase = Phase::Launching;
                         return vec![
-                            Command::Hide,
+                            Command::ShowLaunching,
                             Command::LaunchApp { command, tags },
-                            Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
                         ];
                     }
                 }
@@ -688,7 +719,11 @@ impl OverlayController {
             Phase::Picking { selection, snap, .. } => {
                 self.activate_index(selection, &snap)
             }
-            Phase::Idle => Vec::new(),
+            Phase::LaunchError => vec![
+                Command::Hide,
+                Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
+            ],
+            Phase::Idle | Phase::Launching => Vec::new(),
         }
     }
 
@@ -699,6 +734,33 @@ impl OverlayController {
                 Command::Hide,
                 Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
             ],
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Launch result
+    // -----------------------------------------------------------------------
+
+    fn on_launch_result(
+        &mut self,
+        success: bool,
+        error: Option<String>,
+        denial: Option<LaunchDenial>,
+    ) -> Vec<Command> {
+        if !matches!(self.phase, Phase::Launching) {
+            return Vec::new();
+        }
+
+        if success {
+            self.phase = Phase::Idle;
+            vec![
+                Command::Hide,
+                Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
+            ]
+        } else {
+            let message = error.unwrap_or_else(|| "launch failed".into());
+            self.phase = Phase::LaunchError;
+            vec![Command::ShowLaunchError { message, denial }]
         }
     }
 
@@ -956,7 +1018,7 @@ mod tests {
         ctrl.handle(Event::Activate, &windows, &test_config());
         let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
         assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")));
-        assert!(ctrl.is_idle());
+        assert!(matches!(ctrl.phase, Phase::Launching));
     }
 
     #[test]
@@ -982,7 +1044,7 @@ mod tests {
             cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "firefox")),
             "expected LaunchApp for firefox, got: {cmds:?}"
         );
-        assert!(ctrl.is_idle());
+        assert!(matches!(ctrl.phase, Phase::Launching));
     }
 
     #[test]

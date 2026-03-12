@@ -636,6 +636,121 @@ fn draw_no_matches(
 }
 
 // ---------------------------------------------------------------------------
+// Status / error toasts
+// ---------------------------------------------------------------------------
+
+/// Draw a centered status message (e.g. "Launching...").
+pub fn draw_status_toast(
+    cr: &gtk4::cairo::Context,
+    width: f64,
+    height: f64,
+    message: &str,
+    theme: &OverlayTheme,
+) {
+    let layout = Layout::new(1.0);
+
+    cr.set_operator(gtk4::cairo::Operator::Source);
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+    let _ = cr.paint();
+    cr.set_operator(gtk4::cairo::Operator::Over);
+
+    // Screen border.
+    let bw = theme.border_width * 2.0;
+    let half = bw / 2.0;
+    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
+    theme.border_color.set_source(cr);
+    cr.set_line_width(bw);
+    let _ = cr.stroke();
+
+    let pango_layout = pangocairo::functions::create_layout(cr);
+    let mut font = gtk4::pango::FontDescription::new();
+    font.set_family("Sans");
+    font.set_weight(gtk4::pango::Weight::Normal);
+    font.set_absolute_size(layout.text_size * 1.2 * gtk4::pango::SCALE as f64);
+    pango_layout.set_font_description(Some(&font));
+    pango_layout.set_text(message);
+    let (tw, th) = pango_layout.pixel_size();
+
+    let pad = layout.padding * 2.0;
+    let cw = tw as f64 + pad * 2.0;
+    let ch = th as f64 + pad * 2.0;
+    let cx = (width - cw) / 2.0;
+    let cy = (height - ch) / 2.0;
+
+    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
+    theme.card_background.set_source(cr);
+    let _ = cr.fill();
+
+    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
+    theme.card_border.set_source(cr);
+    cr.set_line_width(layout.border_width);
+    let _ = cr.stroke();
+
+    cr.move_to(cx + pad, cy + pad);
+    theme.text_secondary.set_source(cr);
+    pangocairo::functions::show_layout(cr, &pango_layout);
+}
+
+/// Draw a centered error message with red accent border.
+pub fn draw_error_toast(
+    cr: &gtk4::cairo::Context,
+    width: f64,
+    height: f64,
+    message: &str,
+    theme: &OverlayTheme,
+) {
+    let layout = Layout::new(1.0);
+    let error_border = Color::rgba(239, 68, 68, 255); // red-500
+
+    cr.set_operator(gtk4::cairo::Operator::Source);
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+    let _ = cr.paint();
+    cr.set_operator(gtk4::cairo::Operator::Over);
+
+    // Screen border — red to indicate error.
+    let bw = theme.border_width * 2.0;
+    let half = bw / 2.0;
+    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
+    error_border.set_source(cr);
+    cr.set_line_width(bw);
+    let _ = cr.stroke();
+
+    // Build display text: header + detail.
+    let display = format!("Launch failed\n\n{message}\n\nPress any key to dismiss");
+
+    let pango_layout = pangocairo::functions::create_layout(cr);
+    let mut font = gtk4::pango::FontDescription::new();
+    font.set_family("Sans");
+    font.set_absolute_size(layout.text_size * 1.1 * gtk4::pango::SCALE as f64);
+    pango_layout.set_font_description(Some(&font));
+    pango_layout.set_text(&display);
+    pango_layout.set_alignment(gtk4::pango::Alignment::Center);
+    let max_width = (width * 0.6).min(500.0);
+    pango_layout.set_width((max_width * gtk4::pango::SCALE as f64) as i32);
+    pango_layout.set_wrap(gtk4::pango::WrapMode::WordChar);
+    let (tw, th) = pango_layout.pixel_size();
+
+    let pad = layout.padding * 2.0;
+    let cw = tw as f64 + pad * 2.0;
+    let ch = th as f64 + pad * 2.0;
+    let cx = (width - cw) / 2.0;
+    let cy = (height - ch) / 2.0;
+
+    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
+    theme.card_background.set_source(cr);
+    let _ = cr.fill();
+
+    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
+    error_border.set_source(cr);
+    cr.set_line_width(layout.border_width * 1.5);
+    let _ = cr.stroke();
+
+    cr.move_to(cx + pad, cy + pad);
+    theme.text_primary.set_source(cr);
+    pangocairo::functions::show_layout(cr, &pango_layout);
+}
+
+// ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 

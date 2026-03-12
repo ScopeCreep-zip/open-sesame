@@ -903,6 +903,38 @@ pub enum SecretDenialReason {
     VaultError(String),
 }
 
+/// Why a launch was denied. Machine-readable so the WM can take action
+/// (e.g. prompt for vault unlock when `VaultsLocked`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaunchDenial {
+    /// One or more required vaults are locked. The WM can offer inline unlock.
+    VaultsLocked {
+        locked_profiles: Vec<TrustProfileName>,
+    },
+    /// Required secrets were not found (configuration error, not lock state).
+    /// Count is opaque to avoid revealing which secrets exist.
+    SecretNotFound {
+        missing_count: u32,
+    },
+    /// Rate limiting on secret access.
+    RateLimited,
+    /// A trust profile referenced by a tag does not exist in config.
+    ProfileNotFound {
+        profile: String,
+    },
+    /// A launch profile referenced by a tag does not exist.
+    LaunchProfileNotFound {
+        profile: String,
+        launch_profile: String,
+    },
+    /// Desktop entry not found in the launcher cache.
+    EntryNotFound,
+    /// The spawned process failed to start.
+    SpawnFailed {
+        reason: String,
+    },
+}
+
 // ============================================================================
 // EventKind
 // ============================================================================
@@ -1247,6 +1279,9 @@ pub enum EventKind {
     LaunchExecuteResponse {
         pid: u32,
         error: Option<String>,
+        /// Machine-readable denial reason for programmatic action by the WM.
+        #[serde(default)]
+        denial: Option<LaunchDenial>,
     },
 
     // -- RPC: Clipboard --
@@ -1514,7 +1549,7 @@ impl_event_debug! {
         LaunchQuery { query, max_results, profile },
         LaunchQueryResponse { results },
         LaunchExecute { entry_id, profile, tags },
-        LaunchExecuteResponse { pid, error },
+        LaunchExecuteResponse { pid, error, denial },
         ClipboardHistory { profile, limit },
         ClipboardHistoryResponse { entries },
         ClipboardClear { profile },
@@ -2792,5 +2827,96 @@ mod tests {
         for input in &inputs {
             let _ = input.parse::<OciReference>(); // must not panic
         }
+    }
+
+    // -- Per-vault unlock IPC protocol tests --
+
+    #[test]
+    fn test_unlock_request_roundtrip_with_profile() {
+        let event = EventKind::UnlockRequest {
+            password: SensitiveBytes::new(b"secret".to_vec()),
+            profile: Some(TrustProfileName::try_from("work").unwrap()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: EventKind = serde_json::from_str(&json).unwrap();
+        match decoded {
+            EventKind::UnlockRequest { profile, .. } => {
+                assert_eq!(profile.unwrap(), TrustProfileName::try_from("work").unwrap());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unlock_request_profile_none_deserializes() {
+        // Simulate old format without profile field
+        let json = r#"{"UnlockRequest":{"password":[1,2,3]}}"#;
+        let decoded: EventKind = serde_json::from_str(json).unwrap();
+        match decoded {
+            EventKind::UnlockRequest { profile, .. } => {
+                assert!(profile.is_none(), "missing profile field should default to None");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lock_request_profile_none_deserializes() {
+        let json = r#"{"LockRequest":{}}"#;
+        let decoded: EventKind = serde_json::from_str(json).unwrap();
+        match decoded {
+            EventKind::LockRequest { profile } => {
+                assert!(profile.is_none(), "missing profile field should default to None");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_status_response_lock_state_roundtrips() {
+        let mut lock_state = std::collections::BTreeMap::new();
+        lock_state.insert(TrustProfileName::try_from("work").unwrap(), false);
+        lock_state.insert(TrustProfileName::try_from("personal").unwrap(), true);
+
+        let event = EventKind::StatusResponse {
+            active_profiles: vec![TrustProfileName::try_from("work").unwrap()],
+            default_profile: TrustProfileName::try_from("work").unwrap(),
+            daemon_uptimes_ms: vec![],
+            locked: false,
+            lock_state: lock_state.clone(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: EventKind = serde_json::from_str(&json).unwrap();
+        match decoded {
+            EventKind::StatusResponse { lock_state: ls, .. } => {
+                assert_eq!(ls, lock_state);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_status_response_missing_lock_state_defaults_empty() {
+        // Old format without lock_state
+        let json = r#"{"StatusResponse":{"active_profiles":["work"],"default_profile":"work","daemon_uptimes_ms":[],"locked":false}}"#;
+        let decoded: EventKind = serde_json::from_str(json).unwrap();
+        match decoded {
+            EventKind::StatusResponse { lock_state, .. } => {
+                assert!(lock_state.is_empty(), "missing lock_state should default to empty BTreeMap");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unlock_request_debug_redacts_password_shows_profile() {
+        let event = EventKind::UnlockRequest {
+            password: SensitiveBytes::new(b"super-secret".to_vec()),
+            profile: Some(TrustProfileName::try_from("myprofile").unwrap()),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("REDACTED"), "password should be redacted");
+        assert!(!debug.contains("super-secret"), "password plaintext must not appear");
+        assert!(debug.contains("myprofile"), "profile name should be visible");
     }
 }

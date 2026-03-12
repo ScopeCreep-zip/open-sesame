@@ -1663,6 +1663,249 @@ mod tests {
             "fresh VaultState must have empty active_profiles"
         );
     }
+
+    // -- A. Independent master keys --
+
+    #[tokio::test]
+    async fn test_independent_master_keys_per_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = VaultState {
+            master_keys: HashMap::new(),
+            vaults: HashMap::new(),
+            active_profiles: HashSet::new(),
+            ttl: Duration::from_secs(60),
+            config_dir: dir.path().to_path_buf(),
+        };
+        let a = profile("alpha");
+        let b = profile("beta");
+        state.master_keys.insert(a.clone(), test_master_key());
+        state.activate_profile(&a);
+        state.activate_profile(&b);
+
+        assert!(state.vault_for(&a).await.is_ok(), "profile with master key should succeed");
+        let result_b = state.vault_for(&b).await;
+        assert!(result_b.is_err(), "profile without master key should fail");
+        let err = result_b.err().unwrap().to_string();
+        assert!(err.contains("not unlocked"), "profile without master key should fail: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_per_profile_lock_isolates_vaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_vault_state(dir.path());
+        let a = profile("alpha");
+        let b = profile("beta");
+        state.activate_profile(&a);
+        state.activate_profile(&b);
+        assert!(state.vault_for(&a).await.is_ok());
+        assert!(state.vault_for(&b).await.is_ok());
+
+        state.master_keys.remove(&a);
+        let result_a = state.vault_for(&a).await;
+        assert!(result_a.is_err(), "locked profile should fail");
+        let err = result_a.err().unwrap().to_string();
+        assert!(err.contains("not unlocked"), "locked profile should fail: {err}");
+        assert!(state.vault_for(&b).await.is_ok(), "other profile should still work");
+    }
+
+    #[tokio::test]
+    async fn test_lock_all_clears_all_master_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_vault_state(dir.path());
+        let profiles: Vec<_> = ["alpha", "beta", "work"].iter().map(|n| profile(n)).collect();
+        for p in &profiles {
+            state.activate_profile(p);
+            let _ = state.vault_for(p).await;
+        }
+        state.master_keys.clear();
+        for p in &profiles {
+            assert!(state.vault_for(p).await.is_err(), "vault_for should fail after clearing all keys");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vault_caching_survives_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_vault_state(dir.path());
+        let p = profile("work");
+        state.activate_profile(&p);
+        assert!(state.vault_for(&p).await.is_ok());
+        assert!(state.vaults.contains_key(&p), "vault should be cached after first access");
+        assert!(state.vault_for(&p).await.is_ok(), "second vault_for should succeed from cache");
+    }
+
+    #[tokio::test]
+    async fn test_different_master_keys_produce_independent_vaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut key_a = vec![0u8; 32];
+        key_a[0] = 0xAA;
+        let mut key_b = vec![0u8; 32];
+        key_b[0] = 0xBB;
+
+        let mut state = VaultState {
+            master_keys: HashMap::new(),
+            vaults: HashMap::new(),
+            active_profiles: HashSet::new(),
+            ttl: Duration::from_secs(60),
+            config_dir: dir.path().to_path_buf(),
+        };
+        let pa = profile("alpha");
+        let pb = profile("beta");
+        state.master_keys.insert(pa.clone(), SecureBytes::new(key_a));
+        state.master_keys.insert(pb.clone(), SecureBytes::new(key_b));
+        state.activate_profile(&pa);
+        state.activate_profile(&pb);
+
+        let vault_a = state.vault_for(&pa).await.unwrap();
+        vault_a.store().set("key1", b"value-a").await.unwrap();
+
+        let vault_b = state.vault_for(&pb).await.unwrap();
+        vault_b.store().set("key1", b"value-b").await.unwrap();
+
+        let val_a = state.vault_for(&pa).await.unwrap().store().get("key1").await.unwrap();
+        let val_b = state.vault_for(&pb).await.unwrap().store().get("key1").await.unwrap();
+        assert_eq!(val_a.as_bytes(), b"value-a", "vault A should have its own data");
+        assert_eq!(val_b.as_bytes(), b"value-b", "vault B should have its own data");
+    }
+
+    // -- B. Salt and Key Derivation --
+
+    #[test]
+    fn test_profile_salt_path_format() {
+        let p = profile("work");
+        let path = profile_salt_path(Path::new("/tmp/config"), &p);
+        assert_eq!(path, PathBuf::from("/tmp/config/vaults/work.salt"));
+    }
+
+    #[test]
+    fn test_generate_profile_salt_creates_16_byte_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = dir.path().join("vaults").join("test.salt");
+        let salt = generate_profile_salt(&sp).unwrap();
+        assert_eq!(salt.len(), 16);
+        let on_disk = std::fs::read(&sp).unwrap();
+        assert_eq!(on_disk.len(), 16);
+    }
+
+    #[test]
+    fn test_generate_profile_salt_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = dir.path().join("deeply").join("nested").join("test.salt");
+        assert!(!sp.parent().unwrap().exists());
+        let result = generate_profile_salt(&sp);
+        assert!(result.is_ok(), "should create parent directories");
+        assert!(sp.exists());
+    }
+
+    #[test]
+    fn test_load_salt_reads_back_generated() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = dir.path().join("vaults").join("test.salt");
+        let generated = generate_profile_salt(&sp).unwrap();
+        let loaded = load_salt(&sp).unwrap();
+        assert_eq!(generated, loaded, "loaded salt must match generated salt");
+    }
+
+    #[test]
+    fn test_load_salt_rejects_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = dir.path().join("bad.salt");
+        std::fs::write(&sp, &[0u8; 15]).unwrap();
+        let err = load_salt(&sp).unwrap_err().to_string();
+        assert!(err.contains("not 16 bytes"), "should reject wrong length: {err}");
+    }
+
+    #[test]
+    fn test_derive_master_key_deterministic() {
+        let salt = [42u8; 16];
+        let k1 = derive_master_key(b"password", &salt).unwrap();
+        let k2 = derive_master_key(b"password", &salt).unwrap();
+        assert_eq!(k1.as_bytes(), k2.as_bytes(), "same inputs must produce same key");
+
+        let k3 = derive_master_key(b"different", &salt).unwrap();
+        assert_ne!(k1.as_bytes(), k3.as_bytes(), "different password must produce different key");
+
+        let other_salt = [99u8; 16];
+        let k4 = derive_master_key(b"password", &other_salt).unwrap();
+        assert_ne!(k1.as_bytes(), k4.as_bytes(), "different salt must produce different key");
+    }
+
+    // -- C. unlock_profile --
+
+    #[tokio::test]
+    async fn test_unlock_profile_generates_salt_and_returns_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = profile("fresh");
+        let salt_file = profile_salt_path(dir.path(), &p);
+        assert!(!salt_file.exists());
+
+        let result = unlock_profile(b"my-password", &p, dir.path()).await;
+        assert!(result.is_ok(), "first unlock should succeed: {:?}", result.err());
+        assert!(salt_file.exists(), "salt file should be created");
+    }
+
+    #[tokio::test]
+    async fn test_unlock_profile_same_password_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = profile("deterministic");
+
+        let r1 = unlock_profile(b"same-pass", &p, dir.path()).await.unwrap();
+        let r2 = unlock_profile(b"same-pass", &p, dir.path()).await.unwrap();
+        assert_eq!(r1.master_key.as_bytes(), r2.master_key.as_bytes(), "same password should derive same key");
+    }
+
+    #[tokio::test]
+    async fn test_unlock_profile_wrong_password_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = profile("wrongpass");
+
+        let r1 = unlock_profile(b"correct-pass", &p, dir.path()).await.unwrap();
+        // Open a vault with the correct key to create the DB file.
+        let vault_key = core_crypto::derive_vault_key(r1.master_key.as_bytes(), &p);
+        let db_path = dir.path().join("vaults").join(format!("{p}.db"));
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let _store = SqlCipherStore::open(&db_path, &vault_key).unwrap();
+        drop(_store);
+
+        let r2 = unlock_profile(b"wrong-pass", &p, dir.path()).await;
+        assert!(r2.is_err(), "wrong password should fail");
+        let err = r2.err().unwrap().to_string();
+        assert!(err.contains("wrong password"), "error should mention wrong password: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_unlock_profile_returns_verified_store_when_vault_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = profile("withvault");
+
+        let r1 = unlock_profile(b"pass123", &p, dir.path()).await.unwrap();
+        // Create the vault DB.
+        let vault_key = core_crypto::derive_vault_key(r1.master_key.as_bytes(), &p);
+        let db_path = dir.path().join("vaults").join(format!("{p}.db"));
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let _store = SqlCipherStore::open(&db_path, &vault_key).unwrap();
+        drop(_store);
+
+        let r2 = unlock_profile(b"pass123", &p, dir.path()).await.unwrap();
+        assert!(r2.verified_store.is_some(), "should return verified store when vault DB exists");
+    }
+
+    #[tokio::test]
+    async fn test_unlock_profile_returns_none_store_when_no_vault_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = profile("novault");
+
+        let result = unlock_profile(b"pass123", &p, dir.path()).await.unwrap();
+        assert!(result.verified_store.is_none(), "should return None when no vault DB exists");
+    }
+
+    // -- F. Keyring account naming --
+
+    #[test]
+    fn test_keylocker_account_format() {
+        let p = profile("work");
+        assert_eq!(keylocker_account(&p), "vault-key-work");
+    }
 }
 
 fn init_logging(format: &str) -> anyhow::Result<()> {

@@ -1403,7 +1403,7 @@ async fn cmd_launch_run(entry_id: &str, profile: Option<&str>) -> anyhow::Result
     };
 
     match rpc(&client, event, SecurityLevel::Internal).await? {
-        EventKind::LaunchExecuteResponse { pid, error } => {
+        EventKind::LaunchExecuteResponse { pid, error, .. } => {
             if pid == 0 {
                 let detail = error.as_deref().unwrap_or("unknown error");
                 anyhow::bail!("launch failed: {detail}");
@@ -1791,4 +1791,47 @@ async fn cmd_env(profile: &str, prefix: Option<&str>, command: &[String]) -> any
 
     // Forward the child's exit code.
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_unlock_profiles_comma_separated() {
+        assert_eq!(parse_unlock_profiles("a,b,c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_unlock_profiles_org_vault_syntax() {
+        let result = parse_unlock_profiles("org1:a,b;org2:c");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_unlock_profiles_single() {
+        assert_eq!(parse_unlock_profiles("default"), vec!["default"]);
+    }
+
+    #[test]
+    fn test_parse_unlock_profiles_empty_segments_filtered() {
+        assert_eq!(parse_unlock_profiles("a,,b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_parse_unlock_profiles_whitespace_trimmed() {
+        assert_eq!(parse_unlock_profiles(" a , b "), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_parse_unlock_profiles_empty_string() {
+        let result = parse_unlock_profiles("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unlock_profiles_org_with_no_vaults() {
+        let result = parse_unlock_profiles("org:");
+        assert!(result.is_empty());
+    }
 }

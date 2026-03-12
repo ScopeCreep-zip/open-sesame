@@ -41,6 +41,12 @@ pub enum OverlayCmd {
     /// acknowledgment. Use this before activating a different window so the
     /// compositor no longer sees our exclusive-keyboard layer-shell surface.
     HideAndSync,
+    /// Show "Launching..." status.
+    ShowLaunching,
+    /// Show launch error with message.
+    ShowLaunchError {
+        message: String,
+    },
     /// Update theme from config.
     UpdateTheme(Box<OverlayTheme>),
     /// Shut down the overlay thread.
@@ -85,6 +91,8 @@ enum OverlayPhase {
     Hidden,
     BorderOnly,
     Full,
+    Launching,
+    LaunchError,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +115,8 @@ struct OverlayState {
     /// cycle. When true, modifier polling is skipped because keyboard focus
     /// is confirmed working — the real key-release handler will fire.
     received_key_event: bool,
+    /// Error message to display in LaunchError phase.
+    error_message: String,
 }
 
 /// Grace period (ms) after activation before modifier polling begins.
@@ -126,6 +136,7 @@ impl OverlayState {
             show_title,
             activated_at: None,
             received_key_event: false,
+            error_message: String::new(),
         }
     }
 }
@@ -243,6 +254,18 @@ fn run_gtk4_overlay(
                     &st.theme,
                     st.show_app_id,
                     st.show_title,
+                );
+            }
+            OverlayPhase::Launching => {
+                render::draw_status_toast(
+                    cr, width as f64, height as f64,
+                    "Launching\u{2026}", &st.theme,
+                );
+            }
+            OverlayPhase::LaunchError => {
+                render::draw_error_toast(
+                    cr, width as f64, height as f64,
+                    &st.error_message, &st.theme,
                 );
             }
         }
@@ -445,6 +468,35 @@ fn run_gtk4_overlay(
                         display.flush();
                     }
                     let _ = event_tx_cmd.blocking_send(OverlayEvent::SurfaceUnmapped);
+                }
+                OverlayCmd::ShowLaunching => {
+                    {
+                        let mut st = state_cmd.borrow_mut();
+                        st.phase = OverlayPhase::Launching;
+                        st.error_message.clear();
+                    }
+                    // Keep keyboard exclusive so Escape works.
+                    window_cmd.set_keyboard_mode(KeyboardMode::Exclusive);
+                    if let Some(surface) = window_cmd.surface() {
+                        surface.set_input_region(&gtk4::cairo::Region::create_rectangle(
+                            &gtk4::cairo::RectangleInt::new(0, 0, i32::MAX, i32::MAX),
+                        ));
+                    }
+                    da_cmd.queue_draw();
+                }
+                OverlayCmd::ShowLaunchError { message } => {
+                    {
+                        let mut st = state_cmd.borrow_mut();
+                        st.phase = OverlayPhase::LaunchError;
+                        st.error_message = message;
+                    }
+                    window_cmd.set_keyboard_mode(KeyboardMode::Exclusive);
+                    if let Some(surface) = window_cmd.surface() {
+                        surface.set_input_region(&gtk4::cairo::Region::create_rectangle(
+                            &gtk4::cairo::RectangleInt::new(0, 0, i32::MAX, i32::MAX),
+                        ));
+                    }
+                    da_cmd.queue_draw();
                 }
                 OverlayCmd::UpdateTheme(theme) => {
                     {

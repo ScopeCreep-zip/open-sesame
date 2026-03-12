@@ -9,7 +9,7 @@ use anyhow::Context;
 use clap::Parser;
 use core_fuzzy::{FrecencyDb, FuzzyMatcher, SearchEngine, inject_items};
 use core_ipc::{BusClient, Message};
-use core_types::{DaemonId, EventKind, LaunchResult, SecurityLevel, TrustProfileName};
+use core_types::{DaemonId, EventKind, LaunchDenial, LaunchResult, SecurityLevel, TrustProfileName};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -177,10 +177,19 @@ async fn main() -> anyhow::Result<()> {
 
                         // Look up the Exec line from the pre-sandbox cache.
                         match launch_entry(entry_id, profile.as_ref().map(|p| p.as_ref()), tags, &entry_cache, &client).await {
-                            Ok(pid) => Some(EventKind::LaunchExecuteResponse { pid, error: None }),
-                            Err(e) => {
+                            Ok(pid) => Some(EventKind::LaunchExecuteResponse { pid, error: None, denial: None }),
+                            Err(LaunchError::Denial(denial)) => {
+                                let error_msg = format!("{denial:?}");
+                                tracing::error!(entry_id, ?denial, "launch denied");
+                                Some(EventKind::LaunchExecuteResponse { pid: 0, error: Some(error_msg), denial: Some(denial) })
+                            }
+                            Err(LaunchError::Other(e)) => {
                                 tracing::error!(entry_id, error = %e, "launch failed");
-                                Some(EventKind::LaunchExecuteResponse { pid: 0, error: Some(e.to_string()) })
+                                Some(EventKind::LaunchExecuteResponse {
+                                    pid: 0,
+                                    error: Some(e.to_string()),
+                                    denial: Some(LaunchDenial::SpawnFailed { reason: e.to_string() }),
+                                })
                             }
                         }
                     }
@@ -383,6 +392,20 @@ fn resolve_entry<'a>(
 /// strips field codes, and spawns the process.
 /// If `profile` is provided, `SESAME_PROFILE` is injected into the child environment
 /// so the launched application (or sesame SDK) can request profile-scoped secrets.
+/// Structured launch error — carries machine-readable denial for the WM.
+enum LaunchError {
+    /// A structured denial the WM can act on (e.g. prompt for vault unlock).
+    Denial(LaunchDenial),
+    /// An unstructured error (spawn failure, IPC error, etc.).
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for LaunchError {
+    fn from(e: anyhow::Error) -> Self {
+        LaunchError::Other(e)
+    }
+}
+
 ///
 /// Launch profile `tags` are resolved to compose environment variables, secrets,
 /// and optional devshell wrapping. Tags support qualified cross-profile references
@@ -393,14 +416,14 @@ async fn launch_entry(
     tags: &[String],
     cache: &HashMap<String, scanner::CachedEntry>,
     client: &BusClient,
-) -> anyhow::Result<u32> {
+) -> Result<u32, LaunchError> {
     let cached = resolve_entry(entry_id, cache)
-        .ok_or_else(|| anyhow::anyhow!("desktop entry '{entry_id}' not found in {} cached entries", cache.len()))?;
+        .ok_or(LaunchError::Denial(LaunchDenial::EntryNotFound))?;
 
     let exec = scanner::strip_field_codes(&cached.exec);
     let parts = scanner::tokenize_exec(&exec);
     if parts.is_empty() {
-        anyhow::bail!("empty Exec line for '{entry_id}'");
+        return Err(LaunchError::Other(anyhow::anyhow!("empty Exec line for '{entry_id}'")));
     }
 
     // Resolve launch profiles from config
@@ -416,11 +439,14 @@ async fn launch_entry(
             let (tp_name, lp_name) = parse_tag(tag, default_profile);
 
             let tp = config.profiles.get(&tp_name).ok_or_else(|| {
-                anyhow::anyhow!("trust profile '{tp_name}' not found in config")
+                LaunchError::Denial(LaunchDenial::ProfileNotFound { profile: tp_name.clone() })
             })?;
 
             let lp = tp.launch_profiles.get(&lp_name).ok_or_else(|| {
-                anyhow::anyhow!("launch profile '{lp_name}' not found in profile '{tp_name}'")
+                LaunchError::Denial(LaunchDenial::LaunchProfileNotFound {
+                    profile: tp_name.clone(),
+                    launch_profile: lp_name.clone(),
+                })
             })?;
 
             // Merge env (later tag wins on conflict)
@@ -442,39 +468,72 @@ async fn launch_entry(
         }
     }
 
-    // Fetch secrets via IPC (all-or-nothing)
+    // Fetch secrets via IPC — collect ALL denials before aborting so the WM
+    // can prompt for all required vault unlocks at once.
+    let mut locked_profiles: Vec<TrustProfileName> = Vec::new();
+    let mut missing_count: u32 = 0;
+
     for (secret_name, tp_name) in &all_secrets {
         let tp = core_types::TrustProfileName::try_from(tp_name.as_str())
-            .map_err(|e| anyhow::anyhow!("invalid trust profile name: {e}"))?;
+            .map_err(|e| LaunchError::Other(anyhow::anyhow!("invalid trust profile name: {e}")))?;
 
         let response = client.request(
             EventKind::SecretGet {
-                profile: tp,
+                profile: tp.clone(),
                 key: secret_name.clone(),
             },
             SecurityLevel::Internal,
             std::time::Duration::from_secs(5),
         ).await.map_err(|e| {
             tracing::error!(error = %e, "secret fetch IPC failed");
-            anyhow::anyhow!("failed to fetch a required secret — launch aborted")
+            LaunchError::Other(anyhow::anyhow!("secret fetch IPC failed"))
         })?;
 
         match response.payload {
             EventKind::SecretGetResponse { key: _, value, denial } => {
                 if let Some(reason) = denial {
                     tracing::error!(secret = %secret_name, ?reason, "secret fetch denied");
-                    anyhow::bail!("a required secret is unavailable — launch aborted");
+                    match reason {
+                        core_types::SecretDenialReason::ProfileNotActive
+                        | core_types::SecretDenialReason::Locked => {
+                            if !locked_profiles.contains(&tp) {
+                                locked_profiles.push(tp);
+                            }
+                        }
+                        core_types::SecretDenialReason::NotFound => {
+                            missing_count += 1;
+                        }
+                        core_types::SecretDenialReason::RateLimited => {
+                            return Err(LaunchError::Denial(LaunchDenial::RateLimited));
+                        }
+                        _ => {
+                            return Err(LaunchError::Other(anyhow::anyhow!(
+                                "secret access denied: {reason:?}"
+                            )));
+                        }
+                    }
+                } else {
+                    let env_var = secret_name_to_env_var(secret_name);
+                    let secret_str = String::from_utf8(value.as_bytes().to_vec())
+                        .context("secret value is not valid UTF-8")?;
+                    composed_env.insert(env_var, secret_str);
                 }
-                let env_var = secret_name_to_env_var(secret_name);
-                let secret_str = String::from_utf8(value.as_bytes().to_vec())
-                    .context("secret value is not valid UTF-8")?;
-                composed_env.insert(env_var, secret_str);
             }
             other => {
                 tracing::error!(?other, "unexpected response to SecretGet");
-                anyhow::bail!("failed to fetch a required secret — launch aborted");
+                return Err(LaunchError::Other(anyhow::anyhow!(
+                    "unexpected response to SecretGet"
+                )));
             }
         }
+    }
+
+    // Check collected denials — locked vaults take priority over missing secrets
+    if !locked_profiles.is_empty() {
+        return Err(LaunchError::Denial(LaunchDenial::VaultsLocked { locked_profiles }));
+    }
+    if missing_count > 0 {
+        return Err(LaunchError::Denial(LaunchDenial::SecretNotFound { missing_count }));
     }
 
     // Build command — wrap in devshell if configured

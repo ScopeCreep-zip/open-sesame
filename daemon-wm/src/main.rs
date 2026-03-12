@@ -249,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
                         cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                         #[cfg(target_os = "linux")] &backend,
                         &mut client, &config_state,
+                        &mut controller, &windows, &wm_config,
                     ).await;
                 }
             }
@@ -269,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
                     cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                     #[cfg(target_os = "linux")] &backend,
                     &mut client, &config_state,
+                    &mut controller, &windows, &wm_config,
                 ).await;
             }
 
@@ -326,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
                             cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
                             &mut client, &config_state,
+                            &mut controller, &windows, &wm_config,
                         ).await;
                         None
                     }
@@ -341,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
                             cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
                             &mut client, &config_state,
+                            &mut controller, &windows, &wm_config,
                         ).await;
                         None
                     }
@@ -356,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
                             cmds, &overlay_cmd_tx, &mut overlay_event_rx,
                             #[cfg(target_os = "linux")] &backend,
                             &mut client, &config_state,
+                            &mut controller, &windows, &wm_config,
                         ).await;
                         None
                     }
@@ -454,6 +459,7 @@ async fn main() -> anyhow::Result<()> {
 // Command executor — dumb switch, no decisions
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_commands(
     commands: Vec<Command>,
     overlay_cmd_tx: &std::sync::mpsc::Sender<OverlayCmd>,
@@ -461,6 +467,9 @@ async fn execute_commands(
     #[cfg(target_os = "linux")] backend: &Option<Arc<Box<dyn platform_linux::compositor::CompositorBackend>>>,
     client: &mut BusClient,
     config_state: &std::sync::Arc<std::sync::RwLock<core_config::Config>>,
+    controller: &mut daemon_wm::controller::OverlayController,
+    windows: &Arc<Mutex<Vec<core_types::Window>>>,
+    wm_config: &Arc<Mutex<core_config::WmConfig>>,
 ) {
     for cmd in commands {
         match cmd {
@@ -519,14 +528,84 @@ async fn execute_commands(
                         ).ok()
                     })
                 };
-                client.publish(
+                let result = client.request(
                     EventKind::LaunchExecute {
                         entry_id: command,
                         profile: active_profile,
                         tags,
                     },
                     SecurityLevel::Internal,
-                ).await.ok();
+                    std::time::Duration::from_secs(10),
+                ).await;
+
+                let launch_event = match result {
+                    Ok(msg) => match msg.payload {
+                        EventKind::LaunchExecuteResponse { pid, error, denial } => {
+                            if pid > 0 && error.is_none() && denial.is_none() {
+                                daemon_wm::controller::Event::LaunchResult {
+                                    success: true,
+                                    error: None,
+                                    denial: None,
+                                }
+                            } else {
+                                daemon_wm::controller::Event::LaunchResult {
+                                    success: false,
+                                    error: error.or_else(|| Some("launch failed".into())),
+                                    denial,
+                                }
+                            }
+                        }
+                        _ => daemon_wm::controller::Event::LaunchResult {
+                            success: false,
+                            error: Some("unexpected response from launcher".into()),
+                            denial: None,
+                        },
+                    },
+                    Err(e) => {
+                        tracing::error!(error = %e, "launch request failed");
+                        daemon_wm::controller::Event::LaunchResult {
+                            success: false,
+                            error: Some(format!("IPC error: {e}")),
+                            denial: None,
+                        }
+                    }
+                };
+
+                let win_list = windows.lock().await;
+                let cfg = wm_config.lock().await;
+                let result_cmds = controller.handle(launch_event, &win_list, &cfg);
+                drop(cfg);
+                drop(win_list);
+                // Recurse to execute the result commands (ShowLaunchError, Hide, etc.)
+                // Use a boxed future to avoid infinite recursion type issues.
+                for result_cmd in result_cmds {
+                    match result_cmd {
+                        Command::Hide => {
+                            if overlay_cmd_tx.send(OverlayCmd::Hide).is_err() {
+                                tracing::error!("overlay thread has exited unexpectedly");
+                            }
+                        }
+                        Command::ShowLaunchError { message, .. } => {
+                            if overlay_cmd_tx.send(OverlayCmd::ShowLaunchError { message }).is_err() {
+                                tracing::error!("overlay thread has exited unexpectedly");
+                            }
+                        }
+                        Command::Publish(event, level) => {
+                            client.publish(event, level).await.ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Command::ShowLaunching => {
+                if overlay_cmd_tx.send(OverlayCmd::ShowLaunching).is_err() {
+                    tracing::error!("overlay thread has exited unexpectedly");
+                }
+            }
+            Command::ShowLaunchError { message, .. } => {
+                if overlay_cmd_tx.send(OverlayCmd::ShowLaunchError { message }).is_err() {
+                    tracing::error!("overlay thread has exited unexpectedly");
+                }
             }
             Command::Publish(event, level) => {
                 client.publish(event, level).await.ok();

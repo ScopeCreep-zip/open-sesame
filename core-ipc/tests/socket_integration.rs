@@ -235,7 +235,7 @@ async fn launch_execute_response_roundtrip() {
     let msg_ctx = core_ipc::MessageContext::new(did(2));
     let response = Message::new(
         &msg_ctx,
-        EventKind::LaunchExecuteResponse { pid: 12345, error: None },
+        EventKind::LaunchExecuteResponse { pid: 12345, error: None, denial: None },
         SecurityLevel::Internal,
         launcher.epoch(),
     )
@@ -245,7 +245,7 @@ async fn launch_execute_response_roundtrip() {
 
     let result = response_handle.await.unwrap().unwrap();
     match result.payload {
-        EventKind::LaunchExecuteResponse { pid, error } => {
+        EventKind::LaunchExecuteResponse { pid, error, .. } => {
             assert_eq!(pid, 12345);
             assert!(error.is_none());
         }
@@ -292,6 +292,7 @@ async fn launch_execute_error_roundtrip() {
         EventKind::LaunchExecuteResponse {
             pid: 0,
             error: Some("desktop entry 'nonexistent' not found".into()),
+            denial: Some(core_types::LaunchDenial::EntryNotFound),
         },
         SecurityLevel::Internal,
         launcher.epoch(),
@@ -302,7 +303,7 @@ async fn launch_execute_error_roundtrip() {
 
     let result = response_handle.await.unwrap().unwrap();
     match result.payload {
-        EventKind::LaunchExecuteResponse { pid, error } => {
+        EventKind::LaunchExecuteResponse { pid, error, .. } => {
             assert_eq!(pid, 0);
             assert!(error.as_ref().is_some_and(|e| e.contains("not found")));
         }

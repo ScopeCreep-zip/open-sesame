@@ -339,7 +339,7 @@ fn controller_char_launches_app_when_no_window() {
     ctrl.handle(Event::Activate, &windows, &test_config());
     let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
     assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")));
-    assert!(ctrl.is_idle());
+    assert!(!ctrl.is_idle()); // In Launching phase, waiting for LaunchResult
 }
 
 #[test]
