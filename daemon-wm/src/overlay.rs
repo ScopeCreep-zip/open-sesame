@@ -47,6 +47,9 @@ pub enum OverlayCmd {
     ShowLaunchError {
         message: String,
     },
+    /// Reset the modifier-poll grace timer. Proves Alt is still held
+    /// (an IPC re-activation wouldn't fire otherwise).
+    ResetGrace,
     /// Update theme from config.
     UpdateTheme(Box<OverlayTheme>),
     /// Shut down the overlay thread.
@@ -291,7 +294,7 @@ fn run_gtk4_overlay(
             gdk::Key::Down => Some(OverlayEvent::SelectionDown),
             gdk::Key::Up => Some(OverlayEvent::SelectionUp),
             gdk::Key::BackSpace => Some(OverlayEvent::Backspace),
-            gdk::Key::space => Some(OverlayEvent::SelectionDown),
+            gdk::Key::space => None, // inert — activation key, not navigation
             _ => {
                 if let Some(ch) = keyval.to_unicode() {
                     if ch.is_alphanumeric() {
@@ -497,6 +500,17 @@ fn run_gtk4_overlay(
                         ));
                     }
                     da_cmd.queue_draw();
+                }
+                OverlayCmd::ResetGrace => {
+                    // An IPC re-activation proves Alt is still held.
+                    // Reset the grace timer and poll flag so the modifier
+                    // poll safety net doesn't fire prematurely.
+                    {
+                        let mut st = state_cmd.borrow_mut();
+                        st.activated_at = Some(std::time::Instant::now());
+                        st.received_key_event = false;
+                    }
+                    *modifier_released_sent.borrow_mut() = false;
                 }
                 OverlayCmd::UpdateTheme(theme) => {
                     {

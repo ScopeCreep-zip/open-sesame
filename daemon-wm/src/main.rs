@@ -597,6 +597,11 @@ async fn execute_commands(
                     }
                 }
             }
+            Command::ResetGrace => {
+                if overlay_cmd_tx.send(OverlayCmd::ResetGrace).is_err() {
+                    tracing::error!("overlay thread has exited unexpectedly");
+                }
+            }
             Command::ShowLaunching => {
                 if overlay_cmd_tx.send(OverlayCmd::ShowLaunching).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");

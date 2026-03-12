@@ -68,6 +68,9 @@ pub enum Command {
     },
     /// Show "Launching..." spinner/status in the overlay.
     ShowLaunching,
+    /// Reset the overlay's modifier-poll grace timer. Sent on IPC
+    /// re-activation to prove Alt is still held and prevent premature commit.
+    ResetGrace,
     /// Publish an IPC event.
     Publish(EventKind, SecurityLevel),
 }
@@ -363,7 +366,10 @@ impl OverlayController {
         config: &WmConfig,
         mode: ActivationMode,
     ) -> Vec<Command> {
-        match &mut self.phase {
+        // Take ownership of the current phase. For Idle this is a no-op
+        // (replaced with Idle). For Armed/Picking we need ownership to
+        // cycle selection and transition without borrow conflicts.
+        match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Idle => {
                 let snap = Snapshot::build(windows, config);
 
@@ -420,39 +426,55 @@ impl OverlayController {
                     }
                 }
             }
-            Phase::Armed { selection, snap, .. } => {
-                // Re-activation cycles in the requested direction.
+            Phase::Armed { snap, mut selection, input, .. } => {
+                // Re-activation via IPC (e.g. repeated Alt+Space intercepted
+                // by compositor). Cycle selection, show the picker so the user
+                // sees feedback, and reset the modifier-poll grace timer to
+                // prevent premature commit.
                 if !snap.windows.is_empty() {
                     let len = snap.windows.len();
-                    match mode {
-                        ActivationMode::Backward => {
-                            *selection = (*selection + len - 1) % len;
-                        }
-                        _ => {
-                            *selection = (*selection + 1) % len;
-                        }
-                    }
+                    selection = match mode {
+                        ActivationMode::Backward => (selection + len - 1) % len,
+                        _ => (selection + 1) % len,
+                    };
                 }
+                let cmds = vec![
+                    Command::ShowPicker {
+                        windows: snap.overlay_windows.clone(),
+                        hints: snap.hints.clone(),
+                    },
+                    Command::UpdatePicker {
+                        input: input.clone(),
+                        selection,
+                    },
+                    Command::ResetGrace,
+                ];
+                self.phase = Phase::Picking { snap, selection, input };
+                cmds
+            }
+            Phase::Picking { snap, mut selection, input } => {
+                // Re-activation while picker is visible. Cycle and reset grace.
+                if !snap.windows.is_empty() {
+                    let len = snap.windows.len();
+                    selection = match mode {
+                        ActivationMode::Backward => (selection + len - 1) % len,
+                        _ => (selection + 1) % len,
+                    };
+                }
+                let cmds = vec![
+                    Command::UpdatePicker {
+                        input: input.clone(),
+                        selection,
+                    },
+                    Command::ResetGrace,
+                ];
+                self.phase = Phase::Picking { snap, selection, input };
+                cmds
+            }
+            other @ (Phase::Launching | Phase::LaunchError) => {
+                self.phase = other;
                 Vec::new()
             }
-            Phase::Picking { selection, snap, input, .. } => {
-                if !snap.windows.is_empty() {
-                    let len = snap.windows.len();
-                    match mode {
-                        ActivationMode::Backward => {
-                            *selection = (*selection + len - 1) % len;
-                        }
-                        _ => {
-                            *selection = (*selection + 1) % len;
-                        }
-                    }
-                }
-                vec![Command::UpdatePicker {
-                    input: input.clone(),
-                    selection: *selection,
-                }]
-            }
-            Phase::Launching | Phase::LaunchError => Vec::new(),
         }
     }
 
@@ -1107,16 +1129,157 @@ mod tests {
     // === Re-activation cycles all windows ===
 
     #[test]
-    fn reactivate_cycles_in_armed() {
+    fn reactivate_transitions_armed_to_picking() {
         let mut ctrl = OverlayController::new();
         let windows = test_windows();
         ctrl.handle(Event::Activate, &windows, &test_config());
-        ctrl.handle(Event::Activate, &windows, &test_config());
-        if let Phase::Armed { selection, snap, .. } = &ctrl.phase {
+        let cmds = ctrl.handle(Event::Activate, &windows, &test_config());
+        // Re-activation in Armed transitions to Picking with picker visible.
+        assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, Command::ResetGrace)));
+        if let Phase::Picking { selection, snap, .. } = &ctrl.phase {
             assert!(*selection < snap.windows.len());
         } else {
-            panic!("expected Armed");
+            panic!("expected Picking after re-activation");
         }
+    }
+
+    // === Re-activation grace reset (prevents modifier poll premature commit) ===
+
+    #[test]
+    fn reactivate_armed_emits_reset_grace() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::Activate, &windows, &test_config());
+        let cmds = ctrl.handle(Event::Activate, &windows, &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::ResetGrace)),
+            "re-activation in Armed must emit ResetGrace to prevent modifier poll commit"
+        );
+    }
+
+    #[test]
+    fn reactivate_picking_emits_reset_grace() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::Activate, &windows, &test_config());
+        ctrl.handle(Event::DwellTimeout, &windows, &test_config());
+        assert!(matches!(ctrl.phase, Phase::Picking { .. }));
+        let cmds = ctrl.handle(Event::Activate, &windows, &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::ResetGrace)),
+            "re-activation in Picking must emit ResetGrace to prevent modifier poll commit"
+        );
+    }
+
+    #[test]
+    fn reactivate_launcher_emits_reset_grace() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::ResetGrace)),
+            "launcher re-activation must emit ResetGrace"
+        );
+    }
+
+    #[test]
+    fn reactivate_backward_emits_reset_grace() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::Activate, &windows, &test_config());
+        let cmds = ctrl.handle(Event::ActivateBackward, &windows, &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::ResetGrace)),
+            "backward re-activation must emit ResetGrace"
+        );
+    }
+
+    // === Rapid re-activation cycling (Alt+Space+Space+Space...) ===
+
+    #[test]
+    fn rapid_reactivation_cycles_all_windows() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+
+        let snap_len = match &ctrl.phase {
+            Phase::Armed { snap, .. } => snap.windows.len(),
+            _ => panic!("expected Armed"),
+        };
+
+        // Simulate Alt+Space repeated — each re-activation should cycle
+        // forward through all windows without committing.
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..snap_len {
+            let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+            // Must never commit (no ActivateWindow or HideAndSync).
+            assert!(
+                !cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. } | Command::HideAndSync)),
+                "re-activation must not commit"
+            );
+            if let Phase::Picking { selection, .. } = &ctrl.phase {
+                visited.insert(*selection);
+            }
+        }
+
+        assert_eq!(
+            visited.len(), snap_len,
+            "rapid re-activation must visit all {snap_len} windows, visited {visited:?}"
+        );
+    }
+
+    #[test]
+    fn rapid_reactivation_no_commit_until_modifier_released() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+
+        // 20 rapid re-activations — none should commit.
+        for i in 0..20 {
+            let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+            assert!(
+                !cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
+                "re-activation #{i} must not activate a window"
+            );
+            assert!(!ctrl.is_idle(), "must not return to Idle during cycling");
+        }
+
+        // Only ModifierReleased commits.
+        let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(ctrl.is_idle());
+    }
+
+    #[test]
+    fn rapid_reactivation_forward_then_backward() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+
+        // Forward 3 times.
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        let sel_after_forward = match &ctrl.phase {
+            Phase::Picking { selection, .. } => *selection,
+            _ => panic!("expected Picking"),
+        };
+
+        // Backward 2 times (simulates adding Shift mid-cycle).
+        ctrl.handle(Event::ActivateBackward, &windows, &test_config());
+        ctrl.handle(Event::ActivateBackward, &windows, &test_config());
+        let sel_after_backward = match &ctrl.phase {
+            Phase::Picking { selection, .. } => *selection,
+            _ => panic!("expected Picking"),
+        };
+
+        // Net movement: 3 forward - 2 backward = 1 forward from initial.
+        // Initial Armed selection is initial_forward(), first re-activation
+        // cycles +1, so after 3 forward we're at initial+3, minus 2 backward = initial+1.
+        assert_ne!(sel_after_forward, sel_after_backward,
+            "backward must change selection from forward position");
     }
 
     // === Release after interaction ===
