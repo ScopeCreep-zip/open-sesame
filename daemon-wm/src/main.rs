@@ -190,17 +190,44 @@ async fn main() -> anyhow::Result<()> {
                 let arc = Arc::new(backend);
                 let poll_backend = Arc::clone(&arc);
                 let win_ref = Arc::clone(&windows);
-                tokio::spawn(async move {
-                    loop {
-                        match poll_backend.list_windows().await {
-                            Ok(win_list) => {
-                                *win_ref.lock().await = win_list;
+                // Window list polling runs on a dedicated OS thread because the
+                // compositor backend does synchronous Wayland roundtrips with
+                // libc::poll(). On the current_thread runtime this would block
+                // the single tokio thread and stall all IPC message processing.
+                let (win_tx, mut win_rx) = tokio::sync::mpsc::channel(1);
+                std::thread::Builder::new()
+                    .name("wm-winlist-poll".into())
+                    .spawn(move || {
+                        loop {
+                            // list_windows() returns BoxFuture wrapping sync Wayland I/O.
+                            // Use a noop-waker poll since the future never yields.
+                            let result = {
+                                let waker = std::task::Waker::noop();
+                                let mut cx = std::task::Context::from_waker(waker);
+                                let mut fut = poll_backend.list_windows();
+                                match std::pin::Pin::as_mut(&mut fut).poll(&mut cx) {
+                                    std::task::Poll::Ready(r) => r,
+                                    std::task::Poll::Pending => {
+                                        tracing::warn!("list_windows unexpectedly yielded Pending");
+                                        continue;
+                                    }
+                                }
+                            };
+                            match result {
+                                Ok(win_list) => {
+                                    let _ = win_tx.blocking_send(win_list);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "failed to refresh window list");
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to refresh window list");
-                            }
+                            std::thread::sleep(std::time::Duration::from_secs(2));
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    })
+                    .expect("failed to spawn window list poll thread");
+                tokio::spawn(async move {
+                    while let Some(win_list) = win_rx.recv().await {
+                        *win_ref.lock().await = win_list;
                     }
                 });
                 Some(arc)
