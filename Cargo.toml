@@ -115,6 +115,8 @@ owo-colors          = "4"
 
 # -- Linux platform --
 evdev                   = { version = "0.13", features = ["tokio", "stream-trait"] }
+# 0.8 matches smithay-client-toolkit's transitive dep; no 0.9 on crates.io.
+xkbcommon               = "0.8"
 wayland-client          = "0.31"
 wayland-protocols       = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr   = { version = "0.3", features = ["client"] }

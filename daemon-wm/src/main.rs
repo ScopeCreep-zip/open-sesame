@@ -28,6 +28,83 @@ struct Cli {
     log_format: String,
 }
 
+// ---------------------------------------------------------------------------
+// IPC keyboard event support
+// ---------------------------------------------------------------------------
+
+/// Tracks recently processed key events to deduplicate GTK4 and IPC sources.
+///
+/// When compositor keyboard focus is working, both the GTK4 `EventControllerKey`
+/// and the IPC `InputKeyEvent` will fire for the same physical keystroke. This
+/// ring buffer ensures only the first arrival is processed.
+struct KeyDeduplicator {
+    recent: [(u32, bool, u64); 8],
+    idx: usize,
+}
+
+impl KeyDeduplicator {
+    fn new() -> Self {
+        Self {
+            recent: [(0, false, 0); 8],
+            idx: 0,
+        }
+    }
+
+    /// Returns true if this event should be processed (not a duplicate).
+    ///
+    /// An event is a duplicate if an event with the same keyval and pressed
+    /// state was processed within the last 50ms.
+    fn accept(&mut self, keyval: u32, pressed: bool) -> bool {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        for &(kv, pr, ts) in &self.recent {
+            if kv == keyval && pr == pressed && now_ms.saturating_sub(ts) < 50 {
+                return false;
+            }
+        }
+
+        self.recent[self.idx] = (keyval, pressed, now_ms);
+        self.idx = (self.idx + 1) % self.recent.len();
+        true
+    }
+}
+
+/// Map an IPC keyboard event (XKB keysym) to a controller Event.
+///
+/// Uses X11 keysym values which are identical to GDK key constants.
+/// Returns None for keys that the overlay does not handle (space, modifiers, etc.).
+fn map_ipc_key_to_event(keyval: u32, modifiers: u32, unicode: Option<char>) -> Option<Event> {
+    const ESCAPE: u32 = 0xFF1B;
+    const RETURN: u32 = 0xFF0D;
+    const KP_ENTER: u32 = 0xFF8D;
+    const TAB: u32 = 0xFF09;
+    const DOWN: u32 = 0xFF54;
+    const UP: u32 = 0xFF52;
+    const BACKSPACE: u32 = 0xFF08;
+    const SPACE: u32 = 0x0020;
+    const SHIFT_MASK: u32 = 1 << 0;
+
+    match keyval {
+        ESCAPE => Some(Event::Escape),
+        RETURN | KP_ENTER => Some(Event::Confirm),
+        TAB => {
+            if modifiers & SHIFT_MASK != 0 {
+                Some(Event::SelectionUp)
+            } else {
+                Some(Event::SelectionDown)
+            }
+        }
+        DOWN => Some(Event::SelectionDown),
+        UP => Some(Event::SelectionUp),
+        BACKSPACE => Some(Event::Backspace),
+        SPACE => None,
+        _ => unicode.filter(|ch| ch.is_alphanumeric()).map(Event::Char),
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -191,6 +268,8 @@ async fn main() -> anyhow::Result<()> {
 
     // -- Overlay lifecycle --
     let mut controller = OverlayController::new();
+    let mut dedup = KeyDeduplicator::new();
+    let mut ipc_keyboard_confirmed = false;
 
     let (overlay_cmd_tx, mut overlay_event_rx) = {
         let cfg = wm_config.lock().await;
@@ -228,17 +307,60 @@ async fn main() -> anyhow::Result<()> {
 
             // Overlay keyboard events — highest priority.
             Some(event) = overlay_event_rx.recv() => {
-                tracing::debug!(?event, "overlay event received");
+                // Log at trace level — event may contain keystroke content (KeyChar).
+                tracing::trace!(?event, "overlay event received");
                 let ctrl_event = match event {
-                    OverlayEvent::KeyChar(ch) => Some(Event::Char(ch)),
-                    OverlayEvent::Backspace => Some(Event::Backspace),
-                    OverlayEvent::SelectionDown => Some(Event::SelectionDown),
-                    OverlayEvent::SelectionUp => Some(Event::SelectionUp),
-                    OverlayEvent::Confirm => Some(Event::Confirm),
-                    OverlayEvent::Escape => Some(Event::Escape),
+                    OverlayEvent::KeyChar(ch) => {
+                        if dedup.accept(ch as u32, true) {
+                            Some(Event::Char(ch))
+                        } else {
+                            None
+                        }
+                    }
+                    OverlayEvent::Backspace => {
+                        if dedup.accept(0xFF08, true) {
+                            Some(Event::Backspace)
+                        } else {
+                            None
+                        }
+                    }
+                    OverlayEvent::SelectionDown => {
+                        if dedup.accept(0xFF54, true) {
+                            Some(Event::SelectionDown)
+                        } else {
+                            None
+                        }
+                    }
+                    OverlayEvent::SelectionUp => {
+                        if dedup.accept(0xFF52, true) {
+                            Some(Event::SelectionUp)
+                        } else {
+                            None
+                        }
+                    }
+                    OverlayEvent::Confirm => {
+                        if dedup.accept(0xFF0D, true) {
+                            Some(Event::Confirm)
+                        } else {
+                            None
+                        }
+                    }
+                    OverlayEvent::Escape => {
+                        if dedup.accept(0xFF1B, true) {
+                            Some(Event::Escape)
+                        } else {
+                            None
+                        }
+                    }
+                    OverlayEvent::ModifierReleased => {
+                        if dedup.accept(0xFFE9, false) {
+                            Some(Event::ModifierReleased)
+                        } else {
+                            None
+                        }
+                    }
                     OverlayEvent::Dismiss => Some(Event::Dismiss),
-                    OverlayEvent::ModifierReleased => Some(Event::ModifierReleased),
-                    OverlayEvent::SurfaceUnmapped => None, // handled in execute_commands
+                    OverlayEvent::SurfaceUnmapped => None,
                 };
                 if let Some(evt) = ctrl_event {
                     let win_list = windows.lock().await;
@@ -251,6 +373,7 @@ async fn main() -> anyhow::Result<()> {
                         #[cfg(target_os = "linux")] &backend,
                         &mut client, &config_state,
                         &mut controller, &windows, &wm_config,
+                        &mut ipc_keyboard_confirmed,
                     ).await;
                 }
             }
@@ -272,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
                     #[cfg(target_os = "linux")] &backend,
                     &mut client, &config_state,
                     &mut controller, &windows, &wm_config,
+                    &mut ipc_keyboard_confirmed,
                 ).await;
             }
 
@@ -330,6 +454,7 @@ async fn main() -> anyhow::Result<()> {
                             #[cfg(target_os = "linux")] &backend,
                             &mut client, &config_state,
                             &mut controller, &windows, &wm_config,
+                            &mut ipc_keyboard_confirmed,
                         ).await;
                         None
                     }
@@ -346,6 +471,7 @@ async fn main() -> anyhow::Result<()> {
                             #[cfg(target_os = "linux")] &backend,
                             &mut client, &config_state,
                             &mut controller, &windows, &wm_config,
+                            &mut ipc_keyboard_confirmed,
                         ).await;
                         None
                     }
@@ -362,6 +488,7 @@ async fn main() -> anyhow::Result<()> {
                             #[cfg(target_os = "linux")] &backend,
                             &mut client, &config_state,
                             &mut controller, &windows, &wm_config,
+                            &mut ipc_keyboard_confirmed,
                         ).await;
                         None
                     }
@@ -380,6 +507,58 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::info!("reconnected with rotated keypair");
                             }
                             Err(e) => tracing::error!(error = %e, "key rotation reconnect failed"),
+                        }
+                        None
+                    }
+
+                    EventKind::InputKeyEvent { keyval, keycode: _, pressed, modifiers, unicode } => {
+                        if !controller.is_idle() {
+                            // On the first IPC key event this activation cycle,
+                            // tell the overlay thread that keyboard input is
+                            // working via IPC. This stops the stale activation
+                            // timeout and Exclusive-mode hammering.
+                            if !ipc_keyboard_confirmed {
+                                ipc_keyboard_confirmed = true;
+                                let _ = overlay_cmd_tx.send(OverlayCmd::ConfirmKeyboardInput);
+                            }
+                            if *pressed {
+                                if dedup.accept(*keyval, true)
+                                    && let Some(evt) = map_ipc_key_to_event(*keyval, *modifiers, *unicode)
+                                {
+                                    let win_list = windows.lock().await;
+                                    let cfg = wm_config.lock().await;
+                                    let cmds = controller.handle(evt, &win_list, &cfg);
+                                    drop(cfg);
+                                    drop(win_list);
+                                    execute_commands(
+                                        cmds, &overlay_cmd_tx, &mut overlay_event_rx,
+                                        #[cfg(target_os = "linux")] &backend,
+                                        &mut client, &config_state,
+                                        &mut controller, &windows, &wm_config,
+                                        &mut ipc_keyboard_confirmed,
+                                    ).await;
+                                }
+                            } else {
+                                // Key release — check for Alt/Meta release.
+                                let is_alt = matches!(
+                                    *keyval,
+                                    0xFFE7..=0xFFEA // Meta_L, Meta_R, Alt_L, Alt_R
+                                );
+                                if is_alt && dedup.accept(*keyval, false) {
+                                    let win_list = windows.lock().await;
+                                    let cfg = wm_config.lock().await;
+                                    let cmds = controller.handle(Event::ModifierReleased, &win_list, &cfg);
+                                    drop(cfg);
+                                    drop(win_list);
+                                    execute_commands(
+                                        cmds, &overlay_cmd_tx, &mut overlay_event_rx,
+                                        #[cfg(target_os = "linux")] &backend,
+                                        &mut client, &config_state,
+                                        &mut controller, &windows, &wm_config,
+                                        &mut ipc_keyboard_confirmed,
+                                    ).await;
+                                }
+                            }
                         }
                         None
                     }
@@ -471,13 +650,21 @@ async fn execute_commands(
     controller: &mut daemon_wm::controller::OverlayController,
     windows: &Arc<Mutex<Vec<core_types::Window>>>,
     wm_config: &Arc<Mutex<core_config::WmConfig>>,
+    ipc_keyboard_confirmed: &mut bool,
 ) {
     for cmd in commands {
         match cmd {
             Command::ShowBorder => {
+                // Reset IPC keyboard confirmation for new activation cycle.
+                *ipc_keyboard_confirmed = false;
                 if overlay_cmd_tx.send(OverlayCmd::ShowBorder).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
+                // Request keyboard event forwarding from daemon-input.
+                client.publish(
+                    EventKind::InputGrabRequest { requester: client.daemon_id() },
+                    SecurityLevel::Internal,
+                ).await.ok();
             }
             Command::ShowPicker { windows, hints } => {
                 if overlay_cmd_tx.send(OverlayCmd::ShowFull { windows, hints }).is_err() {
@@ -490,11 +677,16 @@ async fn execute_commands(
                 }
             }
             Command::HideAndSync => {
+                // Release keyboard grab BEFORE hiding — daemon-input stops forwarding.
+                client.publish(
+                    EventKind::InputGrabRelease { requester: client.daemon_id() },
+                    SecurityLevel::Internal,
+                ).await.ok();
+
                 if overlay_cmd_tx.send(OverlayCmd::HideAndSync).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");
                     continue;
                 }
-                // Wait for the GTK4 thread to confirm surface is unmapped.
                 while let Some(ev) = overlay_event_rx.recv().await {
                     if matches!(ev, OverlayEvent::SurfaceUnmapped) {
                         break;
@@ -502,6 +694,11 @@ async fn execute_commands(
                 }
             }
             Command::Hide => {
+                client.publish(
+                    EventKind::InputGrabRelease { requester: client.daemon_id() },
+                    SecurityLevel::Internal,
+                ).await.ok();
+
                 if overlay_cmd_tx.send(OverlayCmd::Hide).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
@@ -521,6 +718,12 @@ async fn execute_commands(
             }
             Command::LaunchApp { command, tags } => {
                 tracing::info!(command = %command, ?tags, "launch-or-focus: launching app");
+
+                // Release keyboard grab before hiding.
+                client.publish(
+                    EventKind::InputGrabRelease { requester: client.daemon_id() },
+                    SecurityLevel::Internal,
+                ).await.ok();
 
                 // Dismiss overlay IMMEDIATELY so the user isn't blocked.
                 // The IPC round-trip can take seconds — the overlay must not
@@ -873,4 +1076,151 @@ fn init_logging(format: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // map_ipc_key_to_event
+    // ============================================================================
+
+    #[test]
+    fn map_escape() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF1B, 0, None),
+            Some(Event::Escape)
+        ));
+    }
+
+    #[test]
+    fn map_return() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF0D, 0, None),
+            Some(Event::Confirm)
+        ));
+    }
+
+    #[test]
+    fn map_kp_enter() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF8D, 0, None),
+            Some(Event::Confirm)
+        ));
+    }
+
+    #[test]
+    fn map_tab_forward() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF09, 0, None),
+            Some(Event::SelectionDown)
+        ));
+    }
+
+    #[test]
+    fn map_tab_with_shift() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF09, 1, None),
+            Some(Event::SelectionUp)
+        ));
+    }
+
+    #[test]
+    fn map_down_arrow() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF54, 0, None),
+            Some(Event::SelectionDown)
+        ));
+    }
+
+    #[test]
+    fn map_up_arrow() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF52, 0, None),
+            Some(Event::SelectionUp)
+        ));
+    }
+
+    #[test]
+    fn map_backspace() {
+        assert!(matches!(
+            map_ipc_key_to_event(0xFF08, 0, None),
+            Some(Event::Backspace)
+        ));
+    }
+
+    #[test]
+    fn map_space_is_inert() {
+        assert!(map_ipc_key_to_event(0x0020, 0, Some(' ')).is_none());
+    }
+
+    #[test]
+    fn map_alphanumeric_char() {
+        assert!(matches!(
+            map_ipc_key_to_event(0x0067, 0, Some('g')),
+            Some(Event::Char('g'))
+        ));
+    }
+
+    #[test]
+    fn map_non_alphanumeric_ignored() {
+        assert!(map_ipc_key_to_event(0x002F, 0, Some('/')).is_none());
+    }
+
+    #[test]
+    fn map_modifier_key_ignored() {
+        // Alt_L keysym — no unicode, should be None.
+        assert!(map_ipc_key_to_event(0xFFE9, 0, None).is_none());
+    }
+
+    // ============================================================================
+    // KeyDeduplicator
+    // ============================================================================
+
+    #[test]
+    fn dedup_accepts_first() {
+        let mut dedup = KeyDeduplicator::new();
+        assert!(dedup.accept(0x67, true));
+    }
+
+    #[test]
+    fn dedup_rejects_immediate_duplicate() {
+        let mut dedup = KeyDeduplicator::new();
+        assert!(dedup.accept(0x67, true));
+        assert!(!dedup.accept(0x67, true));
+    }
+
+    #[test]
+    fn dedup_accepts_different_key() {
+        let mut dedup = KeyDeduplicator::new();
+        assert!(dedup.accept(0x67, true));
+        assert!(dedup.accept(0x68, true));
+    }
+
+    #[test]
+    fn dedup_accepts_same_key_different_direction() {
+        let mut dedup = KeyDeduplicator::new();
+        assert!(dedup.accept(0x67, true));
+        assert!(dedup.accept(0x67, false));
+    }
+
+    #[test]
+    fn dedup_accepts_after_window_expires() {
+        let mut dedup = KeyDeduplicator::new();
+        assert!(dedup.accept(0x67, true));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(dedup.accept(0x67, true));
+    }
+
+    #[test]
+    fn dedup_ring_buffer_wraps() {
+        let mut dedup = KeyDeduplicator::new();
+        // Fill the ring buffer (8 entries).
+        for i in 0..8 {
+            assert!(dedup.accept(i, true));
+        }
+        // 9th entry wraps — still accepted because it's a different key.
+        assert!(dedup.accept(8, true));
+    }
 }

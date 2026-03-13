@@ -7,6 +7,8 @@
 //! Landlock: /dev/input (read), /dev/uinput (write), runtime dir (IPC).
 //! No network access beyond local IPC.
 
+mod keyboard;
+
 use anyhow::Context;
 use clap::Parser;
 use core_ipc::{BusClient, Message};
@@ -48,6 +50,17 @@ async fn main() -> anyhow::Result<()> {
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
 
+    // Keyboard event capture.
+    let mut keyboard_rx = keyboard::spawn_keyboard_readers();
+    let mut xkb_ctx = keyboard::XkbContext::new();
+    if xkb_ctx.is_none() {
+        tracing::warn!("failed to initialize XKB context — keyboard forwarding will send raw keycodes without keysym translation");
+    }
+
+    // Grab state: tracks whether daemon-wm has requested keyboard forwarding.
+    let mut grab_active = false;
+    let mut grab_requester: Option<DaemonId> = None;
+
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
         "daemon-input", daemon_id, &socket_path, &server_pub, 5,
         std::time::Duration::from_millis(500),
@@ -82,6 +95,37 @@ async fn main() -> anyhow::Result<()> {
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
             }
+            Some(raw_event) = keyboard_rx.recv() => {
+                if grab_active {
+                    let kb_event = if let Some(ref mut xkb) = xkb_ctx {
+                        xkb.process_key(raw_event.keycode, raw_event.pressed)
+                    } else {
+                        // Fallback: no XKB, send raw keycode as keyval.
+                        keyboard::KeyboardEvent {
+                            keyval: raw_event.keycode,
+                            keycode: raw_event.keycode,
+                            pressed: raw_event.pressed,
+                            modifiers: 0,
+                            unicode: None,
+                        }
+                    };
+
+                    client.publish(
+                        EventKind::InputKeyEvent {
+                            keyval: kb_event.keyval,
+                            keycode: kb_event.keycode,
+                            pressed: kb_event.pressed,
+                            modifiers: kb_event.modifiers,
+                            unicode: kb_event.unicode,
+                        },
+                        SecurityLevel::Internal,
+                    ).await.ok();
+                } else if let Some(ref mut xkb) = xkb_ctx {
+                    // Even when no grab is active, update XKB state so modifier
+                    // tracking stays accurate for when a grab is activated.
+                    let _event = xkb.process_key(raw_event.keycode, raw_event.pressed);
+                }
+            }
             Some(msg) = client.recv() => {
                 // Skip self-published messages to prevent feedback loops.
                 if msg.sender == daemon_id {
@@ -102,6 +146,61 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::info!("reconnected with rotated keypair");
                             }
                             Err(e) => tracing::error!(error = %e, "key rotation reconnect failed"),
+                        }
+                        None
+                    }
+
+                    EventKind::InputGrabRequest { requester } => {
+                        tracing::info!(%requester, "keyboard grab requested");
+                        grab_active = true;
+                        grab_requester = Some(*requester);
+
+                        // Check if Alt is already released — if so, send a synthetic
+                        // key-release event so daemon-wm doesn't wait forever for
+                        // an Alt release that already happened.
+                        if let Some(ref xkb) = xkb_ctx
+                            && !xkb.is_alt_active()
+                        {
+                            tracing::debug!("Alt already released at grab time, sending synthetic release");
+                            client.publish(
+                                EventKind::InputKeyEvent {
+                                    keyval: 0xFFE9, // XKB_KEY_Alt_L
+                                    keycode: 56,    // KEY_LEFTALT
+                                    pressed: false,
+                                    modifiers: 0,
+                                    unicode: None,
+                                },
+                                SecurityLevel::Internal,
+                            ).await.ok();
+                        }
+
+                        // Send correlated response.
+                        let response = Message::new(
+                            &msg_ctx,
+                            EventKind::InputGrabResponse {
+                                success: true,
+                                error: None,
+                            },
+                            msg.security_level,
+                            client.epoch(),
+                        ).with_correlation(msg.msg_id);
+                        if let Err(e) = client.send(&response).await {
+                            tracing::warn!(error = %e, "failed to send grab response");
+                        }
+                        None
+                    }
+
+                    EventKind::InputGrabRelease { requester } => {
+                        if grab_requester.as_ref() == Some(requester) {
+                            tracing::info!(%requester, "keyboard grab released");
+                            grab_active = false;
+                            grab_requester = None;
+                        } else {
+                            tracing::debug!(
+                                %requester,
+                                current = ?grab_requester,
+                                "ignoring grab release from non-owner"
+                            );
                         }
                         None
                     }
@@ -220,6 +319,16 @@ fn apply_sandbox() {
         },
         LandlockRule {
             path: std::path::PathBuf::from("/dev/input"),
+            access: FsAccess::ReadOnly,
+        },
+        // /sys/class/input: evdev enumerate() reads device symlinks and metadata.
+        LandlockRule {
+            path: std::path::PathBuf::from("/sys/class/input"),
+            access: FsAccess::ReadOnly,
+        },
+        // /sys/devices: evdev follows symlinks from /sys/class/input to device metadata.
+        LandlockRule {
+            path: std::path::PathBuf::from("/sys/devices"),
             access: FsAccess::ReadOnly,
         },
     ];

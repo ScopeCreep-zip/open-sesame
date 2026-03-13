@@ -1231,6 +1231,7 @@ dependencies = [
  "core-ipc",
  "core-profile",
  "core-types",
+ "evdev",
  "platform-linux",
  "platform-macos",
  "platform-windows",
@@ -1241,6 +1242,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "xkbcommon",
 ]
 
 [[package]]

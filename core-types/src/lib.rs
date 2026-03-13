@@ -1025,6 +1025,48 @@ pub enum EventKind {
         expansion_preview: String,
     },
 
+    /// Request daemon-input to start forwarding keyboard events for the overlay.
+    /// Published by daemon-wm when the overlay activates. daemon-input processes
+    /// this as a broadcast event (fire-and-forget, no response expected).
+    InputGrabRequest {
+        /// Requesting daemon's ID — used to scope the grab.
+        requester: DaemonId,
+    },
+
+    /// Acknowledge that keyboard grab/forwarding is active.
+    /// Sent as a correlated response to `InputGrabRequest`.
+    InputGrabResponse {
+        success: bool,
+        /// If false, reason for failure (e.g., no keyboard devices accessible).
+        error: Option<String>,
+    },
+
+    /// Release keyboard forwarding. Published by daemon-wm when the overlay
+    /// deactivates. Idempotent — safe to send even if no grab is active.
+    InputGrabRelease {
+        /// Must match the requester from the corresponding `InputGrabRequest`.
+        requester: DaemonId,
+    },
+
+    /// A keyboard event forwarded from daemon-input while a grab is active.
+    /// Carries pre-processed keysym and unicode data so daemon-wm does not
+    /// need its own xkbcommon instance.
+    InputKeyEvent {
+        /// XKB keysym value (e.g., 0xFF1B for Escape, 0xFF0D for Return).
+        keyval: u32,
+        /// Evdev keycode (hardware scan code, NOT XKB keycode).
+        keycode: u32,
+        /// true = key press, false = key release.
+        pressed: bool,
+        /// Active modifier bitmask at time of event. Uses GDK-compatible
+        /// bit positions: bit 0 = Shift, bit 2 = Control, bit 3 = Alt (Mod1),
+        /// bit 26 = Super (Mod4).
+        modifiers: u32,
+        /// Unicode character for the key, if applicable. None for modifier
+        /// keys, function keys, etc. Only populated on key press, not release.
+        unicode: Option<char>,
+    },
+
     // -- Secrets Events (authorized daemons only) --
     SecretResolved {
         secret_ref: String,
@@ -1503,6 +1545,10 @@ impl_event_debug! {
         HotkeyFired { sequence, layer, action },
         LayerChanged { from, to, trigger_app },
         MacroTriggered { macro_id, expansion_preview },
+        InputGrabRequest { requester },
+        InputGrabResponse { success, error },
+        InputGrabRelease { requester },
+        InputKeyEvent { keyval, keycode, pressed, modifiers, unicode },
         SecretResolved { secret_ref, ttl_remaining_s },
         SecretExpired { secret_ref },
         SsoSessionExpired { profile_id, provider },

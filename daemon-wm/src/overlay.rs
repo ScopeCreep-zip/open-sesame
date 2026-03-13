@@ -54,6 +54,10 @@ pub enum OverlayCmd {
     /// Reset the modifier-poll grace timer. Proves Alt is still held
     /// (an IPC re-activation wouldn't fire otherwise).
     ResetGrace,
+    /// Confirm that keyboard input is working via IPC. Stops the stale
+    /// activation timeout and `KeyboardMode::Exclusive` hammering by
+    /// setting `received_key_event = true` on the overlay thread.
+    ConfirmKeyboardInput,
     /// Update theme from config.
     UpdateTheme(Box<OverlayTheme>),
     /// Shut down the overlay thread.
@@ -543,6 +547,9 @@ fn run_gtk4_overlay(
                     }
                     *modifier_released_sent.borrow_mut() = false;
                 }
+                OverlayCmd::ConfirmKeyboardInput => {
+                    state_cmd.borrow_mut().received_key_event = true;
+                }
                 OverlayCmd::UpdateTheme(theme) => {
                     {
                         let mut st = state_cmd.borrow_mut();
@@ -583,12 +590,21 @@ fn run_gtk4_overlay(
             window_poll.set_keyboard_mode(KeyboardMode::Exclusive);
         }
 
-        // Poll modifier state when keyboard focus is confirmed (key events
-        // prove modifier_state() is reliable). Also dismiss if the overlay
-        // has been up too long with no keyboard interaction (stale timeout)
-        // — the user likely released Alt before we got keyboard focus.
+        // Stale activation: if no keyboard events arrived within the timeout,
+        // the compositor never granted us focus. Dismiss unconditionally —
+        // modifier state is unreliable without keyboard focus, so don't check it.
         let stale = !keyboard_confirmed && elapsed_ms >= STALE_ACTIVATION_TIMEOUT_MS;
-        if phase != OverlayPhase::Hidden && !within_grace && (keyboard_confirmed || stale) {
+        if phase != OverlayPhase::Hidden && stale
+            && !*modifier_released_flag.borrow()
+        {
+            *modifier_released_flag.borrow_mut() = true;
+            let _ = event_tx_poll.blocking_send(OverlayEvent::Dismiss);
+        }
+
+        // Normal modifier poll: only when keyboard focus IS confirmed (key
+        // events prove modifier_state() is reliable). Before that, the state
+        // is unreliable — IPC activations from COSMIC consume the Alt press.
+        if phase != OverlayPhase::Hidden && !within_grace && keyboard_confirmed {
             let alt_held = window_poll.surface()
                 .and_then(|surface| surface.display().default_seat())
                 .and_then(|seat| seat.keyboard())
@@ -601,14 +617,7 @@ fn run_gtk4_overlay(
             if !alt_held {
                 if !*modifier_released_flag.borrow() {
                     *modifier_released_flag.borrow_mut() = true;
-                    // Stale timeout: dismiss without activating (no user interaction).
-                    // Normal modifier release: commit the current selection.
-                    let event = if stale {
-                        OverlayEvent::Dismiss
-                    } else {
-                        OverlayEvent::ModifierReleased
-                    };
-                    let _ = event_tx_poll.blocking_send(event);
+                    let _ = event_tx_poll.blocking_send(OverlayEvent::ModifierReleased);
                 }
             } else {
                 // Alt is held — reset the flag so we detect future releases.

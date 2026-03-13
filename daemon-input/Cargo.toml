@@ -17,6 +17,8 @@ tracing-subscriber = { workspace = true }
 clap         = { workspace = true }
 anyhow       = { workspace = true }
 serde        = { workspace = true }
+xkbcommon    = { workspace = true }
+evdev        = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux      = { workspace = true }
