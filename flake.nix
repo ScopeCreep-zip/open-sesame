@@ -106,6 +106,17 @@
           };
 
           config = lib.mkIf cfg.enable {
+            warnings = lib.optional
+              (builtins.pathExists "/dev/input" && !(builtins.elem "input" (config.home.extraGroups or [])))
+              ''
+                open-sesame: daemon-input requires 'input' group membership for
+                keyboard capture on desktops without a focused window.
+                Run: sudo usermod -aG input $USER (logout/login required)
+                This requirement will be removed once cosmic-comp is patched
+                to grant keyboard focus to exclusive layer-shell surfaces
+                when no window is focused.
+              '';
+
             home.packages = [ cfg.package ];
 
             xdg.configFile."pds/config.toml" =
@@ -258,7 +269,16 @@
               };
             };
 
-            # Input daemon (stub).
+            # Input daemon — evdev keyboard capture for IPC keyboard routing.
+            # Requires `input` group membership for /dev/input/* access.
+            #
+            # TODO: upstream a fix to cosmic-comp (shell/focus/mod.rs:532-537)
+            # so layer-shell surfaces with KeyboardMode::Exclusive receive
+            # keyboard focus even when no window is focused. This would
+            # eliminate the need for evdev-based keyboard routing and the
+            # `input` group requirement entirely.
+            # Ref: refresh_focus() early-exits when no toplevel is focused,
+            # never discovering exclusive layer surfaces.
             systemd.user.services.open-sesame-input = {
               Unit = {
                 Description = "Open Sesame input daemon";
