@@ -109,7 +109,7 @@ macro_rules! define_id {
 
 define_id!(ProfileId, "prof");
 define_id!(WindowId, "win");
-define_id!(WorkspaceId, "ws");
+define_id!(CompositorWorkspaceId, "ws");
 define_id!(MonitorId, "mon");
 define_id!(ClipboardEntryId, "clip");
 define_id!(DaemonId, "dmon");
@@ -894,6 +894,7 @@ pub enum UnlockRejectedReason {
 
 /// Why a secret operation was denied (typed denial, replaces ambiguous empty responses).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SecretDenialReason {
     Locked,
     ProfileNotActive,
@@ -906,6 +907,7 @@ pub enum SecretDenialReason {
 /// Why a launch was denied. Machine-readable so the WM can take action
 /// (e.g. prompt for vault unlock when `VaultsLocked`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum LaunchDenial {
     /// One or more required vaults are locked. The WM can offer inline unlock.
     VaultsLocked {
@@ -950,20 +952,20 @@ pub enum EventKind {
     WindowFocused {
         window_id: WindowId,
         app_id: AppId,
-        workspace_id: WorkspaceId,
+        workspace_id: CompositorWorkspaceId,
     },
     WindowMoved {
         window_id: WindowId,
-        from_workspace: WorkspaceId,
-        to_workspace: WorkspaceId,
+        from_workspace: CompositorWorkspaceId,
+        to_workspace: CompositorWorkspaceId,
     },
     WorkspaceSwitched {
-        from: WorkspaceId,
-        to: WorkspaceId,
+        from: CompositorWorkspaceId,
+        to: CompositorWorkspaceId,
         monitor_id: MonitorId,
     },
     LayoutChanged {
-        workspace_id: WorkspaceId,
+        workspace_id: CompositorWorkspaceId,
         layout_name: String,
     },
 
@@ -1317,6 +1319,9 @@ pub enum EventKind {
         /// Launch profile tags to compose for environment injection.
         #[serde(default)]
         tags: Vec<String>,
+        /// Additional CLI arguments appended to the desktop entry's Exec line.
+        #[serde(default)]
+        launch_args: Vec<String>,
     },
     LaunchExecuteResponse {
         pid: u32,
@@ -1594,7 +1599,7 @@ impl_event_debug! {
         WmOverlayDismissed,
         LaunchQuery { query, max_results, profile },
         LaunchQueryResponse { results },
-        LaunchExecute { entry_id, profile, tags },
+        LaunchExecute { entry_id, profile, tags, launch_args },
         LaunchExecuteResponse { pid, error, denial },
         ClipboardHistory { profile, limit },
         ClipboardHistoryResponse { entries },
@@ -1940,7 +1945,7 @@ pub struct Window {
     pub id: WindowId,
     pub app_id: AppId,
     pub title: String,
-    pub workspace_id: WorkspaceId,
+    pub workspace_id: CompositorWorkspaceId,
     pub monitor_id: MonitorId,
     pub geometry: Geometry,
     pub is_focused: bool,

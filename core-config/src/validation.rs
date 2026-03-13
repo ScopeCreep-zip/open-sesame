@@ -358,6 +358,7 @@ mod tests {
             apps: vec!["ghostty".into()],
             launch: Some("ghostty".into()),
             tags: vec!["nonexistent".into()],
+            launch_args: Vec::new(),
         });
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
@@ -376,6 +377,7 @@ mod tests {
             apps: vec!["ghostty".into()],
             launch: Some("ghostty".into()),
             tags: vec!["work:corp".into()],
+            launch_args: Vec::new(),
         });
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
@@ -402,6 +404,7 @@ mod tests {
             apps: vec!["ghostty".into()],
             launch: Some("ghostty".into()),
             tags: vec!["a".into(), "b".into()],
+            launch_args: Vec::new(),
         });
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
@@ -424,6 +427,7 @@ mod tests {
             apps: vec!["ghostty".into()],
             launch: Some("ghostty".into()),
             tags: vec!["dev-rust".into()],
+            launch_args: Vec::new(),
         });
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);

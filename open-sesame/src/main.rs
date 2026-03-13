@@ -163,6 +163,76 @@ enum Command {
         #[arg(long)]
         prefix: Option<String>,
     },
+
+    /// Workspace management (directory-scoped project environments).
+    #[command(subcommand)]
+    Workspace(WorkspaceCmd),
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// Initialize a new workspace directory with sesame configuration.
+    Init {
+        /// Path to the workspace root directory.
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+
+    /// Clone a git repository into the workspace tree.
+    Clone {
+        /// Git repository URL.
+        url: String,
+
+        /// Override the target directory within the workspace root.
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+
+    /// List registered workspaces.
+    List {
+        /// Output format.
+        #[arg(short, long, default_value = "table")]
+        format: WorkspaceListFormat,
+    },
+
+    /// Show workspace status (active links, profile bindings).
+    Status {
+        /// Workspace path (default: current directory).
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+
+    /// Link a workspace directory to a launch profile.
+    Link {
+        /// Workspace path to link.
+        path: std::path::PathBuf,
+
+        /// Launch profile tag(s) to bind.
+        #[arg(short, long, required = true)]
+        tags: Vec<String>,
+    },
+
+    /// Open a shell in a workspace with its linked profile environment.
+    Shell {
+        /// Workspace path (default: current directory).
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+
+    /// Show detailed information about a workspace.
+    Info {
+        /// Workspace path (default: current directory).
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Clone, ValueEnum)]
+enum WorkspaceListFormat {
+    /// Formatted table output.
+    Table,
+    /// JSON output.
+    Json,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -497,6 +567,43 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Export { profile, format, prefix } => {
             cmd_export(&profile, &format, prefix.as_deref()).await
         }
+        Command::Workspace(sub) => match sub {
+            WorkspaceCmd::Init { path } => {
+                let _ = path;
+                eprintln!("workspace init: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+            WorkspaceCmd::Clone { url, path } => {
+                let _ = (url, path);
+                eprintln!("workspace clone: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+            WorkspaceCmd::List { format } => {
+                let _ = format;
+                eprintln!("workspace list: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+            WorkspaceCmd::Status { path } => {
+                let _ = path;
+                eprintln!("workspace status: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+            WorkspaceCmd::Link { path, tags } => {
+                let _ = (path, tags);
+                eprintln!("workspace link: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+            WorkspaceCmd::Shell { path } => {
+                let _ = path;
+                eprintln!("workspace shell: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+            WorkspaceCmd::Info { path } => {
+                let _ = path;
+                eprintln!("workspace info: not yet implemented (sesame-workspace crate pending)");
+                Ok(())
+            }
+        },
     }
 }
 
@@ -1439,6 +1546,7 @@ async fn cmd_launch_run(entry_id: &str, profile: Option<&str>) -> anyhow::Result
         entry_id: entry_id.to_owned(),
         profile,
         tags: Vec::new(),
+        launch_args: Vec::new(),
     };
 
     match rpc(&client, event, SecurityLevel::Internal).await? {
@@ -1713,6 +1821,7 @@ fn format_denial_reason(reason: &core_types::SecretDenialReason, key: &str, prof
         SecretDenialReason::RateLimited => "rate limited -- try again later".into(),
         SecretDenialReason::NotFound => format!("secret '{}' not found in profile '{}'", key, profile),
         SecretDenialReason::VaultError(e) => format!("vault error: {}", e),
+        _ => format!("secret access denied for '{}': {:?}", key, reason),
     }
 }
 

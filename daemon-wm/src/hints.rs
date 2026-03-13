@@ -160,6 +160,16 @@ pub fn tags_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) ->
         .unwrap_or_default()
 }
 
+/// Look up the launch args for a key character.
+#[must_use]
+pub fn launch_args_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) -> Vec<String> {
+    let key_str = key.to_lowercase().to_string();
+    key_bindings
+        .get(&key_str)
+        .map(|b| b.launch_args.clone())
+        .unwrap_or_default()
+}
+
 /// Assign hints to windows grouped by app, using configured key mappings.
 ///
 /// Hint key priority:
@@ -286,6 +296,7 @@ mod tests {
             apps: vec!["app-f".into()],
             launch: Some("app-f".into()),
             tags: Vec::new(),
+            launch_args: Vec::new(),
         });
         assert_eq!(launch_for_key('f', &bindings), Some("app-f"));
         assert_eq!(launch_for_key('F', &bindings), Some("app-f"));
@@ -309,6 +320,7 @@ mod tests {
             apps: vec!["ghostty".into()],
             launch: Some("ghostty".into()),
             tags: vec!["dev-rust".into(), "ai-tools".into()],
+            launch_args: Vec::new(),
         });
         let tags = tags_for_key('g', &bindings);
         assert_eq!(tags, vec!["dev-rust", "ai-tools"]);
@@ -328,6 +340,7 @@ mod tests {
             apps: vec!["firefox".into()],
             launch: Some("firefox".into()),
             tags: Vec::new(),
+            launch_args: Vec::new(),
         });
         let tags = tags_for_key('f', &bindings);
         assert!(tags.is_empty());

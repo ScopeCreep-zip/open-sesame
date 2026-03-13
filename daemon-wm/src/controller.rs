@@ -60,6 +60,7 @@ pub enum Command {
     LaunchApp {
         command: String,
         tags: Vec<String>,
+        launch_args: Vec<String>,
     },
     /// Show a launch error toast in the overlay.
     ShowLaunchError {
@@ -261,6 +262,7 @@ impl Snapshot {
 struct PendingLaunch {
     command: String,
     tags: Vec<String>,
+    launch_args: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -523,6 +525,7 @@ impl OverlayController {
                         Command::LaunchApp {
                             command: launch.command,
                             tags: launch.tags,
+                            launch_args: launch.launch_args,
                         },
                     ];
                 }
@@ -546,6 +549,7 @@ impl OverlayController {
                         Command::LaunchApp {
                             command: launch.command,
                             tags: launch.tags,
+                            launch_args: launch.launch_args,
                         },
                     ];
                 }
@@ -678,7 +682,8 @@ impl OverlayController {
                         // User can Backspace to cancel or Escape to dismiss.
                         let command = cmd.to_string();
                         let tags = hints::tags_for_key(key, key_bindings);
-                        self.set_pending_launch(PendingLaunch { command: command.clone(), tags });
+                        let launch_args = hints::launch_args_for_key(key, key_bindings);
+                        self.set_pending_launch(PendingLaunch { command: command.clone(), tags, launch_args });
                         let mut cmds = if is_armed {
                             self.transition_armed_to_picking()
                         } else {
@@ -934,6 +939,7 @@ mod tests {
                         apps: apps.into_iter().map(String::from).collect(),
                         launch: launch.map(String::from),
                         tags: Vec::new(),
+                        launch_args: Vec::new(),
                     },
                 )
             })
@@ -948,7 +954,7 @@ mod tests {
                 id: core_types::WindowId::new(),
                 app_id: core_types::AppId::new("com.mitchellh.ghostty"),
                 title: "Terminal".into(),
-                workspace_id: core_types::WorkspaceId::new(),
+                workspace_id: core_types::CompositorWorkspaceId::new(),
                 monitor_id: core_types::MonitorId::new(),
                 geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
                 is_focused: true,
@@ -960,7 +966,7 @@ mod tests {
                 id: core_types::WindowId::new(),
                 app_id: core_types::AppId::new("firefox"),
                 title: "Firefox".into(),
-                workspace_id: core_types::WorkspaceId::new(),
+                workspace_id: core_types::CompositorWorkspaceId::new(),
                 monitor_id: core_types::MonitorId::new(),
                 geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
                 is_focused: false,
@@ -972,7 +978,7 @@ mod tests {
                 id: core_types::WindowId::new(),
                 app_id: core_types::AppId::new("microsoft-edge"),
                 title: "Edge".into(),
-                workspace_id: core_types::WorkspaceId::new(),
+                workspace_id: core_types::CompositorWorkspaceId::new(),
                 monitor_id: core_types::MonitorId::new(),
                 geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
                 is_focused: false,

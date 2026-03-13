@@ -169,14 +169,14 @@ async fn main() -> anyhow::Result<()> {
                         })
                     }
 
-                    EventKind::LaunchExecute { entry_id, profile, tags } => {
+                    EventKind::LaunchExecute { entry_id, profile, tags, launch_args } => {
                         // Record the launch for frecency.
                         if let Err(e) = engine.record_launch(entry_id) {
                             tracing::warn!(entry_id, error = %e, "frecency record failed");
                         }
 
                         // Look up the Exec line from the pre-sandbox cache.
-                        match launch_entry(entry_id, profile.as_ref().map(|p| p.as_ref()), tags, &entry_cache, &client).await {
+                        match launch_entry(entry_id, profile.as_ref().map(|p| p.as_ref()), tags, launch_args, &entry_cache, &client, &_config_state).await {
                             Ok(pid) => Some(EventKind::LaunchExecuteResponse { pid, error: None, denial: None }),
                             Err(LaunchError::Denial(denial)) => {
                                 let error_msg = format!("{denial:?}");
@@ -414,8 +414,10 @@ async fn launch_entry(
     entry_id: &str,
     profile: Option<&str>,
     tags: &[String],
+    launch_args: &[String],
     cache: &HashMap<String, scanner::CachedEntry>,
     client: &BusClient,
+    config_state: &Arc<std::sync::RwLock<core_config::Config>>,
 ) -> Result<u32, LaunchError> {
     let cached = resolve_entry(entry_id, cache)
         .ok_or(LaunchError::Denial(LaunchDenial::EntryNotFound))?;
@@ -426,13 +428,14 @@ async fn launch_entry(
         return Err(LaunchError::Other(anyhow::anyhow!("empty Exec line for '{entry_id}'")));
     }
 
-    // Resolve launch profiles from config
+    // Resolve launch profiles from config (passed from hot-reload watcher)
     let default_profile = profile.unwrap_or("default");
-    let config = core_config::load_config(None).unwrap_or_default();
+    let config = config_state.read().unwrap_or_else(|e| e.into_inner()).clone();
 
     let mut composed_env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let mut all_secrets: Vec<(String, String)> = Vec::new(); // (secret_name, trust_profile_name)
     let mut devshell: Option<String> = None;
+    let mut cwd: Option<String> = None;
 
     if !tags.is_empty() {
         for tag in tags {
@@ -457,6 +460,11 @@ async fn launch_entry(
             // Last devshell wins
             if lp.devshell.is_some() {
                 devshell.clone_from(&lp.devshell);
+            }
+
+            // Last cwd wins
+            if lp.cwd.is_some() {
+                cwd.clone_from(&lp.cwd);
             }
 
             // Collect secrets with their owning trust profile
@@ -550,10 +558,32 @@ async fn launch_entry(
     };
 
     let mut cmd = std::process::Command::new(&program);
-    cmd.args(&args)
-        .stdin(std::process::Stdio::null())
+    cmd.args(&args);
+
+    // Append launch_args from the IPC message (e.g., workspace-specific flags).
+    if !launch_args.is_empty() {
+        cmd.args(launch_args);
+    }
+
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+
+    // Set working directory if configured via launch profile cwd.
+    if let Some(ref dir) = cwd {
+        let path = std::path::Path::new(dir);
+        if !path.is_absolute() {
+            return Err(LaunchError::Other(anyhow::anyhow!(
+                "cwd must be an absolute path, got: {dir}"
+            )));
+        }
+        if !path.is_dir() {
+            return Err(LaunchError::Other(anyhow::anyhow!(
+                "cwd does not exist or is not a directory: {dir}"
+            )));
+        }
+        cmd.current_dir(path);
+    }
 
     // Inject composed env vars from launch profiles
     for (k, v) in &composed_env {

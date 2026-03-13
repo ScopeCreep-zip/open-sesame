@@ -15,6 +15,7 @@ fn make_bindings(entries: &[(&str, &[&str])]) -> BTreeMap<String, WmKeyBinding> 
             apps: apps.iter().map(|s| s.to_string()).collect(),
             launch: None,
             tags: Vec::new(),
+            launch_args: Vec::new(),
         })
     }).collect()
 }
@@ -38,6 +39,7 @@ fn test_config() -> core_config::WmConfig {
                     apps: apps.into_iter().map(String::from).collect(),
                     launch: launch.map(String::from),
                     tags: Vec::new(),
+                    launch_args: Vec::new(),
                 },
             )
         })
@@ -52,7 +54,7 @@ fn test_windows() -> Vec<core_types::Window> {
             id: core_types::WindowId::new(),
             app_id: core_types::AppId::new("com.mitchellh.ghostty"),
             title: "Terminal".into(),
-            workspace_id: core_types::WorkspaceId::new(),
+            workspace_id: core_types::CompositorWorkspaceId::new(),
             monitor_id: core_types::MonitorId::new(),
             geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
             is_focused: true,
@@ -64,7 +66,7 @@ fn test_windows() -> Vec<core_types::Window> {
             id: core_types::WindowId::new(),
             app_id: core_types::AppId::new("firefox"),
             title: "Firefox".into(),
-            workspace_id: core_types::WorkspaceId::new(),
+            workspace_id: core_types::CompositorWorkspaceId::new(),
             monitor_id: core_types::MonitorId::new(),
             geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
             is_focused: false,
@@ -76,7 +78,7 @@ fn test_windows() -> Vec<core_types::Window> {
             id: core_types::WindowId::new(),
             app_id: core_types::AppId::new("microsoft-edge"),
             title: "Edge".into(),
-            workspace_id: core_types::WorkspaceId::new(),
+            workspace_id: core_types::CompositorWorkspaceId::new(),
             monitor_id: core_types::MonitorId::new(),
             geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
             is_focused: false,
@@ -503,6 +505,7 @@ fn launch_for_key_returns_command() {
         apps: vec!["ghostty".to_string()],
         launch: Some("ghostty".to_string()),
         tags: Vec::new(),
+        launch_args: Vec::new(),
     });
     assert_eq!(launch_for_key('g', &bindings), Some("ghostty"));
     assert_eq!(launch_for_key('z', &bindings), None);

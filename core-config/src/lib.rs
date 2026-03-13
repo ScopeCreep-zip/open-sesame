@@ -10,6 +10,6 @@ mod validation;
 mod watcher;
 
 pub use schema::*;
-pub use loader::{atomic_write, load_config, config_dir, resolve_config_paths, installation_path, load_installation, write_installation};
+pub use loader::{atomic_write, load_config, config_dir, resolve_config_paths, installation_path, load_installation, write_installation, load_workspace_config, save_workspace_config};
 pub use validation::{validate, ConfigDiagnostic, DiagnosticSeverity};
 pub use watcher::ConfigWatcher;

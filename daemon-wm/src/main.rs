@@ -253,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
                                         id: core_types::WindowId::new(),
                                         app_id: core_types::AppId::new(&app_id),
                                         title: app_id.clone(),
-                                        workspace_id: core_types::WorkspaceId::new(),
+                                        workspace_id: core_types::CompositorWorkspaceId::new(),
                                         monitor_id: core_types::MonitorId::new(),
                                         geometry: core_types::Geometry { x: 0, y: 0, width: 0, height: 0 },
                                         is_focused: true,
@@ -754,8 +754,8 @@ async fn execute_commands(
                     tracing::info!(target = %target_id, app_id = %window.app_id, "window activated via overlay");
                 }
             }
-            Command::LaunchApp { command, tags } => {
-                tracing::info!(command = %command, ?tags, "launch-or-focus: launching app");
+            Command::LaunchApp { command, tags, launch_args } => {
+                tracing::info!(command = %command, ?tags, ?launch_args, "launch-or-focus: launching app");
 
                 // Release keyboard grab — no more key forwarding needed.
                 client.publish(
@@ -782,6 +782,7 @@ async fn execute_commands(
                         entry_id: command,
                         profile: active_profile,
                         tags,
+                        launch_args,
                     },
                     SecurityLevel::Internal,
                     std::time::Duration::from_secs(10),

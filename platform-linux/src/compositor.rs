@@ -6,14 +6,14 @@
 //!   `zcosmic_toplevel_manager_v1` (COSMIC)
 //! - `wlr-foreign-toplevel-management-v1` (Hyprland, sway, niri, Wayfire)
 
-use core_types::{Geometry, Window, WindowId, WorkspaceId};
+use core_types::{Geometry, Window, WindowId, CompositorWorkspaceId};
 use std::future::Future;
 use std::pin::Pin;
 
 /// A Wayland workspace.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    pub id: WorkspaceId,
+    pub id: CompositorWorkspaceId,
     pub name: String,
     pub is_active: bool,
 }
@@ -42,7 +42,7 @@ pub trait CompositorBackend: Send + Sync {
     fn move_to_workspace(
         &self,
         id: &WindowId,
-        ws: &WorkspaceId,
+        ws: &CompositorWorkspaceId,
     ) -> BoxFuture<'_, core_types::Result<()>>;
     fn focus_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>>;
     fn close_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>>;
@@ -372,7 +372,7 @@ impl CompositorBackend for WlrBackend {
                     id: *wid,
                     app_id: core_types::AppId::new(&tl.app_id),
                     title: tl.title.clone(),
-                    workspace_id: WorkspaceId::from_uuid(uuid::Uuid::nil()),
+                    workspace_id: CompositorWorkspaceId::from_uuid(uuid::Uuid::nil()),
                     monitor_id: core_types::MonitorId::from_uuid(uuid::Uuid::nil()),
                     geometry: Geometry { x: 0, y: 0, width: 0, height: 0 },
                     is_focused: tl.activated,
@@ -412,7 +412,7 @@ impl CompositorBackend for WlrBackend {
         })
     }
 
-    fn move_to_workspace(&self, _id: &WindowId, _ws: &WorkspaceId) -> BoxFuture<'_, core_types::Result<()>> {
+    fn move_to_workspace(&self, _id: &WindowId, _ws: &CompositorWorkspaceId) -> BoxFuture<'_, core_types::Result<()>> {
         Box::pin(async {
             Err(core_types::Error::Platform("move_to_workspace not supported by wlr protocol".into()))
         })
@@ -578,7 +578,7 @@ impl CosmicBackend {
                     id: window_id,
                     app_id: core_types::AppId::new(app_id),
                     title: pending.title.clone().unwrap_or_default(),
-                    workspace_id: WorkspaceId::from_uuid(uuid::Uuid::nil()),
+                    workspace_id: CompositorWorkspaceId::from_uuid(uuid::Uuid::nil()),
                     monitor_id: core_types::MonitorId::from_uuid(uuid::Uuid::nil()),
                     geometry: core_types::Geometry { x: 0, y: 0, width: 0, height: 0 },
                     is_focused: pending.is_activated,
@@ -854,7 +854,7 @@ impl CompositorBackend for CosmicBackend {
         })
     }
 
-    fn move_to_workspace(&self, _id: &WindowId, _ws: &WorkspaceId) -> BoxFuture<'_, core_types::Result<()>> {
+    fn move_to_workspace(&self, _id: &WindowId, _ws: &CompositorWorkspaceId) -> BoxFuture<'_, core_types::Result<()>> {
         Box::pin(async {
             Err(core_types::Error::Platform("move_to_workspace not yet implemented for cosmic".into()))
         })

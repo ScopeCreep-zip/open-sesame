@@ -219,6 +219,41 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Load workspace configuration from `~/.config/pds/workspaces.toml`.
+///
+/// Returns a default config if the file does not exist.
+///
+/// # Errors
+///
+/// Returns an error string if the file exists but cannot be read or parsed.
+pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String> {
+    let path = config_dir().join("workspaces.toml");
+    if !path.exists() {
+        return Ok(crate::schema::WorkspaceConfig::default());
+    }
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    toml::from_str(&contents)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
+/// Save workspace configuration atomically to `~/.config/pds/workspaces.toml`.
+///
+/// # Errors
+///
+/// Returns an error string if serialization or file I/O fails.
+pub fn save_workspace_config(config: &crate::schema::WorkspaceConfig) -> Result<(), String> {
+    let path = config_dir().join("workspaces.toml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+    let contents = toml::to_string_pretty(config)
+        .map_err(|e| format!("failed to serialize workspace config: {e}"))?;
+    atomic_write(&path, contents.as_bytes())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +403,7 @@ mod tests {
             apps: vec!["custom-app".into()],
             launch: Some("custom-app".into()),
             tags: vec!["my-tag".into()],
+            launch_args: Vec::new(),
         });
         overlay.profiles.insert("default".into(), overlay_profile);
         merge_config(&mut base, &overlay);

@@ -238,6 +238,9 @@ pub struct WmKeyBinding {
     /// Supports qualified cross-profile references: `"work:corp"`.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Additional CLI arguments to pass to the launched command.
+    #[serde(default)]
+    pub launch_args: Vec<String>,
 }
 
 /// A named, composable launch profile for environment injection.
@@ -256,6 +259,10 @@ pub struct LaunchProfile {
     /// Nix flake devshell reference (e.g., "/workspace/project#rust").
     #[serde(default)]
     pub devshell: Option<String>,
+    /// Working directory for the launched process. If multiple tags specify `cwd`,
+    /// the last tag wins (same merge semantics as `devshell`).
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Window manager overlay configuration for a profile.
@@ -330,6 +337,7 @@ impl Default for WmConfig {
                         apps: apps.into_iter().map(String::from).collect(),
                         launch: launch.map(String::from),
                         tags: Vec::new(),
+                        launch_args: Vec::new(),
                     },
                 )
             })
@@ -601,6 +609,49 @@ pub struct ExtensionsPolicyConfig {
     pub trusted_signers: Vec<String>,
 }
 
+// ============================================================================
+// Workspace Configuration
+// ============================================================================
+
+/// Workspace directory management configuration.
+/// Stored in `~/.config/pds/workspaces.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceConfig {
+    /// General workspace settings.
+    pub settings: WorkspaceSettings,
+    /// Profile links: canonical path -> profile name.
+    /// More specific paths override less specific ones (longest prefix wins).
+    #[serde(default)]
+    pub links: BTreeMap<String, String>,
+}
+
+/// Workspace directory settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceSettings {
+    /// Root directory for all workspaces.
+    pub root: String,
+    /// Username for workspace path construction.
+    pub user: String,
+    /// Prefer SSH URLs when cloning.
+    pub default_ssh: bool,
+    /// Auto-add sibling repos to workspace.git `.gitignore`.
+    pub auto_gitignore: bool,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            root: std::env::var("SESAME_WORKSPACE_ROOT")
+                .unwrap_or_else(|_| "/workspace".into()),
+            user: std::env::var("USER").unwrap_or_else(|_| "user".into()),
+            default_ssh: true,
+            auto_gitignore: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +696,50 @@ mod tests {
         "#;
         let kb: WmKeyBinding = toml::from_str(toml_str).unwrap();
         assert!(kb.tags.is_empty());
+    }
+
+    #[test]
+    fn wm_key_binding_with_launch_args() {
+        let toml_str = r#"
+            apps = ["ghostty"]
+            launch = "ghostty"
+            launch_args = ["--working-directory=/workspace/user/github.com/org/repo"]
+        "#;
+        let kb: WmKeyBinding = toml::from_str(toml_str).unwrap();
+        assert_eq!(kb.launch_args, vec!["--working-directory=/workspace/user/github.com/org/repo"]);
+    }
+
+    #[test]
+    fn launch_profile_with_cwd() {
+        let toml_str = r#"
+            env = { RUST_LOG = "debug" }
+            secrets = ["github-token"]
+            cwd = "/workspace/usrbinkat/github.com/org/repo"
+        "#;
+        let lp: LaunchProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(lp.cwd.as_deref(), Some("/workspace/usrbinkat/github.com/org/repo"));
+    }
+
+    #[test]
+    fn workspace_config_defaults() {
+        let ws = WorkspaceConfig::default();
+        assert_eq!(ws.settings.root, "/workspace");
+        assert!(ws.settings.default_ssh);
+        assert!(ws.settings.auto_gitignore);
+        assert!(ws.links.is_empty());
+    }
+
+    #[test]
+    fn workspace_config_roundtrips_toml() {
+        let mut ws = WorkspaceConfig::default();
+        ws.settings.root = "/mnt/workspace".into();
+        ws.settings.user = "testuser".into();
+        ws.links.insert("/mnt/workspace/testuser/github.com/org".into(), "work".into());
+        let toml_str = toml::to_string_pretty(&ws).unwrap();
+        let parsed: WorkspaceConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.settings.root, "/mnt/workspace");
+        assert_eq!(parsed.settings.user, "testuser");
+        assert_eq!(parsed.links["/mnt/workspace/testuser/github.com/org"], "work");
     }
 
     #[test]
