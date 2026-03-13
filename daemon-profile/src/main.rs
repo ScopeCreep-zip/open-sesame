@@ -263,10 +263,11 @@ async fn main() -> anyhow::Result<()> {
 
     // -- Context signal sources --
     let (ctx_tx, mut ctx_rx) = mpsc::channel::<ContextSignal>(64);
+    let _ctx_tx = &ctx_tx; // suppress unused warning in headless builds
 
-    // SSID monitor (Linux only): spawns a long-lived task that sends
+    // SSID monitor (Linux desktop only): spawns a long-lived task that sends
     // SsidChanged signals when the WiFi network changes.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
     {
         let ssid_tx = ctx_tx.clone();
         tokio::spawn(async move {
@@ -281,9 +282,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("SSID monitor spawned");
     }
 
-    // Focused app monitor (Linux only): spawns a long-lived task that sends
+    // Focused app monitor (Linux desktop only): spawns a long-lived task that sends
     // AppFocused signals when the Wayland compositor focus changes.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
     {
         let focus_tx = ctx_tx.clone();
         tokio::spawn(async move {

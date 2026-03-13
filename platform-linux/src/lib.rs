@@ -6,25 +6,34 @@
 //!
 //! Contains NO business logic. Consumed exclusively by daemon-* crates.
 //!
-//! The `cosmic` feature flag enables COSMIC-specific protocol support
-//! (cosmic-toplevel-info-v1, cosmic-workspace). This pulls in GPL-3.0
-//! dependencies — enable only when building for COSMIC desktop.
+//! # Feature flags
+//!
+//! - `desktop`: enables Wayland compositor integration, evdev input capture,
+//!   and clipboard modules. Requires wayland-client, smithay-client-toolkit, evdev.
+//! - `cosmic`: enables COSMIC-specific Wayland protocol support. Implies `desktop`.
+//!   Pulls in GPL-3.0 dependencies (cosmic-client-toolkit, cosmic-protocols).
+//!
+//! Without any features, only headless-safe modules are available:
+//! sandbox, security, systemd, dbus, cosmic_keys, cosmic_theme, clipboard (trait only).
 
-#[cfg(target_os = "linux")]
-pub mod compositor;
-#[cfg(target_os = "linux")]
-pub mod cosmic_keys;
-#[cfg(target_os = "linux")]
-pub mod cosmic_theme;
-#[cfg(target_os = "linux")]
-pub mod clipboard;
-#[cfg(target_os = "linux")]
-pub mod dbus;
-#[cfg(target_os = "linux")]
-pub mod input;
+// -- Always available (headless-safe) --
 #[cfg(target_os = "linux")]
 pub mod sandbox;
 #[cfg(target_os = "linux")]
 pub mod security;
 #[cfg(target_os = "linux")]
 pub mod systemd;
+#[cfg(target_os = "linux")]
+pub mod dbus;
+#[cfg(target_os = "linux")]
+pub mod cosmic_keys;
+#[cfg(target_os = "linux")]
+pub mod cosmic_theme;
+#[cfg(target_os = "linux")]
+pub mod clipboard;
+
+// -- Desktop-only (requires `desktop` or `cosmic` feature) --
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub mod compositor;
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub mod input;

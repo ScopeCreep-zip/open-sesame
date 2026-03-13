@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["desktop"]
+desktop = ["platform-linux/desktop"]
+
 [dependencies]
 core-types   = { workspace = true }
 core-config  = { workspace = true }

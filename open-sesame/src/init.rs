@@ -384,7 +384,7 @@ async fn init_unlock() -> anyhow::Result<()> {
 
 // ── Step 4: Keybinding ─────────────────────────────────────────────────────
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "desktop"))]
 fn init_keybinding() -> anyhow::Result<()> {
     platform_linux::cosmic_keys::setup_keybinding("alt+space")
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -392,7 +392,7 @@ fn init_keybinding() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "desktop")))]
 fn init_keybinding() -> anyhow::Result<()> {
     Ok(())
 }

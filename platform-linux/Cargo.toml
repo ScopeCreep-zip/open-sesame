@@ -8,15 +8,22 @@ repository.workspace = true
 
 [features]
 default = []
-cosmic = ["dep:cosmic-client-toolkit", "dep:cosmic-protocols"]
+desktop = [
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+    "dep:smithay-client-toolkit",
+    "dep:evdev",
+]
+cosmic = [
+    "desktop",
+    "dep:cosmic-client-toolkit",
+    "dep:cosmic-protocols",
+]
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Always available (headless-safe)
 core-types              = { workspace = true }
-evdev                   = { workspace = true }
-wayland-client          = { workspace = true }
-wayland-protocols       = { workspace = true }
-wayland-protocols-wlr   = { workspace = true }
-smithay-client-toolkit  = { workspace = true }
 zbus                    = { workspace = true }
 landlock                = { workspace = true }
 libseccomp              = { workspace = true }
@@ -30,6 +37,13 @@ futures-util            = { workspace = true }
 ron                     = { workspace = true }
 dirs                    = { workspace = true }
 uuid                    = { workspace = true }
+
+# Desktop-only (optional, behind `desktop` feature)
+evdev                   = { workspace = true, optional = true }
+wayland-client          = { workspace = true, optional = true }
+wayland-protocols       = { workspace = true, optional = true }
+wayland-protocols-wlr   = { workspace = true, optional = true }
+smithay-client-toolkit  = { workspace = true, optional = true }
 
 # GPL-3.0 gated: feature-flagged to isolate license obligation
 cosmic-client-toolkit   = { workspace = true, optional = true }

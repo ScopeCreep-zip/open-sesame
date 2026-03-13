@@ -19,10 +19,12 @@
       packages = forAllSystems (system: {
         default = (pkgsFor system).callPackage ./nix/package.nix { };
         open-sesame = self.packages.${system}.default;
+        open-sesame-headless = (pkgsFor system).callPackage ./nix/package-headless.nix { };
       });
 
       overlays.default = final: prev: {
         open-sesame = final.callPackage ./nix/package.nix { };
+        open-sesame-headless = final.callPackage ./nix/package-headless.nix { };
       };
 
       homeManagerModules.default =

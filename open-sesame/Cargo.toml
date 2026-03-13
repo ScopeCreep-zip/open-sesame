@@ -10,6 +10,10 @@ repository.workspace = true
 name = "sesame"
 path = "src/main.rs"
 
+[features]
+default = ["desktop"]
+desktop = []
+
 [dependencies]
 core-types   = { workspace = true }
 core-config  = { workspace = true }
@@ -33,7 +37,7 @@ blake3       = { workspace = true }
 libc         = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux   = { workspace = true, features = ["cosmic"] }
+platform-linux   = { workspace = true }
 tracing-journald = { workspace = true }
 
 [dev-dependencies]
