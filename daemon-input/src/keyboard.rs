@@ -89,6 +89,7 @@ impl XkbContext {
     }
 
     /// Query whether Alt (Mod1) is currently active in the XKB state.
+    #[cfg(test)]
     pub fn is_alt_active(&self) -> bool {
         self.state.mod_name_is_active(
             xkbcommon::xkb::MOD_NAME_ALT,

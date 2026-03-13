@@ -123,7 +123,32 @@ async fn main() -> anyhow::Result<()> {
                 } else if let Some(ref mut xkb) = xkb_ctx {
                     // Even when no grab is active, update XKB state so modifier
                     // tracking stays accurate for when a grab is activated.
-                    let _event = xkb.process_key(raw_event.keycode, raw_event.pressed);
+                    let kb_event = xkb.process_key(raw_event.keycode, raw_event.pressed);
+
+                    // Always forward Alt/Meta release events regardless of grab
+                    // state. This solves a critical race condition: on a
+                    // single-threaded runtime, the InputGrabRequest may arrive
+                    // AFTER the user has already released Alt, making the grab
+                    // miss the release event entirely. By forwarding modifier
+                    // releases unconditionally, daemon-wm can detect Alt release
+                    // even when the grab hasn't been activated yet.
+                    // Only releases — presses are not needed and this limits
+                    // IPC traffic to ~4 keycodes (Alt_L, Alt_R, Meta_L, Meta_R).
+                    if !raw_event.pressed && matches!(
+                        kb_event.keyval,
+                        0xFFE7..=0xFFEA // Meta_L, Meta_R, Alt_L, Alt_R
+                    ) {
+                        client.publish(
+                            EventKind::InputKeyEvent {
+                                keyval: kb_event.keyval,
+                                keycode: kb_event.keycode,
+                                pressed: false,
+                                modifiers: kb_event.modifiers,
+                                unicode: None,
+                            },
+                            SecurityLevel::Internal,
+                        ).await.ok();
+                    }
                 }
             }
             Some(msg) = client.recv() => {
@@ -152,40 +177,8 @@ async fn main() -> anyhow::Result<()> {
 
                     EventKind::InputGrabRequest { requester } => {
                         tracing::info!(%requester, "keyboard grab requested");
-
-                        // Drain all pending keyboard events to bring XKB state
-                        // up to date BEFORE checking modifier state. Without this,
-                        // Alt press/release events sitting in the channel buffer
-                        // make XKB state stale — the grab activates thinking Alt
-                        // is not held when it actually is (or vice versa).
-                        while let Ok(raw) = keyboard_rx.try_recv() {
-                            if let Some(ref mut xkb) = xkb_ctx {
-                                xkb.process_key(raw.keycode, raw.pressed);
-                            }
-                        }
-
                         grab_active = true;
                         grab_requester = Some(*requester);
-
-                        // If Alt is already released at grab activation time,
-                        // the user released it before the IPC roundtrip completed.
-                        // Send a synthetic Alt-release so daemon-wm doesn't wait
-                        // forever for a release that already happened.
-                        if let Some(ref xkb) = xkb_ctx
-                            && !xkb.is_alt_active()
-                        {
-                            tracing::debug!("Alt not active at grab time — sending synthetic release");
-                            client.publish(
-                                EventKind::InputKeyEvent {
-                                    keyval: 0xFFE9, // XKB_KEY_Alt_L
-                                    keycode: 56,    // KEY_LEFTALT
-                                    pressed: false,
-                                    modifiers: 0,
-                                    unicode: None,
-                                },
-                                SecurityLevel::Internal,
-                            ).await.ok();
-                        }
 
                         // Send correlated response.
                         let response = Message::new(
