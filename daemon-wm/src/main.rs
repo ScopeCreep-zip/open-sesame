@@ -735,13 +735,24 @@ async fn execute_commands(
                 mru::save(origin.as_deref(), &target_id);
 
                 #[cfg(target_os = "linux")]
-                if let Some(backend) = backend
-                    && let Err(e) = backend.activate_window(&window.id).await
-                {
-                    tracing::warn!(error = %e, target = %target_id, "compositor activate_window failed");
-                }
+                let activate_ok = if let Some(backend) = backend {
+                    match backend.activate_window(&window.id).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(error = %e, target = %target_id, "compositor activate_window failed");
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
 
-                tracing::info!(target = %target_id, app_id = %window.app_id, "window activated via overlay");
+                #[cfg(not(target_os = "linux"))]
+                let activate_ok = true;
+
+                if activate_ok {
+                    tracing::info!(target = %target_id, app_id = %window.app_id, "window activated via overlay");
+                }
             }
             Command::LaunchApp { command, tags } => {
                 tracing::info!(command = %command, ?tags, "launch-or-focus: launching app");
@@ -906,17 +917,8 @@ fn apply_sandbox() {
     let keys_dir = pds_dir.join("keys");
 
     let rules = vec![
-        // Per-daemon key file isolation. Only daemon-wm's keypair.
         LandlockRule {
-            path: keys_dir.join("daemon-wm.key"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: keys_dir.join("daemon-wm.pub"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: keys_dir.join("daemon-wm.checksum"),
+            path: keys_dir.clone(),
             access: FsAccess::ReadOnly,
         },
         // Bus public key: needed if reconnect ever happens.

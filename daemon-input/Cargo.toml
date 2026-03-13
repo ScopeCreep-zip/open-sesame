@@ -21,7 +21,7 @@ xkbcommon    = { workspace = true }
 evdev        = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux      = { workspace = true }
+platform-linux      = { workspace = true, features = ["desktop"] }
 tracing-journald    = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

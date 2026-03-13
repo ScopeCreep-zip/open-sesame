@@ -230,15 +230,7 @@ fn apply_sandbox() {
 
     let rules = vec![
         LandlockRule {
-            path: keys_dir.join("daemon-snippets.key"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: keys_dir.join("daemon-snippets.pub"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: keys_dir.join("daemon-snippets.checksum"),
+            path: keys_dir.clone(),
             access: FsAccess::ReadOnly,
         },
         LandlockRule {

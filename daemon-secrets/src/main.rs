@@ -1221,17 +1221,8 @@ fn apply_sandbox() {
             path: config_dir,
             access: FsAccess::ReadWrite,
         },
-        // Per-daemon key file isolation. Only this daemon's keypair.
         LandlockRule {
-            path: keys_dir.join("daemon-secrets.key"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: keys_dir.join("daemon-secrets.pub"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: keys_dir.join("daemon-secrets.checksum"),
+            path: keys_dir.clone(),
             access: FsAccess::ReadOnly,
         },
         // Bus public key: needed if reconnect ever happens.
