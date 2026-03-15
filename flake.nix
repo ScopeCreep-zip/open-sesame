@@ -121,6 +121,14 @@
 
             home.packages = [ cfg.package ];
 
+            # Stable SSH_AUTH_SOCK for systemd user services.
+            # On Konductor VMs, /etc/profile.d/konductor-ssh-agent.sh creates
+            # a symlink at ~/.ssh/agent.sock pointing to the forwarded agent
+            # socket, then imports this variable into the systemd user manager.
+            # This environment.d entry ensures newly started services always
+            # get the stable path even without an explicit import-environment.
+            systemd.user.sessionVariables.SSH_AUTH_SOCK = "\${HOME}/.ssh/agent.sock";
+
             xdg.configFile."pds/config.toml" =
               let
                 hasConfig = cfg.settings != { } || cfg.profiles != { };
@@ -184,6 +192,9 @@
                 RestartSec = 5;
                 WatchdogSec = 30;
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
+                # SSH agent env written by profile.d hook on each SSH login.
+                # %h expands to user home; - prefix makes missing file non-fatal.
+                EnvironmentFile = [ "-%h/.config/pds/ssh-agent.env" ];
               };
               Install = {
                 WantedBy = [ "open-sesame.target" ];
@@ -246,6 +257,8 @@
                 RestartSec = 5;
                 WatchdogSec = 30;
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
+                # SSH agent env for auto-unlock via forwarded agent.
+                EnvironmentFile = [ "-%h/.config/pds/ssh-agent.env" ];
               };
               Install = {
                 WantedBy = [ "open-sesame.target" ];

@@ -35,15 +35,36 @@ fn identity_algorithm(id: &Identity<'_>) -> ssh_key::Algorithm {
     }
 }
 
-/// Connect to the SSH agent via `$SSH_AUTH_SOCK`.
+/// Connect to the SSH agent, trying multiple socket paths.
 ///
-/// Returns `None` if the environment variable is unset or the socket
-/// is not connectable. Intentionally synchronous — local Unix socket
-/// connect is sub-millisecond.
+/// Resolution order:
+/// 1. `$SSH_AUTH_SOCK` (may be a symlink to a forwarded agent socket)
+/// 2. `~/.ssh/agent.sock` — stable symlink path created by the Konductor
+///    profile.d propagation script for forwarded SSH agent sessions
+///
+/// Returns `None` if no connectable agent socket is found.
+/// Intentionally synchronous — local Unix socket connect is sub-millisecond.
 fn connect_agent() -> Option<ssh_agent_client_rs::Client> {
-    let sock_path = std::env::var_os("SSH_AUTH_SOCK")?;
-    let path = std::path::Path::new(&sock_path);
-    ssh_agent_client_rs::Client::connect(path).ok()
+    // Primary: $SSH_AUTH_SOCK (set by ssh-agent, sshd forwarding, or systemd env)
+    if let Some(sock_path) = std::env::var_os("SSH_AUTH_SOCK") {
+        let path = std::path::Path::new(&sock_path);
+        if let Ok(client) = ssh_agent_client_rs::Client::connect(path) {
+            return Some(client);
+        }
+    }
+
+    // Fallback: well-known stable symlink managed by profile.d hook.
+    // On Konductor VMs, /etc/profile.d/konductor-ssh-agent.sh creates
+    // ~/.ssh/agent.sock -> /tmp/ssh-XXXX/agent.PID on each SSH login,
+    // giving systemd user services a stable path to the forwarded agent.
+    if let Some(home) = std::env::var_os("HOME") {
+        let fallback = std::path::Path::new(&home).join(".ssh/agent.sock");
+        if let Ok(client) = ssh_agent_client_rs::Client::connect(&fallback) {
+            return Some(client);
+        }
+    }
+
+    None
 }
 
 /// SSH-agent backed vault authentication.
@@ -442,6 +463,16 @@ mod tests {
     fn backend_id_is_ssh_agent() {
         let backend = SshAgentBackend::new();
         assert_eq!(backend.backend_id(), "ssh-agent");
+    }
+
+    /// Verify connect_agent handles nonexistent socket paths gracefully.
+    /// We cannot mutate env vars (crate forbids unsafe), so this exercises
+    /// the connect path with a known-bad socket via direct Client::connect.
+    #[test]
+    fn connect_to_nonexistent_socket_returns_error() {
+        let bad_path = std::path::Path::new("/tmp/nonexistent-ssh-agent-test.sock");
+        let result = ssh_agent_client_rs::Client::connect(bad_path);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -1297,6 +1297,54 @@ fn apply_sandbox() -> anyhow::Result<()> {
         }
     }
 
+    // SSH agent socket: daemon-profile hosts the auth dispatcher and needs
+    // access to the SSH agent for auto-unlock (can_unlock + sign challenge).
+    //
+    // Forwarded SSH agent sockets rotate per-session (/tmp/ssh-XXXX/agent.PID).
+    // On Konductor VMs, a profile.d script creates a stable symlink at
+    // ~/.ssh/agent.sock. Landlock resolves symlinks to their target inodes,
+    // so we must grant access to the symlink, its resolved target, and the
+    // parent directory of the target for path traversal.
+    {
+        let mut seen = std::collections::HashSet::new();
+        let add_path = |rules: &mut Vec<LandlockRule>,
+                            path: PathBuf,
+                            access: FsAccess,
+                            seen: &mut std::collections::HashSet<PathBuf>| {
+            if seen.insert(path.clone()) && (path.exists() || path.is_symlink()) {
+                rules.push(LandlockRule { path, access });
+            }
+        };
+
+        if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
+            let sock_path = PathBuf::from(&sock);
+            add_path(&mut rules, sock_path.clone(), FsAccess::ReadWriteFile, &mut seen);
+
+            if let Ok(canonical) = std::fs::canonicalize(&sock_path) {
+                add_path(&mut rules, canonical.clone(), FsAccess::ReadWriteFile, &mut seen);
+                if let Some(parent) = canonical.parent() {
+                    add_path(&mut rules, parent.to_path_buf(), FsAccess::ReadOnly, &mut seen);
+                }
+            }
+        }
+
+        // Stable fallback: ~/.ssh/agent.sock (forwarded agent symlink)
+        if let Some(home) = std::env::var_os("HOME") {
+            let ssh_dir = PathBuf::from(&home).join(".ssh");
+            let agent_sock = ssh_dir.join("agent.sock");
+
+            add_path(&mut rules, ssh_dir, FsAccess::ReadOnly, &mut seen);
+            add_path(&mut rules, agent_sock.clone(), FsAccess::ReadWriteFile, &mut seen);
+
+            if let Ok(canonical) = std::fs::canonicalize(&agent_sock) {
+                add_path(&mut rules, canonical.clone(), FsAccess::ReadWriteFile, &mut seen);
+                if let Some(parent) = canonical.parent() {
+                    add_path(&mut rules, parent.to_path_buf(), FsAccess::ReadOnly, &mut seen);
+                }
+            }
+        }
+    }
+
     let seccomp = SeccompProfile {
         daemon_name: "daemon-profile".into(),
         allowed_syscalls: vec![
