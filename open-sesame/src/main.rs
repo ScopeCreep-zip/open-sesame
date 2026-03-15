@@ -365,7 +365,8 @@ enum SshCmd {
     ///
     /// Requires the vault to be unlockable with a password (the master key
     /// is derived via Argon2id, then wrapped under an SSH-derived KEK).
-    /// Only Ed25519 and RSA keys are supported (deterministic signatures).
+    /// Only Ed25519 and RSA (PKCS#1 v1.5) keys are supported — their
+    /// signatures are deterministic, which is required for KEK derivation.
     Enroll {
         /// Target profiles (CSV: "default,work").
         /// Falls back to SESAME_PROFILES env var, then "default".
@@ -895,9 +896,12 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
                             .get("ssh_fingerprint")
                             .cloned()
                             .unwrap_or_default();
+                        // Transfer master key bytes without creating an
+                        // unprotected intermediate copy. into_vec() moves
+                        // the backing allocation directly into SensitiveBytes.
                         let event = EventKind::SshUnlockRequest {
                             master_key: SensitiveBytes::new(
-                                outcome.master_key.as_bytes().to_vec(),
+                                outcome.master_key.into_vec(),
                             ),
                             profile: target_profile.clone(),
                             ssh_fingerprint: fp,
@@ -1067,7 +1071,7 @@ async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
             })
             .collect();
 
-        let _selection = if key_labels.len() == 1 {
+        let selection = if key_labels.len() == 1 {
             println!("Using key: {}", key_labels[0]);
             0
         } else {
@@ -1079,8 +1083,15 @@ async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
         };
 
         let backend = core_auth::SshAgentBackend::new();
-        core_auth::VaultAuthBackend::enroll(&backend, &target, &master_key, &config_dir, &salt)
-            .await?;
+        core_auth::VaultAuthBackend::enroll(
+            &backend,
+            &target,
+            &master_key,
+            &config_dir,
+            &salt,
+            Some(selection),
+        )
+        .await?;
 
         println!(
             "{}",

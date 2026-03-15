@@ -21,6 +21,10 @@ pub use ssh::SshAgentBackend;
 pub use ssh_types::{EnrollmentBlob, SshKeyType, ENROLLMENT_VERSION};
 
 /// Errors from authentication backends.
+///
+/// Does not implement `Clone` because the `Io` variant wraps `std::io::Error`
+/// which is not `Clone`. If clonability is needed for IPC forwarding, the
+/// error should be converted to a string representation first.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("backend not applicable: {0}")]

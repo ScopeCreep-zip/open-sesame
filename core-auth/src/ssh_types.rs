@@ -12,10 +12,21 @@ pub const ENROLLMENT_VERSION: u8 = 0x01;
 /// Expected ciphertext length: 32-byte master key + 16-byte GCM tag.
 const CIPHERTEXT_LEN: usize = 48;
 
-/// Supported SSH key types (deterministic signatures only).
+/// Supported SSH key types for vault unlock.
 ///
-/// ECDSA and RSA-PSS are excluded because their non-deterministic
-/// signatures would produce different KEKs on each unlock attempt.
+/// Only key types that produce deterministic signatures are supported,
+/// because the KEK is derived from the raw signature bytes — a different
+/// signature on each unlock would produce a different KEK and fail to
+/// unwrap the enrollment blob.
+///
+/// - **Ed25519**: deterministic by specification (RFC 8032).
+/// - **RSA (PKCS#1 v1.5)**: deterministic — the padding scheme uses no
+///   randomness. The ssh-agent-client-rs crate hard-codes RSA sign
+///   requests to SHA-512, which is stable.
+///
+/// Excluded:
+/// - **ECDSA**: non-deterministic — uses a random `k` value per signature.
+/// - **RSA-PSS**: non-deterministic — uses a random salt per signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SshKeyType {
     Ed25519,
@@ -27,8 +38,9 @@ impl SshKeyType {
     ///
     /// # Errors
     ///
-    /// Returns `AuthError::UnsupportedKeyType` for non-deterministic key types
-    /// (ECDSA, RSA-PSS) or unrecognized type strings.
+    /// Returns `AuthError::UnsupportedKeyType` for key types with
+    /// non-deterministic signatures (ECDSA, RSA-PSS) or unrecognized
+    /// type strings.
     pub fn from_wire_name(name: &str) -> Result<Self, AuthError> {
         match name {
             "ssh-ed25519" => Ok(Self::Ed25519),
@@ -37,11 +49,12 @@ impl SshKeyType {
         }
     }
 
-    /// Convert from `ssh_key::Algorithm`, rejecting non-deterministic types.
+    /// Convert from `ssh_key::Algorithm`, accepting only deterministic types.
     ///
-    /// Only Ed25519 and RSA (PKCS#1 v1.5) are accepted. ECDSA and other
-    /// non-deterministic signature schemes are rejected because they would
-    /// produce different KEKs on each unlock attempt.
+    /// Only Ed25519 (RFC 8032, deterministic) and RSA PKCS#1 v1.5
+    /// (deterministic padding) are accepted. ECDSA (random k) and
+    /// RSA-PSS (random salt) are rejected because their non-deterministic
+    /// signatures would produce different KEKs on each unlock attempt.
     ///
     /// # Errors
     ///
@@ -136,6 +149,13 @@ impl EnrollmentBlob {
         }
 
         let fp_len = u16::from_be_bytes([data[1], data[2]]) as usize;
+        // Cap fingerprint length to prevent memory allocation attacks from
+        // malformed blobs. SHA-256 fingerprints are ~47 bytes; 256 is generous.
+        if fp_len > 256 {
+            return Err(AuthError::InvalidBlob(format!(
+                "fingerprint length {fp_len} exceeds maximum of 256 bytes"
+            )));
+        }
         let fp_end = 3 + fp_len;
         if data.len() < fp_end + 1 {
             return Err(AuthError::InvalidBlob("truncated: fingerprint data".into()));
@@ -267,5 +287,18 @@ mod tests {
             SshKeyType::from_wire_name("ecdsa-sha2-nistp256"),
             Err(AuthError::UnsupportedKeyType(_))
         ));
+    }
+
+    #[test]
+    fn rejects_oversized_fingerprint() {
+        // Craft a blob with fingerprint length > 256
+        let mut data = vec![ENROLLMENT_VERSION];
+        let big_len: u16 = 300;
+        data.extend_from_slice(&big_len.to_be_bytes());
+        data.extend_from_slice(&vec![b'A'; 300]);
+        // Pad enough for the rest of the blob
+        data.extend_from_slice(&[0u8; 100]);
+        let result = EnrollmentBlob::deserialize(&data);
+        assert!(matches!(result, Err(AuthError::InvalidBlob(msg)) if msg.contains("exceeds maximum")));
     }
 }

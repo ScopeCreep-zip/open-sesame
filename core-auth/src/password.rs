@@ -71,6 +71,7 @@ impl VaultAuthBackend for PasswordBackend {
         _master_key: &SecureBytes,
         _config_dir: &Path,
         _salt: &[u8],
+        _selected_key_index: Option<usize>,
     ) -> Result<(), AuthError> {
         Err(AuthError::BackendNotApplicable(
             "password backend requires no enrollment".into(),

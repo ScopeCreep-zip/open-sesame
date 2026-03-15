@@ -894,6 +894,15 @@ async fn execute_commands(
                 client.publish(event, level).await.ok();
             }
             // -- Unlock flow commands --
+            //
+            // The AttemptAutoUnlock handler cannot be unit-tested in isolation
+            // because it requires a live IPC bus (BusClient), a running
+            // daemon-secrets for the request/response cycle, and filesystem
+            // access for salt files and enrollment blobs. The underlying
+            // crypto round-trip is covered by core-auth's
+            // `full_enrollment_unlock_round_trip` test. The controller's
+            // state machine transitions for AutoUnlockResult are covered
+            // by the controller unit tests in controller.rs.
             Command::AttemptAutoUnlock { profile } => {
                 tracing::info!(
                     audit = "unlock-flow",
@@ -913,15 +922,49 @@ async fn execute_commands(
                             Ok(outcome) => {
                                 let fp = outcome.audit_metadata.get("ssh_fingerprint")
                                     .cloned().unwrap_or_default();
+                                // Transfer master key bytes without creating an
+                                // unprotected intermediate copy.
                                 let event = core_types::EventKind::SshUnlockRequest {
                                     master_key: core_types::SensitiveBytes::new(
-                                        outcome.master_key.as_bytes().to_vec()
+                                        outcome.master_key.into_vec()
                                     ),
                                     profile: profile.clone(),
-                                    ssh_fingerprint: fp,
+                                    ssh_fingerprint: fp.clone(),
                                 };
-                                client.publish(event, core_types::SecurityLevel::SecretsOnly).await.ok();
-                                (true, false)
+                                // Use request() (RPC with response) instead of
+                                // publish() (fire-and-forget) so we confirm
+                                // daemon-secrets actually accepted the master key.
+                                // 30s timeout accommodates Argon2id KDF parameters.
+                                match client.request(
+                                    event,
+                                    core_types::SecurityLevel::SecretsOnly,
+                                    std::time::Duration::from_secs(30),
+                                ).await {
+                                    Ok(msg) => match msg.payload {
+                                        EventKind::UnlockResponse { success: true, .. } => {
+                                            tracing::info!(%profile, %fp, "SSH auto-unlock accepted by daemon-secrets");
+                                            (true, false)
+                                        }
+                                        EventKind::UnlockRejected {
+                                            reason: UnlockRejectedReason::AlreadyUnlocked, ..
+                                        } => {
+                                            tracing::info!(%profile, "vault already unlocked, treating as success");
+                                            (true, false)
+                                        }
+                                        EventKind::UnlockResponse { success: false, .. } => {
+                                            tracing::warn!(%profile, "SSH auto-unlock rejected by daemon-secrets");
+                                            (false, false)
+                                        }
+                                        other => {
+                                            tracing::warn!(%profile, ?other, "unexpected response to SshUnlockRequest");
+                                            (false, false)
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::error!(error = %e, %profile, "SshUnlockRequest IPC failed");
+                                        (false, false)
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::debug!(error = %e, %profile, "auto-unlock failed, falling back to password");

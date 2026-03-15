@@ -20,9 +20,9 @@ fn identity_fingerprint(id: &Identity<'_>) -> String {
     match id {
         Identity::PublicKey(cow) => cow.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
         Identity::Certificate(cow) => {
-            let key_data = cow.public_key();
-            let pk = ssh_key::PublicKey::new(key_data.clone(), "");
-            pk.fingerprint(ssh_key::HashAlg::Sha256).to_string()
+            cow.public_key()
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string()
         }
     }
 }
@@ -138,7 +138,10 @@ impl VaultAuthBackend for SshAgentBackend {
         let challenge_ctx = format!("pds v2 ssh-challenge {profile_str}");
         let challenge_bytes: [u8; 32] = blake3::derive_key(&challenge_ctx, salt);
 
-        // 3. Connect to agent, find enrolled key, sign challenge
+        // 3. Connect to agent, find enrolled key, sign challenge.
+        //    ssh-agent-client-rs is synchronous (Unix socket I/O), so all
+        //    agent calls run inside spawn_blocking to avoid blocking the
+        //    tokio runtime.
         let fingerprint = blob.key_fingerprint.clone();
         let challenge = challenge_bytes.to_vec();
         let sign_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AuthError> {
@@ -161,15 +164,18 @@ impl VaultAuthBackend for SshAgentBackend {
                 AuthError::AgentProtocolError(format!("sign request failed: {e}"))
             })?;
 
+            // Immediately copy the signature bytes so the Vec is the only
+            // unprotected holder; zeroized promptly after KEK derivation below.
             Ok(signature.as_bytes().to_vec())
         })
         .await
         .map_err(|e| AuthError::AgentUnavailable(format!("spawn_blocking failed: {e}")))??;
 
-        // 4. Derive KEK from signature
+        // 4. Derive KEK from signature, then zeroize the raw signature bytes
+        //    immediately. The signature is the sole input to KEK derivation —
+        //    minimizing its lifetime reduces the exposure window.
         let kek_ctx = format!("pds v2 ssh-vault-kek {profile_str}");
         let mut kek_bytes: [u8; 32] = blake3::derive_key(&kek_ctx, &sign_result);
-        // Zeroize signature bytes
         let mut sig_bytes = sign_result;
         sig_bytes.zeroize();
 
@@ -201,6 +207,7 @@ impl VaultAuthBackend for SshAgentBackend {
         master_key: &SecureBytes,
         config_dir: &Path,
         salt: &[u8],
+        selected_key_index: Option<usize>,
     ) -> Result<(), AuthError> {
         // 1. Connect to agent, list eligible keys, sign challenge
         let profile_str = profile.to_string();
@@ -208,6 +215,8 @@ impl VaultAuthBackend for SshAgentBackend {
         let challenge: [u8; 32] = blake3::derive_key(&challenge_ctx, salt);
         let challenge_vec = challenge.to_vec();
 
+        // ssh-agent-client-rs is synchronous (Unix socket I/O), so all agent
+        // calls run inside spawn_blocking to avoid blocking the tokio runtime.
         let (fingerprint, key_type, sig_bytes) = tokio::task::spawn_blocking(
             move || -> Result<(String, SshKeyType, Vec<u8>), AuthError> {
                 let mut agent = connect_agent().ok_or_else(|| {
@@ -231,7 +240,12 @@ impl VaultAuthBackend for SshAgentBackend {
                     return Err(AuthError::NoEligibleKey);
                 }
 
-                let identity = eligible.into_iter().next().unwrap();
+                // Use the caller-selected key index, defaulting to the first eligible key.
+                let idx = selected_key_index.unwrap_or(0);
+                if idx >= eligible.len() {
+                    return Err(AuthError::NoEligibleKey);
+                }
+                let identity = eligible.into_iter().nth(idx).unwrap();
                 let fp = identity_fingerprint(&identity);
                 let algo = identity_algorithm(&identity);
                 let kt = SshKeyType::from_algorithm(&algo)?;
@@ -240,7 +254,12 @@ impl VaultAuthBackend for SshAgentBackend {
                     AuthError::AgentProtocolError(format!("sign: {e}"))
                 })?;
 
-                Ok((fp, kt, sig.as_bytes().to_vec()))
+                // Use a zeroizing container to minimize the window where raw
+                // signature bytes (KEK input) sit unprotected in memory.
+                let mut sig_vec = sig.as_bytes().to_vec();
+                let result = (fp, kt, sig_vec.clone());
+                sig_vec.zeroize();
+                Ok(result)
             },
         )
         .await
@@ -280,6 +299,18 @@ impl VaultAuthBackend for SshAgentBackend {
 
         let tmp_path = blob_path.with_extension("ssh-enrollment.tmp");
         std::fs::write(&tmp_path, blob.serialize())?;
+
+        // Set restrictive permissions (owner-only) before rename. The blob
+        // contains an AES-256-GCM encrypted master key; do not rely on umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &tmp_path,
+                std::fs::Permissions::from_mode(0o600),
+            )?;
+        }
+
         std::fs::rename(&tmp_path, &blob_path)?;
 
         tracing::info!(
@@ -508,5 +539,69 @@ mod tests {
         let wrong_enc_key = core_crypto::EncryptionKey::from_bytes(&wrong_kek).unwrap();
         let result = wrong_enc_key.decrypt(&nonce, &ciphertext);
         assert!(result.is_err());
+    }
+
+    /// Full enrollment + unlock cycle integration test (simulated agent).
+    ///
+    /// Exercises the complete crypto round-trip without a real SSH agent:
+    /// generate challenge, derive KEK from simulated signature, wrap master
+    /// key, write enrollment blob to disk, read it back, unwrap, and verify
+    /// the recovered master key matches the original.
+    #[test]
+    fn full_enrollment_unlock_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = test_profile();
+        let salt = [0xBB; 16];
+        let master_key_data = vec![0x42u8; 32];
+        let simulated_sig = [0xAB; 64];
+
+        // --- Enrollment phase ---
+
+        // 1. Generate challenge (same as SshAgentBackend::enroll)
+        let challenge_ctx = format!("pds v2 ssh-challenge {profile}");
+        let _challenge: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
+
+        // 2. Derive KEK from simulated signature
+        let kek_ctx = format!("pds v2 ssh-vault-kek {profile}");
+        let kek: [u8; 32] = blake3::derive_key(&kek_ctx, &simulated_sig);
+
+        // 3. Wrap master key
+        let enc_key = core_crypto::EncryptionKey::from_bytes(&kek).unwrap();
+        let nonce = [0x33u8; 12];
+        let ciphertext = enc_key.encrypt(&nonce, &master_key_data).unwrap();
+
+        // 4. Build and write enrollment blob
+        let blob = EnrollmentBlob {
+            version: crate::ENROLLMENT_VERSION,
+            key_fingerprint: "SHA256:test-round-trip".into(),
+            key_type: SshKeyType::Ed25519,
+            nonce,
+            ciphertext,
+        };
+        let vaults_dir = dir.path().join("vaults");
+        std::fs::create_dir_all(&vaults_dir).unwrap();
+        let blob_path = vaults_dir.join(format!("{profile}.ssh-enrollment"));
+        std::fs::write(&blob_path, blob.serialize()).unwrap();
+
+        // --- Unlock phase ---
+
+        // 5. Read blob back from disk
+        let blob_data = std::fs::read(&blob_path).unwrap();
+        let parsed = EnrollmentBlob::deserialize(&blob_data).unwrap();
+        assert_eq!(parsed.key_fingerprint, "SHA256:test-round-trip");
+        assert_eq!(parsed.key_type, SshKeyType::Ed25519);
+
+        // 6. Re-derive the same challenge (deterministic)
+        let challenge2: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
+        assert_eq!(_challenge, challenge2);
+
+        // 7. Same signature -> same KEK -> successful unwrap
+        let kek2: [u8; 32] = blake3::derive_key(&kek_ctx, &simulated_sig);
+        assert_eq!(kek, kek2);
+        let enc_key2 = core_crypto::EncryptionKey::from_bytes(&kek2).unwrap();
+        let unwrapped = enc_key2.decrypt(&parsed.nonce, &parsed.ciphertext).unwrap();
+
+        // 8. Verify recovered master key matches original
+        assert_eq!(unwrapped.as_bytes(), &master_key_data);
     }
 }

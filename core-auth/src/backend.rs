@@ -66,12 +66,16 @@ pub trait VaultAuthBackend: Send + Sync {
     ) -> Result<UnlockOutcome, AuthError>;
 
     /// Enroll this backend for a profile. Requires the master key.
+    ///
+    /// `selected_key_index` is an optional index into the list of eligible keys
+    /// returned by the backend. If `None`, the backend picks the first eligible key.
     async fn enroll(
         &self,
         profile: &TrustProfileName,
         master_key: &SecureBytes,
         config_dir: &Path,
         salt: &[u8],
+        selected_key_index: Option<usize>,
     ) -> Result<(), AuthError>;
 
     /// Remove enrollment for this backend.

@@ -143,3 +143,41 @@ fn wm_focus_requires_window_id() {
         .failure()
         .stderr(predicate::str::is_empty().not());
 }
+
+// ===== SSH subcommand tests =====
+
+#[test]
+fn ssh_help_exits_zero() {
+    sesame()
+        .args(["ssh", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SSH").or(predicate::str::contains("ssh")));
+}
+
+#[test]
+fn ssh_enroll_help_exits_zero() {
+    sesame()
+        .args(["ssh", "enroll", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Enroll").or(predicate::str::contains("enroll")));
+}
+
+#[test]
+fn ssh_list_help_exits_zero() {
+    sesame()
+        .args(["ssh", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("List").or(predicate::str::contains("list")));
+}
+
+#[test]
+fn ssh_revoke_help_exits_zero() {
+    sesame()
+        .args(["ssh", "revoke", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Revoke").or(predicate::str::contains("revoke")));
+}

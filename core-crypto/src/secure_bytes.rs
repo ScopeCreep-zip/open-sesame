@@ -59,6 +59,19 @@ impl SecureBytes {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    /// Consume the `SecureBytes` and return the inner `Vec<u8>`.
+    ///
+    /// The caller takes ownership of the raw bytes and is responsible for
+    /// zeroizing them. This avoids creating a temporary unprotected copy
+    /// when transferring key material to another zeroizing container.
+    #[must_use]
+    pub fn into_vec(mut self) -> Vec<u8> {
+        // Take the inner Vec, replacing it with an empty Vec so that
+        // Drop::drop (which calls zeroize) operates on the empty Vec
+        // rather than double-zeroing the data the caller now owns.
+        std::mem::take(&mut self.inner)
+    }
 }
 
 impl Drop for SecureBytes {
