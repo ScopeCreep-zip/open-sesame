@@ -1314,7 +1314,7 @@ fn apply_sandbox() {
     let pds_dir = std::path::PathBuf::from(&runtime_dir).join("pds");
     let keys_dir = pds_dir.join("keys");
 
-    let rules = vec![
+    let mut rules = vec![
         LandlockRule {
             path: keys_dir.clone(),
             access: FsAccess::ReadOnly,
@@ -1424,7 +1424,25 @@ fn apply_sandbox() {
                 .join("gtk-4.0"),
             access: FsAccess::ReadOnly,
         },
+        // PDS vaults directory: salt files and SSH enrollment blobs needed
+        // for auto-unlock (SSH-agent backend reads salt + blob at unlock time).
+        LandlockRule {
+            path: core_config::config_dir().join("vaults"),
+            access: FsAccess::ReadOnly,
+        },
     ];
+
+    // SSH agent socket: needed for SSH-agent auto-unlock (can_unlock + sign).
+    // Only added if $SSH_AUTH_SOCK is set and the socket exists.
+    if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
+        let sock_path = std::path::PathBuf::from(&sock);
+        if sock_path.exists() {
+            rules.push(LandlockRule {
+                path: sock_path,
+                access: FsAccess::ReadWriteFile,
+            });
+        }
+    }
 
     let seccomp = SeccompProfile {
         daemon_name: "daemon-wm".into(),
