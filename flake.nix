@@ -37,15 +37,29 @@
         let
           cfg = config.programs.open-sesame;
           tomlFormat = pkgs.formats.toml { };
-          defaultPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          systemPkgs = self.packages.${pkgs.stdenv.hostPlatform.system};
+          headlessPkg = systemPkgs.open-sesame-headless;
+          desktopPkg = systemPkgs.default;
+          isHeadless = cfg.headless;
         in
         {
           options.programs.open-sesame = {
             enable = lib.mkEnableOption "Open Sesame desktop suite for COSMIC/Wayland";
 
+            headless = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Run in headless mode (no GUI daemons). Only starts profile,
+                secrets, launcher, and snippets daemons. Suitable for servers,
+                containers, and SSH-only environments like Konductor VMs.
+              '';
+            };
+
             package = lib.mkOption {
               type = lib.types.package;
-              default = defaultPkg;
+              default = if isHeadless then headlessPkg else desktopPkg;
+              defaultText = lib.literalExpression "open-sesame or open-sesame-headless (based on headless option)";
               description = "The open-sesame package to use.";
             };
 
@@ -109,7 +123,7 @@
 
           config = lib.mkIf cfg.enable {
             warnings = lib.optional
-              (builtins.pathExists "/dev/input" && !(builtins.elem "input" (config.home.extraGroups or [])))
+              (!isHeadless && builtins.pathExists "/dev/input" && !(builtins.elem "input" (config.home.extraGroups or [])))
               ''
                 open-sesame: daemon-input requires 'input' group membership for
                 keyboard capture on desktops without a focused window.
@@ -174,20 +188,23 @@
               "d %t/pds 0700 - - -"
               "d %h/.config/pds 0700 - - -"
               "d %h/.cache/open-sesame 0700 - - -"
+            ] ++ lib.optionals (!isHeadless) [
               "d %h/.cache/fontconfig 0755 - - -"
             ];
 
             # Grouping target — start/stop all daemons together.
-            # Pulled in by graphical-session.target so daemons start on login.
+            # Desktop: pulled in by graphical-session.target.
+            # Headless: pulled in by default.target (no display server needed).
             systemd.user.targets.open-sesame = {
               Unit = {
-                Description = "Open Sesame Desktop Suite";
+                Description = "Open Sesame ${if isHeadless then "Headless" else "Desktop"} Suite";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";
+              } // lib.optionalAttrs (!isHeadless) {
                 Requires = [ "graphical-session.target" ];
                 After = [ "graphical-session.target" ];
               };
               Install = {
-                WantedBy = [ "graphical-session.target" ];
+                WantedBy = [ (if isHeadless then "default.target" else "graphical-session.target") ];
               };
             };
 
@@ -196,8 +213,9 @@
               Unit = {
                 Description = "Open Sesame profile daemon (IPC bus)";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";
-                After = [ "graphical-session.target" ];
                 PartOf = [ "open-sesame.target" ];
+              } // lib.optionalAttrs (!isHeadless) {
+                After = [ "graphical-session.target" ];
               };
               Service = {
                 Type = "notify";
@@ -284,8 +302,10 @@
               };
             };
 
+            # === GUI-only daemons (skipped in headless mode) ===
+
             # Window manager daemon — overlay window switcher.
-            systemd.user.services.open-sesame-wm = {
+            systemd.user.services.open-sesame-wm = lib.mkIf (!isHeadless) {
               Unit = {
                 Description = "Open Sesame window manager daemon";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";
@@ -316,7 +336,7 @@
             };
 
             # Clipboard daemon.
-            systemd.user.services.open-sesame-clipboard = {
+            systemd.user.services.open-sesame-clipboard = lib.mkIf (!isHeadless) {
               Unit = {
                 Description = "Open Sesame clipboard daemon";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";
@@ -346,7 +366,7 @@
 
             # Input daemon — evdev keyboard capture for IPC keyboard routing.
             # Requires `input` group membership for /dev/input/* access.
-            systemd.user.services.open-sesame-input = {
+            systemd.user.services.open-sesame-input = lib.mkIf (!isHeadless) {
               Unit = {
                 Description = "Open Sesame input daemon";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";

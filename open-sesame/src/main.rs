@@ -375,6 +375,13 @@ enum SshCmd {
         /// Falls back to SESAME_PROFILES env var, then "default".
         #[arg(short, long)]
         profile: Option<String>,
+
+        /// SSH key fingerprint to enroll (SHA256:...).
+        /// Required in non-interactive mode. In interactive mode,
+        /// presents a selection menu if omitted.
+        /// Use `ssh-add -l` to list available fingerprints.
+        #[arg(short = 'k', long = "key")]
+        key_fingerprint: Option<String>,
     },
 
     /// List SSH key enrollments for profiles.
@@ -629,7 +636,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ProfileCmd::Show { name } => cmd_profile_show(&name),
         },
         Command::Ssh(sub) => match sub {
-            SshCmd::Enroll { profile } => cmd_ssh_enroll(profile).await,
+            SshCmd::Enroll { profile, key_fingerprint } => cmd_ssh_enroll(profile, key_fingerprint).await,
             SshCmd::List { profile } => cmd_ssh_list(profile).await,
             SshCmd::Revoke { profile } => cmd_ssh_revoke(profile).await,
         },
@@ -1064,7 +1071,7 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
+async fn cmd_ssh_enroll(profile_arg: Option<String>, key_fingerprint: Option<String>) -> anyhow::Result<()> {
     let specs = resolve_profile_specs(profile_arg.as_deref());
     let config_dir = core_config::config_dir();
 
@@ -1080,10 +1087,28 @@ async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
 
         // Need password to derive master key for wrapping
         println!("SSH enrollment requires your vault password to derive the master key.");
-        let password = dialoguer::Password::new()
-            .with_prompt(format!("Password for vault '{profile_name}'"))
-            .interact()
-            .context("failed to read password")?;
+        let mut password = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            dialoguer::Password::new()
+                .with_prompt(format!("Password for vault '{profile_name}'"))
+                .interact()
+                .context("failed to read password")?
+        } else {
+            let mut buf = String::new();
+            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf)
+                .context("failed to read password from stdin")?;
+            if buf.ends_with('\n') {
+                buf.pop();
+                if buf.ends_with('\r') {
+                    buf.pop();
+                }
+            }
+            if buf.is_empty() {
+                anyhow::bail!(
+                    "empty password from stdin for vault '{profile_name}' — refusing to enroll with no password"
+                );
+            }
+            buf
+        };
 
         let salt_array: [u8; 16] = salt
             .as_slice()
@@ -1091,6 +1116,7 @@ async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
             .context("vault salt must be exactly 16 bytes")?;
         let master_key = core_crypto::derive_key_argon2(password.as_bytes(), &salt_array)
             .context("failed to derive master key from password")?;
+        password.zeroize();
 
         // List SSH agent keys for user selection
         let sock_path = std::env::var("SSH_AUTH_SOCK")
@@ -1135,15 +1161,46 @@ async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
             })
             .collect();
 
-        let selection = if key_labels.len() == 1 {
-            println!("Using key: {}", key_labels[0]);
-            0
-        } else {
+        let selection = if let Some(ref fp) = key_fingerprint {
+            // Explicit key selection by fingerprint (headless-safe).
+            let fp_normalized = fp.strip_prefix("SHA256:").unwrap_or(fp);
+            eligible
+                .iter()
+                .position(|id| {
+                    let id_fp = match id {
+                        ssh_agent_client_rs::Identity::PublicKey(cow) => {
+                            cow.fingerprint(ssh_key::HashAlg::Sha256).to_string()
+                        }
+                        ssh_agent_client_rs::Identity::Certificate(cow) => {
+                            cow.public_key().fingerprint(ssh_key::HashAlg::Sha256).to_string()
+                        }
+                    };
+                    // Match with or without "SHA256:" prefix.
+                    let id_fp_bare = id_fp.strip_prefix("SHA256:").unwrap_or(&id_fp);
+                    id_fp_bare == fp_normalized
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "SSH key with fingerprint '{fp}' not found in agent.\n\
+                         Available keys:\n{}\n\
+                         Use `ssh-add -l` to list loaded keys.",
+                        key_labels.join("\n")
+                    )
+                })?
+        } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            // Interactive: always require explicit selection.
             dialoguer::Select::new()
                 .with_prompt("Select SSH key for enrollment")
                 .items(&key_labels)
                 .default(0)
                 .interact()?
+        } else {
+            anyhow::bail!(
+                "no --key fingerprint specified (required for non-interactive use).\n\
+                 Available keys:\n{}\n\
+                 Use --key <SHA256:fingerprint> to select one explicitly.",
+                key_labels.join("\n")
+            );
         };
 
         let backend = core_auth::SshAgentBackend::new();

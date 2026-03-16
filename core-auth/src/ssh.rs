@@ -254,8 +254,12 @@ impl VaultAuthBackend for SshAgentBackend {
                     return Err(AuthError::NoEligibleKey);
                 }
 
-                // Use the caller-selected key index, defaulting to the first eligible key.
-                let idx = selected_key_index.unwrap_or(0);
+                // Caller MUST provide an explicit key index. Silent default
+                // selection is never acceptable — the user must declare which
+                // key to use.
+                let idx = selected_key_index.ok_or_else(|| {
+                    AuthError::NoEligibleKey
+                })?;
                 if idx >= eligible.len() {
                     return Err(AuthError::NoEligibleKey);
                 }
