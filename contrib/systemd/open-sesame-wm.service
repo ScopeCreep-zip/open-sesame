@@ -17,7 +17,7 @@ NoNewPrivileges=yes
 # Security hardening
 ProtectHome=read-only
 ProtectSystem=strict
-RuntimeDirectory=pds
+
 ReadWritePaths=%t/pds
 ReadWritePaths=%h/.cache/open-sesame
 

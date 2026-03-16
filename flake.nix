@@ -165,6 +165,17 @@
                 };
               };
 
+            # Ensure %t/pds exists on the host filesystem before services start.
+            # ProtectSystem=strict bind-mounts ReadWritePaths into each service's
+            # mount namespace — the source directory must exist on the real fs.
+            # RuntimeDirectory= cannot do this reliably for user services because
+            # the mkdir happens inside the namespace (invisible to other units).
+            systemd.user.tmpfiles.rules = [
+              "d %t/pds 0700 - - -"
+              "d %h/.config/pds 0700 - - -"
+              "d %h/.cache/open-sesame 0700 - - -"
+            ];
+
             # Grouping target — start/stop all daemons together.
             # Pulled in by graphical-session.target so daemons start on login.
             systemd.user.targets.open-sesame = {
@@ -197,7 +208,6 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
                 ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
@@ -231,7 +241,7 @@
                 PrivateNetwork = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
+
                 ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
                 LimitNOFILE = 1024;
                 LimitMEMLOCK = "64M";
@@ -262,7 +272,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
+
                 ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
@@ -292,7 +302,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
+
                 ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
@@ -324,7 +334,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
+
                 ReadWritePaths = [ "%t/pds" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
@@ -355,7 +365,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
+
                 ReadWritePaths = [ "%t/pds" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
@@ -385,7 +395,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                RuntimeDirectory = "pds";
+
                 ReadWritePaths = [ "%t/pds" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
