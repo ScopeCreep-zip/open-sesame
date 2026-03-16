@@ -1,4 +1,4 @@
 # Cargo configuration for Open Sesame
 
 [alias]
-xtask = "run --package xtask --"
+xtask = "run --manifest-path xtask/Cargo.toml --"

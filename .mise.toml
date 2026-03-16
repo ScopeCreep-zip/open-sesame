@@ -464,7 +464,7 @@ mise run ci:setup
 mise run cargo:fmt:check
 mise run cargo:clippy
 mise run cargo:test
-mise run cargo:build
+mise run cargo:build:debug
 """
 
 [tasks."ci:docs"]
