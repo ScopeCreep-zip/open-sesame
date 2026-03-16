@@ -70,12 +70,12 @@ export default {
       },
     ],
 
-    // Update Cargo.toml version (Rust-specific)
+    // Update [workspace.package] version in Cargo.toml
     [
       '@semantic-release/exec',
       {
         prepareCmd:
-          "sed -i 's/^version = \".*\"/version = \"${nextRelease.version}\"/' Cargo.toml",
+          "sed -i '/^\\[workspace\\.package\\]/,/^\\[/ s/^version = \".*\"/version = \"${nextRelease.version}\"/' Cargo.toml && cargo generate-lockfile",
       },
     ],
 

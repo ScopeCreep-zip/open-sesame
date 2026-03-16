@@ -1,0 +1,11 @@
+[Unit]
+Description=Open Sesame Desktop Suite
+Documentation=https://github.com/scopecreep-zip/open-sesame
+# Grouping target for all Open Sesame daemons. Individual daemons declare
+# WantedBy=open-sesame.target so they start together.
+# Enable with: systemctl --user enable open-sesame.target
+Requires=graphical-session.target
+After=graphical-session.target
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,29 @@
+[package]
+name = "core-auth"
+description = "Pluggable authentication backends for vault unlock (password, SSH-agent, future FIDO2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types.workspace = true
+core-crypto.workspace = true
+
+blake3.workspace = true
+aes-gcm.workspace = true
+zeroize = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
+thiserror.workspace = true
+tracing.workspace = true
+async-trait = { workspace = true }
+ssh-key.workspace = true
+ssh-agent-client-rs.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "core-types"
+description = "Shared types, error types, and event schema for the PDS IPC bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde       = { workspace = true }
+uuid        = { workspace = true }
+thiserror   = { workspace = true }
+zeroize     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+serde_json  = { workspace = true }
+postcard    = { workspace = true }

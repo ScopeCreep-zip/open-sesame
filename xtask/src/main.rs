@@ -17,7 +17,7 @@ use std::process;
 
 /// Read the version from the parent Cargo.toml
 ///
-/// This reads ../Cargo.toml and extracts the version field from [package].
+/// This reads ../Cargo.toml and extracts the version field from [workspace.package].
 /// Returns an error if the file cannot be read or parsed.
 fn read_main_package_version() -> Result<String> {
     let cargo_toml_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,10 +33,11 @@ fn read_main_package_version() -> Result<String> {
         toml::from_str(&content).context("Failed to parse parent Cargo.toml")?;
 
     let version = cargo_toml
-        .get("package")
+        .get("workspace")
+        .and_then(|w| w.get("package"))
         .and_then(|p| p.get("version"))
         .and_then(|v| v.as_str())
-        .context("Failed to extract version from Cargo.toml")?;
+        .context("Failed to extract version from [workspace.package] in Cargo.toml")?;
 
     Ok(version.to_string())
 }

@@ -1,0 +1,22 @@
+[package]
+name = "core-secrets"
+description = "Secret storage abstraction over platform keystores and age-encrypted vaults"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types  = { workspace = true }
+core-crypto = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+zeroize     = { workspace = true }
+tokio       = { workspace = true }
+rusqlite    = { workspace = true }
+blake3      = { workspace = true }
+getrandom   = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }

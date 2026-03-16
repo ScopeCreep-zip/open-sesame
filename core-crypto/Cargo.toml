@@ -1,0 +1,30 @@
+[package]
+name = "core-crypto"
+description = "Cryptographic primitives: AES-256-GCM, Argon2id, SecureBytes, EncryptedStore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate uses unsafe for mlock/madvise syscalls — no workspace lints override.
+# Safety justification documented inline.
+
+[dependencies]
+core-types  = { workspace = true }
+aes-gcm     = { workspace = true }
+argon2      = { workspace = true }
+zeroize     = { workspace = true }
+blake3      = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+pbkdf2      = { workspace = true }
+sha2        = { workspace = true }
+hmac        = { workspace = true }
+hkdf        = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc        = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }

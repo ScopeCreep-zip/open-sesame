@@ -41,7 +41,7 @@ dir_cfg = ".config/open-sesame"
 dir_cache = ".cache/open-sesame"
 arch_amd64 = "x86_64-unknown-linux-gnu"
 arch_arm64 = "aarch64-unknown-linux-gnu"
-apt_deps = "liblzma-dev libxkbcommon-dev libfontconfig1-dev pkg-config"
+apt_deps = "pkg-config libgtk-4-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libgraphene-1.0-dev libgdk-pixbuf-2.0-dev libwayland-dev libxkbcommon-dev libseccomp-dev libfontconfig1-dev gettext meson ninja-build libgirepository1.0-dev gobject-introspection"
 
 [env]
 RUST_BACKTRACE = "1"
@@ -90,12 +90,12 @@ run = "cross build --release --target ${TARGET}"
 
 [tasks."cargo:deb"]
 hide = true
-run = "cargo deb --no-build"
+run = "cargo deb -p open-sesame --no-build"
 
 [tasks."cargo:deb:arm64"]
 hide = true
 env.TARGET = "{{vars.arch_arm64}}"
-run = "cargo deb --no-build --target ${TARGET}"
+run = "cargo deb -p open-sesame --no-build --target ${TARGET}"
 
 [tasks."cargo:clean"]
 hide = true
@@ -152,7 +152,7 @@ mise run test
 mise run cargo:build
 mise run docs:man
 mise run docs:completions
-mise run cargo:deb
+cargo deb -p open-sesame --no-build
 """
 
 [tasks."build:deb:debug"]
@@ -449,6 +449,17 @@ run = """
 set -euxo pipefail
 sudo apt-get update && sudo apt-get install -y {{vars.apt_deps}}
 rustup component add rustfmt clippy
+
+# Build gtk4-layer-shell from source (not packaged in Ubuntu 24.04)
+if ! pkg-config --exists gtk4-layer-shell; then
+  GTK4LS_VERSION="1.1.0"
+  git clone --depth 1 --branch "v${GTK4LS_VERSION}" https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
+  meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell -Dexamples=false -Ddocs=false -Dtests=false -Dvapi=false --prefix=/usr
+  ninja -C /tmp/gtk4-layer-shell/build
+  sudo ninja -C /tmp/gtk4-layer-shell/build install
+  sudo ldconfig
+  rm -rf /tmp/gtk4-layer-shell
+fi
 """
 
 [tasks."ci:setup:apt-repo"]
@@ -464,7 +475,7 @@ mise run ci:setup
 mise run cargo:fmt:check
 mise run cargo:clippy
 mise run cargo:test
-mise run cargo:build
+mise run cargo:build:debug
 """
 
 [tasks."ci:docs"]
@@ -496,7 +507,7 @@ mise run ci:setup
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
-cargo deb --no-build --target ${TARGET}
+cargo deb -p open-sesame --no-build --target ${TARGET}
 """
 
 [tasks."ci:build:deb:arm64"]
@@ -509,7 +520,7 @@ mise run ci:setup
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
-cargo deb --no-build --target ${TARGET}
+cargo deb -p open-sesame --no-build --target ${TARGET}
 """
 
 [tasks."ci:docs:all"]

@@ -1,103 +1,200 @@
 [workspace]
-members = [ ".", "xtask" ]
+members = [
+    "core-types",
+    "core-config",
+    "core-ipc",
+    "core-crypto",
+    "core-fuzzy",
+    "core-secrets",
+    "core-profile",
+    "core-auth",
+    "platform-linux",
+    "platform-macos",
+    "platform-windows",
+    "daemon-wm",
+    "daemon-launcher",
+    "daemon-clipboard",
+    "daemon-input",
+    "daemon-snippets",
+    "daemon-profile",
+    "daemon-secrets",
+    "open-sesame",
+    "sesame-workspace",
+    "extension-host",
+    "extension-sdk",
+]
+exclude = ["xtask"]
 resolver = "2"
 
-[package]
-name = "open-sesame"
-version = "1.2.0"
+[workspace.package]
+version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-only"
-description = "Vimium-style window switcher for COSMIC desktop with visual hints overlay"
+license = "MIT"
 repository = "https://github.com/ScopeCreep-zip/open-sesame"
-homepage = "https://scopecreep-zip.github.io/open-sesame/"
-documentation = "https://scopecreep-zip.github.io/open-sesame/doc/open_sesame/"
-authors = [ "usrbinkat" ]
-readme = "README.md"
-keywords = [ "wayland", "cosmic", "window-switcher", "desktop", "launcher" ]
-categories = [ "gui", "command-line-utilities" ]
+authors = ["usrbinkat"]
 
-[dependencies]
-# Wayland/COSMIC
-smithay-client-toolkit = { version = "0.20", features = [ "calloop" ] }
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = [ "client", "staging" ] }
-cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit" }
+# ============================================================================
+# Workspace Dependencies
+#
+# All external deps declared here, referenced by members via `dep.workspace = true`.
+# Version pins reflect DEPENDENCIES.*.md research (2026-02-24).
+# ============================================================================
 
-# Graphics
-tiny-skia = "0.11"
-fontdue = "0.9"
+[workspace.dependencies]
 
-# Event loop
-calloop = "0.14"
+# -- Internal crates --
+core-types      = { path = "core-types" }
+core-config     = { path = "core-config" }
+core-ipc        = { path = "core-ipc" }
+core-crypto     = { path = "core-crypto" }
+core-fuzzy      = { path = "core-fuzzy" }
+core-secrets    = { path = "core-secrets" }
+core-profile    = { path = "core-profile" }
+core-auth       = { path = "core-auth" }
+platform-linux  = { path = "platform-linux" }
+platform-macos  = { path = "platform-macos" }
+platform-windows = { path = "platform-windows" }
+sesame-workspace = { path = "sesame-workspace" }
+extension-host  = { path = "extension-host" }
+extension-sdk   = { path = "extension-sdk" }
 
-# Config
-toml = "0.9"
-ron = "0.9"
-serde = { version = "1", features = [ "derive" ] }
-dirs = "6"
+# -- Serialization --
+serde           = { version = "1", features = ["derive"] }
+postcard        = { version = "1", features = ["use-std"] }
+toml            = "1"
+serde_json      = "1"
+ron             = "0.9"
 
-# Font resolution (freedesktop fontconfig)
-fontconfig = "0.6"
+# -- Types & Errors --
+thiserror       = "2"
+anyhow          = "1"
+uuid            = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+bytes           = "1.11.1"                      # MANDATORY pin: RUSTSEC-2026-0007
 
-# CLI
-clap = { version = "4", features = [ "derive" ] }
+# -- Async --
+tokio           = { version = "1", features = ["rt", "net", "io-util", "sync", "macros", "time", "signal", "fs"] }
+futures-util    = { version = "0.3", default-features = false, features = ["std"] }
+async-trait     = "0.1"
 
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = [ "env-filter" ] }
-tracing-appender = "0.2"
+# -- Crypto --
+aes-gcm         = { version = "0.10.3", features = ["zeroize"] }  # MANDATORY pin: CVE-2023-42811
+aes             = { version = "0.8", features = ["zeroize"] }    # SEC-012: zeroize AES key schedule on drop
+argon2          = "0.5"
+zeroize         = { version = "1", features = ["derive"] }
+blake3          = "1.8"
+getrandom       = "0.2"
+governor        = { version = "0.10", default-features = false, features = ["std"] }
+snow            = "0.10"
+pbkdf2          = "0.12"
+sha2            = "0.10"
+hmac            = "0.12"
+hkdf            = "0.12"
+hex             = "0.4"
+ssh-key             = { version = "0.6.7", features = ["ed25519", "rsa"] }
+ssh-agent-client-rs = "1.1.2"
 
-# Error handling
-anyhow = "1"
-thiserror = "2"
+# -- Database --
+rusqlite        = { version = "0.38", features = ["bundled-sqlcipher"] }
 
-# Unix/system
-libc = "0.2"
+# -- Fuzzy --
+# TODO: pinned to git HEAD because crates.io 0.5.0 does not expose
+# Snapshot::matches() (added in helix-editor/nucleo#57, unreleased).
+# Revert to crates.io version once nucleo publishes a release with this API.
+nucleo          = { git = "https://github.com/helix-editor/nucleo.git", rev = "4253de9" }
 
-[features]
-default = [  ]
-debug-logging = [  ] # Always log to file, regardless of RUST_LOG
+# -- Config --
+notify          = "8"
+dirs            = "6"
 
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = [ "--cfg", "docsrs" ]
+# -- Logging --
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3.20", features = ["env-filter", "fmt", "json", "ansi"] }  # MANDATORY pin: CVE-2025-58160
+tracing-journald    = "0.3"
 
-[package.metadata.deb]
-maintainer = "usrbinkat <usrbinkat@users.noreply.github.com>"
-copyright = "2024, usrbinkat"
-extended-description = """
-Open Sesame - Vimium-style window switcher for COSMIC desktop.
+# -- CLI --
+clap                = { version = "4", features = ["derive", "env"] }
+clap_complete       = "4"
+clap_mangen         = "0.2"
+comfy-table         = "7"
+dialoguer           = { version = "0.12", features = ["fuzzy-select"] }
+indicatif           = "0.17"
+owo-colors          = "4"
 
-Shows a centered list of all windows with letter hints. Type a letter
-to instantly focus that window, or use arrow keys to navigate.
+# -- Linux platform --
+evdev                   = { version = "0.13", features = ["tokio", "stream-trait"] }
+# 0.8 matches smithay-client-toolkit's transitive dep; no 0.9 on crates.io.
+xkbcommon               = "0.8"
+wayland-client          = "0.31"
+wayland-protocols       = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr   = { version = "0.3", features = ["client"] }
+smithay-client-toolkit  = { version = "0.20", features = ["xkbcommon"] }
+cosmic-client-toolkit   = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit" }
+cosmic-protocols        = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-protocols" }
+zbus                    = { version = "5", default-features = false, features = ["tokio"] }
+landlock                = "0.4"
+libseccomp              = "0.4"
+sd-notify               = "0.4"
+libc                    = "0.2"
+rustix                  = { version = "1", default-features = false, features = ["process"] }
 
-Features:
-- Clean centered list UI with letter hints
-- Arrow key navigation with visual selection
-- Repeated letter hints for multiple windows (g, gg, ggg)
-- Focus-or-launch: type a key to focus or launch an app
-- Fast window activation via COSMIC protocols
-- Automatic COSMIC keybinding setup
+# -- Linux UI --
+gtk4                = { version = "0.10", features = ["v4_14"] }
+gtk4-layer-shell    = "0.7"
+pangocairo          = "0.21"
 
-Setup:
-  sesame --setup-keybinding
-  # Or with custom key combo:
-  sesame --setup-keybinding alt+tab
+# -- macOS platform --
+security-framework  = "3"
+objc2               = "0.6"
+core-foundation     = "0.10"
+core-graphics       = "0.25"
 
-Configuration: ~/.config/open-sesame/config.toml"""
-section = "utils"
-priority = "optional"
-depends = "$auto, fontconfig"
-maintainer-scripts = "scripts/"
-assets = [
-  [ "target/release/sesame", "usr/bin/", "755" ],
-  [ "config.example.toml", "usr/share/doc/open-sesame/", "644" ],
-  [ "target/man/sesame.1.gz", "usr/share/man/man1/", "644" ],
-  [ "target/completions/sesame.bash", "usr/share/bash-completion/completions/sesame", "644" ],
-  [ "target/completions/_sesame", "usr/share/zsh/vendor-completions/", "644" ],
-  [ "target/completions/sesame.fish", "usr/share/fish/vendor_completions.d/", "644" ],
-]
+# -- Windows platform --
+# windows crate requires explicit feature selection per API surface
+windows             = "0.62"
 
-[[bin]]
-name = "sesame"
-path = "src/main.rs"
+# -- Daemon-specific --
+regex                       = "1"
+freedesktop-desktop-entry   = "0.8"
+
+# -- Extensions --
+wasmtime        = { version = "36", features = ["runtime", "cranelift", "component-model", "std", "pooling-allocator"] }
+wasmtime-wasi   = { version = "36", features = ["p3"] }
+wit-bindgen     = "0.42"
+
+# -- Testing --
+proptest        = "1"
+rstest          = "0.25"
+criterion       = { version = "0.7", features = ["html_reports"] }
+tempfile        = "3"
+assert_cmd      = "2"
+predicates      = "3"
+insta           = { version = "1", features = ["yaml", "json", "redactions"] }
+tokio-test      = "0.4"
+
+# -- Build/xtask --
+flate2          = "1"
+
+# ============================================================================
+# Workspace Lints
+# ============================================================================
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# ============================================================================
+# Release Profiles
+# ============================================================================
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = 3
+codegen-units = 1
+
+[profile.release-full]
+inherits = "release"
+lto = "fat"

@@ -1,0 +1,49 @@
+[package]
+name = "daemon-secrets"
+description = "Secrets broker daemon: JIT delivery, keyring integration, profile-scoped access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types   = { workspace = true }
+core-config  = { workspace = true }
+core-ipc     = { workspace = true }
+core-crypto  = { workspace = true }
+core-secrets = { workspace = true }
+core-profile = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap         = { workspace = true }
+anyhow       = { workspace = true }
+serde        = { workspace = true }
+blake3       = { workspace = true }
+getrandom    = { workspace = true }
+snow         = { workspace = true }
+zeroize      = { workspace = true }
+governor     = { workspace = true }
+
+[features]
+## Per-field AES-256-GCM encryption of secret values on the IPC bus,
+## layered on top of Noise IK transport encryption (ADR-SEC-006).
+## Default off: the Noise transport is the security boundary, matching
+## ssh-agent/1Password/Vault/gpg-agent precedent. Enable for research
+## into defense-in-depth for daemon-to-daemon relay scenarios.
+ipc-field-encryption = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux      = { workspace = true }
+tracing-journald    = { workspace = true }
+libc                = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos  = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+platform-windows = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio-test  = { workspace = true }

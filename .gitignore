@@ -1,4 +1,7 @@
 /target
+xtask/target
+.direnv
+/result
 /tmp
 /docs/book
 /node_modules

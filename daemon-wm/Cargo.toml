@@ -1,0 +1,46 @@
+[package]
+name = "daemon-wm"
+description = "Window manager daemon: Wayland overlay window switcher with letter-hint navigation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core-types   = { workspace = true }
+core-config  = { workspace = true }
+core-ipc     = { workspace = true }
+core-crypto  = { workspace = true }
+core-auth    = { workspace = true }
+core-profile = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap         = { workspace = true }
+anyhow       = { workspace = true }
+serde        = { workspace = true }
+dirs         = { workspace = true }
+libc         = { workspace = true }
+snow         = { workspace = true }
+zeroize      = { workspace = true }
+
+[features]
+default = ["gtk"]
+gtk = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:pangocairo"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux      = { workspace = true, features = ["cosmic"] }
+gtk4                = { workspace = true, optional = true }
+gtk4-layer-shell    = { workspace = true, optional = true }
+pangocairo          = { workspace = true, optional = true }
+tracing-journald    = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+platform-macos  = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+platform-windows = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio-test  = { workspace = true }

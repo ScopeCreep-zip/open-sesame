@@ -1,0 +1,29 @@
+[Unit]
+Description=Open Sesame input daemon
+Documentation=https://github.com/scopecreep-zip/open-sesame
+Requires=open-sesame-profile.service
+After=open-sesame-profile.service
+PartOf=open-sesame.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/daemon-input
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+# Security hardening
+PrivateNetwork=no
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=%t/open-sesame
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=128M
+
+# Environment
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=open-sesame.target

@@ -1,0 +1,25 @@
+[package]
+name = "core-config"
+description = "Configuration schema, validation, hot-reload, and policy override for PDS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+core-types  = { workspace = true }
+serde       = { workspace = true }
+toml        = { workspace = true }
+notify      = { workspace = true }
+dirs        = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }
+serde_json  = { workspace = true }
