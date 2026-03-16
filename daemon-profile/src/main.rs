@@ -1346,7 +1346,7 @@ async fn sigterm() {
 /// requires every path in the ruleset to exist.
 #[cfg(target_os = "linux")]
 fn apply_sandbox() -> anyhow::Result<()> {
-    use platform_linux::sandbox::{FsAccess, LandlockRule, SeccompProfile, apply_sandbox};
+    use platform_linux::sandbox::{FsAccess, LandlockRule, LandlockScope, SeccompProfile};
 
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
 
@@ -1545,6 +1545,26 @@ fn apply_sandbox() -> anyhow::Result<()> {
             "rt_sigprocmask".into(),
             "rt_sigreturn".into(),
             "tgkill".into(),
+            // D-Bus credential passing
+            "getresuid".into(),
+            "getresgid".into(),
+            "getgid".into(),
+            "getegid".into(),
+            // D-Bus / Wayland I/O
+            "writev".into(),
+            "readv".into(),
+            "readlink".into(),
+            "readlinkat".into(),
+            "uname".into(),
+            "memfd_create".into(),
+            "getcwd".into(),
+            // Timers (D-Bus / Wayland event loops)
+            "nanosleep".into(),
+            "clock_nanosleep".into(),
+            "sched_yield".into(),
+            "timerfd_create".into(),
+            "timerfd_settime".into(),
+            "timerfd_gettime".into(),
             // Misc
             "exit_group".into(),
             "exit".into(),
@@ -1555,10 +1575,11 @@ fn apply_sandbox() -> anyhow::Result<()> {
             "inotify_rm_watch".into(),
             "pipe2".into(),
             "dup".into(),
+            "flock".into(),
         ],
     };
 
-    match apply_sandbox(&rules, &seccomp) {
+    match platform_linux::sandbox::apply_sandbox_with_scope(&rules, &seccomp, LandlockScope::SignalOnly) {
         Ok(status) => {
             tracing::info!(?status, "sandbox applied");
             Ok(())
