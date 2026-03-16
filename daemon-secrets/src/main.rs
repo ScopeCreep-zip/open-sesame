@@ -422,9 +422,14 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut rate_limiter = SecretRateLimiter::new();
 
+    let mut watchdog_count: u64 = 0;
     loop {
         tokio::select! {
             _ = watchdog.tick() => {
+                watchdog_count += 1;
+                if watchdog_count <= 3 || watchdog_count % 20 == 0 {
+                    tracing::info!(watchdog_count, "watchdog tick");
+                }
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
             }
@@ -1959,6 +1964,10 @@ fn apply_sandbox() {
             "rt_sigprocmask".into(),
             "rt_sigreturn".into(),
             "tgkill".into(),
+            // Config hot-reload (notify crate uses inotify)
+            "inotify_init1".into(),
+            "inotify_add_watch".into(),
+            "inotify_rm_watch".into(),
             // Misc
             "exit_group".into(),
             "exit".into(),

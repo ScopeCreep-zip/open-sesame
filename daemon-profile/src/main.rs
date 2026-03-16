@@ -373,6 +373,9 @@ async fn main() -> anyhow::Result<()> {
 
                 // Reconcile with daemon-secrets every 30s (every other tick).
                 watchdog_tick_count += 1;
+                if watchdog_tick_count <= 3 || watchdog_tick_count % 20 == 0 {
+                    tracing::info!(watchdog_tick_count, "watchdog tick");
+                }
                 if watchdog_tick_count.is_multiple_of(2) {
                     reconcile_secrets_state(
                         &bus,

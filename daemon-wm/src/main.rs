@@ -341,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Event loop — thin orchestrator
     // -----------------------------------------------------------------------
+    let mut watchdog_count: u64 = 0;
     loop {
         // Compute the controller's next deadline for dwell/activation timeout.
         let deadline = controller.next_deadline();
@@ -350,6 +351,10 @@ async fn main() -> anyhow::Result<()> {
             biased;
 
             _ = watchdog.tick() => {
+                watchdog_count += 1;
+                if watchdog_count <= 3 || watchdog_count % 20 == 0 {
+                    tracing::info!(watchdog_count, "watchdog tick");
+                }
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
             }

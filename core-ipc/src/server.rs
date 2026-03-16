@@ -776,7 +776,7 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
             .write()
             .await
             .insert(name.clone(), sender_conn_id);
-        tracing::debug!(
+        tracing::info!(
             daemon_name = %name,
             conn_id = sender_conn_id,
             "name_to_conn mapping registered"
