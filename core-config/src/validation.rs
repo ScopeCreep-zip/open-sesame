@@ -109,7 +109,9 @@ fn check_wm_config(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic>) {
                 line: None,
                 column: None,
                 message: format!("profile '{name}': wm.hint_keys must not be empty"),
-                remediation: Some("set wm.hint_keys to a non-empty string of unique characters".into()),
+                remediation: Some(
+                    "set wm.hint_keys to a non-empty string of unique characters".into(),
+                ),
             });
         }
 
@@ -122,7 +124,9 @@ fn check_wm_config(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic>) {
                     file: None,
                     line: None,
                     column: None,
-                    message: format!("profile '{name}': wm.hint_keys contains duplicate character '{ch}'"),
+                    message: format!(
+                        "profile '{name}': wm.hint_keys contains duplicate character '{ch}'"
+                    ),
                     remediation: Some("remove duplicate characters from wm.hint_keys".into()),
                 });
                 break;
@@ -218,13 +222,17 @@ fn check_launch_profiles(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic
             }
 
             // Warn if multiple tagged profiles define devshells.
-            let devshell_count = binding.tags.iter()
+            let devshell_count = binding
+                .tags
+                .iter()
                 .filter(|t| {
                     let (tp_name, lp_name) = match t.split_once(':') {
                         Some((p, n)) => (p, n),
                         None => (profile_name.as_str(), t.as_str()),
                     };
-                    config.profiles.get(tp_name)
+                    config
+                        .profiles
+                        .get(tp_name)
                         .and_then(|tp| tp.launch_profiles.get(lp_name))
                         .and_then(|lp| lp.devshell.as_ref())
                         .is_some()
@@ -260,7 +268,9 @@ fn check_extends_references(config: &Config, diagnostics: &mut Vec<ConfigDiagnos
                 message: format!(
                     "profile '{name}' extends '{parent}', but '{parent}' is not defined"
                 ),
-                remediation: Some(format!("define a profile named '{parent}' or remove the 'extends' field")),
+                remediation: Some(format!(
+                    "define a profile named '{parent}' or remove the 'extends' field"
+                )),
             });
         }
     }
@@ -297,8 +307,9 @@ mod tests {
         );
         let diags = validate(&config);
         assert!(
-            diags.iter().any(|d| d.severity == DiagnosticSeverity::Error
-                && d.message.contains("circular")),
+            diags
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Error && d.message.contains("circular")),
             "expected circular inheritance error, got: {diags:?}"
         );
     }
@@ -353,18 +364,26 @@ mod tests {
     #[test]
     fn warns_on_missing_launch_profile_tag() {
         let mut config = Config::default();
-        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
-        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
-            apps: vec!["ghostty".into()],
-            launch: Some("ghostty".into()),
-            tags: vec!["nonexistent".into()],
-            launch_args: Vec::new(),
-        });
+        let mut pc = ProfileConfig {
+            name: tpn("default"),
+            ..Default::default()
+        };
+        pc.wm.key_bindings.insert(
+            "g".into(),
+            crate::schema::WmKeyBinding {
+                apps: vec!["ghostty".into()],
+                launch: Some("ghostty".into()),
+                tags: vec!["nonexistent".into()],
+                launch_args: Vec::new(),
+            },
+        );
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
         assert!(
-            diags.iter().any(|d| d.severity == DiagnosticSeverity::Warning
-                && d.message.contains("nonexistent")),
+            diags
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Warning
+                    && d.message.contains("nonexistent")),
             "expected warning about missing launch profile, got: {diags:?}"
         );
     }
@@ -372,18 +391,25 @@ mod tests {
     #[test]
     fn warns_on_missing_cross_profile_tag() {
         let mut config = Config::default();
-        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
-        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
-            apps: vec!["ghostty".into()],
-            launch: Some("ghostty".into()),
-            tags: vec!["work:corp".into()],
-            launch_args: Vec::new(),
-        });
+        let mut pc = ProfileConfig {
+            name: tpn("default"),
+            ..Default::default()
+        };
+        pc.wm.key_bindings.insert(
+            "g".into(),
+            crate::schema::WmKeyBinding {
+                apps: vec!["ghostty".into()],
+                launch: Some("ghostty".into()),
+                tags: vec!["work:corp".into()],
+                launch_args: Vec::new(),
+            },
+        );
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
         assert!(
-            diags.iter().any(|d| d.severity == DiagnosticSeverity::Warning
-                && d.message.contains("work")),
+            diags
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Warning && d.message.contains("work")),
             "expected warning about missing trust profile, got: {diags:?}"
         );
     }
@@ -391,26 +417,39 @@ mod tests {
     #[test]
     fn warns_on_multiple_devshells() {
         let mut config = Config::default();
-        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
-        pc.launch_profiles.insert("a".into(), crate::schema::LaunchProfile {
-            devshell: Some("/workspace#a".into()),
+        let mut pc = ProfileConfig {
+            name: tpn("default"),
             ..Default::default()
-        });
-        pc.launch_profiles.insert("b".into(), crate::schema::LaunchProfile {
-            devshell: Some("/workspace#b".into()),
-            ..Default::default()
-        });
-        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
-            apps: vec!["ghostty".into()],
-            launch: Some("ghostty".into()),
-            tags: vec!["a".into(), "b".into()],
-            launch_args: Vec::new(),
-        });
+        };
+        pc.launch_profiles.insert(
+            "a".into(),
+            crate::schema::LaunchProfile {
+                devshell: Some("/workspace#a".into()),
+                ..Default::default()
+            },
+        );
+        pc.launch_profiles.insert(
+            "b".into(),
+            crate::schema::LaunchProfile {
+                devshell: Some("/workspace#b".into()),
+                ..Default::default()
+            },
+        );
+        pc.wm.key_bindings.insert(
+            "g".into(),
+            crate::schema::WmKeyBinding {
+                apps: vec!["ghostty".into()],
+                launch: Some("ghostty".into()),
+                tags: vec!["a".into(), "b".into()],
+                launch_args: Vec::new(),
+            },
+        );
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
         assert!(
-            diags.iter().any(|d| d.severity == DiagnosticSeverity::Warning
-                && d.message.contains("devshell")),
+            diags.iter().any(
+                |d| d.severity == DiagnosticSeverity::Warning && d.message.contains("devshell")
+            ),
             "expected warning about multiple devshells, got: {diags:?}"
         );
     }
@@ -418,22 +457,35 @@ mod tests {
     #[test]
     fn no_warning_for_valid_tags() {
         let mut config = Config::default();
-        let mut pc = ProfileConfig { name: tpn("default"), ..Default::default() };
-        pc.launch_profiles.insert("dev-rust".into(), crate::schema::LaunchProfile {
-            env: [("RUST_LOG".into(), "debug".into())].into(),
+        let mut pc = ProfileConfig {
+            name: tpn("default"),
             ..Default::default()
-        });
-        pc.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
-            apps: vec!["ghostty".into()],
-            launch: Some("ghostty".into()),
-            tags: vec!["dev-rust".into()],
-            launch_args: Vec::new(),
-        });
+        };
+        pc.launch_profiles.insert(
+            "dev-rust".into(),
+            crate::schema::LaunchProfile {
+                env: [("RUST_LOG".into(), "debug".into())].into(),
+                ..Default::default()
+            },
+        );
+        pc.wm.key_bindings.insert(
+            "g".into(),
+            crate::schema::WmKeyBinding {
+                apps: vec!["ghostty".into()],
+                launch: Some("ghostty".into()),
+                tags: vec!["dev-rust".into()],
+                launch_args: Vec::new(),
+            },
+        );
         config.profiles.insert("default".into(), pc);
         let diags = validate(&config);
-        let launch_warnings: Vec<_> = diags.iter()
+        let launch_warnings: Vec<_> = diags
+            .iter()
             .filter(|d| d.message.contains("launch profile") || d.message.contains("tag"))
             .collect();
-        assert!(launch_warnings.is_empty(), "unexpected launch profile warnings: {launch_warnings:?}");
+        assert!(
+            launch_warnings.is_empty(),
+            "unexpected launch profile warnings: {launch_warnings:?}"
+        );
     }
 }

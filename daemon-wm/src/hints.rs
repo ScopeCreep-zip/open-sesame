@@ -103,7 +103,9 @@ fn normalize_input(input: &str) -> String {
             if let Ok(num) = num_str.parse::<usize>()
                 && num > 0
                 && num <= 26
-                && letters.chars().all(|c| c == letters.chars().next().unwrap_or(' '))
+                && letters
+                    .chars()
+                    .all(|c| c == letters.chars().next().unwrap_or(' '))
             {
                 let base = letters.chars().next().unwrap();
                 return std::iter::repeat_n(base, num).collect();
@@ -162,7 +164,10 @@ pub fn tags_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) ->
 
 /// Look up the launch args for a key character.
 #[must_use]
-pub fn launch_args_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) -> Vec<String> {
+pub fn launch_args_for_key(
+    key: char,
+    key_bindings: &BTreeMap<String, WmKeyBinding>,
+) -> Vec<String> {
     let key_str = key.to_lowercase().to_string();
     key_bindings
         .get(&key_str)
@@ -292,12 +297,15 @@ mod tests {
     #[test]
     fn launch_for_key_case_insensitive() {
         let mut bindings = BTreeMap::new();
-        bindings.insert("f".to_string(), WmKeyBinding {
-            apps: vec!["app-f".into()],
-            launch: Some("app-f".into()),
-            tags: Vec::new(),
-            launch_args: Vec::new(),
-        });
+        bindings.insert(
+            "f".to_string(),
+            WmKeyBinding {
+                apps: vec!["app-f".into()],
+                launch: Some("app-f".into()),
+                tags: Vec::new(),
+                launch_args: Vec::new(),
+            },
+        );
         assert_eq!(launch_for_key('f', &bindings), Some("app-f"));
         assert_eq!(launch_for_key('F', &bindings), Some("app-f"));
         assert_eq!(launch_for_key('z', &bindings), None);
@@ -316,12 +324,15 @@ mod tests {
     #[test]
     fn tags_for_key_found() {
         let mut bindings = BTreeMap::new();
-        bindings.insert("g".to_string(), WmKeyBinding {
-            apps: vec!["ghostty".into()],
-            launch: Some("ghostty".into()),
-            tags: vec!["dev-rust".into(), "ai-tools".into()],
-            launch_args: Vec::new(),
-        });
+        bindings.insert(
+            "g".to_string(),
+            WmKeyBinding {
+                apps: vec!["ghostty".into()],
+                launch: Some("ghostty".into()),
+                tags: vec!["dev-rust".into(), "ai-tools".into()],
+                launch_args: Vec::new(),
+            },
+        );
         let tags = tags_for_key('g', &bindings);
         assert_eq!(tags, vec!["dev-rust", "ai-tools"]);
     }
@@ -336,12 +347,15 @@ mod tests {
     #[test]
     fn tags_for_key_no_tags_on_binding() {
         let mut bindings = BTreeMap::new();
-        bindings.insert("f".to_string(), WmKeyBinding {
-            apps: vec!["firefox".into()],
-            launch: Some("firefox".into()),
-            tags: Vec::new(),
-            launch_args: Vec::new(),
-        });
+        bindings.insert(
+            "f".to_string(),
+            WmKeyBinding {
+                apps: vec!["firefox".into()],
+                launch: Some("firefox".into()),
+                tags: Vec::new(),
+                launch_args: Vec::new(),
+            },
+        );
         let tags = tags_for_key('f', &bindings);
         assert!(tags.is_empty());
     }

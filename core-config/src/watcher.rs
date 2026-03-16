@@ -60,62 +60,66 @@ impl ConfigWatcher {
             .filter_map(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
             .collect();
 
-        let watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            match res {
-                Ok(event) => {
-                    if event.kind.is_modify() || event.kind.is_create() {
-                        // Filter: only react to changes in actual config files.
-                        let is_config_file = event.paths.iter().any(|p| {
-                            // Exact match against known config paths.
-                            if let Ok(canon) = std::fs::canonicalize(p)
-                                && watched_files.contains(&canon) {
-                                return true;
+        let watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        if event.kind.is_modify() || event.kind.is_create() {
+                            // Filter: only react to changes in actual config files.
+                            let is_config_file = event.paths.iter().any(|p| {
+                                // Exact match against known config paths.
+                                if let Ok(canon) = std::fs::canonicalize(p)
+                                    && watched_files.contains(&canon)
+                                {
+                                    return true;
+                                }
+                                if watched_files.contains(p) {
+                                    return true;
+                                }
+                                // Extension match for drop-in fragments.
+                                if let Some(ext) = p.extension() {
+                                    let ext_str = ext.to_string_lossy();
+                                    return watched_extensions
+                                        .iter()
+                                        .any(|we| we == ext_str.as_ref());
+                                }
+                                false
+                            });
+                            if !is_config_file {
+                                return;
                             }
-                            if watched_files.contains(p) {
-                                return true;
-                            }
-                            // Extension match for drop-in fragments.
-                            if let Some(ext) = p.extension() {
-                                let ext_str = ext.to_string_lossy();
-                                return watched_extensions.iter().any(|we| we == ext_str.as_ref());
-                            }
-                            false
-                        });
-                        if !is_config_file {
-                            return;
-                        }
-                        info!(?event, "config file changed, reloading");
-                        match crate::loader::load_config(None) {
-                            Ok(new_config) => {
-                                let diags = crate::validation::validate(&new_config);
-                                let has_errors = diags
-                                    .iter()
-                                    .any(|d| d.severity == crate::validation::DiagnosticSeverity::Error);
-                                if has_errors {
-                                    warn!("config reload rejected: validation errors");
-                                    for d in &diags {
-                                        warn!(message = %d.message, "config diagnostic");
-                                    }
-                                } else if let Ok(mut guard) = current_clone.write() {
-                                    *guard = new_config;
-                                    info!("config reloaded successfully");
-                                    if let Some(ref cb) = on_reload {
-                                        cb();
+                            info!(?event, "config file changed, reloading");
+                            match crate::loader::load_config(None) {
+                                Ok(new_config) => {
+                                    let diags = crate::validation::validate(&new_config);
+                                    let has_errors = diags.iter().any(|d| {
+                                        d.severity == crate::validation::DiagnosticSeverity::Error
+                                    });
+                                    if has_errors {
+                                        warn!("config reload rejected: validation errors");
+                                        for d in &diags {
+                                            warn!(message = %d.message, "config diagnostic");
+                                        }
+                                    } else if let Ok(mut guard) = current_clone.write() {
+                                        *guard = new_config;
+                                        info!("config reloaded successfully");
+                                        if let Some(ref cb) = on_reload {
+                                            cb();
+                                        }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "config reload failed");
+                                Err(e) => {
+                                    warn!(error = %e, "config reload failed");
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        warn!(error = %e, "filesystem watcher error");
+                    }
                 }
-                Err(e) => {
-                    warn!(error = %e, "filesystem watcher error");
-                }
-            }
-        })
-        .map_err(|e| core_types::Error::Config(format!("failed to create watcher: {e}")))?;
+            })
+            .map_err(|e| core_types::Error::Config(format!("failed to create watcher: {e}")))?;
 
         let mut w = Self {
             watcher,

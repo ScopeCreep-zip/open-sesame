@@ -179,7 +179,11 @@ mod tests {
     fn snapshot_generations_captures_all_daemons() {
         let mut reg = ClearanceRegistry::new();
         reg.register([0xAA; 32], "daemon-wm".into(), SecurityLevel::Internal);
-        reg.register([0xBB; 32], "daemon-secrets".into(), SecurityLevel::SecretsOnly);
+        reg.register(
+            [0xBB; 32],
+            "daemon-secrets".into(),
+            SecurityLevel::SecretsOnly,
+        );
 
         // Rotate daemon-wm once.
         reg.rotate_key(&[0xAA; 32], [0xCC; 32]);
@@ -258,10 +262,16 @@ mod tests {
     fn unregistered_keys_always_return_none() {
         let mut reg = ClearanceRegistry::new();
         reg.register([0xAA; 32], "daemon-wm".into(), SecurityLevel::Internal);
-        reg.register([0xBB; 32], "daemon-secrets".into(), SecurityLevel::SecretsOnly);
+        reg.register(
+            [0xBB; 32],
+            "daemon-secrets".into(),
+            SecurityLevel::SecretsOnly,
+        );
 
         // Spot-check several unregistered keys.
-        for byte in [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xCC, 0xDD, 0xEE, 0xFF] {
+        for byte in [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xCC, 0xDD, 0xEE, 0xFF,
+        ] {
             assert!(
                 reg.lookup(&[byte; 32]).is_none(),
                 "key [{byte:#04X}; 32] should not be in registry"

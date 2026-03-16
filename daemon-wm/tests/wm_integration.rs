@@ -6,18 +6,26 @@
 
 use core_config::WmKeyBinding;
 use daemon_wm::controller::{Command, Event, OverlayController};
-use daemon_wm::hints::{assign_hints, assign_app_hints, match_input, MatchResult, auto_key_for_app, key_for_app};
+use daemon_wm::hints::{
+    MatchResult, assign_app_hints, assign_hints, auto_key_for_app, key_for_app, match_input,
+};
 use std::collections::BTreeMap;
 
 fn make_bindings(entries: &[(&str, &[&str])]) -> BTreeMap<String, WmKeyBinding> {
-    entries.iter().map(|(k, apps)| {
-        (k.to_string(), WmKeyBinding {
-            apps: apps.iter().map(|s| s.to_string()).collect(),
-            launch: None,
-            tags: Vec::new(),
-            launch_args: Vec::new(),
+    entries
+        .iter()
+        .map(|(k, apps)| {
+            (
+                k.to_string(),
+                WmKeyBinding {
+                    apps: apps.iter().map(|s| s.to_string()).collect(),
+                    launch: None,
+                    tags: Vec::new(),
+                    launch_args: Vec::new(),
+                },
+            )
         })
-    }).collect()
+        .collect()
 }
 
 fn test_config() -> core_config::WmConfig {
@@ -56,7 +64,12 @@ fn test_windows() -> Vec<core_types::Window> {
             title: "Terminal".into(),
             workspace_id: core_types::CompositorWorkspaceId::new(),
             monitor_id: core_types::MonitorId::new(),
-            geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+            geometry: core_types::Geometry {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
             is_focused: true,
             is_minimized: false,
             is_fullscreen: false,
@@ -68,7 +81,12 @@ fn test_windows() -> Vec<core_types::Window> {
             title: "Firefox".into(),
             workspace_id: core_types::CompositorWorkspaceId::new(),
             monitor_id: core_types::MonitorId::new(),
-            geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+            geometry: core_types::Geometry {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
             is_focused: false,
             is_minimized: false,
             is_fullscreen: false,
@@ -80,7 +98,12 @@ fn test_windows() -> Vec<core_types::Window> {
             title: "Edge".into(),
             workspace_id: core_types::CompositorWorkspaceId::new(),
             monitor_id: core_types::MonitorId::new(),
-            geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+            geometry: core_types::Geometry {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
             is_focused: false,
             is_minimized: false,
             is_fullscreen: false,
@@ -190,14 +213,16 @@ fn app_hints_groups_by_app() {
     let result = assign_app_hints(&apps, "fgcasdjkl", &empty);
     assert_eq!(result.len(), 4);
 
-    let ff_hints: Vec<&str> = result.iter()
+    let ff_hints: Vec<&str> = result
+        .iter()
         .filter(|(_, idx)| apps[*idx] == "firefox")
         .map(|(h, _)| h.as_str())
         .collect();
     assert!(ff_hints.contains(&"f"));
     assert!(ff_hints.contains(&"ff"));
 
-    let g_hints: Vec<&str> = result.iter()
+    let g_hints: Vec<&str> = result
+        .iter()
         .filter(|(_, idx)| apps[*idx] == "ghostty")
         .map(|(h, _)| h.as_str())
         .collect();
@@ -241,7 +266,10 @@ fn controller_fast_release_quick_switches() {
     ctrl.handle(Event::Activate, &windows, &test_config());
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
     assert!(cmds.iter().any(|c| matches!(c, Command::HideAndSync)));
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
     assert!(ctrl.is_idle());
 }
 
@@ -272,7 +300,10 @@ fn controller_backward_fast_release_activates() {
     ctrl.handle(Event::ActivateBackward, &windows, &test_config());
     // Selection != 0, so release always activates (no quick-switch).
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
     assert!(ctrl.is_idle());
 }
 
@@ -301,7 +332,10 @@ fn controller_launcher_modifier_release_commits() {
     ctrl.handle(Event::SelectionDown, &windows, &test_config());
     // Releasing Alt commits the selection, same as Alt+Tab mode.
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
     assert!(ctrl.is_idle());
 }
 
@@ -312,7 +346,10 @@ fn controller_launcher_confirm_activates() {
     ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
     ctrl.handle(Event::SelectionDown, &windows, &test_config());
     let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
     assert!(ctrl.is_idle());
 }
 
@@ -341,12 +378,19 @@ fn controller_char_stages_launch_when_no_window() {
     ctrl.handle(Event::Activate, &windows, &test_config());
     // 'e' has no window → stages launch, does NOT execute on keypress.
     let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
-        "must stage launch, got: {cmds:?}");
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
+        "must stage launch, got: {cmds:?}"
+    );
     assert!(!ctrl.is_idle());
     // Alt release executes the staged launch.
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")));
+    assert!(
+        cmds.iter().any(
+            |c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")
+        )
+    );
 }
 
 #[test]
@@ -356,12 +400,19 @@ fn controller_char_selects_on_exact_hint() {
     ctrl.handle(Event::Activate, &windows, &test_config());
     // 'e' matches edge hint → selects, does NOT commit on keypress.
     let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
-    assert!(!cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
-        "must NOT activate on keypress");
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. })),
+        "must NOT activate on keypress"
+    );
     assert!(!ctrl.is_idle());
     // Alt release commits.
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
     assert!(ctrl.is_idle());
 }
 
@@ -385,7 +436,10 @@ fn controller_selection_cycles_in_picking() {
     ctrl.handle(Event::Activate, &windows, &test_config());
     ctrl.handle(Event::DwellTimeout, &windows, &test_config());
     let cmds = ctrl.handle(Event::SelectionDown, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. }))
+    );
 }
 
 // ============================================================================
@@ -419,7 +473,10 @@ fn controller_confirm_in_picking_activates() {
     ctrl.handle(Event::Activate, &windows, &test_config());
     ctrl.handle(Event::DwellTimeout, &windows, &test_config());
     let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
     assert!(ctrl.is_idle());
 }
 
@@ -434,7 +491,10 @@ fn controller_reactivate_in_picking_cycles_and_updates() {
     ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
     ctrl.handle(Event::DwellTimeout, &windows, &test_config());
     let cmds = ctrl.handle(Event::Activate, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::UpdatePicker { selection: 1, .. }))
+    );
 }
 
 // ============================================================================
@@ -450,7 +510,10 @@ fn controller_release_after_tab_activates_selection() {
     ctrl.handle(Event::SelectionDown, &windows, &test_config());
     ctrl.handle(Event::SelectionDown, &windows, &test_config());
     let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ActivateWindow { .. }))
+    );
 }
 
 // ============================================================================
@@ -501,12 +564,15 @@ fn assign_app_hints_with_config_overrides() {
 fn launch_for_key_returns_command() {
     use daemon_wm::hints::launch_for_key;
     let mut bindings = BTreeMap::new();
-    bindings.insert("g".to_string(), WmKeyBinding {
-        apps: vec!["ghostty".to_string()],
-        launch: Some("ghostty".to_string()),
-        tags: Vec::new(),
-        launch_args: Vec::new(),
-    });
+    bindings.insert(
+        "g".to_string(),
+        WmKeyBinding {
+            apps: vec!["ghostty".to_string()],
+            launch: Some("ghostty".to_string()),
+            tags: Vec::new(),
+            launch_args: Vec::new(),
+        },
+    );
     assert_eq!(launch_for_key('g', &bindings), Some("ghostty"));
     assert_eq!(launch_for_key('z', &bindings), None);
 }
@@ -530,7 +596,10 @@ fn wm_config_defaults_are_valid() {
         .iter()
         .filter(|d| d.severity == core_config::DiagnosticSeverity::Error)
         .collect();
-    assert!(errors.is_empty(), "default config should have no errors: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "default config should have no errors: {errors:?}"
+    );
 }
 
 #[test]
@@ -543,8 +612,7 @@ fn wm_config_rejects_empty_hint_keys() {
     let diagnostics = core_config::validate(&config);
     assert!(
         diagnostics.iter().any(|d| {
-            d.severity == core_config::DiagnosticSeverity::Error
-                && d.message.contains("hint_keys")
+            d.severity == core_config::DiagnosticSeverity::Error && d.message.contains("hint_keys")
         }),
         "expected error for empty hint_keys: {diagnostics:?}"
     );
@@ -560,8 +628,7 @@ fn wm_config_rejects_duplicate_hint_keys() {
     let diagnostics = core_config::validate(&config);
     assert!(
         diagnostics.iter().any(|d| {
-            d.severity == core_config::DiagnosticSeverity::Error
-                && d.message.contains("duplicate")
+            d.severity == core_config::DiagnosticSeverity::Error && d.message.contains("duplicate")
         }),
         "expected error for duplicate hint_keys: {diagnostics:?}"
     );

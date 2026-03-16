@@ -103,8 +103,7 @@ impl ContextEngine {
         }
 
         let target = winner.profile_id;
-        self.last_switch
-            .insert(target, tokio::time::Instant::now());
+        self.last_switch.insert(target, tokio::time::Instant::now());
         self.default_profile = target;
         Some(target)
     }
@@ -134,9 +133,7 @@ impl ContextEngine {
             (RuleTrigger::AppFocus, ContextSignal::AppFocused(app)) => {
                 rule.value == app.to_string()
             }
-            (RuleTrigger::UsbDevice, ContextSignal::UsbDeviceAttached(dev)) => {
-                rule.value == *dev
-            }
+            (RuleTrigger::UsbDevice, ContextSignal::UsbDeviceAttached(dev)) => rule.value == *dev,
             (RuleTrigger::HardwareKey, ContextSignal::HardwareKeyPresent(key)) => {
                 rule.value == *key
             }

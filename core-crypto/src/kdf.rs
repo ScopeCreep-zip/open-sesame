@@ -63,7 +63,11 @@ pub fn derive_key_pbkdf2(password: &[u8], salt: &[u8; 16]) -> core_types::Result
 /// Dispatch key derivation based on the configured KDF algorithm.
 ///
 /// Routes to either Argon2id or PBKDF2-SHA256 depending on the algorithm.
-pub fn derive_key_kdf(algorithm: &KdfAlgorithm, password: &[u8], salt: &[u8; 16]) -> core_types::Result<SecureBytes> {
+pub fn derive_key_kdf(
+    algorithm: &KdfAlgorithm,
+    password: &[u8],
+    salt: &[u8; 16],
+) -> core_types::Result<SecureBytes> {
     match algorithm {
         KdfAlgorithm::Argon2id => derive_key_argon2(password, salt),
         KdfAlgorithm::Pbkdf2Sha256 => derive_key_pbkdf2(password, salt),

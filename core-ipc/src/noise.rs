@@ -15,7 +15,7 @@
 //! Noise transport messages are limited to 65535 bytes. Application frames up to
 //! 16 MiB are chunked into multiple Noise messages with a chunk-count header.
 
-use crate::framing::{read_frame, write_frame, MAX_FRAME_SIZE};
+use crate::framing::{MAX_FRAME_SIZE, read_frame, write_frame};
 use crate::transport::PeerCredentials;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -50,12 +50,14 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 ///
 /// Returns an error if the crypto resolver fails.
 pub fn generate_keypair() -> core_types::Result<ZeroizingKeypair> {
-    let builder = snow::Builder::new(NOISE_PARAMS.parse().map_err(|e| {
-        core_types::Error::Platform(format!("invalid Noise params: {e}"))
-    })?);
-    let keypair = builder.generate_keypair().map_err(|e| {
-        core_types::Error::Platform(format!("keypair generation failed: {e}"))
-    })?;
+    let builder = snow::Builder::new(
+        NOISE_PARAMS
+            .parse()
+            .map_err(|e| core_types::Error::Platform(format!("invalid Noise params: {e}")))?,
+    );
+    let keypair = builder
+        .generate_keypair()
+        .map_err(|e| core_types::Error::Platform(format!("keypair generation failed: {e}")))?;
     Ok(ZeroizingKeypair::new(keypair))
 }
 
@@ -138,9 +140,8 @@ fn runtime_dir() -> core_types::Result<PathBuf> {
     if let Some(ref override_dir) = *RUNTIME_DIR_OVERRIDE.lock().unwrap() {
         return Ok(override_dir.clone());
     }
-    let runtime = std::env::var("XDG_RUNTIME_DIR").map_err(|_| {
-        core_types::Error::Platform("XDG_RUNTIME_DIR is not set".into())
-    })?;
+    let runtime = std::env::var("XDG_RUNTIME_DIR")
+        .map_err(|_| core_types::Error::Platform("XDG_RUNTIME_DIR is not set".into()))?;
     Ok(PathBuf::from(runtime).join("pds"))
 }
 
@@ -164,9 +165,9 @@ pub async fn write_bus_keypair(keypair: &snow::Keypair) -> core_types::Result<()
     let pub_path = dir.join("bus.pub");
     let key_path = dir.join("bus.key");
 
-    tokio::fs::write(&pub_path, &keypair.public).await.map_err(|e| {
-        core_types::Error::Platform(format!("failed to write bus.pub: {e}"))
-    })?;
+    tokio::fs::write(&pub_path, &keypair.public)
+        .await
+        .map_err(|e| core_types::Error::Platform(format!("failed to write bus.pub: {e}")))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -209,19 +210,24 @@ pub async fn write_bus_keypair(keypair: &snow::Keypair) -> core_types::Result<()
 
     #[cfg(not(unix))]
     {
-        compile_error!("bus.key writing requires Unix file permissions (mode 0600). Non-Unix platforms are not supported in MVP.");
+        compile_error!(
+            "bus.key writing requires Unix file permissions (mode 0600). Non-Unix platforms are not supported in MVP."
+        );
     }
 
     // Write tamper-detection checksum.
     {
-        let pub_array: [u8; 32] = keypair.public.clone().try_into().map_err(|_| {
-            core_types::Error::Platform("bus public key is not 32 bytes".into())
-        })?;
+        let pub_array: [u8; 32] =
+            keypair.public.clone().try_into().map_err(|_| {
+                core_types::Error::Platform("bus public key is not 32 bytes".into())
+            })?;
         let checksum = keypair_checksum(&pub_array, &keypair.private);
         let checksum_path = dir.join("bus.checksum");
-        tokio::fs::write(&checksum_path, checksum).await.map_err(|e| {
-            core_types::Error::Platform(format!("failed to write bus.checksum: {e}"))
-        })?;
+        tokio::fs::write(&checksum_path, checksum)
+            .await
+            .map_err(|e| {
+                core_types::Error::Platform(format!("failed to write bus.checksum: {e}"))
+            })?;
     }
 
     tracing::info!(
@@ -245,10 +251,7 @@ fn keys_dir() -> core_types::Result<PathBuf> {
 pub async fn create_keys_dir() -> core_types::Result<()> {
     let dir = keys_dir()?;
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
-        core_types::Error::Platform(format!(
-            "failed to create keys dir {}: {e}",
-            dir.display()
-        ))
+        core_types::Error::Platform(format!("failed to create keys dir {}: {e}", dir.display()))
     })?;
     // Restrict to owner-only (0700) — create_dir_all inherits umask
     // (typically 0022 → 0755), which would let any local user enumerate daemons.
@@ -284,16 +287,20 @@ pub async fn write_daemon_keypair(
     let key_path = dir.join(format!("{daemon_name}.key"));
 
     // Public key: world-readable (explicit 0644).
-    tokio::fs::write(&pub_path, &keypair.public).await.map_err(|e| {
-        core_types::Error::Platform(format!("failed to write {daemon_name}.pub: {e}"))
-    })?;
+    tokio::fs::write(&pub_path, &keypair.public)
+        .await
+        .map_err(|e| {
+            core_types::Error::Platform(format!("failed to write {daemon_name}.pub: {e}"))
+        })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644))
             .await
             .map_err(|e| {
-                core_types::Error::Platform(format!("failed to set {daemon_name}.pub permissions: {e}"))
+                core_types::Error::Platform(format!(
+                    "failed to set {daemon_name}.pub permissions: {e}"
+                ))
             })?;
     }
 
@@ -340,9 +347,11 @@ pub async fn write_daemon_keypair(
         })?;
         let checksum = keypair_checksum(&pub_array, &keypair.private);
         let checksum_path = dir.join(format!("{daemon_name}.checksum"));
-        tokio::fs::write(&checksum_path, checksum).await.map_err(|e| {
-            core_types::Error::Platform(format!("failed to write {daemon_name}.checksum: {e}"))
-        })?;
+        tokio::fs::write(&checksum_path, checksum)
+            .await
+            .map_err(|e| {
+                core_types::Error::Platform(format!("failed to write {daemon_name}.checksum: {e}"))
+            })?;
     }
 
     tracing::debug!(
@@ -552,9 +561,8 @@ impl NoiseTransport {
 
         // Write chunk count as a 4-byte BE header (plaintext — the count itself
         // is not sensitive and is needed to know how many chunks to read).
-        let count_bytes = u32::try_from(chunk_count).map_err(|_| {
-            core_types::Error::Ipc("too many chunks".into())
-        })?;
+        let count_bytes = u32::try_from(chunk_count)
+            .map_err(|_| core_types::Error::Ipc("too many chunks".into()))?;
         write_frame(writer, &count_bytes.to_be_bytes()).await?;
 
         // Write each chunk as an encrypted Noise message.
@@ -566,9 +574,10 @@ impl NoiseTransport {
             let end = (start + MAX_NOISE_PLAINTEXT).min(payload.len());
             let chunk = &payload[start..end];
 
-            let len = self.state.write_message(chunk, &mut enc_buf).map_err(|e| {
-                core_types::Error::Ipc(format!("Noise encrypt failed: {e}"))
-            })?;
+            let len = self
+                .state
+                .write_message(chunk, &mut enc_buf)
+                .map_err(|e| core_types::Error::Ipc(format!("Noise encrypt failed: {e}")))?;
 
             write_frame(writer, &enc_buf[..len]).await?;
         }
@@ -617,9 +626,10 @@ impl NoiseTransport {
 
         for _ in 0..chunk_count {
             let ciphertext = read_frame(reader).await?;
-            let len = self.state.read_message(&ciphertext, &mut dec_buf).map_err(|e| {
-                core_types::Error::Ipc(format!("Noise decrypt failed: {e}"))
-            })?;
+            let len = self
+                .state
+                .read_message(&ciphertext, &mut dec_buf)
+                .map_err(|e| core_types::Error::Ipc(format!("Noise decrypt failed: {e}")))?;
             payload.extend_from_slice(&dec_buf[..len]);
         }
 
@@ -696,9 +706,11 @@ where
         // Read message 1 from initiator.
         let msg1 = read_frame(reader).await?;
         let mut payload_buf = vec![0u8; 65535];
-        handshake.read_message(&msg1, &mut payload_buf).map_err(|e| {
-            core_types::Error::Ipc(format!("Noise handshake msg1 read failed: {e}"))
-        })?;
+        handshake
+            .read_message(&msg1, &mut payload_buf)
+            .map_err(|e| {
+                core_types::Error::Ipc(format!("Noise handshake msg1 read failed: {e}"))
+            })?;
 
         // Write message 2 to initiator.
         let mut msg2_buf = vec![0u8; 65535];
@@ -708,9 +720,9 @@ where
         write_frame(writer, &msg2_buf[..msg2_len]).await?;
 
         // Handshake complete — transition to transport mode.
-        let transport = handshake.into_transport_mode().map_err(|e| {
-            core_types::Error::Ipc(format!("Noise transport mode failed: {e}"))
-        })?;
+        let transport = handshake
+            .into_transport_mode()
+            .map_err(|e| core_types::Error::Ipc(format!("Noise transport mode failed: {e}")))?;
 
         tracing::info!("Noise IK handshake completed (server)");
         Ok(NoiseTransport { state: transport })
@@ -774,14 +786,16 @@ where
         // Read message 2 from responder.
         let msg2 = read_frame(reader).await?;
         let mut payload_buf = vec![0u8; 65535];
-        handshake.read_message(&msg2, &mut payload_buf).map_err(|e| {
-            core_types::Error::Ipc(format!("Noise handshake msg2 read failed: {e}"))
-        })?;
+        handshake
+            .read_message(&msg2, &mut payload_buf)
+            .map_err(|e| {
+                core_types::Error::Ipc(format!("Noise handshake msg2 read failed: {e}"))
+            })?;
 
         // Handshake complete — transition to transport mode.
-        let transport = handshake.into_transport_mode().map_err(|e| {
-            core_types::Error::Ipc(format!("Noise transport mode failed: {e}"))
-        })?;
+        let transport = handshake
+            .into_transport_mode()
+            .map_err(|e| core_types::Error::Ipc(format!("Noise transport mode failed: {e}")))?;
 
         tracing::info!("Noise IK handshake completed (client)");
         Ok(NoiseTransport { state: transport })
@@ -796,8 +810,14 @@ mod tests {
 
     #[test]
     fn prologue_canonical_ordering() {
-        let a = PeerCredentials { pid: 100, uid: 1000 };
-        let b = PeerCredentials { pid: 200, uid: 1000 };
+        let a = PeerCredentials {
+            pid: 100,
+            uid: 1000,
+        };
+        let b = PeerCredentials {
+            pid: 200,
+            uid: 1000,
+        };
 
         // Both orderings produce the same prologue.
         assert_eq!(build_prologue(&a, &b), build_prologue(&b, &a));
@@ -900,21 +920,36 @@ mod tests {
 
         let (mut ct, mut st) = tokio::join!(
             async {
-                client_handshake(&mut cr, &mut cw, &server_pub, client_kp.as_inner(), &client_creds, &server_creds)
-                    .await
-                    .unwrap()
+                client_handshake(
+                    &mut cr,
+                    &mut cw,
+                    &server_pub,
+                    client_kp.as_inner(),
+                    &client_creds,
+                    &server_creds,
+                )
+                .await
+                .unwrap()
             },
             async {
-                server_handshake(&mut sr, &mut sw, server_kp.as_inner(), &server_creds, &client_creds)
-                    .await
-                    .unwrap()
+                server_handshake(
+                    &mut sr,
+                    &mut sw,
+                    server_kp.as_inner(),
+                    &server_creds,
+                    &client_creds,
+                )
+                .await
+                .unwrap()
             },
         );
 
         // 200 KiB payload — requires multiple chunks (200*1024 / 65519 = ~4 chunks).
         let large_payload = vec![0xABu8; 200 * 1024];
 
-        ct.write_encrypted_frame(&mut cw, &large_payload).await.unwrap();
+        ct.write_encrypted_frame(&mut cw, &large_payload)
+            .await
+            .unwrap();
         let decrypted = st.read_encrypted_frame(&mut sr).await.unwrap();
         assert_eq!(decrypted, large_payload);
     }
@@ -990,7 +1025,10 @@ mod tests {
     fn zeroizing_keypair_into_inner_zeroes_source() {
         let kp = generate_keypair().unwrap();
         let private_copy = kp.private().to_vec();
-        assert!(!private_copy.iter().all(|&b| b == 0), "generated key must be non-zero");
+        assert!(
+            !private_copy.iter().all(|&b| b == 0),
+            "generated key must be non-zero"
+        );
 
         let extracted = kp.into_inner();
         // The extracted keypair should have the original private key.
@@ -1021,9 +1059,16 @@ mod tests {
 
         let (mut ct, mut st) = tokio::join!(
             async {
-                client_handshake(&mut cr, &mut cw, &server_pub, client_kp.as_inner(), &cc, &sc)
-                    .await
-                    .unwrap()
+                client_handshake(
+                    &mut cr,
+                    &mut cw,
+                    &server_pub,
+                    client_kp.as_inner(),
+                    &cc,
+                    &sc,
+                )
+                .await
+                .unwrap()
             },
             async {
                 server_handshake(&mut sr, &mut sw, server_kp.as_inner(), &sc, &cc)

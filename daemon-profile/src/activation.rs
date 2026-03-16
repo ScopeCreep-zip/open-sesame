@@ -74,23 +74,51 @@ pub async fn activate<W: std::io::Write>(
         target,
     };
     match confirmed_rpc(bus, daemon_id, activate_event, confirm_tx, confirm_rx).await {
-        Ok(response) => {
-            match response.payload {
-                EventKind::ProfileActivateResponse { success: true } => {
-                    completed.push(CompletedStep::SecretsVaultOpened);
-                }
-                EventKind::ProfileActivateResponse { success: false } => {
-                    rollback(&completed, target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await;
-                    return Err("daemon-secrets rejected ProfileActivate".into());
-                }
-                other => {
-                    rollback(&completed, target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await;
-                    return Err(format!("unexpected response to ProfileActivate: {other:?}"));
-                }
+        Ok(response) => match response.payload {
+            EventKind::ProfileActivateResponse { success: true } => {
+                completed.push(CompletedStep::SecretsVaultOpened);
             }
-        }
+            EventKind::ProfileActivateResponse { success: false } => {
+                rollback(
+                    &completed,
+                    target,
+                    profile_name,
+                    bus,
+                    audit,
+                    daemon_id,
+                    confirm_tx,
+                    confirm_rx,
+                )
+                .await;
+                return Err("daemon-secrets rejected ProfileActivate".into());
+            }
+            other => {
+                rollback(
+                    &completed,
+                    target,
+                    profile_name,
+                    bus,
+                    audit,
+                    daemon_id,
+                    confirm_tx,
+                    confirm_rx,
+                )
+                .await;
+                return Err(format!("unexpected response to ProfileActivate: {other:?}"));
+            }
+        },
         Err(e) => {
-            rollback(&completed, target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await;
+            rollback(
+                &completed,
+                target,
+                profile_name,
+                bus,
+                audit,
+                daemon_id,
+                confirm_tx,
+                confirm_rx,
+            )
+            .await;
             return Err(format!("confirmed RPC failed for ProfileActivate: {e}"));
         }
     }
@@ -149,22 +177,42 @@ pub async fn deactivate<W: std::io::Write>(
         target,
     };
     match confirmed_rpc(bus, daemon_id, deactivate_event, confirm_tx, confirm_rx).await {
-        Ok(response) => {
-            match response.payload {
-                EventKind::ProfileDeactivateResponse { success: true } => {
-                    completed.push(CompletedStep::SecretsJitFlushed);
-                    completed.push(CompletedStep::SecretsVaultClosed);
-                }
-                EventKind::ProfileDeactivateResponse { success: false } => {
-                    rollback(&completed, target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await;
-                    return Err("daemon-secrets rejected ProfileDeactivate".into());
-                }
-                other => {
-                    rollback(&completed, target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await;
-                    return Err(format!("unexpected response to ProfileDeactivate: {other:?}"));
-                }
+        Ok(response) => match response.payload {
+            EventKind::ProfileDeactivateResponse { success: true } => {
+                completed.push(CompletedStep::SecretsJitFlushed);
+                completed.push(CompletedStep::SecretsVaultClosed);
             }
-        }
+            EventKind::ProfileDeactivateResponse { success: false } => {
+                rollback(
+                    &completed,
+                    target,
+                    profile_name,
+                    bus,
+                    audit,
+                    daemon_id,
+                    confirm_tx,
+                    confirm_rx,
+                )
+                .await;
+                return Err("daemon-secrets rejected ProfileDeactivate".into());
+            }
+            other => {
+                rollback(
+                    &completed,
+                    target,
+                    profile_name,
+                    bus,
+                    audit,
+                    daemon_id,
+                    confirm_tx,
+                    confirm_rx,
+                )
+                .await;
+                return Err(format!(
+                    "unexpected response to ProfileDeactivate: {other:?}"
+                ));
+            }
+        },
         Err(e) => {
             // Deactivation timeout: log error, trigger reconciliation at caller level.
             tracing::error!(
@@ -237,7 +285,10 @@ pub(crate) async fn confirmed_rpc(
         let mut sent = false;
         for attempt in 1..=max_attempts {
             match bus.send_to_named("daemon-secrets", &frame).await {
-                Ok(()) => { sent = true; break; }
+                Ok(()) => {
+                    sent = true;
+                    break;
+                }
                 Err(e) => {
                     last_err = e;
                     if attempt < max_attempts {
@@ -284,11 +335,7 @@ pub(crate) async fn confirmed_rpc(
 }
 
 /// Serialize and publish an event on the bus (fire-and-forget, informational).
-async fn broadcast(
-    bus: &BusServer,
-    daemon_id: DaemonId,
-    event: EventKind,
-) -> Result<(), String> {
+async fn broadcast(bus: &BusServer, daemon_id: DaemonId, event: EventKind) -> Result<(), String> {
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
     let msg = Message::new(&msg_ctx, event, SecurityLevel::Internal, bus.epoch());
     let payload = core_ipc::encode_frame(&msg).map_err(|e| e.to_string())?;
@@ -329,7 +376,9 @@ async fn rollback<W: std::io::Write>(
                 };
                 match confirmed_rpc(bus, daemon_id, event, confirm_tx, confirm_rx).await {
                     Ok(_) => tracing::info!("rollback: secrets vault deactivated"),
-                    Err(e) => tracing::error!(error = %e, "rollback: failed to deactivate secrets vault (confirmed RPC)"),
+                    Err(e) => {
+                        tracing::error!(error = %e, "rollback: failed to deactivate secrets vault (confirmed RPC)")
+                    }
                 }
             }
             CompletedStep::SecretsJitFlushed | CompletedStep::SecretsVaultClosed => {
@@ -340,11 +389,12 @@ async fn rollback<W: std::io::Write>(
                 };
                 match confirmed_rpc(bus, daemon_id, event, confirm_tx, confirm_rx).await {
                     Ok(_) => tracing::info!("rollback: secrets vault re-activated"),
-                    Err(e) => tracing::error!(error = %e, "rollback: failed to re-activate secrets vault (confirmed RPC)"),
+                    Err(e) => {
+                        tracing::error!(error = %e, "rollback: failed to re-activate secrets vault (confirmed RPC)")
+                    }
                 }
             }
-            CompletedStep::ActivationBegunEmitted
-            | CompletedStep::ActivationCompletedEmitted => {}
+            CompletedStep::ActivationBegunEmitted | CompletedStep::ActivationCompletedEmitted => {}
         }
     }
 

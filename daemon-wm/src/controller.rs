@@ -43,10 +43,7 @@ pub enum Command {
         hints: Vec<String>,
     },
     /// Send OverlayCmd::UpdateInput.
-    UpdatePicker {
-        input: String,
-        selection: usize,
-    },
+    UpdatePicker { input: String, selection: usize },
     /// Send OverlayCmd::HideAndSync, wait for SurfaceUnmapped ack.
     HideAndSync,
     /// Send OverlayCmd::Hide (no sync needed).
@@ -218,10 +215,13 @@ impl Snapshot {
         let app_hints = hints::assign_app_hints(&app_ids, &config.hint_keys, &config.key_bindings);
         let hint_strings: Vec<String> = app_hints.iter().map(|(h, _)| h.clone()).collect();
 
-        let overlay_windows: Vec<WindowInfo> = win_list.iter().map(|w| WindowInfo {
-            app_id: w.app_id.to_string(),
-            title: w.title.clone(),
-        }).collect();
+        let overlay_windows: Vec<WindowInfo> = win_list
+            .iter()
+            .map(|w| WindowInfo {
+                app_id: w.app_id.to_string(),
+                title: w.title.clone(),
+            })
+            .collect();
 
         tracing::info!(
             window_count = win_list.len(),
@@ -276,10 +276,13 @@ impl Snapshot {
         let app_ids: Vec<&str> = windows.iter().map(|w| w.app_id.as_str()).collect();
         let app_hints = hints::assign_app_hints(&app_ids, &config.hint_keys, &config.key_bindings);
         let hint_strings: Vec<String> = app_hints.iter().map(|(h, _)| h.clone()).collect();
-        let overlay_windows: Vec<WindowInfo> = windows.iter().map(|w| WindowInfo {
-            app_id: w.app_id.to_string(),
-            title: w.title.clone(),
-        }).collect();
+        let overlay_windows: Vec<WindowInfo> = windows
+            .iter()
+            .map(|w| WindowInfo {
+                app_id: w.app_id.to_string(),
+                title: w.title.clone(),
+            })
+            .collect();
         let mru_origin = origin_index.map(|i| windows[i].id.to_string());
 
         Self {
@@ -383,9 +386,11 @@ impl OverlayController {
     /// Returns the next deadline the main loop should wake for, if any.
     pub fn next_deadline(&self) -> Option<Instant> {
         match &self.phase {
-            Phase::Armed { entered_at, dwell_ms, .. } => {
-                Some(*entered_at + std::time::Duration::from_millis(*dwell_ms as u64))
-            }
+            Phase::Armed {
+                entered_at,
+                dwell_ms,
+                ..
+            } => Some(*entered_at + std::time::Duration::from_millis(*dwell_ms as u64)),
             _ => None,
         }
     }
@@ -397,7 +402,12 @@ impl OverlayController {
 
     /// Return the profile currently being unlocked, if in the unlocking phase.
     pub fn current_unlock_profile(&self) -> Option<&TrustProfileName> {
-        if let Phase::Unlocking { profiles_to_unlock, current_index, .. } = &self.phase {
+        if let Phase::Unlocking {
+            profiles_to_unlock,
+            current_index,
+            ..
+        } = &self.phase
+        {
             profiles_to_unlock.get(*current_index)
         } else {
             None
@@ -431,12 +441,7 @@ impl OverlayController {
     }
 
     /// Handle an event, returning commands to execute.
-    pub fn handle(
-        &mut self,
-        event: Event,
-        windows: &[Window],
-        config: &WmConfig,
-    ) -> Vec<Command> {
+    pub fn handle(&mut self, event: Event, windows: &[Window], config: &WmConfig) -> Vec<Command> {
         match event {
             Event::Activate => self.on_activate(windows, config, ActivationMode::Forward),
             Event::ActivateBackward => self.on_activate(windows, config, ActivationMode::Backward),
@@ -449,18 +454,28 @@ impl OverlayController {
             Event::Confirm => self.on_confirm(),
             Event::Escape | Event::Dismiss => self.on_escape(),
             Event::DwellTimeout => self.on_dwell_timeout(),
-            Event::LaunchResult { success, error, denial, original_command, original_tags, original_launch_args } => {
-                self.on_launch_result(success, error, denial, original_command, original_tags, original_launch_args)
-            }
-            Event::AutoUnlockResult { success, profile, needs_touch } => {
-                self.on_auto_unlock_result(success, profile, needs_touch)
-            }
-            Event::TouchResult { success, profile } => {
-                self.on_touch_result(success, profile)
-            }
-            Event::UnlockResult { success, profile } => {
-                self.on_unlock_result(success, profile)
-            }
+            Event::LaunchResult {
+                success,
+                error,
+                denial,
+                original_command,
+                original_tags,
+                original_launch_args,
+            } => self.on_launch_result(
+                success,
+                error,
+                denial,
+                original_command,
+                original_tags,
+                original_launch_args,
+            ),
+            Event::AutoUnlockResult {
+                success,
+                profile,
+                needs_touch,
+            } => self.on_auto_unlock_result(success, profile, needs_touch),
+            Event::TouchResult { success, profile } => self.on_touch_result(success, profile),
+            Event::UnlockResult { success, profile } => self.on_unlock_result(success, profile),
         }
     }
 
@@ -540,7 +555,13 @@ impl OverlayController {
                     }
                 }
             }
-            Phase::Armed { snap, mut selection, input, pending_launch, .. } => {
+            Phase::Armed {
+                snap,
+                mut selection,
+                input,
+                pending_launch,
+                ..
+            } => {
                 // Re-activation via IPC (e.g. repeated Alt+Space intercepted
                 // by compositor). Cycle selection, show the picker so the user
                 // sees feedback, and reset the modifier-poll grace timer to
@@ -563,10 +584,20 @@ impl OverlayController {
                     },
                     Command::ResetGrace,
                 ];
-                self.phase = Phase::Picking { snap, selection, input, pending_launch };
+                self.phase = Phase::Picking {
+                    snap,
+                    selection,
+                    input,
+                    pending_launch,
+                };
                 cmds
             }
-            Phase::Picking { snap, mut selection, input, pending_launch } => {
+            Phase::Picking {
+                snap,
+                mut selection,
+                input,
+                pending_launch,
+            } => {
                 // Re-activation while picker is visible. Cycle and reset grace.
                 if !snap.windows.is_empty() {
                     let len = snap.windows.len();
@@ -582,7 +613,12 @@ impl OverlayController {
                     },
                     Command::ResetGrace,
                 ];
-                self.phase = Phase::Picking { snap, selection, input, pending_launch };
+                self.phase = Phase::Picking {
+                    snap,
+                    selection,
+                    input,
+                    pending_launch,
+                };
                 cmds
             }
             other @ (Phase::Launching | Phase::LaunchError | Phase::Unlocking { .. }) => {
@@ -629,7 +665,12 @@ impl OverlayController {
                     self.activate_index(selection, &snap)
                 }
             }
-            Phase::Picking { selection, snap, pending_launch, .. } => {
+            Phase::Picking {
+                selection,
+                snap,
+                pending_launch,
+                ..
+            } => {
                 // Pending launch takes priority over window activation.
                 if let Some(launch) = pending_launch {
                     self.phase = Phase::Launching;
@@ -644,7 +685,10 @@ impl OverlayController {
                 }
                 self.activate_index(selection, &snap)
             }
-            other @ (Phase::Idle | Phase::Launching | Phase::LaunchError | Phase::Unlocking { .. }) => {
+            other @ (Phase::Idle
+            | Phase::Launching
+            | Phase::LaunchError
+            | Phase::Unlocking { .. }) => {
                 self.phase = other;
                 Vec::new()
             }
@@ -684,12 +728,23 @@ impl OverlayController {
 
     fn on_dwell_timeout(&mut self) -> Vec<Command> {
         match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Armed { snap, selection, input, pending_launch, .. } => {
+            Phase::Armed {
+                snap,
+                selection,
+                input,
+                pending_launch,
+                ..
+            } => {
                 let cmds = vec![Command::ShowPicker {
                     windows: snap.overlay_windows.clone(),
                     hints: snap.hints.clone(),
                 }];
-                self.phase = Phase::Picking { snap, selection, input, pending_launch };
+                self.phase = Phase::Picking {
+                    snap,
+                    selection,
+                    input,
+                    pending_launch,
+                };
                 cmds
             }
             other => {
@@ -719,7 +774,11 @@ impl OverlayController {
                 input.push(ch);
                 self.check_hint_or_launch()
             }
-            Phase::Unlocking { unlock_mode: UnlockMode::Password, password_len, .. } => {
+            Phase::Unlocking {
+                unlock_mode: UnlockMode::Password,
+                password_len,
+                ..
+            } => {
                 *password_len += 1;
                 vec![Command::PasswordChar(ch)]
             }
@@ -784,7 +843,11 @@ impl OverlayController {
                         let command = cmd.to_string();
                         let tags = hints::tags_for_key(key, key_bindings);
                         let launch_args = hints::launch_args_for_key(key, key_bindings);
-                        self.set_pending_launch(PendingLaunch { command: command.clone(), tags, launch_args });
+                        self.set_pending_launch(PendingLaunch {
+                            command: command.clone(),
+                            tags,
+                            launch_args,
+                        });
                         let mut cmds = if is_armed {
                             self.transition_armed_to_picking()
                         } else {
@@ -825,7 +888,13 @@ impl OverlayController {
 
     fn transition_armed_to_picking(&mut self) -> Vec<Command> {
         match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Armed { snap, selection, input, pending_launch, .. } => {
+            Phase::Armed {
+                snap,
+                selection,
+                input,
+                pending_launch,
+                ..
+            } => {
                 let cmds = vec![
                     Command::ShowPicker {
                         windows: snap.overlay_windows.clone(),
@@ -836,7 +905,12 @@ impl OverlayController {
                         selection,
                     },
                 ];
-                self.phase = Phase::Picking { snap, selection, input, pending_launch };
+                self.phase = Phase::Picking {
+                    snap,
+                    selection,
+                    input,
+                    pending_launch,
+                };
                 cmds
             }
             other => {
@@ -852,13 +926,20 @@ impl OverlayController {
 
     fn on_selection_down(&mut self) -> Vec<Command> {
         match &mut self.phase {
-            Phase::Armed { selection, snap, .. } => {
+            Phase::Armed {
+                selection, snap, ..
+            } => {
                 if !snap.windows.is_empty() {
                     *selection = (*selection + 1) % snap.windows.len();
                 }
                 self.transition_armed_to_picking()
             }
-            Phase::Picking { selection, snap, input, .. } => {
+            Phase::Picking {
+                selection,
+                snap,
+                input,
+                ..
+            } => {
                 if !snap.windows.is_empty() {
                     *selection = (*selection + 1) % snap.windows.len();
                 }
@@ -873,15 +954,30 @@ impl OverlayController {
 
     fn on_selection_up(&mut self) -> Vec<Command> {
         match &mut self.phase {
-            Phase::Armed { selection, snap, .. } => {
+            Phase::Armed {
+                selection, snap, ..
+            } => {
                 if !snap.windows.is_empty() {
-                    *selection = if *selection == 0 { snap.windows.len() - 1 } else { *selection - 1 };
+                    *selection = if *selection == 0 {
+                        snap.windows.len() - 1
+                    } else {
+                        *selection - 1
+                    };
                 }
                 self.transition_armed_to_picking()
             }
-            Phase::Picking { selection, snap, input, .. } => {
+            Phase::Picking {
+                selection,
+                snap,
+                input,
+                ..
+            } => {
                 if !snap.windows.is_empty() {
-                    *selection = if *selection == 0 { snap.windows.len() - 1 } else { *selection - 1 };
+                    *selection = if *selection == 0 {
+                        snap.windows.len() - 1
+                    } else {
+                        *selection - 1
+                    };
                 }
                 vec![Command::UpdatePicker {
                     input: input.clone(),
@@ -894,7 +990,11 @@ impl OverlayController {
 
     fn on_backspace(&mut self) -> Vec<Command> {
         match &mut self.phase {
-            Phase::Unlocking { unlock_mode: UnlockMode::Password, password_len, .. } => {
+            Phase::Unlocking {
+                unlock_mode: UnlockMode::Password,
+                password_len,
+                ..
+            } => {
                 if *password_len > 0 {
                     *password_len -= 1;
                     vec![Command::PasswordBackspace]
@@ -902,7 +1002,11 @@ impl OverlayController {
                     Vec::new()
                 }
             }
-            Phase::Armed { input, pending_launch, .. } => {
+            Phase::Armed {
+                input,
+                pending_launch,
+                ..
+            } => {
                 input.pop();
                 // Clear pending launch if input is emptied (user cancelled).
                 if input.is_empty() {
@@ -910,7 +1014,12 @@ impl OverlayController {
                 }
                 Vec::new()
             }
-            Phase::Picking { input, selection, pending_launch, .. } => {
+            Phase::Picking {
+                input,
+                selection,
+                pending_launch,
+                ..
+            } => {
                 input.pop();
                 if input.is_empty() {
                     *pending_launch = None;
@@ -950,10 +1059,12 @@ impl OverlayController {
                 self.phase = unlocking;
                 Vec::new()
             }
-            Phase::Armed { selection, snap, .. } |
-            Phase::Picking { selection, snap, .. } => {
-                self.activate_index(selection, &snap)
+            Phase::Armed {
+                selection, snap, ..
             }
+            | Phase::Picking {
+                selection, snap, ..
+            } => self.activate_index(selection, &snap),
             Phase::LaunchError => vec![
                 Command::Hide,
                 Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
@@ -1026,7 +1137,10 @@ impl OverlayController {
 
         let message = error.unwrap_or_else(|| "launch failed".into());
         self.phase = Phase::LaunchError;
-        vec![Command::ShowLaunchError { message, denial: None }]
+        vec![Command::ShowLaunchError {
+            message,
+            denial: None,
+        }]
     }
 
     // -----------------------------------------------------------------------
@@ -1058,11 +1172,7 @@ impl OverlayController {
         vec![Command::ShowPasswordPrompt { profile }]
     }
 
-    fn on_touch_result(
-        &mut self,
-        success: bool,
-        profile: TrustProfileName,
-    ) -> Vec<Command> {
+    fn on_touch_result(&mut self, success: bool, profile: TrustProfileName) -> Vec<Command> {
         if !matches!(self.phase, Phase::Unlocking { .. }) {
             return Vec::new();
         }
@@ -1081,11 +1191,7 @@ impl OverlayController {
         ]
     }
 
-    fn on_unlock_result(
-        &mut self,
-        success: bool,
-        profile: TrustProfileName,
-    ) -> Vec<Command> {
+    fn on_unlock_result(&mut self, success: bool, profile: TrustProfileName) -> Vec<Command> {
         if !matches!(self.phase, Phase::Unlocking { .. }) {
             return Vec::new();
         }
@@ -1250,7 +1356,12 @@ mod tests {
                 title: "Terminal".into(),
                 workspace_id: core_types::CompositorWorkspaceId::new(),
                 monitor_id: core_types::MonitorId::new(),
-                geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+                geometry: core_types::Geometry {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                },
                 is_focused: true,
                 is_minimized: false,
                 is_fullscreen: false,
@@ -1262,7 +1373,12 @@ mod tests {
                 title: "Firefox".into(),
                 workspace_id: core_types::CompositorWorkspaceId::new(),
                 monitor_id: core_types::MonitorId::new(),
-                geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+                geometry: core_types::Geometry {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                },
                 is_focused: false,
                 is_minimized: false,
                 is_fullscreen: false,
@@ -1274,7 +1390,12 @@ mod tests {
                 title: "Edge".into(),
                 workspace_id: core_types::CompositorWorkspaceId::new(),
                 monitor_id: core_types::MonitorId::new(),
-                geometry: core_types::Geometry { x: 0, y: 0, width: 800, height: 600 },
+                geometry: core_types::Geometry {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                },
                 is_focused: false,
                 is_minimized: false,
                 is_fullscreen: false,
@@ -1304,9 +1425,15 @@ mod tests {
     fn forward_initial_selection_is_not_origin() {
         let mut ctrl = OverlayController::new();
         ctrl.handle(Event::Activate, &test_windows(), &test_config());
-        if let Phase::Armed { selection, snap, .. } = &ctrl.phase {
-            assert_ne!(Some(*selection), snap.origin_index,
-                "forward should not default-select origin");
+        if let Phase::Armed {
+            selection, snap, ..
+        } = &ctrl.phase
+        {
+            assert_ne!(
+                Some(*selection),
+                snap.origin_index,
+                "forward should not default-select origin"
+            );
         }
     }
 
@@ -1316,9 +1443,15 @@ mod tests {
     fn backward_initial_selection_is_not_origin() {
         let mut ctrl = OverlayController::new();
         ctrl.handle(Event::ActivateBackward, &test_windows(), &test_config());
-        if let Phase::Armed { selection, snap, .. } = &ctrl.phase {
-            assert_ne!(Some(*selection), snap.origin_index,
-                "backward should not default-select origin");
+        if let Phase::Armed {
+            selection, snap, ..
+        } = &ctrl.phase
+        {
+            assert_ne!(
+                Some(*selection),
+                snap.origin_index,
+                "backward should not default-select origin"
+            );
         }
     }
 
@@ -1348,7 +1481,10 @@ mod tests {
     fn launcher_initial_selection_is_not_origin() {
         let mut ctrl = OverlayController::new();
         ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
-        if let Phase::Armed { selection, snap, .. } = &ctrl.phase {
+        if let Phase::Armed {
+            selection, snap, ..
+        } = &ctrl.phase
+        {
             assert_ne!(Some(*selection), snap.origin_index);
         }
     }
@@ -1362,7 +1498,10 @@ mod tests {
         ctrl.handle(Event::Activate, &windows, &test_config());
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
         assert!(cmds.iter().any(|c| matches!(c, Command::HideAndSync)));
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1378,8 +1517,10 @@ mod tests {
     fn launcher_activates_with_zero_windows() {
         let mut ctrl = OverlayController::new();
         let cmds = ctrl.handle(Event::ActivateLauncher, &[], &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)),
-            "launcher must activate even with zero windows");
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::ShowBorder)),
+            "launcher must activate even with zero windows"
+        );
         assert!(!ctrl.is_idle());
     }
 
@@ -1390,11 +1531,17 @@ mod tests {
         ctrl.handle(Event::ActivateLauncher, &[], &config);
         // Type 'g' — no ghostty window, but launch binding exists.
         let cmds = ctrl.handle(Event::Char('g'), &[], &config);
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
-            "must stage ghostty launch with zero windows, got: {cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
+            "must stage ghostty launch with zero windows, got: {cmds:?}"
+        );
         // Alt release executes.
         let cmds = ctrl.handle(Event::ModifierReleased, &[], &config);
-        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty"))
+        );
     }
 
     // === Full-circle cycling reaches origin ===
@@ -1426,8 +1573,11 @@ mod tests {
         }
 
         // Every index must be reachable (including origin when it exists).
-        assert_eq!(visited.len(), snap_len,
-            "full-circle cycling must visit all {snap_len} indices, visited {visited:?}");
+        assert_eq!(
+            visited.len(),
+            snap_len,
+            "full-circle cycling must visit all {snap_len} indices, visited {visited:?}"
+        );
     }
 
     // === Hint match selects, does NOT commit (commit on Alt release) ===
@@ -1440,13 +1590,20 @@ mod tests {
         // 'g' is the hint for ghostty (the origin/focused window).
         // Typing it SELECTS ghostty but does NOT commit.
         let cmds = ctrl.handle(Event::Char('g'), &windows, &test_config());
-        assert!(!cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
-            "hint match must NOT activate on keypress");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. })),
+            "hint match must NOT activate on keypress"
+        );
         assert!(!ctrl.is_idle(), "must stay in Picking, not Idle");
         // Alt release commits the selection.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
-            "Alt release must commit the hint selection");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. })),
+            "Alt release must commit the hint selection"
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1471,15 +1628,24 @@ mod tests {
         ctrl.handle(Event::Activate, &windows, &test_config());
         // 'e' has no window → stages launch, does NOT execute.
         let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
-            "must show staged launch, got: {cmds:?}");
-        assert!(!cmds.iter().any(|c| matches!(c, Command::LaunchApp { .. })),
-            "must NOT execute launch on keypress");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
+            "must show staged launch, got: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::LaunchApp { .. })),
+            "must NOT execute launch on keypress"
+        );
         assert!(matches!(ctrl.phase, Phase::Picking { .. }));
         // Alt release executes the staged launch.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")),
-            "Alt release must execute staged launch");
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, Command::LaunchApp { command, .. } if command == "microsoft-edge")
+            ),
+            "Alt release must execute staged launch"
+        );
     }
 
     #[test]
@@ -1489,12 +1655,19 @@ mod tests {
         ctrl.handle(Event::Activate, &windows, &test_config());
         // 'e' matches edge window hint → selects, does NOT commit.
         let cmds = ctrl.handle(Event::Char('e'), &windows, &test_config());
-        assert!(!cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
-            "hint match must NOT activate on keypress");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. })),
+            "hint match must NOT activate on keypress"
+        );
         assert!(!ctrl.is_idle());
         // Alt release commits.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1508,13 +1681,17 @@ mod tests {
         // 'f' has no window → stages launch, does NOT execute.
         let cmds = ctrl.handle(Event::Char('f'), &windows, &test_config());
         assert!(
-            cmds.iter().any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
             "expected ShowLaunchStaged for firefox, got: {cmds:?}"
         );
         assert!(matches!(ctrl.phase, Phase::Picking { .. }));
         // Alt release executes.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "firefox")));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "firefox"))
+        );
     }
 
     #[test]
@@ -1525,13 +1702,18 @@ mod tests {
         // 'f' matches firefox hint → selects, does NOT commit.
         let cmds = ctrl.handle(Event::Char('f'), &windows, &test_config());
         assert!(
-            !cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. })),
             "hint match must NOT activate on keypress, got: {cmds:?}"
         );
         assert!(!ctrl.is_idle());
         // Alt release commits.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1543,14 +1725,28 @@ mod tests {
         ctrl.handle(Event::DwellTimeout, &windows, &test_config());
         // Stage a launch.
         ctrl.handle(Event::Char('e'), &windows, &test_config());
-        assert!(matches!(ctrl.phase, Phase::Picking { pending_launch: Some(_), .. }));
+        assert!(matches!(
+            ctrl.phase,
+            Phase::Picking {
+                pending_launch: Some(_),
+                ..
+            }
+        ));
         // Backspace clears input and pending launch.
         ctrl.handle(Event::Backspace, &windows, &test_config());
-        assert!(matches!(ctrl.phase, Phase::Picking { pending_launch: None, .. }));
+        assert!(matches!(
+            ctrl.phase,
+            Phase::Picking {
+                pending_launch: None,
+                ..
+            }
+        ));
         // Alt release now activates a window, not a launch.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(!cmds.iter().any(|c| matches!(c, Command::LaunchApp { .. })),
-            "backspace must cancel staged launch");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::LaunchApp { .. })),
+            "backspace must cancel staged launch"
+        );
     }
 
     // === Navigation shows picker ===
@@ -1592,7 +1788,10 @@ mod tests {
         ctrl.handle(Event::Activate, &windows, &test_config());
         ctrl.handle(Event::DwellTimeout, &windows, &test_config());
         let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1607,7 +1806,10 @@ mod tests {
         // Re-activation in Armed transitions to Picking with picker visible.
         assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
         assert!(cmds.iter().any(|c| matches!(c, Command::ResetGrace)));
-        if let Phase::Picking { selection, snap, .. } = &ctrl.phase {
+        if let Phase::Picking {
+            selection, snap, ..
+        } = &ctrl.phase
+        {
             assert!(*selection < snap.windows.len());
         } else {
             panic!("expected Picking after re-activation");
@@ -1686,7 +1888,9 @@ mod tests {
             let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
             // Must never commit (no ActivateWindow or HideAndSync).
             assert!(
-                !cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. } | Command::HideAndSync)),
+                !cmds
+                    .iter()
+                    .any(|c| matches!(c, Command::ActivateWindow { .. } | Command::HideAndSync)),
                 "re-activation must not commit"
             );
             if let Phase::Picking { selection, .. } = &ctrl.phase {
@@ -1695,7 +1899,8 @@ mod tests {
         }
 
         assert_eq!(
-            visited.len(), snap_len,
+            visited.len(),
+            snap_len,
             "rapid re-activation must visit all {snap_len} windows, visited {visited:?}"
         );
     }
@@ -1710,7 +1915,9 @@ mod tests {
         for i in 0..20 {
             let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
             assert!(
-                !cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })),
+                !cmds
+                    .iter()
+                    .any(|c| matches!(c, Command::ActivateWindow { .. })),
                 "re-activation #{i} must not activate a window"
             );
             assert!(!ctrl.is_idle(), "must not return to Idle during cycling");
@@ -1718,7 +1925,10 @@ mod tests {
 
         // Only ModifierReleased commits.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1748,8 +1958,10 @@ mod tests {
         // Net movement: 3 forward - 2 backward = 1 forward from initial.
         // Initial Armed selection is initial_forward(), first re-activation
         // cycles +1, so after 3 forward we're at initial+3, minus 2 backward = initial+1.
-        assert_ne!(sel_after_forward, sel_after_backward,
-            "backward must change selection from forward position");
+        assert_ne!(
+            sel_after_forward, sel_after_backward,
+            "backward must change selection from forward position"
+        );
     }
 
     // === Release after interaction ===
@@ -1763,7 +1975,10 @@ mod tests {
         ctrl.handle(Event::SelectionDown, &windows, &test_config());
         ctrl.handle(Event::SelectionDown, &windows, &test_config());
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
     }
 
     #[test]
@@ -1774,7 +1989,10 @@ mod tests {
         ctrl.handle(Event::SelectionDown, &windows, &test_config());
         // Releasing Alt commits the selection, same as Alt+Tab mode.
         let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1785,7 +2003,10 @@ mod tests {
         ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
         ctrl.handle(Event::SelectionDown, &windows, &test_config());
         let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1802,7 +2023,9 @@ mod tests {
         // Navigate to origin by cycling all the way around.
         let snap_len = if let Phase::Picking { snap, .. } = &ctrl.phase {
             snap.windows.len()
-        } else { panic!("expected Picking") };
+        } else {
+            panic!("expected Picking")
+        };
 
         for _ in 0..snap_len {
             ctrl.handle(Event::SelectionDown, &windows, &test_config());
@@ -1813,7 +2036,10 @@ mod tests {
 
         // Confirm — should activate whatever is selected, even if origin.
         let cmds = ctrl.handle(Event::Confirm, &windows, &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateWindow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. }))
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1867,7 +2093,10 @@ mod tests {
     fn snapshot_has_targets_with_origin_needs_more_than_one() {
         let single = vec![test_windows()[0].clone()];
         let snap = Snapshot::with_origin(&single, &test_config(), Some(0));
-        assert!(!snap.has_targets(), "single window that is origin = no targets");
+        assert!(
+            !snap.has_targets(),
+            "single window that is origin = no targets"
+        );
     }
 
     #[test]
@@ -1910,7 +2139,11 @@ mod tests {
             _ => None,
         });
         assert!(activated.is_some(), "should activate a window");
-        assert_eq!(activated.unwrap().id, windows[0].id, "should activate index 0, not origin");
+        assert_eq!(
+            activated.unwrap().id,
+            windows[0].id,
+            "should activate index 0, not origin"
+        );
         assert!(ctrl.is_idle());
     }
 
@@ -1928,7 +2161,11 @@ mod tests {
             _ => None,
         });
         assert!(activated.is_some());
-        assert_eq!(activated.unwrap().id, windows[1].id, "should activate index 1, skipping origin at 0");
+        assert_eq!(
+            activated.unwrap().id,
+            windows[1].id,
+            "should activate index 1, skipping origin at 0"
+        );
     }
 
     #[test]
@@ -1938,7 +2175,10 @@ mod tests {
         let snap = Snapshot::with_origin(&windows, &test_config(), Some(2));
         ctrl.pick_with_snapshot(snap);
 
-        if let Phase::Picking { selection, snap, .. } = &ctrl.phase {
+        if let Phase::Picking {
+            selection, snap, ..
+        } = &ctrl.phase
+        {
             assert_ne!(*selection, 2, "should not start at origin");
             assert_ne!(Some(*selection), snap.origin_index);
             assert_eq!(*selection, 0);
@@ -2027,8 +2267,11 @@ mod tests {
             _ => None,
         });
         assert!(activated.is_some());
-        assert_eq!(activated.unwrap().id, windows[0].id,
-            "quick-switch should activate top of picker (index 0), not origin");
+        assert_eq!(
+            activated.unwrap().id,
+            windows[0].id,
+            "quick-switch should activate top of picker (index 0), not origin"
+        );
     }
 
     // === In-flight direction change (Alt+Tab then Alt+Shift+Tab) ===
@@ -2100,9 +2343,12 @@ mod tests {
         ctrl.handle(Event::ActivateLauncher, &no_windows, config);
         ctrl.handle(Event::Char('g'), &no_windows, config);
         let cmds = ctrl.handle(Event::ModifierReleased, &no_windows, config);
-        assert!(matches!(ctrl.phase, Phase::Launching),
+        assert!(
+            matches!(ctrl.phase, Phase::Launching),
             "expected Phase::Launching after modifier release with staged launch, \
-             phase={:?}, cmds={cmds:?}", ctrl.phase);
+             phase={:?}, cmds={cmds:?}",
+            ctrl.phase
+        );
     }
 
     /// Helper: construct a VaultsLocked LaunchResult event.
@@ -2111,7 +2357,8 @@ mod tests {
             success: false,
             error: Some("VaultsLocked".into()),
             denial: Some(LaunchDenial::VaultsLocked {
-                locked_profiles: profiles.iter()
+                locked_profiles: profiles
+                    .iter()
                     .map(|p| TrustProfileName::try_from(*p).unwrap())
                     .collect(),
             }),
@@ -2130,13 +2377,25 @@ mod tests {
     ) {
         drive_to_launching(ctrl, windows, config);
         ctrl.handle(vaults_locked_event(&[profile]), windows, config);
-        ctrl.handle(Event::AutoUnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from(profile).unwrap(),
-            needs_touch: false,
-        }, windows, config);
-        assert!(matches!(ctrl.phase, Phase::Unlocking { unlock_mode: UnlockMode::Password, .. }),
-            "expected Phase::Unlocking(Password) after auto-unlock failure");
+        ctrl.handle(
+            Event::AutoUnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from(profile).unwrap(),
+                needs_touch: false,
+            },
+            windows,
+            config,
+        );
+        assert!(
+            matches!(
+                ctrl.phase,
+                Phase::Unlocking {
+                    unlock_mode: UnlockMode::Password,
+                    ..
+                }
+            ),
+            "expected Phase::Unlocking(Password) after auto-unlock failure"
+        );
     }
 
     #[test]
@@ -2147,16 +2406,17 @@ mod tests {
 
         drive_to_launching(&mut ctrl, &windows, &config);
 
-        let cmds = ctrl.handle(
-            vaults_locked_event(&["default", "work"]),
-            &windows,
-            &config,
-        );
+        let cmds = ctrl.handle(vaults_locked_event(&["default", "work"]), &windows, &config);
 
-        assert!(matches!(ctrl.phase, Phase::Unlocking { .. }),
-            "VaultsLocked must transition to Phase::Unlocking");
-        assert!(cmds.iter().any(|c| matches!(c, Command::AttemptAutoUnlock { .. })),
-            "VaultsLocked must emit AttemptAutoUnlock, got: {cmds:?}");
+        assert!(
+            matches!(ctrl.phase, Phase::Unlocking { .. }),
+            "VaultsLocked must transition to Phase::Unlocking"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::AttemptAutoUnlock { .. })),
+            "VaultsLocked must emit AttemptAutoUnlock, got: {cmds:?}"
+        );
     }
 
     #[test]
@@ -2168,14 +2428,21 @@ mod tests {
         drive_to_launching(&mut ctrl, &windows, &config);
         ctrl.handle(vaults_locked_event(&["default"]), &windows, &config);
 
-        let cmds = ctrl.handle(Event::AutoUnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from("default").unwrap(),
-            needs_touch: false,
-        }, &windows, &config);
+        let cmds = ctrl.handle(
+            Event::AutoUnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from("default").unwrap(),
+                needs_touch: false,
+            },
+            &windows,
+            &config,
+        );
 
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowPasswordPrompt { .. })),
-            "auto-unlock failure must fall back to password prompt, got: {cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowPasswordPrompt { .. })),
+            "auto-unlock failure must fall back to password prompt, got: {cmds:?}"
+        );
         if let Phase::Unlocking { unlock_mode, .. } = &ctrl.phase {
             assert_eq!(*unlock_mode, UnlockMode::Password);
         } else {
@@ -2214,8 +2481,11 @@ mod tests {
         ctrl.handle(Event::Char('p'), &windows, &config);
 
         let cmds = ctrl.handle(Event::Confirm, &windows, &config);
-        assert!(cmds.iter().any(|c| matches!(c, Command::SubmitPasswordUnlock { .. })),
-            "Confirm during password must emit SubmitPasswordUnlock, got: {cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::SubmitPasswordUnlock { .. })),
+            "Confirm during password must emit SubmitPasswordUnlock, got: {cmds:?}"
+        );
         // ShowVerifying is now emitted by the main.rs handler before IPC,
         // not by the controller, so we only check SubmitPasswordUnlock here.
     }
@@ -2228,15 +2498,25 @@ mod tests {
 
         drive_to_password_prompt(&mut ctrl, &windows, &config, "default");
 
-        let cmds = ctrl.handle(Event::UnlockResult {
-            success: true,
-            profile: TrustProfileName::try_from("default").unwrap(),
-        }, &windows, &config);
+        let cmds = ctrl.handle(
+            Event::UnlockResult {
+                success: true,
+                profile: TrustProfileName::try_from("default").unwrap(),
+            },
+            &windows,
+            &config,
+        );
 
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateProfiles { .. })),
-            "successful unlock must activate profiles before retry, got: {cmds:?}");
-        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")),
-            "successful unlock must retry original launch, got: {cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateProfiles { .. })),
+            "successful unlock must activate profiles before retry, got: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")),
+            "successful unlock must retry original launch, got: {cmds:?}"
+        );
         assert!(matches!(ctrl.phase, Phase::Launching));
     }
 
@@ -2250,20 +2530,31 @@ mod tests {
         ctrl.handle(vaults_locked_event(&["default", "work"]), &windows, &config);
 
         // First profile: auto-unlock fails, password succeeds.
-        ctrl.handle(Event::AutoUnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from("default").unwrap(),
-            needs_touch: false,
-        }, &windows, &config);
-        let cmds = ctrl.handle(Event::UnlockResult {
-            success: true,
-            profile: TrustProfileName::try_from("default").unwrap(),
-        }, &windows, &config);
+        ctrl.handle(
+            Event::AutoUnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from("default").unwrap(),
+                needs_touch: false,
+            },
+            &windows,
+            &config,
+        );
+        let cmds = ctrl.handle(
+            Event::UnlockResult {
+                success: true,
+                profile: TrustProfileName::try_from("default").unwrap(),
+            },
+            &windows,
+            &config,
+        );
 
         // Must advance to second profile, NOT retry launch yet.
-        assert!(cmds.iter().any(|c| matches!(c, Command::AttemptAutoUnlock { profile }
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::AttemptAutoUnlock { profile }
             if profile.as_ref() == "work")),
-            "must advance to next locked profile, got: {cmds:?}");
+            "must advance to next locked profile, got: {cmds:?}"
+        );
         if let Phase::Unlocking { current_index, .. } = &ctrl.phase {
             assert_eq!(*current_index, 1);
         } else {
@@ -2271,21 +2562,35 @@ mod tests {
         }
 
         // Second profile: auto-unlock fails, password succeeds.
-        ctrl.handle(Event::AutoUnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from("work").unwrap(),
-            needs_touch: false,
-        }, &windows, &config);
-        let cmds = ctrl.handle(Event::UnlockResult {
-            success: true,
-            profile: TrustProfileName::try_from("work").unwrap(),
-        }, &windows, &config);
+        ctrl.handle(
+            Event::AutoUnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from("work").unwrap(),
+                needs_touch: false,
+            },
+            &windows,
+            &config,
+        );
+        let cmds = ctrl.handle(
+            Event::UnlockResult {
+                success: true,
+                profile: TrustProfileName::try_from("work").unwrap(),
+            },
+            &windows,
+            &config,
+        );
 
         // NOW activate profiles and retry the launch.
-        assert!(cmds.iter().any(|c| matches!(c, Command::ActivateProfiles { .. })),
-            "all profiles unlocked must activate profiles before retry, got: {cmds:?}");
-        assert!(cmds.iter().any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")),
-            "all profiles unlocked must retry launch, got: {cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateProfiles { .. })),
+            "all profiles unlocked must activate profiles before retry, got: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")),
+            "all profiles unlocked must retry launch, got: {cmds:?}"
+        );
         assert!(matches!(ctrl.phase, Phase::Launching));
     }
 
@@ -2298,16 +2603,34 @@ mod tests {
         drive_to_password_prompt(&mut ctrl, &windows, &config, "default");
         ctrl.handle(Event::Char('x'), &windows, &config);
 
-        let cmds = ctrl.handle(Event::UnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from("default").unwrap(),
-        }, &windows, &config);
+        let cmds = ctrl.handle(
+            Event::UnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from("default").unwrap(),
+            },
+            &windows,
+            &config,
+        );
 
-        assert!(cmds.iter().any(|c| matches!(c, Command::ClearPasswordBuffer)));
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowPasswordPrompt { .. })));
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowUnlockError { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ClearPasswordBuffer))
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowPasswordPrompt { .. }))
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowUnlockError { .. }))
+        );
 
-        if let Phase::Unlocking { password_len, unlock_mode, .. } = &ctrl.phase {
+        if let Phase::Unlocking {
+            password_len,
+            unlock_mode,
+            ..
+        } = &ctrl.phase
+        {
             assert_eq!(*password_len, 0);
             assert_eq!(*unlock_mode, UnlockMode::Password);
         } else {
@@ -2326,8 +2649,11 @@ mod tests {
 
         let cmds = ctrl.handle(Event::Escape, &windows, &config);
 
-        assert!(cmds.iter().any(|c| matches!(c, Command::ClearPasswordBuffer)),
-            "escape during unlock must clear password buffer");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ClearPasswordBuffer)),
+            "escape during unlock must clear password buffer"
+        );
         assert!(cmds.iter().any(|c| matches!(c, Command::Hide)));
         assert!(ctrl.is_idle());
     }
@@ -2341,20 +2667,27 @@ mod tests {
         drive_to_launching(&mut ctrl, &windows, &config);
 
         // VaultsLocked but missing original_command — can't retry.
-        let cmds = ctrl.handle(Event::LaunchResult {
-            success: false,
-            error: Some("VaultsLocked".into()),
-            denial: Some(LaunchDenial::VaultsLocked {
-                locked_profiles: vec![TrustProfileName::try_from("default").unwrap()],
-            }),
-            original_command: None,
-            original_tags: None,
-            original_launch_args: None,
-        }, &windows, &config);
+        let cmds = ctrl.handle(
+            Event::LaunchResult {
+                success: false,
+                error: Some("VaultsLocked".into()),
+                denial: Some(LaunchDenial::VaultsLocked {
+                    locked_profiles: vec![TrustProfileName::try_from("default").unwrap()],
+                }),
+                original_command: None,
+                original_tags: None,
+                original_launch_args: None,
+            },
+            &windows,
+            &config,
+        );
 
         // Must fall through to error display, not unlock flow.
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowLaunchError { .. })),
-            "VaultsLocked without retry context must show error, got: {cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowLaunchError { .. })),
+            "VaultsLocked without retry context must show error, got: {cmds:?}"
+        );
     }
 
     #[test]
@@ -2364,16 +2697,20 @@ mod tests {
         let config = test_config();
 
         // Controller is Idle — LaunchResult should be ignored.
-        let cmds = ctrl.handle(Event::LaunchResult {
-            success: false,
-            error: None,
-            denial: Some(LaunchDenial::VaultsLocked {
-                locked_profiles: vec![TrustProfileName::try_from("default").unwrap()],
-            }),
-            original_command: Some("ghostty".into()),
-            original_tags: Some(vec![]),
-            original_launch_args: Some(vec![]),
-        }, &windows, &config);
+        let cmds = ctrl.handle(
+            Event::LaunchResult {
+                success: false,
+                error: None,
+                denial: Some(LaunchDenial::VaultsLocked {
+                    locked_profiles: vec![TrustProfileName::try_from("default").unwrap()],
+                }),
+                original_command: Some("ghostty".into()),
+                original_tags: Some(vec![]),
+                original_launch_args: Some(vec![]),
+            },
+            &windows,
+            &config,
+        );
 
         assert!(cmds.is_empty());
         assert!(ctrl.is_idle());
@@ -2392,38 +2729,67 @@ mod tests {
         ctrl.handle(vaults_locked_event(&["alpha", "beta"]), &windows, &config);
 
         // Unlock both profiles.
-        ctrl.handle(Event::AutoUnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from("alpha").unwrap(),
-            needs_touch: false,
-        }, &windows, &config);
-        ctrl.handle(Event::UnlockResult {
-            success: true,
-            profile: TrustProfileName::try_from("alpha").unwrap(),
-        }, &windows, &config);
-        ctrl.handle(Event::AutoUnlockResult {
-            success: false,
-            profile: TrustProfileName::try_from("beta").unwrap(),
-            needs_touch: false,
-        }, &windows, &config);
-        let cmds = ctrl.handle(Event::UnlockResult {
-            success: true,
-            profile: TrustProfileName::try_from("beta").unwrap(),
-        }, &windows, &config);
+        ctrl.handle(
+            Event::AutoUnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from("alpha").unwrap(),
+                needs_touch: false,
+            },
+            &windows,
+            &config,
+        );
+        ctrl.handle(
+            Event::UnlockResult {
+                success: true,
+                profile: TrustProfileName::try_from("alpha").unwrap(),
+            },
+            &windows,
+            &config,
+        );
+        ctrl.handle(
+            Event::AutoUnlockResult {
+                success: false,
+                profile: TrustProfileName::try_from("beta").unwrap(),
+                needs_touch: false,
+            },
+            &windows,
+            &config,
+        );
+        let cmds = ctrl.handle(
+            Event::UnlockResult {
+                success: true,
+                profile: TrustProfileName::try_from("beta").unwrap(),
+            },
+            &windows,
+            &config,
+        );
 
         // Find positions to verify ordering.
-        let activate_pos = cmds.iter().position(|c| matches!(c, Command::ActivateProfiles { .. }));
-        let launch_pos = cmds.iter().position(|c| matches!(c, Command::LaunchApp { .. }));
+        let activate_pos = cmds
+            .iter()
+            .position(|c| matches!(c, Command::ActivateProfiles { .. }));
+        let launch_pos = cmds
+            .iter()
+            .position(|c| matches!(c, Command::LaunchApp { .. }));
 
-        assert!(activate_pos.is_some(),
-            "ActivateProfiles must be emitted before launch retry, got: {cmds:?}");
-        assert!(launch_pos.is_some(),
-            "LaunchApp must be emitted for retry, got: {cmds:?}");
-        assert!(activate_pos.unwrap() < launch_pos.unwrap(),
-            "ActivateProfiles must come before LaunchApp, got: {cmds:?}");
+        assert!(
+            activate_pos.is_some(),
+            "ActivateProfiles must be emitted before launch retry, got: {cmds:?}"
+        );
+        assert!(
+            launch_pos.is_some(),
+            "LaunchApp must be emitted for retry, got: {cmds:?}"
+        );
+        assert!(
+            activate_pos.unwrap() < launch_pos.unwrap(),
+            "ActivateProfiles must come before LaunchApp, got: {cmds:?}"
+        );
 
         // Verify the profiles list contains both unlocked profiles.
-        if let Some(Command::ActivateProfiles { profiles }) = cmds.iter().find(|c| matches!(c, Command::ActivateProfiles { .. })) {
+        if let Some(Command::ActivateProfiles { profiles }) = cmds
+            .iter()
+            .find(|c| matches!(c, Command::ActivateProfiles { .. }))
+        {
             assert_eq!(profiles.len(), 2);
             assert!(profiles.iter().any(|p| p.as_ref() == "alpha"));
             assert!(profiles.iter().any(|p| p.as_ref() == "beta"));

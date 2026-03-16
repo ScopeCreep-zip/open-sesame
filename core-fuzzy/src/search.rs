@@ -40,11 +40,7 @@ const FRECENCY_WEIGHT: f64 = 0.3;
 
 impl SearchEngine {
     /// Create a new search engine for the given profile.
-    pub fn new(
-        matcher: FuzzyMatcher,
-        frecency: FrecencyDb,
-        profile_id: TrustProfileName,
-    ) -> Self {
+    pub fn new(matcher: FuzzyMatcher, frecency: FrecencyDb, profile_id: TrustProfileName) -> Self {
         Self {
             matcher,
             frecency,
@@ -79,11 +75,7 @@ impl SearchEngine {
     /// Update the search pattern and tick the matcher.
     ///
     /// Returns ranked results combining fuzzy and frecency scores.
-    pub fn query(
-        &mut self,
-        query: &str,
-        max_results: u32,
-    ) -> Vec<SearchResult> {
+    pub fn query(&mut self, query: &str, max_results: u32) -> Vec<SearchResult> {
         self.matcher.update_pattern(query);
         self.matcher.tick(10); // 10ms timeout per ADR
 
@@ -115,7 +107,11 @@ impl SearchEngine {
             .collect();
 
         // Re-sort by combined score (nucleo sorts by fuzzy only).
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results
     }
 
@@ -152,6 +148,4 @@ impl SearchEngine {
             .map(|(_, score)| score / self.frecency_max)
             .unwrap_or(0.0)
     }
-
 }
-

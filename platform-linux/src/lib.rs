@@ -18,19 +18,19 @@
 
 // -- Always available (headless-safe) --
 #[cfg(target_os = "linux")]
-pub mod sandbox;
-#[cfg(target_os = "linux")]
-pub mod security;
-#[cfg(target_os = "linux")]
-pub mod systemd;
-#[cfg(target_os = "linux")]
-pub mod dbus;
+pub mod clipboard;
 #[cfg(target_os = "linux")]
 pub mod cosmic_keys;
 #[cfg(target_os = "linux")]
 pub mod cosmic_theme;
 #[cfg(target_os = "linux")]
-pub mod clipboard;
+pub mod dbus;
+#[cfg(target_os = "linux")]
+pub mod sandbox;
+#[cfg(target_os = "linux")]
+pub mod security;
+#[cfg(target_os = "linux")]
+pub mod systemd;
 
 // -- Desktop-only (requires `desktop` or `cosmic` feature) --
 #[cfg(all(target_os = "linux", feature = "desktop"))]

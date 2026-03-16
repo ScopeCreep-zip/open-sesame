@@ -10,7 +10,7 @@
 //!
 //! Wire format on the socket: `[4-byte BE length][postcard payload]`
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Maximum frame payload size (16 MiB). Prevents OOM from malformed length prefixes.
@@ -127,7 +127,10 @@ mod tests {
         buf.extend(std::iter::repeat_n(0u8, 64));
         let mut cursor = &buf[..];
         let result = read_frame(&mut cursor).await;
-        assert!(result.is_err(), "frame exceeding MAX_FRAME_SIZE must be rejected");
+        assert!(
+            result.is_err(),
+            "frame exceeding MAX_FRAME_SIZE must be rejected"
+        );
     }
 
     // SECURITY INVARIANT: Zero-length frames must roundtrip correctly —

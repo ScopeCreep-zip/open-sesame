@@ -91,6 +91,9 @@ mod tests {
         let dispatcher = AuthDispatcher::new();
         let backend = dispatcher.password_backend();
         assert_eq!(backend.backend_id(), "password");
-        assert_eq!(backend.requires_interaction(), AuthInteraction::PasswordEntry);
+        assert_eq!(
+            backend.requires_interaction(),
+            AuthInteraction::PasswordEntry
+        );
     }
 }

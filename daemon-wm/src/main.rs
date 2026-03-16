@@ -102,7 +102,9 @@ fn map_ipc_key_to_event(keyval: u32, modifiers: u32, unicode: Option<char>) -> O
         UP => Some(Event::SelectionUp),
         BACKSPACE => Some(Event::Backspace),
         SPACE => Some(Event::Char(' ')),
-        _ => unicode.filter(|ch| ch.is_ascii_graphic() || *ch == ' ').map(Event::Char),
+        _ => unicode
+            .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
+            .map(Event::Char),
     }
 }
 
@@ -119,8 +121,7 @@ async fn main() -> anyhow::Result<()> {
     platform_linux::security::harden_process();
 
     // Load config.
-    let config = core_config::load_config(None)
-        .context("failed to load config")?;
+    let config = core_config::load_config(None).context("failed to load config")?;
     let wm_config = config
         .profiles
         .values()
@@ -140,25 +141,34 @@ async fn main() -> anyhow::Result<()> {
     let (_config_watcher, config_state) = core_config::ConfigWatcher::with_callback(
         &config_paths,
         config,
-        Some(Box::new(move || { let _ = reload_tx.blocking_send(()); })),
-    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Some(Box::new(move || {
+            let _ = reload_tx.blocking_send(());
+        })),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Mutable config for hot-reload.
     let wm_config = Arc::new(Mutex::new(wm_config));
 
     // Connect to IPC bus: read keypair BEFORE sandbox.
-    let socket_path = core_ipc::socket_path()
-        .context("failed to resolve IPC socket path")?;
-    let server_pub = core_ipc::noise::read_bus_public_key().await
+    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
+    let server_pub = core_ipc::noise::read_bus_public_key()
+        .await
         .context("daemon-profile is not running (no bus public key found)")?;
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
 
     // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
-        "daemon-wm", daemon_id, &socket_path, &server_pub, 5,
+        "daemon-wm",
+        daemon_id,
+        &socket_path,
+        &server_pub,
+        5,
         std::time::Duration::from_millis(500),
-    ).await.context("failed to connect to IPC bus")?;
+    )
+    .await
+    .context("failed to connect to IPC bus")?;
     // ZeroizingKeypair: private key zeroized on drop (no manual zeroize needed).
     drop(_client_keypair);
 
@@ -256,7 +266,12 @@ async fn main() -> anyhow::Result<()> {
                                         title: app_id.clone(),
                                         workspace_id: core_types::CompositorWorkspaceId::new(),
                                         monitor_id: core_types::MonitorId::new(),
-                                        geometry: core_types::Geometry { x: 0, y: 0, width: 0, height: 0 },
+                                        geometry: core_types::Geometry {
+                                            x: 0,
+                                            y: 0,
+                                            width: 0,
+                                            height: 0,
+                                        },
                                         is_focused: true,
                                         is_minimized: false,
                                         is_fullscreen: false,
@@ -685,7 +700,9 @@ async fn execute_commands(
     commands: Vec<Command>,
     overlay_cmd_tx: &std::sync::mpsc::Sender<OverlayCmd>,
     overlay_event_rx: &mut tokio::sync::mpsc::Receiver<OverlayEvent>,
-    #[cfg(target_os = "linux")] backend: &Option<Arc<Box<dyn platform_linux::compositor::CompositorBackend>>>,
+    #[cfg(target_os = "linux")] backend: &Option<
+        Arc<Box<dyn platform_linux::compositor::CompositorBackend>>,
+    >,
     client: &mut BusClient,
     config_state: &std::sync::Arc<std::sync::RwLock<core_config::Config>>,
     controller: &mut daemon_wm::controller::OverlayController,
@@ -703,27 +720,43 @@ async fn execute_commands(
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
                 // Request keyboard event forwarding from daemon-input.
-                client.publish(
-                    EventKind::InputGrabRequest { requester: client.daemon_id() },
-                    SecurityLevel::Internal,
-                ).await.ok();
+                client
+                    .publish(
+                        EventKind::InputGrabRequest {
+                            requester: client.daemon_id(),
+                        },
+                        SecurityLevel::Internal,
+                    )
+                    .await
+                    .ok();
             }
             Command::ShowPicker { windows, hints } => {
-                if overlay_cmd_tx.send(OverlayCmd::ShowFull { windows, hints }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowFull { windows, hints })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
             Command::UpdatePicker { input, selection } => {
-                if overlay_cmd_tx.send(OverlayCmd::UpdateInput { input, selection }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::UpdateInput { input, selection })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
             Command::HideAndSync => {
                 // Release keyboard grab BEFORE hiding — daemon-input stops forwarding.
-                client.publish(
-                    EventKind::InputGrabRelease { requester: client.daemon_id() },
-                    SecurityLevel::Internal,
-                ).await.ok();
+                client
+                    .publish(
+                        EventKind::InputGrabRelease {
+                            requester: client.daemon_id(),
+                        },
+                        SecurityLevel::Internal,
+                    )
+                    .await
+                    .ok();
 
                 if overlay_cmd_tx.send(OverlayCmd::HideAndSync).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");
@@ -736,10 +769,15 @@ async fn execute_commands(
                 }
             }
             Command::Hide => {
-                client.publish(
-                    EventKind::InputGrabRelease { requester: client.daemon_id() },
-                    SecurityLevel::Internal,
-                ).await.ok();
+                client
+                    .publish(
+                        EventKind::InputGrabRelease {
+                            requester: client.daemon_id(),
+                        },
+                        SecurityLevel::Internal,
+                    )
+                    .await
+                    .ok();
 
                 if overlay_cmd_tx.send(OverlayCmd::Hide).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");
@@ -769,14 +807,23 @@ async fn execute_commands(
                     tracing::info!(target = %target_id, app_id = %window.app_id, "window activated via overlay");
                 }
             }
-            Command::LaunchApp { command, tags, launch_args } => {
+            Command::LaunchApp {
+                command,
+                tags,
+                launch_args,
+            } => {
                 tracing::info!(command = %command, ?tags, ?launch_args, "launch-or-focus: launching app");
 
                 // Release keyboard grab — no more key forwarding needed.
-                client.publish(
-                    EventKind::InputGrabRelease { requester: client.daemon_id() },
-                    SecurityLevel::Internal,
-                ).await.ok();
+                client
+                    .publish(
+                        EventKind::InputGrabRelease {
+                            requester: client.daemon_id(),
+                        },
+                        SecurityLevel::Internal,
+                    )
+                    .await
+                    .ok();
 
                 // Keep the "Launching..." toast visible during the IPC request.
                 // The overlay runs on a separate GTK4 thread so it keeps rendering
@@ -792,21 +839,22 @@ async fn execute_commands(
                 let active_profile = {
                     let cfg_guard = config_state.read().ok();
                     cfg_guard.and_then(|c| {
-                        core_types::TrustProfileName::try_from(
-                            c.global.default_profile.as_ref()
-                        ).ok()
+                        core_types::TrustProfileName::try_from(c.global.default_profile.as_ref())
+                            .ok()
                     })
                 };
-                let result = client.request(
-                    EventKind::LaunchExecute {
-                        entry_id: command,
-                        profile: active_profile,
-                        tags,
-                        launch_args,
-                    },
-                    SecurityLevel::Internal,
-                    std::time::Duration::from_secs(10),
-                ).await;
+                let result = client
+                    .request(
+                        EventKind::LaunchExecute {
+                            entry_id: command,
+                            profile: active_profile,
+                            tags,
+                            launch_args,
+                        },
+                        SecurityLevel::Internal,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
 
                 let launch_event = match result {
                     Ok(msg) => match msg.payload {
@@ -863,15 +911,26 @@ async fn execute_commands(
                 // commands (AttemptAutoUnlock, ShowPasswordPrompt, etc.)
                 // emitted when the launcher returns VaultsLocked denial.
                 Box::pin(execute_commands(
-                    result_cmds, overlay_cmd_tx, overlay_event_rx,
-                    #[cfg(target_os = "linux")] backend,
-                    client, config_state, controller, windows, wm_config,
+                    result_cmds,
+                    overlay_cmd_tx,
+                    overlay_event_rx,
+                    #[cfg(target_os = "linux")]
+                    backend,
+                    client,
+                    config_state,
+                    controller,
+                    windows,
+                    wm_config,
                     ipc_keyboard_confirmed,
                     password_buffer,
-                )).await;
+                ))
+                .await;
             }
             Command::ShowLaunchStaged { command } => {
-                if overlay_cmd_tx.send(OverlayCmd::ShowLaunchStaged { command }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowLaunchStaged { command })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -886,7 +945,10 @@ async fn execute_commands(
                 }
             }
             Command::ShowLaunchError { message, .. } => {
-                if overlay_cmd_tx.send(OverlayCmd::ShowLaunchError { message }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowLaunchError { message })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -917,16 +979,20 @@ async fn execute_commands(
 
                 let (success, needs_touch) = if let Some(salt_bytes) = &salt {
                     let auth = core_auth::AuthDispatcher::new();
-                    if let Some(auto_backend) = auth.find_auto_backend(&profile, &config_dir).await {
+                    if let Some(auto_backend) = auth.find_auto_backend(&profile, &config_dir).await
+                    {
                         match auto_backend.unlock(&profile, &config_dir, salt_bytes).await {
                             Ok(outcome) => {
-                                let fp = outcome.audit_metadata.get("ssh_fingerprint")
-                                    .cloned().unwrap_or_default();
+                                let fp = outcome
+                                    .audit_metadata
+                                    .get("ssh_fingerprint")
+                                    .cloned()
+                                    .unwrap_or_default();
                                 // Transfer master key bytes without creating an
                                 // unprotected intermediate copy.
                                 let event = core_types::EventKind::SshUnlockRequest {
                                     master_key: core_types::SensitiveBytes::new(
-                                        outcome.master_key.into_vec()
+                                        outcome.master_key.into_vec(),
                                     ),
                                     profile: profile.clone(),
                                     ssh_fingerprint: fp.clone(),
@@ -935,18 +1001,22 @@ async fn execute_commands(
                                 // publish() (fire-and-forget) so we confirm
                                 // daemon-secrets actually accepted the master key.
                                 // 30s timeout accommodates Argon2id KDF parameters.
-                                match client.request(
-                                    event,
-                                    core_types::SecurityLevel::Internal,
-                                    std::time::Duration::from_secs(30),
-                                ).await {
+                                match client
+                                    .request(
+                                        event,
+                                        core_types::SecurityLevel::Internal,
+                                        std::time::Duration::from_secs(30),
+                                    )
+                                    .await
+                                {
                                     Ok(msg) => match msg.payload {
                                         EventKind::UnlockResponse { success: true, .. } => {
                                             tracing::info!(%profile, %fp, "SSH auto-unlock accepted by daemon-secrets");
                                             (true, false)
                                         }
                                         EventKind::UnlockRejected {
-                                            reason: UnlockRejectedReason::AlreadyUnlocked, ..
+                                            reason: UnlockRejectedReason::AlreadyUnlocked,
+                                            ..
                                         } => {
                                             tracing::info!(%profile, "vault already unlocked, treating as success");
                                             (true, false)
@@ -994,12 +1064,20 @@ async fn execute_commands(
                 drop(cfg);
                 drop(win_list);
                 Box::pin(execute_commands(
-                    sub_cmds, overlay_cmd_tx, overlay_event_rx,
-                    #[cfg(target_os = "linux")] backend,
-                    client, config_state, controller, windows, wm_config,
+                    sub_cmds,
+                    overlay_cmd_tx,
+                    overlay_event_rx,
+                    #[cfg(target_os = "linux")]
+                    backend,
+                    client,
+                    config_state,
+                    controller,
+                    windows,
+                    wm_config,
                     ipc_keyboard_confirmed,
                     password_buffer,
-                )).await;
+                ))
+                .await;
             }
             Command::ShowPasswordPrompt { profile } => {
                 tracing::info!(
@@ -1012,15 +1090,23 @@ async fn execute_commands(
                 // handler releases the grab before the IPC request, but the
                 // VaultsLocked fallback needs keyboard input for password entry.
                 *ipc_keyboard_confirmed = false;
-                client.publish(
-                    EventKind::InputGrabRequest { requester: client.daemon_id() },
-                    SecurityLevel::Internal,
-                ).await.ok();
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockPrompt {
-                    profile: profile.to_string(),
-                    password_len: 0,
-                    error: None,
-                }).is_err() {
+                client
+                    .publish(
+                        EventKind::InputGrabRequest {
+                            requester: client.daemon_id(),
+                        },
+                        SecurityLevel::Internal,
+                    )
+                    .await
+                    .ok();
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockPrompt {
+                        profile: profile.to_string(),
+                        password_len: 0,
+                        error: None,
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -1031,10 +1117,15 @@ async fn execute_commands(
                     %profile,
                     "showing touch prompt for vault unlock"
                 );
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockProgress {
-                    profile: profile.to_string(),
-                    message: format!("Touch your security key for \u{201C}{profile}\u{201D}\u{2026}"),
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockProgress {
+                        profile: profile.to_string(),
+                        message: format!(
+                            "Touch your security key for \u{201C}{profile}\u{201D}\u{2026}"
+                        ),
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -1045,10 +1136,13 @@ async fn execute_commands(
                     %profile,
                     "showing auto-unlock progress"
                 );
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockProgress {
-                    profile: profile.to_string(),
-                    message: format!("Authenticating \u{201C}{profile}\u{201D}\u{2026}"),
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockProgress {
+                        profile: profile.to_string(),
+                        message: format!("Authenticating \u{201C}{profile}\u{201D}\u{2026}"),
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -1058,39 +1152,51 @@ async fn execute_commands(
                     event_type = "verifying",
                     "showing verification progress for vault unlock"
                 );
-                let profile = controller.current_unlock_profile()
+                let profile = controller
+                    .current_unlock_profile()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "vault".into());
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockProgress {
-                    profile,
-                    message: "Verifying\u{2026}".into(),
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockProgress {
+                        profile,
+                        message: "Verifying\u{2026}".into(),
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
             Command::PasswordChar(ch) => {
                 password_buffer.push_char(ch);
-                let profile = controller.current_unlock_profile()
+                let profile = controller
+                    .current_unlock_profile()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "vault".into());
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockPrompt {
-                    profile,
-                    password_len: password_buffer.char_count(),
-                    error: None,
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockPrompt {
+                        profile,
+                        password_len: password_buffer.char_count(),
+                        error: None,
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
             Command::PasswordBackspace => {
                 password_buffer.pop_char();
-                let profile = controller.current_unlock_profile()
+                let profile = controller
+                    .current_unlock_profile()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "vault".into());
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockPrompt {
-                    profile,
-                    password_len: password_buffer.char_count(),
-                    error: None,
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockPrompt {
+                        profile,
+                        password_len: password_buffer.char_count(),
+                        error: None,
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -1108,10 +1214,13 @@ async fn execute_commands(
                 // call and its recursive result processing happen inline — a
                 // ShowVerifying command after this one would execute AFTER the
                 // unlock result is already processed and displayed.
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockProgress {
-                    profile: profile.to_string(),
-                    message: "Verifying\u{2026}".into(),
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockProgress {
+                        profile: profile.to_string(),
+                        message: "Verifying\u{2026}".into(),
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
 
@@ -1132,12 +1241,20 @@ async fn execute_commands(
                     drop(cfg);
                     drop(win_list);
                     Box::pin(execute_commands(
-                        sub_cmds, overlay_cmd_tx, overlay_event_rx,
-                        #[cfg(target_os = "linux")] backend,
-                        client, config_state, controller, windows, wm_config,
+                        sub_cmds,
+                        overlay_cmd_tx,
+                        overlay_event_rx,
+                        #[cfg(target_os = "linux")]
+                        backend,
+                        client,
+                        config_state,
+                        controller,
+                        windows,
+                        wm_config,
                         ipc_keyboard_confirmed,
                         password_buffer,
-                    )).await;
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1148,24 +1265,33 @@ async fn execute_commands(
                 };
 
                 // 30s timeout accommodates Argon2id KDF with high memory parameters.
-                let result = client.request(
-                    unlock_event,
-                    SecurityLevel::Internal,
-                    std::time::Duration::from_secs(30),
-                ).await;
+                let result = client
+                    .request(
+                        unlock_event,
+                        SecurityLevel::Internal,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await;
 
                 let unlock_result = match result {
                     Ok(msg) => match msg.payload {
-                        EventKind::UnlockResponse { success, profile: resp_profile } => {
-                            daemon_wm::controller::Event::UnlockResult {
-                                success,
-                                profile: resp_profile,
-                            }
-                        }
-                        EventKind::UnlockRejected { reason, profile: resp_profile } => {
+                        EventKind::UnlockResponse {
+                            success,
+                            profile: resp_profile,
+                        } => daemon_wm::controller::Event::UnlockResult {
+                            success,
+                            profile: resp_profile,
+                        },
+                        EventKind::UnlockRejected {
+                            reason,
+                            profile: resp_profile,
+                        } => {
                             let already = reason == UnlockRejectedReason::AlreadyUnlocked;
                             if already {
-                                tracing::info!(?resp_profile, "vault already unlocked, treating as success");
+                                tracing::info!(
+                                    ?resp_profile,
+                                    "vault already unlocked, treating as success"
+                                );
                             } else {
                                 tracing::info!(?reason, ?resp_profile, "unlock rejected");
                             }
@@ -1197,12 +1323,20 @@ async fn execute_commands(
                 drop(cfg);
                 drop(win_list);
                 Box::pin(execute_commands(
-                    sub_cmds, overlay_cmd_tx, overlay_event_rx,
-                    #[cfg(target_os = "linux")] backend,
-                    client, config_state, controller, windows, wm_config,
+                    sub_cmds,
+                    overlay_cmd_tx,
+                    overlay_event_rx,
+                    #[cfg(target_os = "linux")]
+                    backend,
+                    client,
+                    config_state,
+                    controller,
+                    windows,
+                    wm_config,
                     ipc_keyboard_confirmed,
                     password_buffer,
-                )).await;
+                ))
+                .await;
             }
             Command::ClearPasswordBuffer => {
                 password_buffer.clear();
@@ -1225,11 +1359,14 @@ async fn execute_commands(
                         %profile_name,
                         "activating profile after vault unlock"
                     );
-                    match client.request(
-                        activate_event,
-                        SecurityLevel::Internal,
-                        std::time::Duration::from_secs(10),
-                    ).await {
+                    match client
+                        .request(
+                            activate_event,
+                            SecurityLevel::Internal,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await
+                    {
                         Ok(msg) => match msg.payload {
                             EventKind::ProfileActivateResponse { success: true } => {
                                 tracing::info!(
@@ -1268,14 +1405,18 @@ async fn execute_commands(
                     %message,
                     "unlock error displayed to user"
                 );
-                let profile = controller.current_unlock_profile()
+                let profile = controller
+                    .current_unlock_profile()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "vault".into());
-                if overlay_cmd_tx.send(OverlayCmd::ShowUnlockPrompt {
-                    profile,
-                    password_len: password_buffer.char_count(),
-                    error: Some(message),
-                }).is_err() {
+                if overlay_cmd_tx
+                    .send(OverlayCmd::ShowUnlockPrompt {
+                        profile,
+                        password_len: password_buffer.char_count(),
+                        error: Some(message),
+                    })
+                    .is_err()
+                {
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
@@ -1287,7 +1428,7 @@ async fn execute_commands(
 async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sig = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         sig.recv().await;
     }
@@ -1301,11 +1442,10 @@ async fn sigterm() {
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
     use platform_linux::sandbox::{
-        apply_sandbox_with_scope, FsAccess, LandlockRule, LandlockScope, SeccompProfile,
+        FsAccess, LandlockRule, LandlockScope, SeccompProfile, apply_sandbox_with_scope,
     };
 
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/run/user/1000".into());
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
 
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
@@ -1333,9 +1473,8 @@ fn apply_sandbox() {
         // ReadWriteFile because the socket is a non-directory fd — directory-only
         // landlock flags (ReadDir, MakeDir, etc.) cause PartiallyEnforced.
         LandlockRule {
-            path: std::path::PathBuf::from(&runtime_dir).join(
-                std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".into()),
-            ),
+            path: std::path::PathBuf::from(&runtime_dir)
+                .join(std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".into())),
             access: FsAccess::ReadWriteFile,
         },
         // MRU state file.
@@ -1386,8 +1525,7 @@ fn apply_sandbox() {
         },
         // GDK/GTK user data.
         LandlockRule {
-            path: dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent")),
+            path: dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("/nonexistent")),
             access: FsAccess::ReadOnly,
         },
         // DRI devices: GPU-accelerated rendering for GTK4/Cairo overlay.
@@ -1448,26 +1586,42 @@ fn apply_sandbox() {
         let mut ssh_paths_added = std::collections::HashSet::new();
 
         // Helper: add a path to Landlock rules if it exists and hasn't been added yet.
-        let add_ssh_path = |rules: &mut Vec<LandlockRule>,
-                                 path: std::path::PathBuf,
-                                 access: FsAccess,
-                                 seen: &mut std::collections::HashSet<std::path::PathBuf>| {
-            if seen.insert(path.clone()) && (path.exists() || path.is_symlink()) {
-                rules.push(LandlockRule { path, access });
-            }
-        };
+        let add_ssh_path =
+            |rules: &mut Vec<LandlockRule>,
+             path: std::path::PathBuf,
+             access: FsAccess,
+             seen: &mut std::collections::HashSet<std::path::PathBuf>| {
+                if seen.insert(path.clone()) && (path.exists() || path.is_symlink()) {
+                    rules.push(LandlockRule { path, access });
+                }
+            };
 
         if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
             let sock_path = std::path::PathBuf::from(&sock);
 
             // Grant the literal $SSH_AUTH_SOCK path (symlink or direct).
-            add_ssh_path(&mut rules, sock_path.clone(), FsAccess::ReadWriteFile, &mut ssh_paths_added);
+            add_ssh_path(
+                &mut rules,
+                sock_path.clone(),
+                FsAccess::ReadWriteFile,
+                &mut ssh_paths_added,
+            );
 
             // Resolve symlink to canonical target; grant target + parent dir.
             if let Ok(canonical) = std::fs::canonicalize(&sock_path) {
-                add_ssh_path(&mut rules, canonical.clone(), FsAccess::ReadWriteFile, &mut ssh_paths_added);
+                add_ssh_path(
+                    &mut rules,
+                    canonical.clone(),
+                    FsAccess::ReadWriteFile,
+                    &mut ssh_paths_added,
+                );
                 if let Some(parent) = canonical.parent() {
-                    add_ssh_path(&mut rules, parent.to_path_buf(), FsAccess::ReadOnly, &mut ssh_paths_added);
+                    add_ssh_path(
+                        &mut rules,
+                        parent.to_path_buf(),
+                        FsAccess::ReadOnly,
+                        &mut ssh_paths_added,
+                    );
                 }
             }
         }
@@ -1479,14 +1633,34 @@ fn apply_sandbox() {
             let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
             let agent_sock = ssh_dir.join("agent.sock");
 
-            add_ssh_path(&mut rules, ssh_dir, FsAccess::ReadOnly, &mut ssh_paths_added);
-            add_ssh_path(&mut rules, agent_sock.clone(), FsAccess::ReadWriteFile, &mut ssh_paths_added);
+            add_ssh_path(
+                &mut rules,
+                ssh_dir,
+                FsAccess::ReadOnly,
+                &mut ssh_paths_added,
+            );
+            add_ssh_path(
+                &mut rules,
+                agent_sock.clone(),
+                FsAccess::ReadWriteFile,
+                &mut ssh_paths_added,
+            );
 
             // If the fallback symlink exists, also resolve its target.
             if let Ok(canonical) = std::fs::canonicalize(&agent_sock) {
-                add_ssh_path(&mut rules, canonical.clone(), FsAccess::ReadWriteFile, &mut ssh_paths_added);
+                add_ssh_path(
+                    &mut rules,
+                    canonical.clone(),
+                    FsAccess::ReadWriteFile,
+                    &mut ssh_paths_added,
+                );
                 if let Some(parent) = canonical.parent() {
-                    add_ssh_path(&mut rules, parent.to_path_buf(), FsAccess::ReadOnly, &mut ssh_paths_added);
+                    add_ssh_path(
+                        &mut rules,
+                        parent.to_path_buf(),
+                        FsAccess::ReadOnly,
+                        &mut ssh_paths_added,
+                    );
                 }
             }
         }
@@ -1496,56 +1670,119 @@ fn apply_sandbox() {
         daemon_name: "daemon-wm".into(),
         allowed_syscalls: vec![
             // I/O basics
-            "read".into(), "write".into(), "close".into(),
-            "openat".into(), "lseek".into(), "pread64".into(),
-            "fstat".into(), "stat".into(), "newfstatat".into(),
-            "statx".into(), "access".into(), "fcntl".into(),
-            "flock".into(), "ftruncate".into(), "mkdir".into(),
-            "rename".into(), "chmod".into(), "fchmod".into(),
-            "fsync".into(), "fdatasync".into(), "ioctl".into(),
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "openat".into(),
+            "lseek".into(),
+            "pread64".into(),
+            "fstat".into(),
+            "stat".into(),
+            "newfstatat".into(),
+            "statx".into(),
+            "access".into(),
+            "fcntl".into(),
+            "flock".into(),
+            "ftruncate".into(),
+            "mkdir".into(),
+            "rename".into(),
+            "chmod".into(),
+            "fchmod".into(),
+            "fsync".into(),
+            "fdatasync".into(),
+            "ioctl".into(),
             "getdents64".into(),
             // Memory
-            "mmap".into(), "mprotect".into(), "munmap".into(),
-            "madvise".into(), "brk".into(),
+            "mmap".into(),
+            "mprotect".into(),
+            "munmap".into(),
+            "madvise".into(),
+            "brk".into(),
             // Process / threading
-            "futex".into(), "clone3".into(), "clone".into(),
-            "set_robust_list".into(), "set_tid_address".into(),
-            "rseq".into(), "sched_getaffinity".into(),
-            "prlimit64".into(), "prctl".into(),
-            "getpid".into(), "gettid".into(), "getuid".into(), "geteuid".into(),
-            "getresuid".into(), "getresgid".into(), "getgid".into(), "getegid".into(),
+            "futex".into(),
+            "clone3".into(),
+            "clone".into(),
+            "set_robust_list".into(),
+            "set_tid_address".into(),
+            "rseq".into(),
+            "sched_getaffinity".into(),
+            "prlimit64".into(),
+            "prctl".into(),
+            "getpid".into(),
+            "gettid".into(),
+            "getuid".into(),
+            "geteuid".into(),
+            "getresuid".into(),
+            "getresgid".into(),
+            "getgid".into(),
+            "getegid".into(),
             "kill".into(),
             // Epoll / event loop (tokio)
-            "epoll_wait".into(), "epoll_ctl".into(),
-            "epoll_create1".into(), "eventfd2".into(),
-            "poll".into(), "ppoll".into(),
+            "epoll_wait".into(),
+            "epoll_ctl".into(),
+            "epoll_create1".into(),
+            "eventfd2".into(),
+            "poll".into(),
+            "ppoll".into(),
             // Timers (tokio runtime)
-            "clock_gettime".into(), "timer_create".into(),
-            "timer_settime".into(), "timer_delete".into(),
+            "clock_gettime".into(),
+            "timer_create".into(),
+            "timer_settime".into(),
+            "timer_delete".into(),
             // Networking / IPC (Wayland compositor protocol)
-            "socket".into(), "connect".into(), "sendto".into(),
-            "recvfrom".into(), "recvmsg".into(), "sendmsg".into(),
-            "getsockname".into(), "getpeername".into(),
-            "setsockopt".into(), "socketpair".into(),
-            "shutdown".into(), "getsockopt".into(),
+            "socket".into(),
+            "connect".into(),
+            "sendto".into(),
+            "recvfrom".into(),
+            "recvmsg".into(),
+            "sendmsg".into(),
+            "getsockname".into(),
+            "getpeername".into(),
+            "setsockopt".into(),
+            "socketpair".into(),
+            "shutdown".into(),
+            "getsockopt".into(),
             // Signals
-            "sigaltstack".into(), "rt_sigaction".into(),
-            "rt_sigprocmask".into(), "rt_sigreturn".into(),
+            "sigaltstack".into(),
+            "rt_sigaction".into(),
+            "rt_sigprocmask".into(),
+            "rt_sigreturn".into(),
             "tgkill".into(),
             // GTK4/GLib runtime
-            "inotify_init1".into(), "inotify_add_watch".into(), "inotify_rm_watch".into(),
-            "statfs".into(), "fstatfs".into(), "memfd_create".into(),
-            "writev".into(), "readv".into(),
-            "readlink".into(), "readlinkat".into(), "uname".into(),
-            "accept4".into(), "bind".into(), "listen".into(),
-            "nanosleep".into(), "clock_nanosleep".into(), "sched_yield".into(),
-            "timerfd_create".into(), "timerfd_settime".into(), "timerfd_gettime".into(),
-            "mlock".into(), "mlock2".into(), "mremap".into(),
-            "unlink".into(), "sched_get_priority_max".into(),
+            "inotify_init1".into(),
+            "inotify_add_watch".into(),
+            "inotify_rm_watch".into(),
+            "statfs".into(),
+            "fstatfs".into(),
+            "memfd_create".into(),
+            "writev".into(),
+            "readv".into(),
+            "readlink".into(),
+            "readlinkat".into(),
+            "uname".into(),
+            "accept4".into(),
+            "bind".into(),
+            "listen".into(),
+            "nanosleep".into(),
+            "clock_nanosleep".into(),
+            "sched_yield".into(),
+            "timerfd_create".into(),
+            "timerfd_settime".into(),
+            "timerfd_gettime".into(),
+            "mlock".into(),
+            "mlock2".into(),
+            "mremap".into(),
+            "unlink".into(),
+            "sched_get_priority_max".into(),
             // Misc
-            "exit_group".into(), "exit".into(), "getrandom".into(),
-            "restart_syscall".into(), "getcwd".into(),
-            "pipe2".into(), "dup".into(), "ioctl".into(),
+            "exit_group".into(),
+            "exit".into(),
+            "getrandom".into(),
+            "restart_syscall".into(),
+            "getcwd".into(),
+            "pipe2".into(),
+            "dup".into(),
+            "ioctl".into(),
         ],
     };
 
@@ -1564,8 +1801,7 @@ fn apply_sandbox() {
 fn init_logging(format: &str) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     match format {
         "json" => {
@@ -1575,9 +1811,7 @@ fn init_logging(format: &str) -> anyhow::Result<()> {
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 

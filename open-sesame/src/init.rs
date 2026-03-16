@@ -94,17 +94,14 @@ fn init_config() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    std::fs::create_dir_all(&config_dir)
-        .context("failed to create config directory")?;
+    std::fs::create_dir_all(&config_dir).context("failed to create config directory")?;
 
     let mut config = core_config::Config::default();
-    config.profiles.insert(
-        "default".into(),
-        core_config::ProfileConfig::default(),
-    );
+    config
+        .profiles
+        .insert("default".into(), core_config::ProfileConfig::default());
 
-    let toml_str = toml::to_string_pretty(&config)
-        .context("failed to serialize default config")?;
+    let toml_str = toml::to_string_pretty(&config).context("failed to serialize default config")?;
     core_config::atomic_write(&config_path, toml_str.as_bytes())
         .context("failed to write config")?;
 
@@ -128,8 +125,8 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
 
     // Deterministic namespace for profile IDs — matches daemon-profile.
     let profile_ns = uuid::Uuid::from_bytes([
-        0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77,
-        0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66, 0x8b,
+        0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77, 0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66,
+        0x8b,
     ]);
 
     let (install_ns, org_config) = if let Some(domain) = org {
@@ -146,19 +143,17 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
     };
 
     // Machine binding: read /etc/machine-id
-    let machine_binding = std::fs::read_to_string("/etc/machine-id")
-        .ok()
-        .map(|mid| {
-            let mid = mid.trim();
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(mid.as_bytes());
-            hasher.update(id.as_bytes());
-            let hash = hasher.finalize();
-            core_config::MachineBindingConfig {
-                binding_hash: hash.to_hex().to_string(),
-                binding_type: "machine-id".to_string(),
-            }
-        });
+    let machine_binding = std::fs::read_to_string("/etc/machine-id").ok().map(|mid| {
+        let mid = mid.trim();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(mid.as_bytes());
+        hasher.update(id.as_bytes());
+        let hash = hasher.finalize();
+        core_config::MachineBindingConfig {
+            binding_hash: hash.to_hex().to_string(),
+            binding_type: "machine-id".to_string(),
+        }
+    });
 
     let install_config = core_config::InstallationConfig {
         id,
@@ -197,18 +192,24 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
         };
 
         let mut audit = core_profile::AuditLogger::new(
-            audit_writer, last_hash, sequence, core_types::AuditHash::Blake3, None,
+            audit_writer,
+            last_hash,
+            sequence,
+            core_types::AuditHash::Blake3,
+            None,
         );
-        audit.append(core_profile::AuditAction::InstallationCreated {
-            id: core_types::InstallationId {
-                id,
-                org_ns: None,
-                namespace: install_ns,
-                machine_binding: None,
-            },
-            org: org.map(|s| s.to_string()),
-            machine_binding_present: machine_binding.is_some(),
-        }).map_err(|e| anyhow::anyhow!("failed to write audit event: {e}"))?;
+        audit
+            .append(core_profile::AuditAction::InstallationCreated {
+                id: core_types::InstallationId {
+                    id,
+                    org_ns: None,
+                    namespace: install_ns,
+                    machine_binding: None,
+                },
+                org: org.map(|s| s.to_string()),
+                machine_binding_present: machine_binding.is_some(),
+            })
+            .map_err(|e| anyhow::anyhow!("failed to write audit event: {e}"))?;
     }
 
     step_done(&format!("Created {}", installation_path.display()));
@@ -217,7 +218,14 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
     if let Some(domain) = org {
         println!("        Organization:    {}", domain);
     }
-    println!("        Machine binding: {}", if machine_binding.is_some() { "present" } else { "absent" });
+    println!(
+        "        Machine binding: {}",
+        if machine_binding.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
 
     Ok(())
 }
@@ -252,8 +260,12 @@ async fn init_services() -> anyhow::Result<()> {
         .args(["--user", "reset-failed", "open-sesame.target"])
         .status();
     for unit in [
-        "open-sesame-profile", "open-sesame-secrets", "open-sesame-wm",
-        "open-sesame-launcher", "open-sesame-clipboard", "open-sesame-input",
+        "open-sesame-profile",
+        "open-sesame-secrets",
+        "open-sesame-wm",
+        "open-sesame-launcher",
+        "open-sesame-clipboard",
+        "open-sesame-input",
         "open-sesame-snippets",
     ] {
         let _ = std::process::Command::new("systemctl")
@@ -317,7 +329,10 @@ async fn init_unlock() -> anyhow::Result<()> {
         let mut password = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             dialoguer::Password::new()
                 .with_prompt("        Master password")
-                .with_confirmation("        Confirm", "        Passwords don't match, try again")
+                .with_confirmation(
+                    "        Confirm",
+                    "        Passwords don't match, try again",
+                )
                 .interact()
                 .context("failed to read password")?
         } else {
@@ -331,7 +346,9 @@ async fn init_unlock() -> anyhow::Result<()> {
                 }
             }
             if buf.is_empty() {
-                anyhow::bail!("empty password from stdin — refusing to create vault with no password");
+                anyhow::bail!(
+                    "empty password from stdin — refusing to create vault with no password"
+                );
             }
             buf
         };
@@ -352,7 +369,10 @@ async fn init_unlock() -> anyhow::Result<()> {
             EventKind::UnlockResponse { success: false, .. } => {
                 anyhow::bail!("unlock failed — wrong password or keyring error");
             }
-            EventKind::UnlockRejected { reason: core_types::UnlockRejectedReason::AlreadyUnlocked, .. } => {
+            EventKind::UnlockRejected {
+                reason: core_types::UnlockRejectedReason::AlreadyUnlocked,
+                ..
+            } => {
                 // Benign: another client unlocked between our StatusRequest and UnlockRequest.
                 step_skip("Secrets already unlocked");
             }
@@ -361,8 +381,7 @@ async fn init_unlock() -> anyhow::Result<()> {
     }
 
     // Activate default profile.
-    let profile_name = TrustProfileName::try_from("default")
-        .expect("hardcoded valid name");
+    let profile_name = TrustProfileName::try_from("default").expect("hardcoded valid name");
     let event = EventKind::ProfileActivate {
         target: ProfileId::new(),
         profile_name,
@@ -414,7 +433,10 @@ pub fn cmd_wipe() -> anyhow::Result<()> {
     );
     println!("    - Configuration:  {}/", config_dir.display());
     println!("    - Secrets vaults: {}/vaults/", config_dir.display());
-    println!("    - Secrets salt:   {}/secrets.salt", config_dir.display());
+    println!(
+        "    - Secrets salt:   {}/secrets.salt",
+        config_dir.display()
+    );
     println!("    - Audit logs:     {}/audit.jsonl", config_dir.display());
     if let Some(ref rt) = runtime_dir {
         println!("    - Runtime state:  {}/", rt.display());
@@ -454,8 +476,7 @@ pub fn cmd_wipe() -> anyhow::Result<()> {
 
     // Remove config directory.
     if config_dir.exists() {
-        std::fs::remove_dir_all(&config_dir)
-            .context("failed to remove config directory")?;
+        std::fs::remove_dir_all(&config_dir).context("failed to remove config directory")?;
         println!("  Removing {} ... {}", config_dir.display(), "done".green());
     }
 
@@ -463,8 +484,7 @@ pub fn cmd_wipe() -> anyhow::Result<()> {
     if let Some(ref rt) = runtime_dir
         && rt.exists()
     {
-        std::fs::remove_dir_all(rt)
-            .context("failed to remove runtime directory")?;
+        std::fs::remove_dir_all(rt).context("failed to remove runtime directory")?;
         println!("  Removing {} ... {}", rt.display(), "done".green());
     }
 

@@ -52,9 +52,7 @@ pub fn parse_url(url: &str) -> Result<WorkspaceConvention, WorkspaceError> {
 
     // Reject null bytes anywhere in the input.
     if url.contains('\0') {
-        return Err(WorkspaceError::InvalidUrl(
-            "URL contains null bytes".into(),
-        ));
+        return Err(WorkspaceError::InvalidUrl("URL contains null bytes".into()));
     }
 
     // Warn on insecure HTTP URLs — credentials transmitted in cleartext.
@@ -104,11 +102,7 @@ pub fn parse_url(url: &str) -> Result<WorkspaceConvention, WorkspaceError> {
 /// For workspace.git repos, returns [`CloneTarget::WorkspaceGit`] pointing at the
 /// org-level directory. For regular repos, returns [`CloneTarget::Regular`].
 #[must_use]
-pub fn canonical_path(
-    root: &Path,
-    user: &str,
-    conv: &WorkspaceConvention,
-) -> CloneTarget {
+pub fn canonical_path(root: &Path, user: &str, conv: &WorkspaceConvention) -> CloneTarget {
     let base = root.join(user).join(&conv.server).join(&conv.org);
     if conv.is_workspace_git {
         CloneTarget::WorkspaceGit(base)
@@ -143,10 +137,8 @@ pub fn parse_path(root: &Path, path: &Path) -> Result<WorkspaceConvention, Works
     // Canonicalize to resolve symlinks before checking containment.
     // Prevents symlink escape attacks where a path inside the workspace
     // root is a symlink pointing outside it.
-    let canonical = std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf());
-    let canonical_root = std::fs::canonicalize(root)
-        .unwrap_or_else(|_| root.to_path_buf());
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     let rel = canonical
         .strip_prefix(&canonical_root)
@@ -286,7 +278,8 @@ fn validate_component(label: &str, value: &str) -> Result<(), WorkspaceError> {
     // Filesystem component length limit (ext4, btrfs, etc.)
     if value.len() > 255 {
         return Err(WorkspaceError::PathValidation(format!(
-            "{label} exceeds 255 bytes: {}", value.len()
+            "{label} exceeds 255 bytes: {}",
+            value.len()
         )));
     }
     // Reject leading/trailing whitespace — creates filesystem ambiguity.

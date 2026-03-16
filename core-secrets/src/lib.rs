@@ -14,13 +14,13 @@
 //! is behind the `KeyLocker` trait, implemented in platform-* crates.
 #![forbid(unsafe_code)]
 
-pub mod store;
-pub mod sqlcipher;
 pub mod compliance;
-mod key_locker;
 mod jit;
+mod key_locker;
+pub mod sqlcipher;
+pub mod store;
 
-pub use store::{SecretsStore, InMemoryStore};
-pub use sqlcipher::SqlCipherStore;
-pub use key_locker::KeyLocker;
 pub use jit::JitDelivery;
+pub use key_locker::KeyLocker;
+pub use sqlcipher::SqlCipherStore;
+pub use store::{InMemoryStore, SecretsStore};

@@ -72,7 +72,9 @@ impl From<Vec<u8>> for SensitiveBytes {
 
 macro_rules! define_id {
     ($name:ident, $prefix:expr) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+        )]
         #[serde(transparent)]
         pub struct $name(Uuid);
 
@@ -418,15 +420,27 @@ impl std::str::FromStr for OciReference {
         // Split off provenance (@...)
         let (main, provenance) = match s.rsplit_once('@') {
             Some((m, p)) if !p.is_empty() => (m, Some(p.to_owned())),
-            Some((_, _)) => return Err(Error::Validation("OCI reference has empty provenance after '@'".into())),
+            Some((_, _)) => {
+                return Err(Error::Validation(
+                    "OCI reference has empty provenance after '@'".into(),
+                ));
+            }
             None => (s, None),
         };
 
         // Split off revision (:...)
         let (path, revision) = match main.rsplit_once(':') {
             Some((p, r)) if !r.is_empty() => (p, r.to_owned()),
-            Some((_, _)) => return Err(Error::Validation("OCI reference has empty revision after ':'".into())),
-            None => return Err(Error::Validation("OCI reference missing ':revision'".into())),
+            Some((_, _)) => {
+                return Err(Error::Validation(
+                    "OCI reference has empty revision after ':'".into(),
+                ));
+            }
+            None => {
+                return Err(Error::Validation(
+                    "OCI reference missing ':revision'".into(),
+                ));
+            }
         };
 
         // Split path into registry/principal/scope (at least 3 segments)
@@ -438,9 +452,15 @@ impl std::str::FromStr for OciReference {
             )));
         }
 
-        for (name, val) in [("registry", segments[0]), ("principal", segments[1]), ("scope", segments[2])] {
+        for (name, val) in [
+            ("registry", segments[0]),
+            ("principal", segments[1]),
+            ("scope", segments[2]),
+        ] {
             if val.is_empty() {
-                return Err(Error::Validation(format!("OCI reference {name} must not be empty")));
+                return Err(Error::Validation(format!(
+                    "OCI reference {name} must not be empty"
+                )));
             }
         }
 
@@ -456,7 +476,11 @@ impl std::str::FromStr for OciReference {
 
 impl fmt::Display for OciReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}/{}:{}", self.registry, self.principal, self.scope, self.revision)?;
+        write!(
+            f,
+            "{}/{}/{}:{}",
+            self.registry, self.principal, self.scope, self.revision
+        )?;
         if let Some(ref prov) = self.provenance {
             write!(f, "@{prov}")?;
         }
@@ -482,7 +506,9 @@ impl CapabilitySet {
     /// The empty capability set — no permissions.
     #[must_use]
     pub fn empty() -> Self {
-        Self { capabilities: BTreeSet::new() }
+        Self {
+            capabilities: BTreeSet::new(),
+        }
     }
 
     /// A capability set containing all non-parameterized capabilities.
@@ -506,7 +532,9 @@ impl CapabilitySet {
                 Capability::Lock,
                 Capability::ExtensionInstall,
                 Capability::ExtensionManage,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -514,7 +542,11 @@ impl CapabilitySet {
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
         Self {
-            capabilities: self.capabilities.union(&other.capabilities).cloned().collect(),
+            capabilities: self
+                .capabilities
+                .union(&other.capabilities)
+                .cloned()
+                .collect(),
         }
     }
 
@@ -522,7 +554,11 @@ impl CapabilitySet {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
         Self {
-            capabilities: self.capabilities.intersection(&other.capabilities).cloned().collect(),
+            capabilities: self
+                .capabilities
+                .intersection(&other.capabilities)
+                .cloned()
+                .collect(),
         }
     }
 
@@ -636,20 +672,14 @@ pub struct DelegationLink {
 #[non_exhaustive]
 pub enum Attestation {
     /// Unix domain socket credentials (pid, uid, gid).
-    UCred {
-        pid: u32,
-        uid: u32,
-        gid: u32,
-    },
+    UCred { pid: u32, uid: u32, gid: u32 },
     /// Noise IK static key verified against the clearance registry.
     NoiseIK {
         public_key: [u8; 32],
         registry_generation: u64,
     },
     /// Master password verified against the KDF-derived key.
-    MasterPassword {
-        verified_at: u64,
-    },
+    MasterPassword { verified_at: u64 },
     /// Hardware security key (FIDO2/WebAuthn).
     SecurityKey {
         credential_id: Vec<u8>,
@@ -915,15 +945,11 @@ pub enum LaunchDenial {
     },
     /// Required secrets were not found (configuration error, not lock state).
     /// Count is opaque to avoid revealing which secrets exist.
-    SecretNotFound {
-        missing_count: u32,
-    },
+    SecretNotFound { missing_count: u32 },
     /// Rate limiting on secret access.
     RateLimited,
     /// A trust profile referenced by a tag does not exist in config.
-    ProfileNotFound {
-        profile: String,
-    },
+    ProfileNotFound { profile: String },
     /// A launch profile referenced by a tag does not exist.
     LaunchProfileNotFound {
         profile: String,
@@ -932,9 +958,7 @@ pub enum LaunchDenial {
     /// Desktop entry not found in the launcher cache.
     EntryNotFound,
     /// The spawned process failed to start.
-    SpawnFailed {
-        reason: String,
-    },
+    SpawnFailed { reason: String },
 }
 
 // ============================================================================
@@ -1471,7 +1495,6 @@ pub enum EventKind {
     },
 
     // -- Bus-level errors (generated by the IPC server, not daemons) --
-
     /// The bus rejected the message. Sent back to the sender as a correlated
     /// response so the client gets an actionable error instead of a silent timeout.
     AccessDenied {
@@ -1771,7 +1794,8 @@ pub fn validate_secret_key(key: &str) -> Result<()> {
     }
     if key.len() > 256 {
         return Err(Error::Validation(format!(
-            "secret key exceeds 256 characters (got {})", key.len()
+            "secret key exceeds 256 characters (got {})",
+            key.len()
         )));
     }
     if key.contains("..") {
@@ -1824,7 +1848,9 @@ impl TrustProfileName {
             ));
         }
         if name == "." || name == ".." {
-            return Err(format!("trust profile name '{name}' is a path traversal component"));
+            return Err(format!(
+                "trust profile name '{name}' is a path traversal component"
+            ));
         }
         if !name.as_bytes()[0].is_ascii_alphanumeric() {
             return Err(format!(
@@ -2123,7 +2149,14 @@ mod tests {
 
     #[test]
     fn trust_profile_name_valid() {
-        for name in ["default", "work", "corporate-aws", "my_profile", "a", "A1-b_2"] {
+        for name in [
+            "default",
+            "work",
+            "corporate-aws",
+            "my_profile",
+            "a",
+            "A1-b_2",
+        ] {
             assert!(
                 TrustProfileName::try_from(name).is_ok(),
                 "expected '{name}' to be valid"
@@ -2182,7 +2215,8 @@ mod tests {
 
     #[test]
     fn trust_profile_name_json_rejects_invalid() {
-        let result: std::result::Result<TrustProfileName, _> = serde_json::from_str("\"../../etc\"");
+        let result: std::result::Result<TrustProfileName, _> =
+            serde_json::from_str("\"../../etc\"");
         assert!(result.is_err());
     }
 
@@ -2245,7 +2279,11 @@ mod tests {
 
     #[test]
     fn conflict_policy_roundtrip_json() {
-        for policy in [ConflictPolicy::Strict, ConflictPolicy::Warn, ConflictPolicy::Last] {
+        for policy in [
+            ConflictPolicy::Strict,
+            ConflictPolicy::Warn,
+            ConflictPolicy::Last,
+        ] {
             let json = serde_json::to_string(&policy).unwrap();
             let decoded: ConflictPolicy = serde_json::from_str(&json).unwrap();
             assert_eq!(decoded, policy);
@@ -2295,12 +2333,19 @@ mod tests {
 
     #[test]
     fn event_kind_debug_redacts_secrets() {
-        let unlock = EventKind::UnlockRequest { password: SensitiveBytes::new(b"hunter2".to_vec()), profile: None };
+        let unlock = EventKind::UnlockRequest {
+            password: SensitiveBytes::new(b"hunter2".to_vec()),
+            profile: None,
+        };
         let debug = format!("{unlock:?}");
         assert!(debug.contains("REDACTED"));
         assert!(!debug.contains("hunter2"));
 
-        let get_resp = EventKind::SecretGetResponse { key: "api-key".into(), value: SensitiveBytes::new(b"secret123".to_vec()), denial: None };
+        let get_resp = EventKind::SecretGetResponse {
+            key: "api-key".into(),
+            value: SensitiveBytes::new(b"secret123".to_vec()),
+            denial: None,
+        };
         let debug = format!("{get_resp:?}");
         assert!(debug.contains("REDACTED"));
         assert!(!debug.contains("secret123"));
@@ -2347,7 +2392,10 @@ mod tests {
     fn agent_id_display_prefix() {
         let id = AgentId::from_uuid(Uuid::from_u128(1));
         let s = format!("{id}");
-        assert!(s.starts_with("agent-"), "AgentId display should have 'agent-' prefix, got: {s}");
+        assert!(
+            s.starts_with("agent-"),
+            "AgentId display should have 'agent-' prefix, got: {s}"
+        );
     }
 
     proptest! {
@@ -2428,7 +2476,11 @@ mod tests {
 
     #[test]
     fn crypto_profile_roundtrip_json() {
-        for p in [CryptoProfile::LeadingEdge, CryptoProfile::GovernanceCompatible, CryptoProfile::Custom] {
+        for p in [
+            CryptoProfile::LeadingEdge,
+            CryptoProfile::GovernanceCompatible,
+            CryptoProfile::Custom,
+        ] {
             let json = serde_json::to_string(&p).unwrap();
             let decoded: CryptoProfile = serde_json::from_str(&json).unwrap();
             assert_eq!(p, decoded);
@@ -2501,7 +2553,8 @@ mod tests {
 
     #[test]
     fn oci_reference_parse_full() {
-        let r = OciReference::parse("registry.example.com/principal/scope:1.0.0@sha256:abc123").unwrap();
+        let r = OciReference::parse("registry.example.com/principal/scope:1.0.0@sha256:abc123")
+            .unwrap();
         assert_eq!(r.registry, "registry.example.com");
         assert_eq!(r.principal, "principal");
         assert_eq!(r.scope, "scope");
@@ -2633,7 +2686,11 @@ mod tests {
 
     #[test]
     fn attestation_ucred_roundtrip_json() {
-        let att = Attestation::UCred { pid: 1234, uid: 1000, gid: 1000 };
+        let att = Attestation::UCred {
+            pid: 1234,
+            uid: 1000,
+            gid: 1000,
+        };
         let json = serde_json::to_string(&att).unwrap();
         let decoded: Attestation = serde_json::from_str(&json).unwrap();
         assert_eq!(att, decoded);
@@ -2670,7 +2727,9 @@ mod tests {
 
     #[test]
     fn agent_type_roundtrip_json() {
-        let at = AgentType::AI { model_family: "claude".into() };
+        let at = AgentType::AI {
+            model_family: "claude".into(),
+        };
         let json = serde_json::to_string(&at).unwrap();
         let decoded: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(at, decoded);
@@ -2688,7 +2747,11 @@ mod tests {
                 namespace: Uuid::from_u128(2),
                 machine_binding: None,
             },
-            attestations: vec![Attestation::UCred { pid: 100, uid: 1000, gid: 1000 }],
+            attestations: vec![Attestation::UCred {
+                pid: 100,
+                uid: 1000,
+                gid: 1000,
+            }],
             session_scope: CapabilitySet::all(),
             delegation_chain: vec![],
         };
@@ -2761,21 +2824,27 @@ mod tests {
                 Capability::SecretRead { key_pattern: None },
                 Capability::SecretWrite { key_pattern: None },
                 Capability::ProfileActivate,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let caps_b = CapabilitySet {
             capabilities: [
                 Capability::SecretWrite { key_pattern: None },
                 Capability::Admin,
                 Capability::StatusRead,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let caps_c = CapabilitySet {
             capabilities: [
                 Capability::SecretRead { key_pattern: None },
                 Capability::Admin,
                 Capability::Lock,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
 
         // Commutativity of intersection
@@ -2833,8 +2902,8 @@ mod tests {
     #[test]
     fn namespace_derivation_determinism() {
         let ns1 = uuid::Uuid::from_bytes([
-            0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77,
-            0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66, 0x8b,
+            0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77, 0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d,
+            0x66, 0x8b,
         ]);
         let ns2 = uuid::Uuid::from_bytes([0xaa; 16]);
 
@@ -2901,7 +2970,10 @@ mod tests {
         let decoded: EventKind = serde_json::from_str(&json).unwrap();
         match decoded {
             EventKind::UnlockRequest { profile, .. } => {
-                assert_eq!(profile.unwrap(), TrustProfileName::try_from("work").unwrap());
+                assert_eq!(
+                    profile.unwrap(),
+                    TrustProfileName::try_from("work").unwrap()
+                );
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -2914,7 +2986,10 @@ mod tests {
         let decoded: EventKind = serde_json::from_str(json).unwrap();
         match decoded {
             EventKind::UnlockRequest { profile, .. } => {
-                assert!(profile.is_none(), "missing profile field should default to None");
+                assert!(
+                    profile.is_none(),
+                    "missing profile field should default to None"
+                );
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -2926,7 +3001,10 @@ mod tests {
         let decoded: EventKind = serde_json::from_str(json).unwrap();
         match decoded {
             EventKind::LockRequest { profile } => {
-                assert!(profile.is_none(), "missing profile field should default to None");
+                assert!(
+                    profile.is_none(),
+                    "missing profile field should default to None"
+                );
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -2962,7 +3040,10 @@ mod tests {
         let decoded: EventKind = serde_json::from_str(json).unwrap();
         match decoded {
             EventKind::StatusResponse { lock_state, .. } => {
-                assert!(lock_state.is_empty(), "missing lock_state should default to empty BTreeMap");
+                assert!(
+                    lock_state.is_empty(),
+                    "missing lock_state should default to empty BTreeMap"
+                );
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -2976,7 +3057,13 @@ mod tests {
         };
         let debug = format!("{event:?}");
         assert!(debug.contains("REDACTED"), "password should be redacted");
-        assert!(!debug.contains("super-secret"), "password plaintext must not appear");
-        assert!(debug.contains("myprofile"), "profile name should be visible");
+        assert!(
+            !debug.contains("super-secret"),
+            "password plaintext must not appear"
+        );
+        assert!(
+            debug.contains("myprofile"),
+            "profile name should be visible"
+        );
     }
 }

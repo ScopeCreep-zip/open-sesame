@@ -63,7 +63,8 @@ pub struct GlobalConfig {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            default_profile: core_types::TrustProfileName::try_from("default").expect("hardcoded valid name"),
+            default_profile: core_types::TrustProfileName::try_from("default")
+                .expect("hardcoded valid name"),
             ipc: IpcConfig::default(),
             logging: LogConfig::default(),
         }
@@ -318,12 +319,20 @@ impl Default for WmConfig {
             hint_matched_color: "#4caf50".into(),
             quick_switch_threshold_ms: 250,
             key_bindings: [
-                ("g", vec!["ghostty", "com.mitchellh.ghostty"], Some("ghostty")),
+                (
+                    "g",
+                    vec!["ghostty", "com.mitchellh.ghostty"],
+                    Some("ghostty"),
+                ),
                 ("f", vec!["firefox", "org.mozilla.firefox"], Some("firefox")),
                 ("e", vec!["microsoft-edge"], Some("microsoft-edge")),
                 ("c", vec!["chromium", "google-chrome"], None),
                 ("v", vec!["code", "Code", "cursor", "Cursor"], Some("code")),
-                ("n", vec!["nautilus", "org.gnome.Nautilus"], Some("nautilus")),
+                (
+                    "n",
+                    vec!["nautilus", "org.gnome.Nautilus"],
+                    Some("nautilus"),
+                ),
                 ("s", vec!["slack", "Slack"], Some("slack")),
                 ("d", vec!["discord", "Discord"], Some("discord")),
                 ("m", vec!["spotify"], Some("spotify")),
@@ -468,23 +477,39 @@ impl CryptoConfigToml {
         let noise_cipher = match self.noise_cipher.as_str() {
             "chacha-poly" => core_types::NoiseCipher::ChaChaPoly,
             "aes-gcm" => core_types::NoiseCipher::AesGcm,
-            other => return Err(core_types::Error::Config(format!("unknown noise_cipher: {other}"))),
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown noise_cipher: {other}"
+                )));
+            }
         };
         let noise_hash = match self.noise_hash.as_str() {
             "blake2s" => core_types::NoiseHash::Blake2s,
             "sha256" => core_types::NoiseHash::Sha256,
-            other => return Err(core_types::Error::Config(format!("unknown noise_hash: {other}"))),
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown noise_hash: {other}"
+                )));
+            }
         };
         let audit_hash = match self.audit_hash.as_str() {
             "blake3" => core_types::AuditHash::Blake3,
             "sha256" => core_types::AuditHash::Sha256,
-            other => return Err(core_types::Error::Config(format!("unknown audit_hash: {other}"))),
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown audit_hash: {other}"
+                )));
+            }
         };
         let minimum_peer_profile = match self.minimum_peer_profile.as_str() {
             "leading-edge" => core_types::CryptoProfile::LeadingEdge,
             "governance-compatible" => core_types::CryptoProfile::GovernanceCompatible,
             "custom" => core_types::CryptoProfile::Custom,
-            other => return Err(core_types::Error::Config(format!("unknown crypto profile: {other}"))),
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown crypto profile: {other}"
+                )));
+            }
         };
         Ok(core_types::CryptoConfig {
             kdf,
@@ -641,8 +666,10 @@ pub struct WorkspaceSettings {
 impl Default for WorkspaceSettings {
     fn default() -> Self {
         Self {
-            root: std::env::var("SESAME_WORKSPACE_ROOT")
-                .map_or_else(|_| std::path::PathBuf::from("/workspace"), std::path::PathBuf::from),
+            root: std::env::var("SESAME_WORKSPACE_ROOT").map_or_else(
+                |_| std::path::PathBuf::from("/workspace"),
+                std::path::PathBuf::from,
+            ),
             user: std::env::var("USER").unwrap_or_else(|_| "user".into()),
             default_ssh: true,
         }
@@ -727,7 +754,10 @@ mod tests {
             launch_args = ["--working-directory=/workspace/user/github.com/org/repo"]
         "#;
         let kb: WmKeyBinding = toml::from_str(toml_str).unwrap();
-        assert_eq!(kb.launch_args, vec!["--working-directory=/workspace/user/github.com/org/repo"]);
+        assert_eq!(
+            kb.launch_args,
+            vec!["--working-directory=/workspace/user/github.com/org/repo"]
+        );
     }
 
     #[test]
@@ -738,7 +768,10 @@ mod tests {
             cwd = "/workspace/usrbinkat/github.com/org/repo"
         "#;
         let lp: LaunchProfile = toml::from_str(toml_str).unwrap();
-        assert_eq!(lp.cwd.as_deref(), Some("/workspace/usrbinkat/github.com/org/repo"));
+        assert_eq!(
+            lp.cwd.as_deref(),
+            Some("/workspace/usrbinkat/github.com/org/repo")
+        );
     }
 
     #[test]
@@ -754,12 +787,21 @@ mod tests {
         let mut ws = WorkspaceConfig::default();
         ws.settings.root = std::path::PathBuf::from("/mnt/workspace");
         ws.settings.user = "testuser".into();
-        ws.links.insert("/mnt/workspace/testuser/github.com/org".into(), "work".into());
+        ws.links.insert(
+            "/mnt/workspace/testuser/github.com/org".into(),
+            "work".into(),
+        );
         let toml_str = toml::to_string_pretty(&ws).unwrap();
         let parsed: WorkspaceConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.settings.root, std::path::PathBuf::from("/mnt/workspace"));
+        assert_eq!(
+            parsed.settings.root,
+            std::path::PathBuf::from("/mnt/workspace")
+        );
         assert_eq!(parsed.settings.user, "testuser");
-        assert_eq!(parsed.links["/mnt/workspace/testuser/github.com/org"], "work");
+        assert_eq!(
+            parsed.links["/mnt/workspace/testuser/github.com/org"],
+            "work"
+        );
     }
 
     #[test]

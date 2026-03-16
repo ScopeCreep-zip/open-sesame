@@ -3,7 +3,9 @@
 //! All tests use Noise IK encrypted transport — the same code path as production.
 //! There is no plaintext transport path.
 
-use core_ipc::{BusClient, BusServer, ClearanceRegistry, Message, ZeroizingKeypair, generate_keypair};
+use core_ipc::{
+    BusClient, BusServer, ClearanceRegistry, Message, ZeroizingKeypair, generate_keypair,
+};
 use core_types::{DaemonId, EventKind, SecurityLevel, TrustProfileName};
 use std::time::Duration;
 use uuid::Uuid;
@@ -15,7 +17,12 @@ use uuid::Uuid;
 #[allow(clippy::unused_async)]
 async fn start_server_with_clients(
     client_count: usize,
-) -> (BusServer, tempfile::TempDir, [u8; 32], Vec<ZeroizingKeypair>) {
+) -> (
+    BusServer,
+    tempfile::TempDir,
+    [u8; 32],
+    Vec<ZeroizingKeypair>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("bus.sock");
     let server_kp = generate_keypair().unwrap();
@@ -60,11 +67,7 @@ async fn connect_with_keypair(
 }
 
 /// Helper: connect a client with an ephemeral (unregistered) keypair.
-async fn connect_client(
-    id: DaemonId,
-    sock: &std::path::Path,
-    server_pub: &[u8; 32],
-) -> BusClient {
+async fn connect_client(id: DaemonId, sock: &std::path::Path, server_pub: &[u8; 32]) -> BusClient {
     let kp = generate_keypair().unwrap();
     BusClient::connect_encrypted(id, sock, server_pub, kp.as_inner())
         .await
@@ -112,7 +115,9 @@ async fn publish_subscribe_roundtrip() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let client_a = connect_with_keypair(did(1), &sock, &server_pub, &kps[0]).await;
@@ -149,7 +154,9 @@ async fn request_response_correlation() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let client_a = connect_with_keypair(did(1), &sock, &server_pub, &kps[0]).await;
@@ -160,7 +167,9 @@ async fn request_response_correlation() {
     let response_handle = tokio::spawn(async move {
         client_a
             .request(
-                EventKind::SecretList { profile: TrustProfileName::try_from("test").unwrap() },
+                EventKind::SecretList {
+                    profile: TrustProfileName::try_from("test").unwrap(),
+                },
                 SecurityLevel::Internal,
                 Duration::from_secs(2),
             )
@@ -202,7 +211,9 @@ async fn launch_execute_response_roundtrip() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let cli_client = connect_with_keypair(did(1), &sock, &server_pub, &kps[0]).await;
@@ -232,13 +243,20 @@ async fn launch_execute_response_roundtrip() {
         .expect("timeout waiting for LaunchExecute")
         .expect("channel closed");
 
-    assert!(matches!(request_msg.payload, EventKind::LaunchExecute { .. }));
+    assert!(matches!(
+        request_msg.payload,
+        EventKind::LaunchExecute { .. }
+    ));
 
     // Launcher sends success response with pid and no error.
     let msg_ctx = core_ipc::MessageContext::new(did(2));
     let response = Message::new(
         &msg_ctx,
-        EventKind::LaunchExecuteResponse { pid: 12345, error: None, denial: None },
+        EventKind::LaunchExecuteResponse {
+            pid: 12345,
+            error: None,
+            denial: None,
+        },
         SecurityLevel::Internal,
         launcher.epoch(),
     )
@@ -261,7 +279,9 @@ async fn launch_execute_error_roundtrip() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let cli_client = connect_with_keypair(did(1), &sock, &server_pub, &kps[0]).await;
@@ -320,7 +340,9 @@ async fn sender_does_not_receive_own_message() {
     let (server, dir, server_pub) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut client = connect_client(did(1), &sock, &server_pub).await;
@@ -365,7 +387,9 @@ async fn request_timeout() {
     let (server, dir, server_pub) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let client = connect_client(did(1), &sock, &server_pub).await;
@@ -394,7 +418,9 @@ async fn noise_handshake_rejects_wrong_key() {
     let (server, dir, _real_server_pub) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Generate a WRONG server public key (not the real one)
@@ -403,7 +429,8 @@ async fn noise_handshake_rejects_wrong_key() {
 
     // Client attempts to connect expecting the wrong server public key
     let client_kp = generate_keypair().unwrap();
-    let result = BusClient::connect_encrypted(did(1), &sock, &wrong_server_pub, client_kp.as_inner()).await;
+    let result =
+        BusClient::connect_encrypted(did(1), &sock, &wrong_server_pub, client_kp.as_inner()).await;
 
     assert!(
         result.is_err(),
@@ -418,7 +445,9 @@ async fn secret_response_not_received_by_bystander() {
     let (server, dir, server_pub, kps) = start_server_with_clients(3).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Connect requester (client A)
@@ -458,7 +487,10 @@ async fn secret_response_not_received_by_bystander() {
         .await
         .expect("bystander should receive broadcast request")
         .expect("bystander channel closed");
-    assert!(matches!(bystander_request.payload, EventKind::SecretList { .. }));
+    assert!(matches!(
+        bystander_request.payload,
+        EventKind::SecretList { .. }
+    ));
 
     // Secrets daemon sends correlated response
     let msg_ctx = core_ipc::MessageContext::new(did(3));
@@ -477,7 +509,10 @@ async fn secret_response_not_received_by_bystander() {
 
     // Requester receives the response
     let result = response_handle.await.unwrap().unwrap();
-    assert!(matches!(result.payload, EventKind::SecretListResponse { .. }));
+    assert!(matches!(
+        result.payload,
+        EventKind::SecretListResponse { .. }
+    ));
 
     // Bystander must NOT receive the correlated response (unicast routing)
     let bystander_result = tokio::time::timeout(Duration::from_millis(200), bystander.recv()).await;
@@ -492,7 +527,9 @@ async fn uncorrelated_response_is_dropped() {
     let (server, dir, server_pub) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let client_a = connect_client(did(1), &sock, &server_pub).await;
@@ -528,7 +565,9 @@ async fn multiple_clients_receive_broadcast() {
     let (server, dir, server_pub, kps) = start_server_with_clients(3).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let sender = connect_with_keypair(did(1), &sock, &server_pub, &kps[0]).await;
@@ -583,7 +622,9 @@ async fn clearance_escalation_blocked() {
     registry.register(internal_pub, "high-daemon".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let open_client = connect_with_keypair(did(10), &sock, &server_pub, &open_kp).await;
@@ -619,7 +660,9 @@ async fn sender_identity_change_blocked() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let sender = connect_with_keypair(did(20), &sock, &server_pub, &kps[0]).await;
@@ -677,7 +720,9 @@ async fn verified_sender_name_stamped() {
     let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Client 0 is registered as "test-client-0" in the registry.
@@ -732,7 +777,9 @@ async fn unregistered_client_overlay_reaches_daemon_wm() {
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // daemon-wm: registered, Internal clearance.
@@ -778,7 +825,9 @@ async fn secrets_only_message_not_delivered_to_internal_daemon() {
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
@@ -816,7 +865,9 @@ async fn shutdown_flushes_publish_before_disconnect() {
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
@@ -859,7 +910,9 @@ async fn drop_without_shutdown_may_lose_message() {
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
-    tokio::spawn(async move { let _ = server.run().await; });
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;

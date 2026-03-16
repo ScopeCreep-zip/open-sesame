@@ -10,7 +10,10 @@
 use anyhow::Context;
 use clap::Parser;
 use core_ipc::{BusClient, Message};
-use core_types::{ClipboardEntry, ClipboardEntryId, DaemonId, EventKind, ProfileId, SecurityLevel, SensitivityClass};
+use core_types::{
+    ClipboardEntry, ClipboardEntryId, DaemonId, EventKind, ProfileId, SecurityLevel,
+    SensitivityClass,
+};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,11 +28,9 @@ struct Cli {
 
 fn init_db(db_path: &std::path::Path) -> anyhow::Result<Connection> {
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .context("failed to create clipboard cache directory")?;
+        std::fs::create_dir_all(parent).context("failed to create clipboard cache directory")?;
     }
-    let conn = Connection::open(db_path)
-        .context("failed to open clipboard database")?;
+    let conn = Connection::open(db_path).context("failed to open clipboard database")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard_entries (
             entry_id TEXT PRIMARY KEY,
@@ -42,7 +43,8 @@ fn init_db(db_path: &std::path::Path) -> anyhow::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_clipboard_profile
             ON clipboard_entries(profile_id, timestamp_ms DESC);",
-    ).context("failed to initialize clipboard schema")?;
+    )
+    .context("failed to initialize clipboard schema")?;
     Ok(conn)
 }
 
@@ -63,28 +65,36 @@ async fn main() -> anyhow::Result<()> {
     let db_path = cache_dir.join("clipboard.db");
     let db = Arc::new(Mutex::new(init_db(&db_path)?));
 
-    let config = core_config::load_config(None)
-        .context("failed to load config")?;
+    let config = core_config::load_config(None).context("failed to load config")?;
 
     let config_paths = core_config::resolve_config_paths(None);
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
     let (_config_watcher, _config_state) = core_config::ConfigWatcher::with_callback(
         &config_paths,
         config,
-        Some(Box::new(move || { let _ = reload_tx.blocking_send(()); })),
-    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Some(Box::new(move || {
+            let _ = reload_tx.blocking_send(());
+        })),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let socket_path = core_ipc::socket_path()
-        .context("failed to resolve IPC socket path")?;
-    let server_pub = core_ipc::noise::read_bus_public_key().await
+    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
+    let server_pub = core_ipc::noise::read_bus_public_key()
+        .await
         .context("daemon-profile is not running (no bus public key found)")?;
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
 
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
-        "daemon-clipboard", daemon_id, &socket_path, &server_pub, 5,
+        "daemon-clipboard",
+        daemon_id,
+        &socket_path,
+        &server_pub,
+        5,
         std::time::Duration::from_millis(500),
-    ).await.context("failed to connect to IPC bus")?;
+    )
+    .await
+    .context("failed to connect to IPC bus")?;
     drop(_client_keypair);
 
     #[cfg(target_os = "linux")]
@@ -266,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
 async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sig = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         sig.recv().await;
     }
@@ -278,12 +288,9 @@ async fn sigterm() {
 
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
-    use platform_linux::sandbox::{
-        apply_sandbox, FsAccess, LandlockRule, SeccompProfile,
-    };
+    use platform_linux::sandbox::{FsAccess, LandlockRule, SeccompProfile, apply_sandbox};
 
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/run/user/1000".into());
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
 
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -306,9 +313,8 @@ fn apply_sandbox() {
             access: FsAccess::ReadWriteFile,
         },
         LandlockRule {
-            path: PathBuf::from(&runtime_dir).join(
-                std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".into()),
-            ),
+            path: PathBuf::from(&runtime_dir)
+                .join(std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".into())),
             access: FsAccess::ReadWriteFile,
         },
         LandlockRule {
@@ -320,36 +326,75 @@ fn apply_sandbox() {
     let seccomp = SeccompProfile {
         daemon_name: "daemon-clipboard".into(),
         allowed_syscalls: vec![
-            "read".into(), "write".into(), "close".into(),
-            "openat".into(), "lseek".into(), "pread64".into(),
-            "fstat".into(), "stat".into(), "newfstatat".into(),
-            "statx".into(), "access".into(), "fcntl".into(),
-            "flock".into(), "mkdir".into(), "getdents64".into(),
-            "fdatasync".into(), "ioctl".into(),
-            "mmap".into(), "mprotect".into(), "munmap".into(),
-            "madvise".into(), "brk".into(),
-            "futex".into(), "clone3".into(), "clone".into(),
-            "set_robust_list".into(), "set_tid_address".into(),
-            "rseq".into(), "sched_getaffinity".into(),
-            "prlimit64".into(), "prctl".into(),
-            "getpid".into(), "gettid".into(), "getuid".into(), "geteuid".into(),
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "openat".into(),
+            "lseek".into(),
+            "pread64".into(),
+            "fstat".into(),
+            "stat".into(),
+            "newfstatat".into(),
+            "statx".into(),
+            "access".into(),
+            "fcntl".into(),
+            "flock".into(),
+            "mkdir".into(),
+            "getdents64".into(),
+            "fdatasync".into(),
+            "ioctl".into(),
+            "mmap".into(),
+            "mprotect".into(),
+            "munmap".into(),
+            "madvise".into(),
+            "brk".into(),
+            "futex".into(),
+            "clone3".into(),
+            "clone".into(),
+            "set_robust_list".into(),
+            "set_tid_address".into(),
+            "rseq".into(),
+            "sched_getaffinity".into(),
+            "prlimit64".into(),
+            "prctl".into(),
+            "getpid".into(),
+            "gettid".into(),
+            "getuid".into(),
+            "geteuid".into(),
             "kill".into(),
-            "epoll_wait".into(), "epoll_ctl".into(),
-            "epoll_create1".into(), "eventfd2".into(),
-            "poll".into(), "ppoll".into(),
-            "clock_gettime".into(), "timer_create".into(),
-            "timer_settime".into(), "timer_delete".into(),
-            "socket".into(), "connect".into(), "sendto".into(),
-            "recvfrom".into(), "recvmsg".into(), "sendmsg".into(),
-            "getsockname".into(), "getpeername".into(),
-            "setsockopt".into(), "socketpair".into(),
-            "shutdown".into(), "getsockopt".into(),
-            "sigaltstack".into(), "rt_sigaction".into(),
-            "rt_sigprocmask".into(), "rt_sigreturn".into(),
+            "epoll_wait".into(),
+            "epoll_ctl".into(),
+            "epoll_create1".into(),
+            "eventfd2".into(),
+            "poll".into(),
+            "ppoll".into(),
+            "clock_gettime".into(),
+            "timer_create".into(),
+            "timer_settime".into(),
+            "timer_delete".into(),
+            "socket".into(),
+            "connect".into(),
+            "sendto".into(),
+            "recvfrom".into(),
+            "recvmsg".into(),
+            "sendmsg".into(),
+            "getsockname".into(),
+            "getpeername".into(),
+            "setsockopt".into(),
+            "socketpair".into(),
+            "shutdown".into(),
+            "getsockopt".into(),
+            "sigaltstack".into(),
+            "rt_sigaction".into(),
+            "rt_sigprocmask".into(),
+            "rt_sigreturn".into(),
             "tgkill".into(),
-            "exit_group".into(), "exit".into(), "getrandom".into(),
+            "exit_group".into(),
+            "exit".into(),
+            "getrandom".into(),
             "restart_syscall".into(),
-            "pipe2".into(), "dup".into(),
+            "pipe2".into(),
+            "dup".into(),
         ],
     };
 
@@ -366,8 +411,7 @@ fn apply_sandbox() {
 fn init_logging(format: &str) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     match format {
         "json" => {
@@ -377,9 +421,7 @@ fn init_logging(format: &str) -> anyhow::Result<()> {
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 
@@ -405,7 +447,8 @@ mod tests {
             );
             CREATE INDEX IF NOT EXISTS idx_clipboard_profile
                 ON clipboard_entries(profile_id, timestamp_ms DESC);",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify table exists by inserting and querying.
         conn.execute(
@@ -414,11 +457,13 @@ mod tests {
             rusqlite::params!["e1", "p1", "hello", "text/plain", "public", "hello", 1000],
         ).unwrap();
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM clipboard_entries WHERE profile_id = 'p1'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clipboard_entries WHERE profile_id = 'p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -438,7 +483,11 @@ mod tests {
                 "topsecret" => SensitivityClass::TopSecret,
                 _ => SensitivityClass::Public,
             };
-            assert_eq!(format!("{sensitivity:?}"), expected_variant, "input: {input}");
+            assert_eq!(
+                format!("{sensitivity:?}"),
+                expected_variant,
+                "input: {input}"
+            );
         }
     }
 
@@ -455,19 +504,31 @@ mod tests {
                 preview TEXT NOT NULL,
                 timestamp_ms INTEGER NOT NULL
             );",
-        ).unwrap();
+        )
+        .unwrap();
 
         let entry_id = uuid::Uuid::now_v7().to_string();
         conn.execute(
             "INSERT INTO clipboard_entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![&entry_id, "profile-a", "secret data", "text/plain", "secret", "sec***", 42],
-        ).unwrap();
+            rusqlite::params![
+                &entry_id,
+                "profile-a",
+                "secret data",
+                "text/plain",
+                "secret",
+                "sec***",
+                42
+            ],
+        )
+        .unwrap();
 
-        let (content, sensitivity): (String, String) = conn.query_row(
-            "SELECT content, sensitivity FROM clipboard_entries WHERE entry_id = ?1",
-            rusqlite::params![&entry_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (content, sensitivity): (String, String) = conn
+            .query_row(
+                "SELECT content, sensitivity FROM clipboard_entries WHERE entry_id = ?1",
+                rusqlite::params![&entry_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
 
         assert_eq!(content, "secret data");
         assert_eq!(sensitivity, "secret");

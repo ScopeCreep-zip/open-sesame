@@ -9,7 +9,9 @@ use anyhow::Context;
 use clap::Parser;
 use core_fuzzy::{FrecencyDb, FuzzyMatcher, SearchEngine, inject_items};
 use core_ipc::{BusClient, Message};
-use core_types::{DaemonId, EventKind, LaunchDenial, LaunchResult, SecurityLevel, TrustProfileName};
+use core_types::{
+    DaemonId, EventKind, LaunchDenial, LaunchResult, SecurityLevel, TrustProfileName,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -46,23 +48,23 @@ async fn main() -> anyhow::Result<()> {
     platform_linux::security::harden_process();
 
     // Config hot-reload.
-    let config = core_config::load_config(None)
-        .context("failed to load config")?;
+    let config = core_config::load_config(None).context("failed to load config")?;
     let config_paths = core_config::resolve_config_paths(None);
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
     let (_config_watcher, _config_state) = core_config::ConfigWatcher::with_callback(
         &config_paths,
         config,
-        Some(Box::new(move || { let _ = reload_tx.blocking_send(()); })),
-    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Some(Box::new(move || {
+            let _ = reload_tx.blocking_send(());
+        })),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Frecency DB: per-profile, plaintext SQLite (not secrets).
     let data_dir = core_config::config_dir().join("launcher");
-    std::fs::create_dir_all(&data_dir)
-        .context("failed to create launcher data directory")?;
+    std::fs::create_dir_all(&data_dir).context("failed to create launcher data directory")?;
     let frecency_path = data_dir.join(format!("{}.frecency.db", &*profile));
-    let frecency = FrecencyDb::open(&frecency_path)
-        .context("failed to open frecency database")?;
+    let frecency = FrecencyDb::open(&frecency_path).context("failed to open frecency database")?;
 
     // Fuzzy matcher.
     let matcher = FuzzyMatcher::new(Arc::new(|| {}));
@@ -71,10 +73,8 @@ async fn main() -> anyhow::Result<()> {
     let (items, entry_cache) = tokio::task::spawn_blocking(|| {
         let items = scanner::scan();
         let cached = scanner::scan_cached();
-        let cache: HashMap<String, scanner::CachedEntry> = cached
-            .into_iter()
-            .map(|e| (e.id.clone(), e))
-            .collect();
+        let cache: HashMap<String, scanner::CachedEntry> =
+            cached.into_iter().map(|e| (e.id.clone(), e)).collect();
         (items, cache)
     })
     .await
@@ -91,18 +91,24 @@ async fn main() -> anyhow::Result<()> {
     engine.refresh_frecency().ok(); // Non-fatal if DB is empty.
 
     // Connect to IPC bus: read keypair BEFORE sandbox.
-    let socket_path = core_ipc::socket_path()
-        .context("failed to resolve IPC socket path")?;
-    let server_pub = core_ipc::noise::read_bus_public_key().await
+    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
+    let server_pub = core_ipc::noise::read_bus_public_key()
+        .await
         .context("daemon-profile is not running (no bus public key found)")?;
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
 
     // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
-        "daemon-launcher", daemon_id, &socket_path, &server_pub, 5,
+        "daemon-launcher",
+        daemon_id,
+        &socket_path,
+        &server_pub,
+        5,
         std::time::Duration::from_millis(500),
-    ).await.context("failed to connect to IPC bus")?;
+    )
+    .await
+    .context("failed to connect to IPC bus")?;
     // ZeroizingKeypair: private key zeroized on drop (no manual zeroize needed).
     drop(_client_keypair);
 
@@ -270,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
 async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sig = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         sig.recv().await;
     }
@@ -290,52 +296,89 @@ async fn sigterm() {
 /// handle raw secret values.
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
-    use platform_linux::sandbox::{
-        apply_seccomp, SeccompProfile,
-    };
+    use platform_linux::sandbox::{SeccompProfile, apply_seccomp};
 
     let seccomp = SeccompProfile {
         daemon_name: "daemon-launcher".into(),
         allowed_syscalls: vec![
             // I/O basics
-            "read".into(), "write".into(), "close".into(),
-            "openat".into(), "lseek".into(), "pread64".into(),
-            "fstat".into(), "stat".into(), "newfstatat".into(),
-            "statx".into(), "access".into(), "fcntl".into(),
-            "flock".into(), "mkdir".into(), "getdents64".into(),
-            "fdatasync".into(), "ioctl".into(),
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "openat".into(),
+            "lseek".into(),
+            "pread64".into(),
+            "fstat".into(),
+            "stat".into(),
+            "newfstatat".into(),
+            "statx".into(),
+            "access".into(),
+            "fcntl".into(),
+            "flock".into(),
+            "mkdir".into(),
+            "getdents64".into(),
+            "fdatasync".into(),
+            "ioctl".into(),
             // Memory
-            "mmap".into(), "mprotect".into(), "munmap".into(),
-            "madvise".into(), "brk".into(),
+            "mmap".into(),
+            "mprotect".into(),
+            "munmap".into(),
+            "madvise".into(),
+            "brk".into(),
             // Process / threading
-            "futex".into(), "clone3".into(), "clone".into(),
-            "set_robust_list".into(), "set_tid_address".into(),
-            "rseq".into(), "sched_getaffinity".into(),
-            "prlimit64".into(), "prctl".into(),
-            "getpid".into(), "gettid".into(), "getuid".into(), "geteuid".into(),
+            "futex".into(),
+            "clone3".into(),
+            "clone".into(),
+            "set_robust_list".into(),
+            "set_tid_address".into(),
+            "rseq".into(),
+            "sched_getaffinity".into(),
+            "prlimit64".into(),
+            "prctl".into(),
+            "getpid".into(),
+            "gettid".into(),
+            "getuid".into(),
+            "geteuid".into(),
             "kill".into(),
             // Epoll / event loop (tokio)
-            "epoll_wait".into(), "epoll_ctl".into(),
-            "epoll_create1".into(), "eventfd2".into(),
-            "poll".into(), "ppoll".into(),
+            "epoll_wait".into(),
+            "epoll_ctl".into(),
+            "epoll_create1".into(),
+            "eventfd2".into(),
+            "poll".into(),
+            "ppoll".into(),
             // Timers (tokio runtime)
-            "clock_gettime".into(), "timer_create".into(),
-            "timer_settime".into(), "timer_delete".into(),
+            "clock_gettime".into(),
+            "timer_create".into(),
+            "timer_settime".into(),
+            "timer_delete".into(),
             // Networking / IPC
-            "socket".into(), "connect".into(), "sendto".into(),
-            "recvfrom".into(), "sendmsg".into(), "recvmsg".into(),
-            "shutdown".into(), "getsockopt".into(),
+            "socket".into(),
+            "connect".into(),
+            "sendto".into(),
+            "recvfrom".into(),
+            "sendmsg".into(),
+            "recvmsg".into(),
+            "shutdown".into(),
+            "getsockopt".into(),
             "socketpair".into(),
             // Signals
-            "sigaltstack".into(), "rt_sigaction".into(),
-            "rt_sigprocmask".into(), "rt_sigreturn".into(),
+            "sigaltstack".into(),
+            "rt_sigaction".into(),
+            "rt_sigprocmask".into(),
+            "rt_sigreturn".into(),
             "tgkill".into(),
             // Misc
-            "exit_group".into(), "exit".into(), "getrandom".into(),
+            "exit_group".into(),
+            "exit".into(),
+            "getrandom".into(),
             "restart_syscall".into(),
-            "pipe2".into(), "dup".into(),
+            "pipe2".into(),
+            "dup".into(),
             // Process spawning (LaunchExecute needs fork/exec).
-            "execve".into(), "execveat".into(), "wait4".into(),
+            "execve".into(),
+            "execveat".into(),
+            "wait4".into(),
             "vfork".into(),
         ],
     };
@@ -419,20 +462,26 @@ async fn launch_entry(
     client: &BusClient,
     config_state: &Arc<std::sync::RwLock<core_config::Config>>,
 ) -> Result<u32, LaunchError> {
-    let cached = resolve_entry(entry_id, cache)
-        .ok_or(LaunchError::Denial(LaunchDenial::EntryNotFound))?;
+    let cached =
+        resolve_entry(entry_id, cache).ok_or(LaunchError::Denial(LaunchDenial::EntryNotFound))?;
 
     let exec = scanner::strip_field_codes(&cached.exec);
     let parts = scanner::tokenize_exec(&exec);
     if parts.is_empty() {
-        return Err(LaunchError::Other(anyhow::anyhow!("empty Exec line for '{entry_id}'")));
+        return Err(LaunchError::Other(anyhow::anyhow!(
+            "empty Exec line for '{entry_id}'"
+        )));
     }
 
     // Resolve launch profiles from config (passed from hot-reload watcher)
     let default_profile = profile.unwrap_or("default");
-    let config = config_state.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let config = config_state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
-    let mut composed_env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut composed_env: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     let mut all_secrets: Vec<(String, String)> = Vec::new(); // (secret_name, trust_profile_name)
     let mut devshell: Option<String> = None;
     let mut cwd: Option<String> = None;
@@ -442,7 +491,9 @@ async fn launch_entry(
             let (tp_name, lp_name) = parse_tag(tag, default_profile);
 
             let tp = config.profiles.get(&tp_name).ok_or_else(|| {
-                LaunchError::Denial(LaunchDenial::ProfileNotFound { profile: tp_name.clone() })
+                LaunchError::Denial(LaunchDenial::ProfileNotFound {
+                    profile: tp_name.clone(),
+                })
             })?;
 
             let lp = tp.launch_profiles.get(&lp_name).ok_or_else(|| {
@@ -485,20 +536,27 @@ async fn launch_entry(
         let tp = core_types::TrustProfileName::try_from(tp_name.as_str())
             .map_err(|e| LaunchError::Other(anyhow::anyhow!("invalid trust profile name: {e}")))?;
 
-        let response = client.request(
-            EventKind::SecretGet {
-                profile: tp.clone(),
-                key: secret_name.clone(),
-            },
-            SecurityLevel::Internal,
-            std::time::Duration::from_secs(5),
-        ).await.map_err(|e| {
-            tracing::error!(error = %e, "secret fetch IPC failed");
-            LaunchError::Other(anyhow::anyhow!("secret fetch IPC failed"))
-        })?;
+        let response = client
+            .request(
+                EventKind::SecretGet {
+                    profile: tp.clone(),
+                    key: secret_name.clone(),
+                },
+                SecurityLevel::Internal,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "secret fetch IPC failed");
+                LaunchError::Other(anyhow::anyhow!("secret fetch IPC failed"))
+            })?;
 
         match response.payload {
-            EventKind::SecretGetResponse { key: _, value, denial } => {
+            EventKind::SecretGetResponse {
+                key: _,
+                value,
+                denial,
+            } => {
                 if let Some(reason) = denial {
                     tracing::error!(secret = %secret_name, ?reason, "secret fetch denied");
                     match reason {
@@ -538,19 +596,19 @@ async fn launch_entry(
 
     // Check collected denials — locked vaults take priority over missing secrets
     if !locked_profiles.is_empty() {
-        return Err(LaunchError::Denial(LaunchDenial::VaultsLocked { locked_profiles }));
+        return Err(LaunchError::Denial(LaunchDenial::VaultsLocked {
+            locked_profiles,
+        }));
     }
     if missing_count > 0 {
-        return Err(LaunchError::Denial(LaunchDenial::SecretNotFound { missing_count }));
+        return Err(LaunchError::Denial(LaunchDenial::SecretNotFound {
+            missing_count,
+        }));
     }
 
     // Build command — wrap in devshell if configured
     let (program, args) = if let Some(ref ds) = devshell {
-        let mut nix_args = vec![
-            "develop".to_string(),
-            ds.clone(),
-            "-c".to_string(),
-        ];
+        let mut nix_args = vec!["develop".to_string(), ds.clone(), "-c".to_string()];
         nix_args.extend(parts.iter().cloned());
         ("nix".to_string(), nix_args)
     } else {
@@ -597,8 +655,7 @@ async fn launch_entry(
         cmd.env("SESAME_SOCKET", sock.to_string_lossy().as_ref());
     }
 
-    let child = cmd.spawn()
-        .context("failed to spawn process")?;
+    let child = cmd.spawn().context("failed to spawn process")?;
 
     tracing::info!(
         entry_id,
@@ -635,9 +692,18 @@ mod tests {
 
     fn test_cache() -> HashMap<String, scanner::CachedEntry> {
         let entries = vec![
-            scanner::CachedEntry { id: "org.mozilla.firefox".into(), exec: "firefox".into() },
-            scanner::CachedEntry { id: "com.mitchellh.ghostty".into(), exec: "ghostty".into() },
-            scanner::CachedEntry { id: "Alacritty".into(), exec: "alacritty".into() },
+            scanner::CachedEntry {
+                id: "org.mozilla.firefox".into(),
+                exec: "firefox".into(),
+            },
+            scanner::CachedEntry {
+                id: "com.mitchellh.ghostty".into(),
+                exec: "ghostty".into(),
+            },
+            scanner::CachedEntry {
+                id: "Alacritty".into(),
+                exec: "alacritty".into(),
+            },
         ];
         entries.into_iter().map(|e| (e.id.clone(), e)).collect()
     }
@@ -672,7 +738,10 @@ mod tests {
     #[test]
     fn secret_name_to_env_var_basic() {
         assert_eq!(secret_name_to_env_var("github-token"), "GITHUB_TOKEN");
-        assert_eq!(secret_name_to_env_var("anthropic-api-key"), "ANTHROPIC_API_KEY");
+        assert_eq!(
+            secret_name_to_env_var("anthropic-api-key"),
+            "ANTHROPIC_API_KEY"
+        );
         assert_eq!(secret_name_to_env_var("simple"), "SIMPLE");
         assert_eq!(secret_name_to_env_var("a-b-c"), "A_B_C");
     }

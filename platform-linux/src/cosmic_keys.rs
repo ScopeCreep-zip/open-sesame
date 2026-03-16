@@ -23,9 +23,7 @@ fn cosmic_shortcuts_dir() -> core_types::Result<PathBuf> {
     let base = dirs::config_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .ok_or_else(|| {
-            core_types::Error::Platform(
-                "cannot determine config directory: HOME not set".into(),
-            )
+            core_types::Error::Platform("cannot determine config directory: HOME not set".into())
         })?;
     Ok(base.join("cosmic/com.system76.CosmicSettings.Shortcuts/v1"))
 }
@@ -224,17 +222,13 @@ fn setup_system_actions() -> core_types::Result<()> {
     // Remove any existing WindowSwitcher entries.
     content = content
         .lines()
-        .filter(|line| {
-            !line.contains("WindowSwitcher")
-        })
+        .filter(|line| !line.contains("WindowSwitcher"))
         .collect::<Vec<_>>()
         .join("\n");
 
     // Add sesame entries.
-    let switcher_entry =
-        "    WindowSwitcher: \"sesame wm overlay\",";
-    let switcher_prev_entry =
-        "    WindowSwitcherPrevious: \"sesame wm overlay --backward\",";
+    let switcher_entry = "    WindowSwitcher: \"sesame wm overlay\",";
+    let switcher_prev_entry = "    WindowSwitcherPrevious: \"sesame wm overlay --backward\",";
 
     let content = add_binding(&content, switcher_entry);
     let content = add_binding(&content, switcher_prev_entry);
@@ -255,9 +249,7 @@ fn remove_system_actions() -> core_types::Result<()> {
     // Remove WindowSwitcher entries that point to sesame.
     let new_content: String = content
         .lines()
-        .filter(|line| {
-            !(line.contains("WindowSwitcher") && line.contains("sesame"))
-        })
+        .filter(|line| !(line.contains("WindowSwitcher") && line.contains("sesame")))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -289,7 +281,11 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
 
     // -- Step 2: Add launcher key as a custom Spawn binding --
     // (Alt+Tab is handled by the system_actions override above, not a custom binding.)
-    let launcher_binding = format_keybinding(&launcher_mods, &launcher_key, "sesame wm overlay --launcher");
+    let launcher_binding = format_keybinding(
+        &launcher_mods,
+        &launcher_key,
+        "sesame wm overlay --launcher",
+    );
 
     let mut content = read_shortcuts()?;
 
@@ -301,15 +297,16 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
     let new_content = add_binding(&content, &launcher_binding);
     write_shortcuts(&new_content)?;
 
-    tracing::info!(
-        "configured COSMIC keybindings: system_actions override + {launcher_key_combo}"
-    );
+    tracing::info!("configured COSMIC keybindings: system_actions override + {launcher_key_combo}");
     println!("Keybindings configured:");
     println!("    alt+tab       -> sesame wm overlay (via system_actions override)");
     println!("    alt+shift+tab -> sesame wm overlay --backward (via system_actions override)");
     println!("    super+tab     -> sesame wm overlay (via system_actions override)");
     println!("    {launcher_key_combo:<14}-> sesame wm overlay --launcher");
-    println!("  System actions: {}", cosmic_system_actions_path()?.display());
+    println!(
+        "  System actions: {}",
+        cosmic_system_actions_path()?.display()
+    );
     println!("  Custom keys:    {}", cosmic_shortcuts_path()?.display());
 
     Ok(())

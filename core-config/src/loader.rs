@@ -174,9 +174,8 @@ pub fn load_installation() -> core_types::Result<crate::schema::InstallationConf
             path.display()
         ))
     })?;
-    toml::from_str(&contents).map_err(|e| {
-        core_types::Error::Config(format!("failed to parse {}: {e}", path.display()))
-    })
+    toml::from_str(&contents)
+        .map_err(|e| core_types::Error::Config(format!("failed to parse {}: {e}", path.display())))
 }
 
 /// Write installation identity to `installation.toml` atomically.
@@ -194,9 +193,8 @@ pub fn write_installation(config: &crate::schema::InstallationConfig) -> core_ty
     let contents = toml::to_string_pretty(config).map_err(|e| {
         core_types::Error::Config(format!("failed to serialize installation config: {e}"))
     })?;
-    atomic_write(&path, contents.as_bytes()).map_err(|e| {
-        core_types::Error::Config(format!("failed to write {}: {e}", path.display()))
-    })
+    atomic_write(&path, contents.as_bytes())
+        .map_err(|e| core_types::Error::Config(format!("failed to write {}: {e}", path.display())))
 }
 
 /// Atomically write contents to a file using the POSIX rename pattern.
@@ -234,8 +232,7 @@ pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String>
     let mut config = if path.exists() {
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        toml::from_str(&contents)
-            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
+        toml::from_str(&contents).map_err(|e| format!("failed to parse {}: {e}", path.display()))?
     } else {
         crate::schema::WorkspaceConfig::default()
     };
@@ -243,28 +240,29 @@ pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String>
     // Merge drop-in fragments from workspaces.d/
     let dropin_dir = config_dir().join("workspaces.d");
     if dropin_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&dropin_dir) {
-            let mut fragments: Vec<std::path::PathBuf> = entries
-                .filter_map(std::result::Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
-                .collect();
-            fragments.sort();
-            for frag_path in fragments {
-                let contents = std::fs::read_to_string(&frag_path)
-                    .map_err(|e| format!("failed to read {}: {e}", frag_path.display()))?;
-                let fragment: crate::schema::WorkspaceConfig = toml::from_str(&contents)
-                    .map_err(|e| format!("failed to parse {}: {e}", frag_path.display()))?;
-                config.links.extend(fragment.links);
-                let defaults = crate::schema::WorkspaceSettings::default();
-                if fragment.settings.root != defaults.root {
-                    config.settings.root = fragment.settings.root;
-                }
-                if fragment.settings.user != defaults.user {
-                    config.settings.user = fragment.settings.user;
-                }
+        && let Ok(entries) = std::fs::read_dir(&dropin_dir)
+    {
+        let mut fragments: Vec<std::path::PathBuf> = entries
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        fragments.sort();
+        for frag_path in fragments {
+            let contents = std::fs::read_to_string(&frag_path)
+                .map_err(|e| format!("failed to read {}: {e}", frag_path.display()))?;
+            let fragment: crate::schema::WorkspaceConfig = toml::from_str(&contents)
+                .map_err(|e| format!("failed to parse {}: {e}", frag_path.display()))?;
+            config.links.extend(fragment.links);
+            let defaults = crate::schema::WorkspaceSettings::default();
+            if fragment.settings.root != defaults.root {
+                config.settings.root = fragment.settings.root;
+            }
+            if fragment.settings.user != defaults.user {
+                config.settings.user = fragment.settings.user;
             }
         }
+    }
 
     Ok(config)
 }
@@ -406,16 +404,14 @@ mod tests {
         );
         merge_config(&mut base, &overlay);
         assert!(base.profiles.contains_key("work"));
-        assert_eq!(
-            base.profiles["work"].color.as_deref(),
-            Some("#ff0000")
-        );
+        assert_eq!(base.profiles["work"].color.as_deref(), Some("#ff0000"));
     }
 
     #[test]
     fn merge_preserves_default_key_bindings() {
         let mut base = Config::default();
-        base.profiles.insert("default".into(), crate::schema::ProfileConfig::default());
+        base.profiles
+            .insert("default".into(), crate::schema::ProfileConfig::default());
         let overlay = Config::default();
         merge_config(&mut base, &overlay);
         let default_wm = crate::schema::WmConfig::default();
@@ -428,15 +424,19 @@ mod tests {
     #[test]
     fn merge_overlay_key_binding_overrides_default() {
         let mut base = Config::default();
-        base.profiles.insert("default".into(), crate::schema::ProfileConfig::default());
+        base.profiles
+            .insert("default".into(), crate::schema::ProfileConfig::default());
         let mut overlay = Config::default();
         let mut overlay_profile = crate::schema::ProfileConfig::default();
-        overlay_profile.wm.key_bindings.insert("g".into(), crate::schema::WmKeyBinding {
-            apps: vec!["custom-app".into()],
-            launch: Some("custom-app".into()),
-            tags: vec!["my-tag".into()],
-            launch_args: Vec::new(),
-        });
+        overlay_profile.wm.key_bindings.insert(
+            "g".into(),
+            crate::schema::WmKeyBinding {
+                apps: vec!["custom-app".into()],
+                launch: Some("custom-app".into()),
+                tags: vec!["my-tag".into()],
+                launch_args: Vec::new(),
+            },
+        );
         overlay.profiles.insert("default".into(), overlay_profile);
         merge_config(&mut base, &overlay);
         let binding = &base.profiles["default"].wm.key_bindings["g"];
@@ -448,23 +448,37 @@ mod tests {
     fn merge_preserves_launch_profiles() {
         let mut base = Config::default();
         let mut base_profile = crate::schema::ProfileConfig::default();
-        base_profile.launch_profiles.insert("dev-rust".into(), crate::schema::LaunchProfile {
-            env: [("RUST_LOG".into(), "debug".into())].into(),
-            ..Default::default()
-        });
+        base_profile.launch_profiles.insert(
+            "dev-rust".into(),
+            crate::schema::LaunchProfile {
+                env: [("RUST_LOG".into(), "debug".into())].into(),
+                ..Default::default()
+            },
+        );
         base.profiles.insert("default".into(), base_profile);
 
         let mut overlay = Config::default();
         let mut overlay_profile = crate::schema::ProfileConfig::default();
-        overlay_profile.launch_profiles.insert("ai-tools".into(), crate::schema::LaunchProfile {
-            secrets: vec!["anthropic-api-key".into()],
-            ..Default::default()
-        });
+        overlay_profile.launch_profiles.insert(
+            "ai-tools".into(),
+            crate::schema::LaunchProfile {
+                secrets: vec!["anthropic-api-key".into()],
+                ..Default::default()
+            },
+        );
         overlay.profiles.insert("default".into(), overlay_profile);
 
         merge_config(&mut base, &overlay);
-        assert!(base.profiles["default"].launch_profiles.contains_key("dev-rust"));
-        assert!(base.profiles["default"].launch_profiles.contains_key("ai-tools"));
+        assert!(
+            base.profiles["default"]
+                .launch_profiles
+                .contains_key("dev-rust")
+        );
+        assert!(
+            base.profiles["default"]
+                .launch_profiles
+                .contains_key("ai-tools")
+        );
     }
 
     #[test]
@@ -489,11 +503,18 @@ mod tests {
             tags = ["dev-rust"]
         "#;
         let parsed: Config = toml::from_str(toml_str).unwrap();
-        assert!(parsed.profiles["default"].launch_profiles.contains_key("dev-rust"));
+        assert!(
+            parsed.profiles["default"]
+                .launch_profiles
+                .contains_key("dev-rust")
+        );
         let lp = &parsed.profiles["default"].launch_profiles["dev-rust"];
         assert_eq!(lp.env["RUST_LOG"], "debug");
         assert_eq!(lp.secrets, vec!["github-token"]);
         assert_eq!(lp.devshell.as_deref(), Some("/workspace#rust"));
-        assert_eq!(parsed.profiles["default"].wm.key_bindings["g"].tags, vec!["dev-rust"]);
+        assert_eq!(
+            parsed.profiles["default"].wm.key_bindings["g"].tags,
+            vec!["dev-rust"]
+        );
     }
 }

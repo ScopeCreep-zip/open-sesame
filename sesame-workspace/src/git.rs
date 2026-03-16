@@ -267,5 +267,4 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(remote_url(dir.path()).unwrap(), None);
     }
-
 }

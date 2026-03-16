@@ -31,13 +31,11 @@ impl FrecencyDb {
     ///
     /// Returns an error if the database cannot be opened or migrated.
     pub fn open(path: &Path) -> core_types::Result<Self> {
-        let conn = Connection::open(path).map_err(|e| {
-            core_types::Error::Platform(format!("frecency DB open failed: {e}"))
-        })?;
+        let conn = Connection::open(path)
+            .map_err(|e| core_types::Error::Platform(format!("frecency DB open failed: {e}")))?;
 
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| {
-            core_types::Error::Platform(format!("frecency WAL mode failed: {e}"))
-        })?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| core_types::Error::Platform(format!("frecency WAL mode failed: {e}")))?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS frecency (
@@ -74,19 +72,13 @@ impl FrecencyDb {
             CREATE INDEX IF NOT EXISTS idx_frecency_profile
                 ON frecency (profile_id, entry_id);",
         )
-        .map_err(|e| {
-            core_types::Error::Platform(format!("frecency schema failed: {e}"))
-        })?;
+        .map_err(|e| core_types::Error::Platform(format!("frecency schema failed: {e}")))?;
 
         Ok(Self { conn })
     }
 
     /// Record a launch event for the given entry in the given profile.
-    pub fn record_launch(
-        &self,
-        entry_id: &str,
-        profile_id: &str,
-    ) -> core_types::Result<()> {
+    pub fn record_launch(&self, entry_id: &str, profile_id: &str) -> core_types::Result<()> {
         let now = now_unix();
         self.conn
             .execute(
@@ -102,34 +94,23 @@ impl FrecencyDb {
     /// Compute frecency scores for all entries in the given profile.
     ///
     /// Returns `(entry_id, score)` pairs sorted by score descending.
-    pub fn scores(
-        &self,
-        profile_id: &str,
-    ) -> core_types::Result<Vec<(String, f64)>> {
+    pub fn scores(&self, profile_id: &str) -> core_types::Result<Vec<(String, f64)>> {
         let now = now_unix();
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT entry_id, timestamp FROM frecency WHERE profile_id = ?1 ORDER BY entry_id",
             )
-            .map_err(|e| {
-                core_types::Error::Platform(format!("frecency query failed: {e}"))
-            })?;
+            .map_err(|e| core_types::Error::Platform(format!("frecency query failed: {e}")))?;
 
         let rows = stmt
             .query_map(params![profile_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|e| {
-                core_types::Error::Platform(format!("frecency query_map failed: {e}"))
-            })?;
+            .map_err(|e| core_types::Error::Platform(format!("frecency query_map failed: {e}")))?;
 
         // Accumulate scores per entry.
-        let mut scores: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
+        let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 
         for row in rows {
             let (entry_id, timestamp) = row.map_err(|e| {
@@ -147,26 +128,16 @@ impl FrecencyDb {
     }
 
     /// Get the frecency score for a single entry in a profile.
-    pub fn score_for(
-        &self,
-        entry_id: &str,
-        profile_id: &str,
-    ) -> core_types::Result<f64> {
+    pub fn score_for(&self, entry_id: &str, profile_id: &str) -> core_types::Result<f64> {
         let now = now_unix();
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT timestamp FROM frecency WHERE entry_id = ?1 AND profile_id = ?2",
-            )
-            .map_err(|e| {
-                core_types::Error::Platform(format!("frecency query failed: {e}"))
-            })?;
+            .prepare("SELECT timestamp FROM frecency WHERE entry_id = ?1 AND profile_id = ?2")
+            .map_err(|e| core_types::Error::Platform(format!("frecency query failed: {e}")))?;
 
         let timestamps: Vec<i64> = stmt
             .query_map(params![entry_id, profile_id], |row| row.get(0))
-            .map_err(|e| {
-                core_types::Error::Platform(format!("frecency query_map failed: {e}"))
-            })?
+            .map_err(|e| core_types::Error::Platform(format!("frecency query_map failed: {e}")))?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -185,13 +156,8 @@ impl FrecencyDb {
         let cutoff = now_unix() - i64::from(max_age_days) * 86_400_000;
         let deleted = self
             .conn
-            .execute(
-                "DELETE FROM frecency WHERE timestamp < ?1",
-                params![cutoff],
-            )
-            .map_err(|e| {
-                core_types::Error::Platform(format!("frecency prune failed: {e}"))
-            })?;
+            .execute("DELETE FROM frecency WHERE timestamp < ?1", params![cutoff])
+            .map_err(|e| core_types::Error::Platform(format!("frecency prune failed: {e}")))?;
         Ok(deleted as u64)
     }
 }

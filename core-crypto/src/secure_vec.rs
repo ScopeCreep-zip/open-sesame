@@ -99,10 +99,7 @@ impl SecureVec {
     #[must_use]
     pub fn char_count(&self) -> usize {
         // Count UTF-8 start bytes: any byte that is NOT a continuation byte (10xxxxxx).
-        self.inner
-            .iter()
-            .filter(|b| (**b & 0xC0) != 0x80)
-            .count()
+        self.inner.iter().filter(|b| (**b & 0xC0) != 0x80).count()
     }
 
     /// Byte length of the buffer contents.

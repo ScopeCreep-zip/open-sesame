@@ -37,9 +37,10 @@ impl SecretRateLimiter {
     /// lookup. Unregistered clients share a single anonymous bucket.
     pub(crate) fn check(&mut self, verified_sender_name: Option<&str>) -> bool {
         let key = verified_sender_name.unwrap_or(ANONYMOUS_RATE_KEY);
-        let limiter = self.limiters.entry(key.to_owned()).or_insert_with(|| {
-            governor::RateLimiter::direct(self.quota)
-        });
+        let limiter = self
+            .limiters
+            .entry(key.to_owned())
+            .or_insert_with(|| governor::RateLimiter::direct(self.quota));
         limiter.check().is_ok()
     }
 }

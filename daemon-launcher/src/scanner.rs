@@ -109,8 +109,7 @@ pub fn strip_field_codes(exec: &str) -> String {
         if ch == '%' {
             if let Some(&next) = chars.peek() {
                 match next {
-                    'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'i' | 'c' | 'k' | 'v'
-                    | 'm' => {
+                    'f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'i' | 'c' | 'k' | 'v' | 'm' => {
                         chars.next(); // consume the field code letter
                     }
                     '%' => {
@@ -200,7 +199,10 @@ mod tests {
 
     #[test]
     fn strip_no_codes() {
-        assert_eq!(strip_field_codes("firefox --new-window"), "firefox --new-window");
+        assert_eq!(
+            strip_field_codes("firefox --new-window"),
+            "firefox --new-window"
+        );
     }
 
     #[test]

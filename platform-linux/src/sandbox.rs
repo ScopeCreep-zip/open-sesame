@@ -9,8 +9,8 @@
 //! seccomp-bpf: syscall filtering via libseccomp (C library).
 
 use landlock::{
-    Access, AccessFs, AccessNet, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus, Scope, ABI,
+    ABI, Access, AccessFs, AccessNet, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, Scope,
 };
 
 /// Filesystem access rights for Landlock rules.
@@ -83,9 +83,13 @@ pub fn apply_landlock(
 
     let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
-        .map_err(|e| core_types::Error::Platform(format!("landlock handle_access(fs) failed: {e}")))?
+        .map_err(|e| {
+            core_types::Error::Platform(format!("landlock handle_access(fs) failed: {e}"))
+        })?
         .handle_access(AccessNet::from_all(abi))
-        .map_err(|e| core_types::Error::Platform(format!("landlock handle_access(net) failed: {e}")))?
+        .map_err(|e| {
+            core_types::Error::Platform(format!("landlock handle_access(net) failed: {e}"))
+        })?
         .scope(scope_flags)
         .map_err(|e| core_types::Error::Platform(format!("landlock scope failed: {e}")))?
         .create()
@@ -103,10 +107,12 @@ pub fn apply_landlock(
             FsAccess::ReadWriteFile => AccessFs::from_file(abi),
             FsAccess::Execute => AccessFs::Execute.into(),
         };
-        let path_fd = PathFd::new(&rule.path)
-            .map_err(|e| core_types::Error::Platform(format!(
-                "landlock PathFd::new({}) failed: {e}", rule.path.display()
-            )))?;
+        let path_fd = PathFd::new(&rule.path).map_err(|e| {
+            core_types::Error::Platform(format!(
+                "landlock PathFd::new({}) failed: {e}",
+                rule.path.display()
+            ))
+        })?;
         // fstat the already-open fd to avoid TOCTOU vs the crate's internal stat.
         // Strip directory-only flags on non-directory inodes to prevent the crate's
         // PathBeneath::try_compat_inner from returning PartiallyEnforced.
@@ -120,9 +126,12 @@ pub fn apply_landlock(
         }
         ruleset = ruleset
             .add_rule(PathBeneath::new(path_fd, access))
-            .map_err(|e| core_types::Error::Platform(format!(
-                "landlock add_rule({}) failed: {e}", rule.path.display()
-            )))?;
+            .map_err(|e| {
+                core_types::Error::Platform(format!(
+                    "landlock add_rule({}) failed: {e}",
+                    rule.path.display()
+                ))
+            })?;
     }
 
     let status = ruleset
@@ -134,16 +143,12 @@ pub fn apply_landlock(
             tracing::info!("landlock: fully enforced");
             Ok(EnforcementStatus::FullyEnforced)
         }
-        RulesetStatus::PartiallyEnforced => {
-            Err(core_types::Error::Platform(
-                "landlock partially enforced — kernel ABI too old, refusing to run".into(),
-            ))
-        }
-        RulesetStatus::NotEnforced => {
-            Err(core_types::Error::Platform(
-                "landlock not enforced — kernel does not support landlock, refusing to run".into(),
-            ))
-        }
+        RulesetStatus::PartiallyEnforced => Err(core_types::Error::Platform(
+            "landlock partially enforced — kernel ABI too old, refusing to run".into(),
+        )),
+        RulesetStatus::NotEnforced => Err(core_types::Error::Platform(
+            "landlock not enforced — kernel does not support landlock, refusing to run".into(),
+        )),
     }
 }
 
@@ -177,15 +182,12 @@ pub fn apply_seccomp(profile: &SeccompProfile) -> core_types::Result<()> {
         .map_err(|e| core_types::Error::Platform(format!("seccomp new_filter failed: {e}")))?;
 
     for syscall_name in &profile.allowed_syscalls {
-        let syscall = ScmpSyscall::from_name(syscall_name)
-            .map_err(|e| core_types::Error::Platform(format!(
-                "seccomp unknown syscall '{syscall_name}': {e}"
-            )))?;
-        filter
-            .add_rule(ScmpAction::Allow, syscall)
-            .map_err(|e| core_types::Error::Platform(format!(
-                "seccomp add_rule({syscall_name}) failed: {e}"
-            )))?;
+        let syscall = ScmpSyscall::from_name(syscall_name).map_err(|e| {
+            core_types::Error::Platform(format!("seccomp unknown syscall '{syscall_name}': {e}"))
+        })?;
+        filter.add_rule(ScmpAction::Allow, syscall).map_err(|e| {
+            core_types::Error::Platform(format!("seccomp add_rule({syscall_name}) failed: {e}"))
+        })?;
     }
 
     filter

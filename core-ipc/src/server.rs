@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::framing::{decode_frame, encode_frame};
@@ -141,7 +141,11 @@ impl BusServer {
     /// # Errors
     ///
     /// Returns an error if directory creation or socket binding fails.
-    pub fn bind(path: &Path, keypair: snow::Keypair, registry: ClearanceRegistry) -> core_types::Result<Self> {
+    pub fn bind(
+        path: &Path,
+        keypair: snow::Keypair,
+        registry: ClearanceRegistry,
+    ) -> core_types::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 core_types::Error::Ipc(format!(
@@ -162,10 +166,7 @@ impl BusServer {
         }
 
         let listener = UnixListener::bind(path).map_err(|e| {
-            core_types::Error::Ipc(format!(
-                "failed to bind socket {}: {e}",
-                path.display()
-            ))
+            core_types::Error::Ipc(format!("failed to bind socket {}: {e}", path.display()))
         })?;
 
         // Defense-in-depth: restrict socket and parent directory permissions to owner-only.
@@ -175,13 +176,14 @@ impl BusServer {
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(parent) = path.parent() {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|e| {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |e| {
                         core_types::Error::Ipc(format!(
                             "failed to set directory permissions on {}: {e}",
                             parent.display()
                         ))
-                    })?;
+                    },
+                )?;
             }
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
                 |e| {
@@ -253,18 +255,15 @@ impl BusServer {
 
                     let conn_id = self.state.next_conn_id.fetch_add(1, Ordering::Relaxed);
 
-                    tracing::info!(
-                        conn_id,
-                        pid = peer.pid,
-                        uid = peer.uid,
-                        "client connected"
-                    );
+                    tracing::info!(conn_id, pid = peer.pid, uid = peer.uid, "client connected");
 
                     // Per-connection outbound channel (server -> client).
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
 
                     let state = Arc::clone(&self.state);
-                    let keypair = self.keypair.clone()
+                    let keypair = self
+                        .keypair
+                        .clone()
                         .expect("BusServer::run() requires bind() — keypair is always set");
                     tokio::spawn(async move {
                         handle_connection(state, conn_id, stream, tx, rx, peer, keypair).await;
@@ -306,9 +305,7 @@ impl BusServer {
     /// Remove a subscriber by daemon ID.
     pub async fn unregister(&self, daemon_id: &DaemonId) {
         let mut conns = self.state.connections.write().await;
-        conns.retain(|_, state| {
-            state.daemon_id.as_ref() != Some(daemon_id)
-        });
+        conns.retain(|_, state| state.daemon_id.as_ref() != Some(daemon_id));
         tracing::info!(%daemon_id, "subscriber unregistered");
     }
 
@@ -377,7 +374,11 @@ impl BusServer {
     /// retrieves and removes that mapping so the response can be unicast
     /// back to the original requester instead of broadcast.
     pub async fn take_pending_request(&self, correlation_id: &uuid::Uuid) -> Option<u64> {
-        self.state.pending_requests.write().await.remove(correlation_id)
+        self.state
+            .pending_requests
+            .write()
+            .await
+            .remove(correlation_id)
     }
 
     /// Register a confirmation route for confirmed RPC.
@@ -390,7 +391,11 @@ impl BusServer {
         correlation_id: Uuid,
         confirm_tx: mpsc::Sender<Vec<u8>>,
     ) -> ConfirmationGuard {
-        self.state.confirmations.write().await.insert(correlation_id, confirm_tx);
+        self.state
+            .confirmations
+            .write()
+            .await
+            .insert(correlation_id, confirm_tx);
         ConfirmationGuard {
             correlation_id,
             state: Arc::clone(&self.state),
@@ -417,10 +422,14 @@ impl BusServer {
                 if self.send_to(id, frame).await {
                     Ok(())
                 } else {
-                    Err(format!("send_to_named({daemon_name}): connection gone or channel full"))
+                    Err(format!(
+                        "send_to_named({daemon_name}): connection gone or channel full"
+                    ))
                 }
             }
-            None => Err(format!("send_to_named({daemon_name}): daemon not connected")),
+            None => Err(format!(
+                "send_to_named({daemon_name}): daemon not connected"
+            )),
         }
     }
 }
@@ -603,9 +612,17 @@ async fn handle_connection(
     }
 
     state.connections.write().await.remove(&conn_id);
-    state.pending_requests.write().await.retain(|_, cid| *cid != conn_id);
+    state
+        .pending_requests
+        .write()
+        .await
+        .retain(|_, cid| *cid != conn_id);
     // Clean up name_to_conn on disconnect.
-    state.name_to_conn.write().await.retain(|_, cid| *cid != conn_id);
+    state
+        .name_to_conn
+        .write()
+        .await
+        .retain(|_, cid| *cid != conn_id);
     let session_ms = connected_at.elapsed().as_millis();
     tracing::debug!(
         audit = "connection-lifecycle",
@@ -739,7 +756,11 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
     {
         let existing = state.name_to_conn.read().await.get(name).copied();
         if let Some(existing_conn_id) = existing {
-            let still_alive = state.connections.read().await.contains_key(&existing_conn_id);
+            let still_alive = state
+                .connections
+                .read()
+                .await
+                .contains_key(&existing_conn_id);
             if still_alive && existing_conn_id != sender_conn_id {
                 tracing::warn!(
                     audit = "security",
@@ -750,7 +771,11 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
                     "rejecting duplicate name_to_conn registration — existing connection still alive"
                 );
             } else {
-                state.name_to_conn.write().await.insert(name.clone(), sender_conn_id);
+                state
+                    .name_to_conn
+                    .write()
+                    .await
+                    .insert(name.clone(), sender_conn_id);
                 tracing::debug!(
                     daemon_name = %name,
                     conn_id = sender_conn_id,
@@ -758,7 +783,11 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
                 );
             }
         } else {
-            state.name_to_conn.write().await.insert(name.clone(), sender_conn_id);
+            state
+                .name_to_conn
+                .write()
+                .await
+                .insert(name.clone(), sender_conn_id);
             tracing::debug!(
                 daemon_name = %name,
                 conn_id = sender_conn_id,
@@ -819,7 +848,11 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
         }
     } else {
         // New request or broadcast — record for response routing and forward.
-        state.pending_requests.write().await.insert(msg.msg_id, sender_conn_id);
+        state
+            .pending_requests
+            .write()
+            .await
+            .insert(msg.msg_id, sender_conn_id);
 
         let conns = state.connections.read().await;
         for (&cid, conn) in conns.iter() {

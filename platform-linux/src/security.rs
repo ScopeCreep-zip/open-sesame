@@ -57,7 +57,10 @@ mod tests {
     fn harden_process_disables_dumpable() {
         harden_process();
         let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
-        assert_eq!(dumpable, 0, "process must be non-dumpable after harden_process()");
+        assert_eq!(
+            dumpable, 0,
+            "process must be non-dumpable after harden_process()"
+        );
     }
 
     // SECURITY INVARIANT: After harden_process(), RLIMIT_CORE must be zero

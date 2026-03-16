@@ -93,10 +93,7 @@ impl Drop for SecureBytes {
             // before dealloc), even though its logical length is now 0.
             if original_len > 0 {
                 unsafe {
-                    libc::munlock(
-                        original_ptr.cast::<libc::c_void>(),
-                        original_len,
-                    );
+                    libc::munlock(original_ptr.cast::<libc::c_void>(), original_len);
                 }
             }
         }

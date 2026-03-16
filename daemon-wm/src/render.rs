@@ -196,7 +196,9 @@ impl OverlayTheme {
             card_border: Color::rgba(accent_base.0, accent_base.1, accent_base.2, 255),
             text_primary: Color::rgba(primary_on.0, primary_on.1, primary_on.2, primary_on.3),
             text_secondary: Color::rgba(
-                primary_on.0, primary_on.1, primary_on.2,
+                primary_on.0,
+                primary_on.1,
+                primary_on.2,
                 ((primary_on.3 as f64) * 0.7) as u8,
             ),
             badge_background: Color::rgba(badge_base.0, badge_base.1, badge_base.2, 255),
@@ -284,8 +286,20 @@ fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f6
     cr.new_sub_path();
     cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
     cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+    cr.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
     cr.close_path();
 }
 
@@ -294,12 +308,7 @@ fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f6
 // ---------------------------------------------------------------------------
 
 /// Draw border-only phase: transparent center, colored stroke around screen edges.
-pub fn draw_border_only(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
-    theme: &OverlayTheme,
-) {
+pub fn draw_border_only(cr: &gtk4::cairo::Context, width: f64, height: f64, theme: &OverlayTheme) {
     // Transparent background (GTK4 surface is already transparent if we set visual alpha).
     cr.set_operator(gtk4::cairo::Operator::Source);
     cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
@@ -378,12 +387,26 @@ pub fn draw_full_overlay(
     let card = calculate_card(&visible, width, height, &layout, show_app_id, show_title);
 
     // Card background.
-    rounded_rect(cr, card.x, card.y, card.width, card.height, layout.corner_radius);
+    rounded_rect(
+        cr,
+        card.x,
+        card.y,
+        card.width,
+        card.height,
+        layout.corner_radius,
+    );
     theme.card_background.set_source(cr);
     let _ = cr.fill();
 
     // Card border.
-    rounded_rect(cr, card.x, card.y, card.width, card.height, layout.corner_radius);
+    rounded_rect(
+        cr,
+        card.x,
+        card.y,
+        card.width,
+        card.height,
+        layout.corner_radius,
+    );
     theme.card_border.set_source(cr);
     cr.set_line_width(layout.border_width);
     let _ = cr.stroke();
@@ -407,7 +430,15 @@ pub fn draw_full_overlay(
         };
 
         draw_hint_row(
-            cr, &card, row_y, row, is_selected, match_state, &layout, theme, show_app_id,
+            cr,
+            &card,
+            row_y,
+            row,
+            is_selected,
+            match_state,
+            &layout,
+            theme,
+            show_app_id,
             show_title,
         );
     }

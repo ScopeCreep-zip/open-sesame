@@ -60,12 +60,7 @@ impl KeyLocker for SecretServiceKeyLocker {
         Box::pin(async move {
             let proxy = self.proxy().await?;
             proxy
-                .store(
-                    &service,
-                    &account,
-                    "PDS Master Key (wrapped)",
-                    &wrapped_key,
-                )
+                .store(&service, &account, "PDS Master Key (wrapped)", &wrapped_key)
                 .await
         })
     }

@@ -19,9 +19,24 @@ use super::WorkspacePlatform;
 /// Prevents social-engineering attacks via `sesame workspace init --root /etc`
 /// where pkexec would chown a system directory to the current user.
 const SYSTEM_DIRS: &[&str] = &[
-    "/", "/etc", "/usr", "/bin", "/sbin", "/var", "/boot",
-    "/dev", "/proc", "/sys", "/run", "/tmp", "/lib", "/lib64",
-    "/opt", "/srv", "/root", "/lost+found",
+    "/",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/var",
+    "/boot",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/run",
+    "/tmp",
+    "/lib",
+    "/lib64",
+    "/opt",
+    "/srv",
+    "/root",
+    "/lost+found",
 ];
 
 /// Reject system directories as workspace roots to prevent pkexec abuse.
@@ -30,7 +45,8 @@ fn validate_root_not_system(root: &Path) -> Result<(), WorkspaceError> {
     for dir in SYSTEM_DIRS {
         if canonical == *dir {
             return Err(WorkspaceError::PathValidation(format!(
-                "refusing to use system directory as workspace root: {}", root.display()
+                "refusing to use system directory as workspace root: {}",
+                root.display()
             )));
         }
     }
@@ -88,13 +104,19 @@ impl WorkspacePlatform for LinuxPlatform {
 /// prevent TOCTOU symlink replacement attacks during discovery walks.
 #[must_use]
 pub fn is_git_dir_nofollow(dir: &Path) -> bool {
-    use rustix::fs::{openat, Mode, OFlags, CWD};
+    use rustix::fs::{CWD, Mode, OFlags, openat};
 
     let git_path = dir.join(".git");
     // O_NOFOLLOW causes the open to fail if the target is a symlink,
     // preventing an attacker from replacing .git with a symlink between
     // our check and subsequent use of the directory.
-    openat(CWD, &git_path, OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).is_ok()
+    openat(
+        CWD,
+        &git_path,
+        OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::RDONLY,
+        Mode::empty(),
+    )
+    .is_ok()
 }
 
 /// Create the user directory inside the workspace root.
@@ -116,9 +138,7 @@ fn ensure_writable(root: &Path) -> Result<(), WorkspaceError> {
             let _ = std::fs::remove_file(&test_path);
             Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            elevate_ownership(root)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => elevate_ownership(root),
         Err(e) => Err(e.into()),
     }
 }

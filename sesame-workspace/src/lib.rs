@@ -7,14 +7,14 @@
 //! No shell interpolation. No temp files. No secret material on disk.
 #![forbid(unsafe_code)]
 
-pub mod convention;
 pub mod config;
+pub mod convention;
 pub mod discover;
 pub mod git;
 pub mod platform;
 
-pub use convention::{WorkspaceConvention, CloneTarget};
-pub use config::{resolve_workspace_profile, EffectiveWorkspaceConfig, ConfigProvenance};
+pub use config::{ConfigProvenance, EffectiveWorkspaceConfig, resolve_workspace_profile};
+pub use convention::{CloneTarget, WorkspaceConvention};
 pub use discover::DiscoveredWorkspace;
 
 /// Errors from workspace operations.

@@ -4,15 +4,15 @@
 //! Phase 2: runtime logic (`ContextEngine`, `AuditLogger` with BLAKE3 hash chain).
 #![forbid(unsafe_code)]
 
-pub mod context;
 pub mod audit;
+pub mod context;
 
 use core_types::{AgentId, AgentType, AppId, InstallationId, ProfileId, TrustProfileName};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use context::ContextEngine;
 pub use audit::{AuditLogger, verify_chain};
+pub use context::ContextEngine;
 
 // ============================================================================
 // Profile State Machine
@@ -87,15 +87,43 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AuditAction {
-    ProfileActivated { target: ProfileId, duration_ms: u32 },
-    ProfileDeactivated { target: ProfileId, duration_ms: u32 },
-    ProfileActivationFailed { target: ProfileId, reason: String },
-    DefaultProfileChanged { previous: ProfileId, current: ProfileId },
-    IsolationViolationAttempt { from_profile: core_types::TrustProfileName, resource: IsolatedResource },
-    SecretAccessed { profile_id: ProfileId, secret_ref: String },
-    KeyRotationStarted { daemon_name: String, generation: u64 },
-    KeyRotationCompleted { daemon_name: String, generation: u64 },
-    KeyRevoked { daemon_name: String, reason: String, generation: u64 },
+    ProfileActivated {
+        target: ProfileId,
+        duration_ms: u32,
+    },
+    ProfileDeactivated {
+        target: ProfileId,
+        duration_ms: u32,
+    },
+    ProfileActivationFailed {
+        target: ProfileId,
+        reason: String,
+    },
+    DefaultProfileChanged {
+        previous: ProfileId,
+        current: ProfileId,
+    },
+    IsolationViolationAttempt {
+        from_profile: core_types::TrustProfileName,
+        resource: IsolatedResource,
+    },
+    SecretAccessed {
+        profile_id: ProfileId,
+        secret_ref: String,
+    },
+    KeyRotationStarted {
+        daemon_name: String,
+        generation: u64,
+    },
+    KeyRotationCompleted {
+        daemon_name: String,
+        generation: u64,
+    },
+    KeyRevoked {
+        daemon_name: String,
+        reason: String,
+        generation: u64,
+    },
     /// A secret operation was performed (or denied). Logged for forensic audit trail.
     SecretOperationAudited {
         action: String,
@@ -105,19 +133,60 @@ pub enum AuditAction {
         requester_name: Option<String>,
         outcome: String,
     },
-    AgentConnected { agent_id: AgentId, agent_type: AgentType },
-    AgentDisconnected { agent_id: AgentId, reason: String },
-    InstallationCreated { id: InstallationId, org: Option<String>, machine_binding_present: bool },
-    ProfileIdMigrated { name: TrustProfileName, old_id: ProfileId, new_id: ProfileId },
-    AuthorizationRequired { request_id: Uuid, operation: String },
-    AuthorizationGranted { request_id: Uuid, delegator: AgentId, scope: String },
-    AuthorizationDenied { request_id: Uuid, reason: String },
-    AuthorizationTimeout { request_id: Uuid },
-    DelegationRevoked { delegation_id: Uuid, revoker: AgentId, reason: String },
-    HeartbeatRenewed { delegation_id: Uuid, renewal_source: AgentId },
-    FederationSessionEstablished { session_id: Uuid, remote_installation: InstallationId },
-    FederationSessionTerminated { session_id: Uuid, reason: String },
-    PostureEvaluated { composite_score: f64 },
+    AgentConnected {
+        agent_id: AgentId,
+        agent_type: AgentType,
+    },
+    AgentDisconnected {
+        agent_id: AgentId,
+        reason: String,
+    },
+    InstallationCreated {
+        id: InstallationId,
+        org: Option<String>,
+        machine_binding_present: bool,
+    },
+    ProfileIdMigrated {
+        name: TrustProfileName,
+        old_id: ProfileId,
+        new_id: ProfileId,
+    },
+    AuthorizationRequired {
+        request_id: Uuid,
+        operation: String,
+    },
+    AuthorizationGranted {
+        request_id: Uuid,
+        delegator: AgentId,
+        scope: String,
+    },
+    AuthorizationDenied {
+        request_id: Uuid,
+        reason: String,
+    },
+    AuthorizationTimeout {
+        request_id: Uuid,
+    },
+    DelegationRevoked {
+        delegation_id: Uuid,
+        revoker: AgentId,
+        reason: String,
+    },
+    HeartbeatRenewed {
+        delegation_id: Uuid,
+        renewal_source: AgentId,
+    },
+    FederationSessionEstablished {
+        session_id: Uuid,
+        remote_installation: InstallationId,
+    },
+    FederationSessionTerminated {
+        session_id: Uuid,
+        reason: String,
+    },
+    PostureEvaluated {
+        composite_score: f64,
+    },
 }
 
 #[cfg(test)]

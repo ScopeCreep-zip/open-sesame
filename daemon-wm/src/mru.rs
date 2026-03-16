@@ -51,7 +51,12 @@ fn mru_path() -> Option<PathBuf> {
         {
             use std::fs::DirBuilder;
             use std::os::unix::fs::DirBuilderExt;
-            if DirBuilder::new().mode(0o700).recursive(true).create(&cache).is_err() {
+            if DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&cache)
+                .is_err()
+            {
                 return None;
             }
         }
@@ -133,7 +138,11 @@ pub fn save(_origin: Option<&str>, target: &str) {
         return;
     }
 
-    tracing::info!(target, stack_len = state.stack.len(), "mru: promoting to top");
+    tracing::info!(
+        target,
+        stack_len = state.stack.len(),
+        "mru: promoting to top"
+    );
 
     // Remove target from current position (if present) and insert at front.
     state.stack.retain(|s| s != target);
@@ -225,10 +234,14 @@ fn lock_exclusive(file: &File) -> bool {
 }
 
 #[cfg(not(unix))]
-fn lock_shared(_file: &File) -> bool { true }
+fn lock_shared(_file: &File) -> bool {
+    true
+}
 
 #[cfg(not(unix))]
-fn lock_exclusive(_file: &File) -> bool { true }
+fn lock_exclusive(_file: &File) -> bool {
+    true
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -249,16 +262,25 @@ fn load_from(path: &std::path::Path) -> MruState {
 #[cfg(test)]
 fn save_to(path: &std::path::Path, target: &str) {
     let Ok(mut file) = OpenOptions::new()
-        .read(true).write(true).create(true).truncate(false)
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
         .open(path)
-    else { return; };
-    if !lock_exclusive(&file) { return; }
+    else {
+        return;
+    };
+    if !lock_exclusive(&file) {
+        return;
+    }
 
     let mut contents = String::new();
     let _ = file.read_to_string(&mut contents);
     let mut state = parse(&contents);
 
-    if state.current() == Some(target) { return; }
+    if state.current() == Some(target) {
+        return;
+    }
 
     state.stack.retain(|s| s != target);
     state.stack.insert(0, target.to_string());

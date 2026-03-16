@@ -18,12 +18,12 @@ mod activation;
 
 use anyhow::Context;
 use clap::Parser;
+use core_ipc::Message;
 use core_ipc::{BusServer, ClearanceRegistry};
 use core_profile::{
     AuditAction, AuditLogger, ContextEngine, ContextSignal,
     context::{ProfileActivation, RuleCombinator},
 };
-use core_ipc::Message;
 use core_types::{DaemonId, EventKind, SecurityLevel, TrustProfileName};
 
 /// Known daemons and their security clearance levels.
@@ -48,8 +48,7 @@ const KEY_ROTATION_GRACE: u32 = 30;
 /// Level 0 namespace seed. Never use directly for ProfileId derivation — use install_ns instead.
 #[allow(dead_code)]
 const PROFILE_NS: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77,
-    0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66, 0x8b,
+    0x4c, 0x45, 0xa6, 0x4f, 0xab, 0xcd, 0x59, 0x77, 0xbc, 0x73, 0x99, 0xd4, 0xc9, 0x3d, 0x66, 0x8b,
 ]);
 
 /// Tracks which `DaemonId` is associated with each daemon name.
@@ -61,7 +60,9 @@ struct DaemonTracker {
 
 impl DaemonTracker {
     fn new() -> Self {
-        Self { known: HashMap::new() }
+        Self {
+            known: HashMap::new(),
+        }
     }
 
     /// Register or detect restart. Returns `Some(old_id)` if this is a restart.
@@ -79,7 +80,10 @@ impl DaemonTracker {
 
 /// PDS profile orchestrator daemon.
 #[derive(Parser, Debug)]
-#[command(name = "daemon-profile", about = "PDS profile orchestrator and IPC bus server")]
+#[command(
+    name = "daemon-profile",
+    about = "PDS profile orchestrator and IPC bus server"
+)]
 struct Cli {
     /// Config directory override.
     #[arg(long, env = "PDS_CONFIG_DIR")]
@@ -104,8 +108,7 @@ async fn main() -> anyhow::Result<()> {
     platform_linux::security::harden_process();
 
     // -- Config --
-    let config = core_config::load_config(None)
-        .context("failed to load config")?;
+    let config = core_config::load_config(None).context("failed to load config")?;
 
     let install_config = core_config::load_installation()
         .context("installation.toml not found — run `sesame init` first")?;
@@ -129,15 +132,16 @@ async fn main() -> anyhow::Result<()> {
     apply_sandbox()?;
 
     // -- IPC bus server: generate Noise IK keypair and bind the Unix socket --
-    let socket_path = core_ipc::socket_path()
-        .context("failed to resolve IPC socket path")?;
-    let bus_keypair = core_ipc::generate_keypair()
-        .context("failed to generate bus Noise IK keypair")?;
-    core_ipc::noise::write_bus_keypair(bus_keypair.as_inner()).await
+    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
+    let bus_keypair =
+        core_ipc::generate_keypair().context("failed to generate bus Noise IK keypair")?;
+    core_ipc::noise::write_bus_keypair(bus_keypair.as_inner())
+        .await
         .context("failed to write bus public key")?;
 
     // -- Per-daemon keypair generation and clearance registry --
-    core_ipc::noise::create_keys_dir().await
+    core_ipc::noise::create_keys_dir()
+        .await
         .context("failed to create keys directory")?;
 
     let mut registry = ClearanceRegistry::new();
@@ -147,9 +151,11 @@ async fn main() -> anyhow::Result<()> {
     let builder = snow::Builder::new(noise_params);
 
     for &(daemon_name, security_level) in KNOWN_DAEMONS {
-        let keypair = core_ipc::ZeroizingKeypair::new(builder
-            .generate_keypair()
-            .context(format!("failed to generate keypair for {daemon_name}"))?);
+        let keypair = core_ipc::ZeroizingKeypair::new(
+            builder
+                .generate_keypair()
+                .context(format!("failed to generate keypair for {daemon_name}"))?,
+        );
 
         let mut pubkey = [0u8; 32];
         pubkey.copy_from_slice(keypair.public());
@@ -174,7 +180,8 @@ async fn main() -> anyhow::Result<()> {
     // -- Default agent identity (needed by audit logger) --
     let uid = rustix::process::getuid().as_raw();
     let default_agent_id = core_types::AgentId::from_uuid(uuid::Uuid::new_v5(
-        &install_ns, format!("agent:human:uid{uid}").as_bytes()
+        &install_ns,
+        format!("agent:human:uid{uid}").as_bytes(),
     ));
 
     // -- Audit logger --
@@ -186,7 +193,13 @@ async fn main() -> anyhow::Result<()> {
         .open(&audit_path)
         .context("failed to open audit log")?;
     let audit_writer = std::io::BufWriter::new(audit_file);
-    let mut audit = AuditLogger::new(audit_writer, last_hash, sequence, core_types::AuditHash::Blake3, Some(default_agent_id));
+    let mut audit = AuditLogger::new(
+        audit_writer,
+        last_hash,
+        sequence,
+        core_types::AuditHash::Blake3,
+        Some(default_agent_id),
+    );
     tracing::info!(
         path = %audit_path.display(),
         sequence = audit.sequence(),
@@ -202,9 +215,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -- Context engine --
-    let default_id = core_types::ProfileId::from_uuid(
-        uuid::Uuid::new_v5(&install_ns, format!("profile:{}", default_profile_name).as_bytes()),
-    );
+    let default_id = core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
+        &install_ns,
+        format!("profile:{}", default_profile_name).as_bytes(),
+    ));
     let profiles = build_activation_rules(&config, default_id, &install_ns);
     let mut context_engine = ContextEngine::new(profiles, default_id);
     tracing::info!(
@@ -259,7 +273,8 @@ async fn main() -> anyhow::Result<()> {
         SecurityLevel::Internal, // host handles StatusRequest/ProfileList — not secrets
         vec![],
         host_tx,
-    ).await;
+    )
+    .await;
 
     // -- Context signal sources --
     let (ctx_tx, mut ctx_rx) = mpsc::channel::<ContextSignal>(64);
@@ -274,7 +289,11 @@ async fn main() -> anyhow::Result<()> {
             let (ssid_raw_tx, mut ssid_raw_rx) = mpsc::channel::<String>(16);
             tokio::spawn(platform_linux::dbus::ssid_monitor(ssid_raw_tx));
             while let Some(ssid) = ssid_raw_rx.recv().await {
-                if ssid_tx.send(ContextSignal::SsidChanged(ssid)).await.is_err() {
+                if ssid_tx
+                    .send(ContextSignal::SsidChanged(ssid))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -292,7 +311,9 @@ async fn main() -> anyhow::Result<()> {
             let (focus_raw_tx, mut focus_raw_rx) = mpsc::channel::<FocusEvent>(16);
             tokio::spawn(platform_linux::compositor::focus_monitor(focus_raw_tx));
             while let Some(event) = focus_raw_rx.recv().await {
-                let FocusEvent::Focus(app_id) = event else { continue };
+                let FocusEvent::Focus(app_id) = event else {
+                    continue;
+                };
                 if focus_tx
                     .send(ContextSignal::AppFocused(core_types::AppId::new(app_id)))
                     .await
@@ -553,7 +574,10 @@ async fn handle_bus_message<W: std::io::Write>(
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
     match &msg.payload {
         // Track daemon start/restart for key revocation.
-        EventKind::DaemonStarted { daemon_id: announced_id, .. } => {
+        EventKind::DaemonStarted {
+            daemon_id: announced_id,
+            ..
+        } => {
             // Require server-verified name from Noise IK registry. Never fall back
             // to self-declared capabilities -- those are spoofable by any client.
             let Some(name) = msg.verified_sender_name.clone() else {
@@ -586,13 +610,14 @@ async fn handle_bus_message<W: std::io::Write>(
                 }
 
                 // Find the KNOWN_DAEMONS entry for this name.
-                if let Some(&(daemon_name, security_level)) = KNOWN_DAEMONS.iter()
-                    .find(|(n, _)| *n == name)
+                if let Some(&(daemon_name, security_level)) =
+                    KNOWN_DAEMONS.iter().find(|(n, _)| *n == name)
                 {
                     // Revoke old key, generate and register new one.
-                    let noise_params: snow::params::NoiseParams = "Noise_IK_25519_ChaChaPoly_BLAKE2s"
-                        .parse()
-                        .expect("valid noise params");
+                    let noise_params: snow::params::NoiseParams =
+                        "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+                            .parse()
+                            .expect("valid noise params");
                     let builder = snow::Builder::new(noise_params);
                     match builder.generate_keypair() {
                         Ok(raw_keypair) => {
@@ -601,20 +626,29 @@ async fn handle_bus_message<W: std::io::Write>(
                             new_pubkey.copy_from_slice(new_keypair.public());
 
                             // Write new keypair to disk.
-                            if let Err(e) = core_ipc::noise::write_daemon_keypair(daemon_name, new_keypair.as_inner()).await {
+                            if let Err(e) = core_ipc::noise::write_daemon_keypair(
+                                daemon_name,
+                                new_keypair.as_inner(),
+                            )
+                            .await
+                            {
                                 tracing::error!(error = %e, daemon = daemon_name, "failed to write revocation keypair");
                             } else {
                                 // Revoke old key, re-register with incremented generation.
                                 let mut reg = bus.registry_mut().await;
-                                let next_gen = if let Some((old_key, _)) = reg.find_by_name(daemon_name) {
-                                    let old_key = *old_key;
-                                    let old_entry = reg.revoke(&old_key);
-                                    old_entry.map_or(0, |e| e.generation + 1)
-                                } else {
-                                    0
-                                };
+                                let next_gen =
+                                    if let Some((old_key, _)) = reg.find_by_name(daemon_name) {
+                                        let old_key = *old_key;
+                                        let old_entry = reg.revoke(&old_key);
+                                        old_entry.map_or(0, |e| e.generation + 1)
+                                    } else {
+                                        0
+                                    };
                                 reg.register_with_generation(
-                                    new_pubkey, daemon_name.into(), security_level, next_gen,
+                                    new_pubkey,
+                                    daemon_name.into(),
+                                    security_level,
+                                    next_gen,
                                 );
                                 drop(reg); // Release lock before I/O.
                                 tracing::info!(
@@ -638,8 +672,10 @@ async fn handle_bus_message<W: std::io::Write>(
                                     grace_period_s: KEY_ROTATION_GRACE,
                                 };
                                 let rotation_msg = Message::new(
-                                    &msg_ctx, rotation_event,
-                                    SecurityLevel::Internal, bus.epoch(),
+                                    &msg_ctx,
+                                    rotation_event,
+                                    SecurityLevel::Internal,
+                                    bus.epoch(),
                                 );
                                 if let Ok(payload) = core_ipc::encode_frame(&rotation_msg) {
                                     bus.publish(&payload, SecurityLevel::Internal).await;
@@ -659,14 +695,21 @@ async fn handle_bus_message<W: std::io::Write>(
             // Query daemon-secrets for authoritative lock + active profile state
             // rather than relying on shadow state that may be stale.
             match activation::confirmed_rpc(
-                bus, daemon_id, EventKind::SecretsStateRequest, confirm_tx, confirm_rx,
-            ).await {
+                bus,
+                daemon_id,
+                EventKind::SecretsStateRequest,
+                confirm_tx,
+                confirm_rx,
+            )
+            .await
+            {
                 Ok(response) => {
                     if let EventKind::SecretsStateResponse {
                         locked: auth_locked,
                         active_profiles: auth_profiles,
                         lock_state: auth_lock_state,
-                    } = response.payload {
+                    } = response.payload
+                    {
                         // Warm the shadow state from the authoritative source.
                         *locked = auth_locked;
                         *active_profiles = auth_profiles.iter().cloned().collect();
@@ -678,7 +721,10 @@ async fn handle_bus_message<W: std::io::Write>(
                             lock_state: auth_lock_state,
                         })
                     } else {
-                        tracing::warn!("unexpected response to SecretsStateRequest: {:?}", response.payload);
+                        tracing::warn!(
+                            "unexpected response to SecretsStateRequest: {:?}",
+                            response.payload
+                        );
                         Some(EventKind::StatusResponse {
                             active_profiles: active_profiles.iter().cloned().collect(),
                             default_profile: default_profile_name.clone(),
@@ -706,28 +752,45 @@ async fn handle_bus_message<W: std::io::Write>(
             // `sesame profile list` shows all configured profiles.
             // Use deterministic UUIDs (UUID v5) so ProfileIds are stable across
             // calls and restarts, matching the IDs used in build_activation_rules().
-            let profiles = config_profile_names.iter().map(|name| {
-                let id = core_types::ProfileId::from_uuid(
-                    uuid::Uuid::new_v5(install_ns, format!("profile:{}", name).as_bytes()),
-                );
-                core_types::ProfileSummary {
-                    id,
-                    name: name.clone(),
-                    is_active: active_profiles.contains(name),
-                    is_default: name == &*default_profile_name,
-                }
-            }).collect();
+            let profiles = config_profile_names
+                .iter()
+                .map(|name| {
+                    let id = core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
+                        install_ns,
+                        format!("profile:{}", name).as_bytes(),
+                    ));
+                    core_types::ProfileSummary {
+                        id,
+                        name: name.clone(),
+                        is_active: active_profiles.contains(name),
+                        is_default: name == &*default_profile_name,
+                    }
+                })
+                .collect();
             Some(EventKind::ProfileListResponse { profiles })
         }
 
-        EventKind::ProfileActivate { profile_name, target } => {
+        EventKind::ProfileActivate {
+            profile_name,
+            target,
+        } => {
             if !config_profile_names.contains(profile_name) {
                 tracing::warn!(profile = %profile_name, "activate requested but profile not in config");
                 return Some(EventKind::ProfileActivateResponse { success: false });
             }
-            match activation::activate(*target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await {
+            match activation::activate(
+                *target,
+                profile_name,
+                bus,
+                audit,
+                daemon_id,
+                confirm_tx,
+                confirm_rx,
+            )
+            .await
+            {
                 Ok(duration_ms) => {
-                    active_profiles.insert(profile_name.clone());  // TrustProfileName: Clone
+                    active_profiles.insert(profile_name.clone()); // TrustProfileName: Clone
                     tracing::info!(
                         profile = %profile_name,
                         duration_ms,
@@ -746,7 +809,10 @@ async fn handle_bus_message<W: std::io::Write>(
             }
         }
 
-        EventKind::ProfileDeactivate { profile_name, target } => {
+        EventKind::ProfileDeactivate {
+            profile_name,
+            target,
+        } => {
             if !config_profile_names.contains(profile_name) {
                 tracing::warn!(profile = %profile_name, "deactivate requested but profile not in config");
                 return Some(EventKind::ProfileDeactivateResponse { success: false });
@@ -756,7 +822,17 @@ async fn handle_bus_message<W: std::io::Write>(
                 return Some(EventKind::ProfileDeactivateResponse { success: false });
             }
 
-            match activation::deactivate(*target, profile_name, bus, audit, daemon_id, confirm_tx, confirm_rx).await {
+            match activation::deactivate(
+                *target,
+                profile_name,
+                bus,
+                audit,
+                daemon_id,
+                confirm_tx,
+                confirm_rx,
+            )
+            .await
+            {
                 Ok(duration_ms) => {
                     active_profiles.remove(profile_name);
                     tracing::info!(
@@ -779,7 +855,8 @@ async fn handle_bus_message<W: std::io::Write>(
                         active_profiles,
                         confirm_tx,
                         confirm_rx,
-                    ).await;
+                    )
+                    .await;
                     Some(EventKind::ProfileDeactivateResponse { success: false })
                 }
             }
@@ -799,18 +876,27 @@ async fn handle_bus_message<W: std::io::Write>(
             Some(EventKind::SetDefaultProfileResponse { success: true })
         }
 
-        EventKind::UnlockResponse { success: true, profile } => {
+        EventKind::UnlockResponse {
+            success: true,
+            profile,
+        } => {
             *locked = false; // At least one vault is unlocked.
             tracing::info!(profile = %profile, "vault unlocked, shadow state updated");
             None
         }
 
-        EventKind::LockResponse { success: true, profiles_locked } => {
+        EventKind::LockResponse {
+            success: true,
+            profiles_locked,
+        } => {
             if profiles_locked.is_empty() {
                 // Lock-all: clear everything.
                 *locked = true;
                 active_profiles.clear();
-                tracing::info!(audit = "security", "all vaults locked, active profiles cleared");
+                tracing::info!(
+                    audit = "security",
+                    "all vaults locked, active profiles cleared"
+                );
             } else {
                 // Per-profile lock: remove locked profiles from active set.
                 for p in profiles_locked {
@@ -1000,9 +1086,11 @@ async fn rotate_keys_phase1<W: std::io::Write>(
     let baseline = bus.registry_mut().await.snapshot_generations();
 
     for &(daemon_name, _security_level) in KNOWN_DAEMONS {
-        let new_keypair = core_ipc::ZeroizingKeypair::new(builder
-            .generate_keypair()
-            .context(format!("failed to generate new keypair for {daemon_name}"))?);
+        let new_keypair = core_ipc::ZeroizingKeypair::new(
+            builder
+                .generate_keypair()
+                .context(format!("failed to generate new keypair for {daemon_name}"))?,
+        );
 
         let mut new_pubkey = [0u8; 32];
         new_pubkey.copy_from_slice(new_keypair.public());
@@ -1028,7 +1116,9 @@ async fn rotate_keys_phase1<W: std::io::Write>(
             grace_period_s = KEY_ROTATION_GRACE,
             "key rotation announced"
         );
-        let current_generation = bus.registry_mut().await
+        let current_generation = bus
+            .registry_mut()
+            .await
             .find_by_name(daemon_name)
             .map_or(0, |(_, e)| e.generation);
         let _ = audit.append(AuditAction::KeyRotationStarted {
@@ -1053,7 +1143,10 @@ async fn rotate_keys_phase2<W: std::io::Write>(
     audit: &mut AuditLogger<W>,
 ) -> anyhow::Result<()> {
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    let baseline = ROTATION_BASELINE.lock().await.take()
+    let baseline = ROTATION_BASELINE
+        .lock()
+        .await
+        .take()
         .context("phase 2 called without phase 1 baseline")?;
 
     // Collect all new pubkeys before taking the lock (avoid per-daemon lock churn).
@@ -1071,9 +1164,7 @@ async fn rotate_keys_phase2<W: std::io::Write>(
         let mut reg = bus.registry_mut().await;
         for &(daemon_name, new_pubkey, security_level) in &new_keys {
             // Check if the daemon's generation advanced since phase 1.
-            let current_gen = reg
-                .find_by_name(daemon_name)
-                .map(|(_, e)| e.generation);
+            let current_gen = reg.find_by_name(daemon_name).map(|(_, e)| e.generation);
             let baseline_gen = baseline.get(daemon_name).copied();
 
             if current_gen != baseline_gen {
@@ -1113,7 +1204,9 @@ async fn rotate_keys_phase2<W: std::io::Write>(
             daemon = daemon_name,
             "key rotation complete, registry updated"
         );
-        let current_generation = bus.registry_mut().await
+        let current_generation = bus
+            .registry_mut()
+            .await
             .find_by_name(daemon_name)
             .map_or(0, |(_, e)| e.generation);
         let _ = audit.append(AuditAction::KeyRotationCompleted {
@@ -1176,9 +1269,10 @@ fn build_activation_rules(
         let profile_id = if name == &config.global.default_profile.to_string() {
             default_id
         } else {
-            core_types::ProfileId::from_uuid(
-                uuid::Uuid::new_v5(install_ns, format!("profile:{}", name).as_bytes()),
-            )
+            core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
+                install_ns,
+                format!("profile:{}", name).as_bytes(),
+            ))
         };
 
         activations.push(ProfileActivation {
@@ -1224,8 +1318,7 @@ fn load_audit_state(path: &PathBuf) -> (String, u64) {
 
 /// Verify the audit log hash chain integrity.
 fn verify_audit_chain(path: &PathBuf) -> anyhow::Result<u64> {
-    let contents = std::fs::read_to_string(path)
-        .context("failed to read audit log")?;
+    let contents = std::fs::read_to_string(path).context("failed to read audit log")?;
     core_profile::verify_chain(&contents, &core_types::AuditHash::Blake3)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -1234,7 +1327,7 @@ fn verify_audit_chain(path: &PathBuf) -> anyhow::Result<u64> {
 async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sig = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         sig.recv().await;
     }
@@ -1253,12 +1346,9 @@ async fn sigterm() {
 /// requires every path in the ruleset to exist.
 #[cfg(target_os = "linux")]
 fn apply_sandbox() -> anyhow::Result<()> {
-    use platform_linux::sandbox::{
-        apply_sandbox, FsAccess, LandlockRule, SeccompProfile,
-    };
+    use platform_linux::sandbox::{FsAccess, LandlockRule, SeccompProfile, apply_sandbox};
 
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/run/user/1000".into());
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
 
     let config_dir = core_config::config_dir();
     let pds_runtime = PathBuf::from(&runtime_dir).join("pds");
@@ -1266,8 +1356,7 @@ fn apply_sandbox() -> anyhow::Result<()> {
     // Ensure Landlock target directories exist before PathFd::new().
     for dir in [&config_dir, &pds_runtime] {
         if !dir.exists() {
-            std::fs::create_dir_all(dir)
-                .context(format!("failed to create {}", dir.display()))?;
+            std::fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
         }
     }
 
@@ -1308,9 +1397,9 @@ fn apply_sandbox() -> anyhow::Result<()> {
     {
         let mut seen = std::collections::HashSet::new();
         let add_path = |rules: &mut Vec<LandlockRule>,
-                            path: PathBuf,
-                            access: FsAccess,
-                            seen: &mut std::collections::HashSet<PathBuf>| {
+                        path: PathBuf,
+                        access: FsAccess,
+                        seen: &mut std::collections::HashSet<PathBuf>| {
             if seen.insert(path.clone()) && (path.exists() || path.is_symlink()) {
                 rules.push(LandlockRule { path, access });
             }
@@ -1318,12 +1407,27 @@ fn apply_sandbox() -> anyhow::Result<()> {
 
         if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
             let sock_path = PathBuf::from(&sock);
-            add_path(&mut rules, sock_path.clone(), FsAccess::ReadWriteFile, &mut seen);
+            add_path(
+                &mut rules,
+                sock_path.clone(),
+                FsAccess::ReadWriteFile,
+                &mut seen,
+            );
 
             if let Ok(canonical) = std::fs::canonicalize(&sock_path) {
-                add_path(&mut rules, canonical.clone(), FsAccess::ReadWriteFile, &mut seen);
+                add_path(
+                    &mut rules,
+                    canonical.clone(),
+                    FsAccess::ReadWriteFile,
+                    &mut seen,
+                );
                 if let Some(parent) = canonical.parent() {
-                    add_path(&mut rules, parent.to_path_buf(), FsAccess::ReadOnly, &mut seen);
+                    add_path(
+                        &mut rules,
+                        parent.to_path_buf(),
+                        FsAccess::ReadOnly,
+                        &mut seen,
+                    );
                 }
             }
         }
@@ -1334,12 +1438,27 @@ fn apply_sandbox() -> anyhow::Result<()> {
             let agent_sock = ssh_dir.join("agent.sock");
 
             add_path(&mut rules, ssh_dir, FsAccess::ReadOnly, &mut seen);
-            add_path(&mut rules, agent_sock.clone(), FsAccess::ReadWriteFile, &mut seen);
+            add_path(
+                &mut rules,
+                agent_sock.clone(),
+                FsAccess::ReadWriteFile,
+                &mut seen,
+            );
 
             if let Ok(canonical) = std::fs::canonicalize(&agent_sock) {
-                add_path(&mut rules, canonical.clone(), FsAccess::ReadWriteFile, &mut seen);
+                add_path(
+                    &mut rules,
+                    canonical.clone(),
+                    FsAccess::ReadWriteFile,
+                    &mut seen,
+                );
                 if let Some(parent) = canonical.parent() {
-                    add_path(&mut rules, parent.to_path_buf(), FsAccess::ReadOnly, &mut seen);
+                    add_path(
+                        &mut rules,
+                        parent.to_path_buf(),
+                        FsAccess::ReadOnly,
+                        &mut seen,
+                    );
                 }
             }
         }
@@ -1349,47 +1468,93 @@ fn apply_sandbox() -> anyhow::Result<()> {
         daemon_name: "daemon-profile".into(),
         allowed_syscalls: vec![
             // I/O basics
-            "read".into(), "write".into(), "close".into(),
-            "openat".into(), "lseek".into(), "pread64".into(),
-            "fstat".into(), "stat".into(), "newfstatat".into(),
-            "statx".into(), "access".into(), "unlink".into(),
-            "mkdir".into(), "rename".into(), "chmod".into(),
-            "fchmod".into(), "fchown".into(),
-            "fcntl".into(), "ioctl".into(), "fsync".into(),
-            "fdatasync".into(), "getdents64".into(),
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "openat".into(),
+            "lseek".into(),
+            "pread64".into(),
+            "fstat".into(),
+            "stat".into(),
+            "newfstatat".into(),
+            "statx".into(),
+            "access".into(),
+            "unlink".into(),
+            "mkdir".into(),
+            "rename".into(),
+            "chmod".into(),
+            "fchmod".into(),
+            "fchown".into(),
+            "fcntl".into(),
+            "ioctl".into(),
+            "fsync".into(),
+            "fdatasync".into(),
+            "getdents64".into(),
             // Memory
-            "mmap".into(), "mprotect".into(), "munmap".into(),
-            "madvise".into(), "brk".into(),
+            "mmap".into(),
+            "mprotect".into(),
+            "munmap".into(),
+            "madvise".into(),
+            "brk".into(),
             // Process / threading
-            "futex".into(), "clone3".into(), "clone".into(),
-            "set_robust_list".into(), "set_tid_address".into(),
-            "rseq".into(), "sched_getaffinity".into(),
-            "prlimit64".into(), "prctl".into(),
-            "getpid".into(), "gettid".into(), "getuid".into(), "geteuid".into(),
+            "futex".into(),
+            "clone3".into(),
+            "clone".into(),
+            "set_robust_list".into(),
+            "set_tid_address".into(),
+            "rseq".into(),
+            "sched_getaffinity".into(),
+            "prlimit64".into(),
+            "prctl".into(),
+            "getpid".into(),
+            "gettid".into(),
+            "getuid".into(),
+            "geteuid".into(),
             "kill".into(),
             // Epoll / event loop (tokio)
-            "epoll_wait".into(), "epoll_ctl".into(),
-            "epoll_create1".into(), "eventfd2".into(),
-            "poll".into(), "ppoll".into(),
+            "epoll_wait".into(),
+            "epoll_ctl".into(),
+            "epoll_create1".into(),
+            "eventfd2".into(),
+            "poll".into(),
+            "ppoll".into(),
             // Timers (tokio runtime)
-            "clock_gettime".into(), "timer_create".into(),
-            "timer_settime".into(), "timer_delete".into(),
+            "clock_gettime".into(),
+            "timer_create".into(),
+            "timer_settime".into(),
+            "timer_delete".into(),
             // Networking / IPC (Unix domain sockets)
-            "socket".into(), "bind".into(), "listen".into(),
-            "accept4".into(), "connect".into(), "sendto".into(),
-            "recvfrom".into(), "getsockname".into(),
-            "getpeername".into(), "setsockopt".into(),
-            "socketpair".into(), "sendmsg".into(), "recvmsg".into(),
-            "shutdown".into(), "getsockopt".into(),
+            "socket".into(),
+            "bind".into(),
+            "listen".into(),
+            "accept4".into(),
+            "connect".into(),
+            "sendto".into(),
+            "recvfrom".into(),
+            "getsockname".into(),
+            "getpeername".into(),
+            "setsockopt".into(),
+            "socketpair".into(),
+            "sendmsg".into(),
+            "recvmsg".into(),
+            "shutdown".into(),
+            "getsockopt".into(),
             // Signals
-            "sigaltstack".into(), "rt_sigaction".into(),
-            "rt_sigprocmask".into(), "rt_sigreturn".into(),
+            "sigaltstack".into(),
+            "rt_sigaction".into(),
+            "rt_sigprocmask".into(),
+            "rt_sigreturn".into(),
             "tgkill".into(),
             // Misc
-            "exit_group".into(), "exit".into(), "getrandom".into(),
+            "exit_group".into(),
+            "exit".into(),
+            "getrandom".into(),
             "restart_syscall".into(),
-            "inotify_init1".into(), "inotify_add_watch".into(),
-            "inotify_rm_watch".into(), "pipe2".into(), "dup".into(),
+            "inotify_init1".into(),
+            "inotify_add_watch".into(),
+            "inotify_rm_watch".into(),
+            "pipe2".into(),
+            "dup".into(),
         ],
     };
 
@@ -1407,8 +1572,7 @@ fn apply_sandbox() -> anyhow::Result<()> {
 fn init_logging(format: &str) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     match format {
         "json" => {
@@ -1418,9 +1582,7 @@ fn init_logging(format: &str) -> anyhow::Result<()> {
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 

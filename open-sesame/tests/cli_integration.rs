@@ -23,10 +23,7 @@ fn help_flag_exits_zero() {
 
 #[test]
 fn version_flag_exits_zero() {
-    sesame()
-        .arg("--version")
-        .assert()
-        .success();
+    sesame().arg("--version").assert().success();
 }
 
 #[test]
@@ -95,15 +92,11 @@ fn env_requires_profile_and_command() {
 
 #[test]
 fn env_help_exits_zero() {
-    sesame()
-        .args(["env", "--help"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("environment")
-                .or(predicate::str::contains("secrets"))
-                .or(predicate::str::contains("SESAME_PROFILE")),
-        );
+    sesame().args(["env", "--help"]).assert().success().stdout(
+        predicate::str::contains("environment")
+            .or(predicate::str::contains("secrets"))
+            .or(predicate::str::contains("SESAME_PROFILE")),
+    );
 }
 
 // ===== WM subcommand tests =====

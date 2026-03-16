@@ -55,19 +55,21 @@ impl SqlCipherStore {
         }
 
         let conn = Connection::open(db_path).map_err(|e| {
-            core_types::Error::Secrets(format!("failed to open database {}: {e}", db_path.display()))
+            core_types::Error::Secrets(format!(
+                "failed to open database {}: {e}",
+                db_path.display()
+            ))
         })?;
 
         // Set the encryption key in raw hex mode.
         use zeroize::Zeroize;
         let mut hex_key = hex_encode(vault_key.as_bytes());
         let mut pragma_sql = format!("PRAGMA key = \"x'{hex_key}'\";");
-        conn.execute_batch(&pragma_sql)
-            .map_err(|e| {
-                hex_key.zeroize();
-                pragma_sql.zeroize();
-                core_types::Error::Secrets(format!("PRAGMA key failed: {e}"))
-            })?;
+        conn.execute_batch(&pragma_sql).map_err(|e| {
+            hex_key.zeroize();
+            pragma_sql.zeroize();
+            core_types::Error::Secrets(format!("PRAGMA key failed: {e}"))
+        })?;
         hex_key.zeroize();
         pragma_sql.zeroize();
 
@@ -92,9 +94,7 @@ impl SqlCipherStore {
                 updated_at INTEGER NOT NULL
             );",
         )
-        .map_err(|e| {
-            core_types::Error::Secrets(format!("schema migration failed: {e}"))
-        })?;
+        .map_err(|e| core_types::Error::Secrets(format!("schema migration failed: {e}")))?;
 
         // Verify the key works by reading the schema.
         conn.execute_batch("SELECT count(*) FROM sqlite_master;")
@@ -107,10 +107,8 @@ impl SqlCipherStore {
         // Derive a separate key for per-entry AES-256-GCM encryption.
         // Domain-separated via BLAKE3 so it is cryptographically independent
         // from the SQLCipher page encryption key (same vault_key input, different context).
-        let mut entry_key_bytes = blake3::derive_key(
-            "pds v2 entry-encryption-key",
-            vault_key.as_bytes(),
-        );
+        let mut entry_key_bytes =
+            blake3::derive_key("pds v2 entry-encryption-key", vault_key.as_bytes());
         let entry_key = SecureBytes::new(entry_key_bytes.to_vec());
         entry_key_bytes.zeroize();
 
@@ -132,13 +130,13 @@ impl SqlCipherStore {
     /// the catastrophic nonce reuse that occurs with deterministic derivation.
     fn encrypt_value(&self, plaintext: &[u8]) -> core_types::Result<Vec<u8>> {
         let mut nonce = [0u8; 12];
-        getrandom::getrandom(&mut nonce).map_err(|e| {
-            core_types::Error::Crypto(format!("nonce generation failed: {e}"))
-        })?;
+        getrandom::getrandom(&mut nonce)
+            .map_err(|e| core_types::Error::Crypto(format!("nonce generation failed: {e}")))?;
         let enc_key = EncryptionKey::from_bytes(
-            self.entry_key.as_bytes().try_into().map_err(|_| {
-                core_types::Error::Crypto("entry key is not 32 bytes".into())
-            })?,
+            self.entry_key
+                .as_bytes()
+                .try_into()
+                .map_err(|_| core_types::Error::Crypto("entry key is not 32 bytes".into()))?,
         )?;
         let ciphertext = enc_key.encrypt(&nonce, plaintext)?;
         let mut wire = Vec::with_capacity(12 + ciphertext.len());
@@ -159,9 +157,10 @@ impl SqlCipherStore {
         let nonce: [u8; 12] = wire[..12].try_into().unwrap();
         let ciphertext = &wire[12..];
         let enc_key = EncryptionKey::from_bytes(
-            self.entry_key.as_bytes().try_into().map_err(|_| {
-                core_types::Error::Crypto("entry key is not 32 bytes".into())
-            })?,
+            self.entry_key
+                .as_bytes()
+                .try_into()
+                .map_err(|_| core_types::Error::Crypto("entry key is not 32 bytes".into()))?,
         )?;
         enc_key.decrypt(&nonce, ciphertext)
     }
@@ -201,9 +200,10 @@ impl SecretsStore for SqlCipherStore {
     fn get(&self, key: &str) -> BoxFuture<'_, core_types::Result<SecureBytes>> {
         let key = key.to_owned();
         Box::pin(async move {
-            let conn = self.conn.lock().map_err(|e| {
-                core_types::Error::Secrets(format!("lock poisoned: {e}"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| core_types::Error::Secrets(format!("lock poisoned: {e}")))?;
 
             let mut stmt = conn
                 .prepare("SELECT value FROM secrets WHERE key = ?1")
@@ -232,9 +232,10 @@ impl SecretsStore for SqlCipherStore {
             let ciphertext = ciphertext?;
             let now = Self::now_secs();
 
-            let conn = self.conn.lock().map_err(|e| {
-                core_types::Error::Secrets(format!("lock poisoned: {e}"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| core_types::Error::Secrets(format!("lock poisoned: {e}")))?;
 
             conn.execute(
                 "INSERT INTO secrets (key, value, created_at, updated_at)
@@ -251,15 +252,13 @@ impl SecretsStore for SqlCipherStore {
     fn delete(&self, key: &str) -> BoxFuture<'_, core_types::Result<()>> {
         let key = key.to_owned();
         Box::pin(async move {
-            let conn = self.conn.lock().map_err(|e| {
-                core_types::Error::Secrets(format!("lock poisoned: {e}"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| core_types::Error::Secrets(format!("lock poisoned: {e}")))?;
 
             let rows = conn
-                .execute(
-                    "DELETE FROM secrets WHERE key = ?1",
-                    rusqlite::params![key],
-                )
+                .execute("DELETE FROM secrets WHERE key = ?1", rusqlite::params![key])
                 .map_err(|e| core_types::Error::Secrets(format!("delete failed: {e}")))?;
 
             if rows == 0 {
@@ -272,9 +271,10 @@ impl SecretsStore for SqlCipherStore {
 
     fn list_keys(&self) -> BoxFuture<'_, core_types::Result<Vec<String>>> {
         Box::pin(async move {
-            let conn = self.conn.lock().map_err(|e| {
-                core_types::Error::Secrets(format!("lock poisoned: {e}"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| core_types::Error::Secrets(format!("lock poisoned: {e}")))?;
 
             let mut stmt = conn
                 .prepare("SELECT key FROM secrets ORDER BY key")
@@ -483,10 +483,8 @@ mod tests {
         let vault_key = core_crypto::derive_vault_key(master_key.as_bytes(), profile);
 
         // Derive entry key (same derivation as SqlCipherStore::open internally)
-        let entry_key_bytes = blake3::derive_key(
-            "pds v2 entry-encryption-key",
-            vault_key.as_bytes(),
-        );
+        let entry_key_bytes =
+            blake3::derive_key("pds v2 entry-encryption-key", vault_key.as_bytes());
 
         // Vault key and entry key must be cryptographically independent
         assert_ne!(
@@ -550,7 +548,10 @@ mod tests {
                 .query_row(rusqlite::params![key], |row| row.get(0))
                 .unwrap();
 
-            assert!(ciphertext.len() >= 12, "ciphertext must include 12-byte nonce prefix");
+            assert!(
+                ciphertext.len() >= 12,
+                "ciphertext must include 12-byte nonce prefix"
+            );
 
             let nonce: [u8; 12] = ciphertext[..12].try_into().unwrap();
             nonces.insert(nonce);
@@ -595,16 +596,21 @@ mod tests {
         // Reopen with the ORIGINAL key -- must succeed if encryption preserved.
         let store2 = SqlCipherStore::open(&db, &key).unwrap();
         let val = store2.get("rekey-check").await.unwrap();
-        assert_eq!(val.as_bytes(), b"secret-payload",
-            "database must still be readable with original key after pragma_rekey_clear");
+        assert_eq!(
+            val.as_bytes(),
+            b"secret-payload",
+            "database must still be readable with original key after pragma_rekey_clear"
+        );
         drop(store2);
 
         // Attempt to open with NO key (empty Connection::open, no PRAGMA key).
         // If PRAGMA rekey='' removed encryption, this would succeed.
         let conn = rusqlite::Connection::open(&db).unwrap();
         let result = conn.execute_batch("SELECT count(*) FROM sqlite_master;");
-        assert!(result.is_err(),
+        assert!(
+            result.is_err(),
             "database must NOT be readable without a key after pragma_rekey_clear -- \
-             PRAGMA rekey='' may have removed encryption!");
+             PRAGMA rekey='' may have removed encryption!"
+        );
     }
 }

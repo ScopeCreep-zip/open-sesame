@@ -48,7 +48,6 @@ pub struct Message<T> {
     pub verified_sender_name: Option<String>,
 
     // -- v3 fields (appended for positional encoding safety) --
-
     /// Installation identity of the sender.
     /// No `skip_serializing_if` — postcard positional encoding requires all fields present.
     pub origin_installation: Option<InstallationId>,
@@ -91,7 +90,10 @@ impl<T: fmt::Debug> fmt::Debug for Message<T> {
             .field("sender", &self.sender)
             .field("security_level", &self.security_level)
             .field("agent_id", &self.agent_id)
-            .field("origin_installation", &self.origin_installation.as_ref().map(|i| &i.id))
+            .field(
+                "origin_installation",
+                &self.origin_installation.as_ref().map(|i| &i.id),
+            )
             .field("payload", &self.payload)
             .finish_non_exhaustive()
     }
@@ -100,7 +102,12 @@ impl<T: fmt::Debug> fmt::Debug for Message<T> {
 impl<T: Serialize> Message<T> {
     /// Create a new message with a fresh UUID v7 and current timestamp.
     #[must_use]
-    pub fn new(ctx: &MessageContext, payload: T, security_level: SecurityLevel, epoch: Instant) -> Self {
+    pub fn new(
+        ctx: &MessageContext,
+        payload: T,
+        security_level: SecurityLevel,
+        epoch: Instant,
+    ) -> Self {
         Self {
             wire_version: WIRE_VERSION,
             msg_id: Uuid::now_v7(),
@@ -201,14 +208,25 @@ mod tests {
                 agent_type: core_types::AgentType::Human,
             }),
         };
-        let msg = Message::new(&ctx, EventKind::StatusRequest, SecurityLevel::Internal, Instant::now());
+        let msg = Message::new(
+            &ctx,
+            EventKind::StatusRequest,
+            SecurityLevel::Internal,
+            Instant::now(),
+        );
 
         let bytes = crate::framing::encode_frame(&msg).unwrap();
         let decoded: Message<EventKind> = crate::framing::decode_frame(&bytes).unwrap();
 
         assert_eq!(decoded.wire_version, WIRE_VERSION);
-        assert_eq!(decoded.origin_installation.as_ref().unwrap().id, Uuid::from_u128(1));
-        assert_eq!(decoded.agent_id.unwrap(), AgentId::from_uuid(Uuid::from_u128(3)));
+        assert_eq!(
+            decoded.origin_installation.as_ref().unwrap().id,
+            Uuid::from_u128(1)
+        );
+        assert_eq!(
+            decoded.agent_id.unwrap(),
+            AgentId::from_uuid(Uuid::from_u128(3))
+        );
         assert!(decoded.trust_snapshot.is_some());
         let tv = decoded.trust_snapshot.unwrap();
         assert_eq!(tv.authn_strength, core_types::TrustLevel::High);
@@ -218,7 +236,12 @@ mod tests {
     #[test]
     fn v3_fields_none_roundtrip() {
         let ctx = MessageContext::new(DaemonId::new());
-        let msg = Message::new(&ctx, EventKind::StatusRequest, SecurityLevel::Open, Instant::now());
+        let msg = Message::new(
+            &ctx,
+            EventKind::StatusRequest,
+            SecurityLevel::Open,
+            Instant::now(),
+        );
 
         let bytes = crate::framing::encode_frame(&msg).unwrap();
         let decoded: Message<EventKind> = crate::framing::decode_frame(&bytes).unwrap();
@@ -284,9 +307,7 @@ mod tests {
                 request_id: req_id,
                 reason: "nope".into(),
             },
-            EventKind::AuthorizationTimeout {
-                request_id: req_id,
-            },
+            EventKind::AuthorizationTimeout { request_id: req_id },
             EventKind::DelegationRevoked {
                 delegation_id: deleg_id,
                 revoker: agent,
@@ -319,7 +340,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("encode failed for variant {i}: {e}"));
             let decoded: Message<EventKind> = crate::framing::decode_frame(&bytes)
                 .unwrap_or_else(|e| panic!("decode failed for variant {i}: {e}"));
-            assert_eq!(decoded.wire_version, WIRE_VERSION, "variant {i} wire version mismatch");
+            assert_eq!(
+                decoded.wire_version, WIRE_VERSION,
+                "variant {i} wire version mismatch"
+            );
         }
     }
 }

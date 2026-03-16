@@ -24,7 +24,9 @@ pub(crate) fn check_secret_access(
 ) -> bool {
     let Some(profile_config) = config.profiles.get(profile.as_ref()) else {
         // Profile not in config. Check if ACL enforcement is active anywhere.
-        let any_acl_active = config.profiles.values()
+        let any_acl_active = config
+            .profiles
+            .values()
             .any(|p| !p.secrets.access.is_empty());
         if any_acl_active {
             tracing::warn!(
@@ -77,7 +79,9 @@ pub(crate) fn check_secret_list_access(
     daemon_name: Option<&str>,
 ) -> bool {
     let Some(profile_config) = config.profiles.get(profile.as_ref()) else {
-        let any_acl_active = config.profiles.values()
+        let any_acl_active = config
+            .profiles
+            .values()
             .any(|p| !p.secrets.access.is_empty());
         if any_acl_active {
             tracing::warn!(
@@ -175,10 +179,7 @@ mod tests {
     }
 
     /// Build a Config with one profile that has the given ACL access map.
-    fn config_with_acl(
-        profile: &str,
-        access: BTreeMap<String, Vec<String>>,
-    ) -> Config {
+    fn config_with_acl(profile: &str, access: BTreeMap<String, Vec<String>>) -> Config {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             profile.to_string(),
@@ -208,7 +209,10 @@ mod tests {
     fn acl_001_profile_missing_no_acl_anywhere_allows() {
         let config = config_with_acl("work", BTreeMap::new());
         assert!(check_secret_access(
-            &config, &profile_name("nonexistent"), Some("daemon-launcher"), "key"
+            &config,
+            &profile_name("nonexistent"),
+            Some("daemon-launcher"),
+            "key"
         ));
     }
 
@@ -221,7 +225,10 @@ mod tests {
         access.insert("daemon-wm".into(), vec!["x".into()]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_access(
-            &config, &profile_name("unknown"), Some("daemon-launcher"), "key"
+            &config,
+            &profile_name("unknown"),
+            Some("daemon-launcher"),
+            "key"
         ));
     }
 
@@ -231,7 +238,10 @@ mod tests {
     fn acl_003_profile_exists_empty_access_allows() {
         let config = config_with_acl("work", BTreeMap::new());
         assert!(check_secret_access(
-            &config, &profile_name("work"), Some("daemon-launcher"), "key"
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher"),
+            "key"
         ));
     }
 
@@ -244,7 +254,10 @@ mod tests {
         access.insert("daemon-wm".into(), vec!["x".into()]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_access(
-            &config, &profile_name("work"), None, "key"
+            &config,
+            &profile_name("work"),
+            None,
+            "key"
         ));
     }
 
@@ -256,7 +269,10 @@ mod tests {
         access.insert("other-daemon".into(), vec!["key".into()]);
         let config = config_with_acl("work", access);
         assert!(check_secret_access(
-            &config, &profile_name("work"), Some("daemon-launcher"), "key"
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher"),
+            "key"
         ));
     }
 
@@ -268,7 +284,10 @@ mod tests {
         access.insert("daemon-launcher".into(), vec!["api-key".into()]);
         let config = config_with_acl("work", access);
         assert!(check_secret_access(
-            &config, &profile_name("work"), Some("daemon-launcher"), "api-key"
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher"),
+            "api-key"
         ));
     }
 
@@ -280,7 +299,10 @@ mod tests {
         access.insert("daemon-launcher".into(), vec!["api-key".into()]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_access(
-            &config, &profile_name("work"), Some("daemon-launcher"), "db-pass"
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher"),
+            "db-pass"
         ));
     }
 
@@ -293,7 +315,10 @@ mod tests {
         access.insert("daemon-launcher".into(), vec![]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_access(
-            &config, &profile_name("work"), Some("daemon-launcher"), "any-key"
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher"),
+            "any-key"
         ));
     }
 
@@ -305,7 +330,9 @@ mod tests {
     fn acl_009_list_profile_missing_no_acl_allows() {
         let config = config_with_acl("work", BTreeMap::new());
         assert!(check_secret_list_access(
-            &config, &profile_name("nonexistent"), Some("daemon-launcher")
+            &config,
+            &profile_name("nonexistent"),
+            Some("daemon-launcher")
         ));
     }
 
@@ -317,7 +344,9 @@ mod tests {
         access.insert("daemon-wm".into(), vec!["x".into()]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_list_access(
-            &config, &profile_name("unknown"), Some("daemon-launcher")
+            &config,
+            &profile_name("unknown"),
+            Some("daemon-launcher")
         ));
     }
 
@@ -325,7 +354,9 @@ mod tests {
     fn acl_011_list_profile_exists_empty_access_allows() {
         let config = config_with_acl("work", BTreeMap::new());
         assert!(check_secret_list_access(
-            &config, &profile_name("work"), Some("daemon-launcher")
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher")
         ));
     }
 
@@ -335,7 +366,9 @@ mod tests {
         access.insert("daemon-wm".into(), vec!["x".into()]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_list_access(
-            &config, &profile_name("work"), None
+            &config,
+            &profile_name("work"),
+            None
         ));
     }
 
@@ -345,7 +378,9 @@ mod tests {
         access.insert("other-daemon".into(), vec!["key".into()]);
         let config = config_with_acl("work", access);
         assert!(check_secret_list_access(
-            &config, &profile_name("work"), Some("daemon-launcher")
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher")
         ));
     }
 
@@ -355,7 +390,9 @@ mod tests {
         access.insert("daemon-launcher".into(), vec!["api-key".into()]);
         let config = config_with_acl("work", access);
         assert!(check_secret_list_access(
-            &config, &profile_name("work"), Some("daemon-launcher")
+            &config,
+            &profile_name("work"),
+            Some("daemon-launcher")
         ));
     }
 
@@ -368,7 +405,9 @@ mod tests {
         access.insert("daemon-wm".into(), vec![]);
         let config = config_with_acl("work", access);
         assert!(!check_secret_list_access(
-            &config, &profile_name("work"), Some("daemon-wm")
+            &config,
+            &profile_name("work"),
+            Some("daemon-wm")
         ));
     }
 }

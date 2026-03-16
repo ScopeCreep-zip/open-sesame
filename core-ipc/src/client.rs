@@ -4,14 +4,14 @@
 //! Production uses Noise IK encrypted transport exclusively via
 //! `connect_encrypted()`. Plaintext `connect()` is `#[cfg(test)]` only.
 
-use core_types::{DaemonId, EventKind, SecurityLevel};
 use crate::message::MessageContext;
+use core_types::{DaemonId, EventKind, SecurityLevel};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::framing::{decode_frame, encode_frame};
@@ -156,9 +156,10 @@ impl BusClient {
     /// Returns an error if serialization fails or the connection is closed.
     pub async fn send(&self, msg: &Message<EventKind>) -> core_types::Result<()> {
         let payload = encode_frame(msg)?;
-        self.outbound_tx.send(payload).await.map_err(|_| {
-            core_types::Error::Ipc("outbound channel closed".into())
-        })?;
+        self.outbound_tx
+            .send(payload)
+            .await
+            .map_err(|_| core_types::Error::Ipc("outbound channel closed".into()))?;
         // Payload ownership transferred to channel. The I/O task zeroizes
         // the buffer after Noise encryption (see outbound_rx select! arm).
         Ok(())
@@ -289,24 +290,32 @@ impl BusClient {
         let mut last_err = None;
         for attempt in 1..=max_attempts {
             // Re-read keypair on each attempt (daemon-profile may have regenerated it).
-            let (private_key, public_key) = match crate::noise::read_daemon_keypair(daemon_name).await {
-                Ok(kp) => kp,
-                Err(e) => {
-                    tracing::warn!(attempt, error = %e, "keypair read failed, retrying");
-                    last_err = Some(e);
-                    if attempt < max_attempts {
-                        tokio::time::sleep(backoff * attempt).await;
+            let (private_key, public_key) =
+                match crate::noise::read_daemon_keypair(daemon_name).await {
+                    Ok(kp) => kp,
+                    Err(e) => {
+                        tracing::warn!(attempt, error = %e, "keypair read failed, retrying");
+                        last_err = Some(e);
+                        if attempt < max_attempts {
+                            tokio::time::sleep(backoff * attempt).await;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
             // ZeroizingKeypair: Drop zeroizes private key even on panic.
             let client_keypair = crate::noise::ZeroizingKeypair::new(snow::Keypair {
                 private: private_key.to_vec(),
                 public: public_key.to_vec(),
             });
 
-            match Self::connect_encrypted(daemon_id, socket_path, server_pub, client_keypair.as_inner()).await {
+            match Self::connect_encrypted(
+                daemon_id,
+                socket_path,
+                server_pub,
+                client_keypair.as_inner(),
+            )
+            .await
+            {
                 Ok(client) => {
                     return Ok((client, client_keypair));
                 }
@@ -361,7 +370,8 @@ impl BusClient {
             private: new_private.to_vec(),
             public: new_public.to_vec(),
         });
-        let new_client = Self::connect_encrypted(daemon_id, socket_path, server_pub, kp.as_inner()).await?;
+        let new_client =
+            Self::connect_encrypted(daemon_id, socket_path, server_pub, kp.as_inner()).await?;
         // kp dropped here -- ZeroizingKeypair::drop() zeroizes private key.
 
         // Re-announce on the new connection.

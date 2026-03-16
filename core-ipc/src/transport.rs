@@ -48,14 +48,17 @@ pub fn local_credentials() -> PeerCredentials {
 ///
 /// Returns an error if peer credentials cannot be extracted from the socket.
 pub fn extract_ucred(stream: &UnixStream) -> core_types::Result<PeerCredentials> {
-    let cred = stream.peer_cred().map_err(|e| {
-        core_types::Error::Ipc(format!("UCred extraction failed: {e}"))
-    })?;
+    let cred = stream
+        .peer_cred()
+        .map_err(|e| core_types::Error::Ipc(format!("UCred extraction failed: {e}")))?;
     let pid = cred
         .pid()
         .and_then(|p| u32::try_from(p).ok())
         .ok_or_else(|| core_types::Error::Ipc("UCred: PID unavailable".into()))?;
-    Ok(PeerCredentials { pid, uid: cred.uid() })
+    Ok(PeerCredentials {
+        pid,
+        uid: cred.uid(),
+    })
 }
 
 /// Get the current process's real UID.
@@ -90,9 +93,8 @@ pub fn socket_path() -> core_types::Result<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        let home = dirs::home_dir().ok_or_else(|| {
-            core_types::Error::Platform("cannot determine home directory".into())
-        })?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| core_types::Error::Platform("cannot determine home directory".into()))?;
         Ok(home.join("Library/Application Support/pds/bus.sock"))
     }
 

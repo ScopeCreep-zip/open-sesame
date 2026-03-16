@@ -5,8 +5,8 @@
 //! daemon-secrets. This backend's `unlock()` returns an error because it
 //! should never be called directly.
 
-use crate::backend::{AuthInteraction, UnlockOutcome, VaultAuthBackend};
 use crate::AuthError;
+use crate::backend::{AuthInteraction, UnlockOutcome, VaultAuthBackend};
 use core_crypto::SecureBytes;
 use core_types::TrustProfileName;
 use std::path::Path;
@@ -107,7 +107,10 @@ mod tests {
     #[test]
     fn requires_password_entry() {
         let backend = PasswordBackend::new();
-        assert_eq!(backend.requires_interaction(), AuthInteraction::PasswordEntry);
+        assert_eq!(
+            backend.requires_interaction(),
+            AuthInteraction::PasswordEntry
+        );
     }
 
     #[test]
@@ -120,14 +123,20 @@ mod tests {
     async fn can_always_unlock() {
         let backend = PasswordBackend::new();
         let profile = test_profile();
-        assert!(backend.can_unlock(&profile, std::path::Path::new("/tmp")).await);
+        assert!(
+            backend
+                .can_unlock(&profile, std::path::Path::new("/tmp"))
+                .await
+        );
     }
 
     #[tokio::test]
     async fn unlock_returns_error() {
         let backend = PasswordBackend::new();
         let profile = test_profile();
-        let result = backend.unlock(&profile, std::path::Path::new("/tmp"), &[0; 16]).await;
+        let result = backend
+            .unlock(&profile, std::path::Path::new("/tmp"), &[0; 16])
+            .await;
         assert!(result.is_err());
     }
 }

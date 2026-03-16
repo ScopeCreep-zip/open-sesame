@@ -145,7 +145,9 @@ impl EnrollmentBlob {
         }
 
         if data.len() < 4 {
-            return Err(AuthError::InvalidBlob("truncated: missing fingerprint length".into()));
+            return Err(AuthError::InvalidBlob(
+                "truncated: missing fingerprint length".into(),
+            ));
         }
 
         let fp_len = u16::from_be_bytes([data[1], data[2]]) as usize;
@@ -169,7 +171,9 @@ impl EnrollmentBlob {
         let kt_start = fp_end + 1;
         let kt_end = kt_start + kt_len;
         if data.len() < kt_end + 12 + CIPHERTEXT_LEN {
-            return Err(AuthError::InvalidBlob("truncated: key type or crypto data".into()));
+            return Err(AuthError::InvalidBlob(
+                "truncated: key type or crypto data".into(),
+            ));
         }
 
         let kt_str = std::str::from_utf8(&data[kt_start..kt_end])
@@ -273,12 +277,18 @@ mod tests {
 
     #[test]
     fn from_wire_name_ed25519() {
-        assert_eq!(SshKeyType::from_wire_name("ssh-ed25519").unwrap(), SshKeyType::Ed25519);
+        assert_eq!(
+            SshKeyType::from_wire_name("ssh-ed25519").unwrap(),
+            SshKeyType::Ed25519
+        );
     }
 
     #[test]
     fn from_wire_name_rsa() {
-        assert_eq!(SshKeyType::from_wire_name("ssh-rsa").unwrap(), SshKeyType::Rsa);
+        assert_eq!(
+            SshKeyType::from_wire_name("ssh-rsa").unwrap(),
+            SshKeyType::Rsa
+        );
     }
 
     #[test]
@@ -299,6 +309,8 @@ mod tests {
         // Pad enough for the rest of the blob
         data.extend_from_slice(&[0u8; 100]);
         let result = EnrollmentBlob::deserialize(&data);
-        assert!(matches!(result, Err(AuthError::InvalidBlob(msg)) if msg.contains("exceeds maximum")));
+        assert!(
+            matches!(result, Err(AuthError::InvalidBlob(msg)) if msg.contains("exceeds maximum"))
+        );
     }
 }

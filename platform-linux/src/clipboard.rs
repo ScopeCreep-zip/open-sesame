@@ -26,8 +26,7 @@ pub trait DataControl: Send + Sync {
     fn read_selection(&self) -> BoxFuture<'_, core_types::Result<Option<ClipboardContent>>>;
 
     /// Write content to the clipboard.
-    fn write_selection(&self, content: &ClipboardContent)
-        -> BoxFuture<'_, core_types::Result<()>>;
+    fn write_selection(&self, content: &ClipboardContent) -> BoxFuture<'_, core_types::Result<()>>;
 
     /// Subscribe to clipboard change notifications.
     /// Returns a receiver that yields each time the clipboard changes.

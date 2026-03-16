@@ -113,9 +113,9 @@ impl SecretServiceProxy {
         // Secret struct: (session_path, parameters: [], value, content_type)
         let secret = (
             &self.session_path,
-            Vec::<u8>::new(),                // parameters (empty for plain)
-            data.to_vec(),                   // the secret value
-            "application/octet-stream",      // content type
+            Vec::<u8>::new(),           // parameters (empty for plain)
+            data.to_vec(),              // the secret value
+            "application/octet-stream", // content type
         );
 
         // Attributes for search/replace.
@@ -126,14 +126,8 @@ impl SecretServiceProxy {
 
         // Properties dict for CreateItem.
         let mut properties = std::collections::HashMap::new();
-        properties.insert(
-            "org.freedesktop.Secret.Item.Label",
-            Value::new(label),
-        );
-        properties.insert(
-            "org.freedesktop.Secret.Item.Attributes",
-            Value::new(attrs),
-        );
+        properties.insert("org.freedesktop.Secret.Item.Label", Value::new(label));
+        properties.insert("org.freedesktop.Secret.Item.Attributes", Value::new(attrs));
 
         let (_item_path, _prompt_path): (OwnedObjectPath, OwnedObjectPath) = collection_proxy
             .call("CreateItem", &(properties, secret, true)) // true = replace
@@ -153,11 +147,7 @@ impl SecretServiceProxy {
     /// # Errors
     ///
     /// Returns `NotFound` if no matching item exists.
-    pub async fn retrieve(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> core_types::Result<Vec<u8>> {
+    pub async fn retrieve(&self, service: &str, account: &str) -> core_types::Result<Vec<u8>> {
         let item_path = self.search_item(service, account).await?;
 
         let item_proxy = zbus::Proxy::new(
@@ -185,11 +175,7 @@ impl SecretServiceProxy {
     /// # Errors
     ///
     /// Returns `NotFound` if no matching item exists.
-    pub async fn delete(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> core_types::Result<()> {
+    pub async fn delete(&self, service: &str, account: &str) -> core_types::Result<()> {
         let item_path = self.search_item(service, account).await?;
 
         let item_proxy = zbus::Proxy::new(
@@ -201,23 +187,16 @@ impl SecretServiceProxy {
         .await
         .map_err(|e| core_types::Error::Platform(format!("Item proxy failed: {e}")))?;
 
-        let _prompt_path: OwnedObjectPath = item_proxy
-            .call("Delete", &())
-            .await
-            .map_err(|e| {
-                core_types::Error::Platform(format!("Secret Service Delete failed: {e}"))
-            })?;
+        let _prompt_path: OwnedObjectPath = item_proxy.call("Delete", &()).await.map_err(|e| {
+            core_types::Error::Platform(format!("Secret Service Delete failed: {e}"))
+        })?;
 
         tracing::debug!(service, account, "deleted wrapped key from Secret Service");
         Ok(())
     }
 
     /// Check if an item with the given attributes exists.
-    pub async fn has(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> core_types::Result<bool> {
+    pub async fn has(&self, service: &str, account: &str) -> core_types::Result<bool> {
         match self.search_item(service, account).await {
             Ok(_) => Ok(true),
             Err(core_types::Error::NotFound(_)) => Ok(false),
@@ -245,10 +224,8 @@ impl SecretServiceProxy {
         attrs.insert("account", account);
         attrs.insert("type", "master-key-wrapped");
 
-        let (unlocked, _locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = proxy
-            .call("SearchItems", &(attrs,))
-            .await
-            .map_err(|e| {
+        let (unlocked, _locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) =
+            proxy.call("SearchItems", &(attrs,)).await.map_err(|e| {
                 core_types::Error::Platform(format!("Secret Service SearchItems failed: {e}"))
             })?;
 
@@ -296,34 +273,29 @@ impl GlobalShortcutsProxy {
             .call("CreateSession", &(options,))
             .await
             .map_err(|e| {
-                core_types::Error::Platform(format!("GlobalShortcuts CreateSession failed: {e}"))
-            })?;
+            core_types::Error::Platform(format!("GlobalShortcuts CreateSession failed: {e}"))
+        })?;
 
         // Construct the session object path from the token per xdg-desktop-portal spec:
         // /org/freedesktop/portal/desktop/session/{sender}/{token}
         // where sender is the D-Bus unique name with ':' and '.' replaced by '_'.
-        let sender = self.conn.unique_name()
+        let sender = self
+            .conn
+            .unique_name()
             .ok_or_else(|| core_types::Error::Platform("no D-Bus unique name".into()))?;
-        let sender_clean = sender.as_str()
-            .trim_start_matches(':')
-            .replace('.', "_");
-        let session_obj = format!(
-            "/org/freedesktop/portal/desktop/session/{sender_clean}/{session_token}"
-        );
+        let sender_clean = sender.as_str().trim_start_matches(':').replace('.', "_");
+        let session_obj =
+            format!("/org/freedesktop/portal/desktop/session/{sender_clean}/{session_token}");
         self.session_path = Some(
-            OwnedObjectPath::try_from(session_obj).map_err(|e| {
-                core_types::Error::Platform(format!("invalid session path: {e}"))
-            })?,
+            OwnedObjectPath::try_from(session_obj)
+                .map_err(|e| core_types::Error::Platform(format!("invalid session path: {e}")))?,
         );
 
         tracing::debug!(session = ?self.session_path, "GlobalShortcuts session created");
         Ok(())
     }
 
-    pub async fn bind_shortcuts(
-        &self,
-        shortcuts: &[(String, String)],
-    ) -> core_types::Result<()> {
+    pub async fn bind_shortcuts(&self, shortcuts: &[(String, String)]) -> core_types::Result<()> {
         let Some(session) = &self.session_path else {
             return Err(core_types::Error::Platform(
                 "no GlobalShortcuts session — call create_session first".into(),
@@ -410,12 +382,10 @@ pub async fn ssid_monitor(tx: tokio::sync::mpsc::Sender<String>) {
     }
 }
 
-async fn ssid_monitor_inner(
-    tx: &tokio::sync::mpsc::Sender<String>,
-) -> core_types::Result<()> {
-    let conn = zbus::Connection::system().await.map_err(|e| {
-        core_types::Error::Platform(format!("system bus connection failed: {e}"))
-    })?;
+async fn ssid_monitor_inner(tx: &tokio::sync::mpsc::Sender<String>) -> core_types::Result<()> {
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| core_types::Error::Platform(format!("system bus connection failed: {e}")))?;
 
     // Read the current SSID once at startup.
     let mut last_ssid = String::new();
@@ -434,29 +404,23 @@ async fn ssid_monitor_inner(
         "org.freedesktop.NetworkManager",
     )
     .await
-    .map_err(|e| {
-        core_types::Error::Platform(format!("NetworkManager proxy failed: {e}"))
-    })?;
+    .map_err(|e| core_types::Error::Platform(format!("NetworkManager proxy failed: {e}")))?;
 
-    let mut state_changed = proxy
-        .receive_signal("StateChanged")
-        .await
-        .map_err(|e| {
-            core_types::Error::Platform(format!(
-                "failed to subscribe to NM StateChanged: {e}"
-            ))
-        })?;
+    let mut state_changed = proxy.receive_signal("StateChanged").await.map_err(|e| {
+        core_types::Error::Platform(format!("failed to subscribe to NM StateChanged: {e}"))
+    })?;
 
     // SignalStream implements futures_core::Stream<Item = Message> (infallible).
     use futures_util::StreamExt;
     while let Some(_signal) = state_changed.next().await {
         if let Some(ssid) = read_current_ssid(&conn).await
-            && ssid != last_ssid {
-                tracing::info!(ssid = %ssid, "SSID changed");
-                last_ssid.clone_from(&ssid);
-                if tx.send(ssid).await.is_err() {
-                    break; // receiver dropped
-                }
+            && ssid != last_ssid
+        {
+            tracing::info!(ssid = %ssid, "SSID changed");
+            last_ssid.clone_from(&ssid);
+            if tx.send(ssid).await.is_err() {
+                break; // receiver dropped
+            }
         }
     }
 
@@ -483,10 +447,7 @@ async fn read_current_ssid(conn: &zbus::Connection) -> Option<String> {
     let primary_val: OwnedValue = nm_proxy
         .call(
             "Get",
-            &(
-                "org.freedesktop.NetworkManager",
-                "PrimaryConnection",
-            ),
+            &("org.freedesktop.NetworkManager", "PrimaryConnection"),
         )
         .await
         .ok()?;
@@ -513,10 +474,7 @@ async fn read_current_ssid(conn: &zbus::Connection) -> Option<String> {
     let type_val: OwnedValue = ac_proxy
         .call(
             "Get",
-            &(
-                "org.freedesktop.NetworkManager.Connection.Active",
-                "Type",
-            ),
+            &("org.freedesktop.NetworkManager.Connection.Active", "Type"),
         )
         .await
         .ok()?;
@@ -543,9 +501,7 @@ async fn read_current_ssid(conn: &zbus::Connection) -> Option<String> {
     // Devices is ao (array of object paths).
     // Array<'a>: TryFrom<&Value<'a>> via value_try_from_ref_clone.
     // Array derefs to [Value<'_>], iterate and extract each ObjectPath.
-    let devices_arr = devices_val
-        .downcast_ref::<zbus::zvariant::Array>()
-        .ok()?;
+    let devices_arr = devices_val.downcast_ref::<zbus::zvariant::Array>().ok()?;
     let device_path = devices_arr
         .first()?
         .downcast_ref::<zbus::zvariant::ObjectPath>()
@@ -572,9 +528,7 @@ async fn read_current_ssid(conn: &zbus::Connection) -> Option<String> {
         )
         .await
         .ok()?;
-    let ap_obj = ap_val
-        .downcast_ref::<zbus::zvariant::ObjectPath>()
-        .ok()?;
+    let ap_obj = ap_val.downcast_ref::<zbus::zvariant::ObjectPath>().ok()?;
     let ap_path: OwnedObjectPath = ap_obj.to_owned().into();
 
     if ap_path.as_str() == "/" {
@@ -594,19 +548,14 @@ async fn read_current_ssid(conn: &zbus::Connection) -> Option<String> {
     let ssid_val: OwnedValue = ap_proxy
         .call(
             "Get",
-            &(
-                "org.freedesktop.NetworkManager.AccessPoint",
-                "Ssid",
-            ),
+            &("org.freedesktop.NetworkManager.AccessPoint", "Ssid"),
         )
         .await
         .ok()?;
 
     // SSID is ay (array of bytes).
     // Array<'a>: TryFrom<&Value<'a>>, then iterate extracting u8 from each element.
-    let ssid_arr = ssid_val
-        .downcast_ref::<zbus::zvariant::Array>()
-        .ok()?;
+    let ssid_arr = ssid_val.downcast_ref::<zbus::zvariant::Array>().ok()?;
     let ssid_bytes: Vec<u8> = ssid_arr
         .iter()
         .map(|v| v.downcast_ref::<u8>().ok())

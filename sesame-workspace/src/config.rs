@@ -87,10 +87,9 @@ pub fn load_local_config(dir: &Path) -> Result<Option<LocalSesameConfig>, Worksp
         return Ok(None);
     }
     let contents = std::fs::read_to_string(&path)?;
-    let config: LocalSesameConfig = toml::from_str(&contents)
-        .map_err(|e| WorkspaceError::ConfigError(format!(
-            "failed to parse {}: {e}", path.display()
-        )))?;
+    let config: LocalSesameConfig = toml::from_str(&contents).map_err(|e| {
+        WorkspaceError::ConfigError(format!("failed to parse {}: {e}", path.display()))
+    })?;
     Ok(Some(config))
 }
 
@@ -186,24 +185,20 @@ mod tests {
 
     fn test_config() -> WorkspaceConfig {
         let mut config = WorkspaceConfig::default();
-        config.links.insert(
-            "/workspace/user/github.com/org".into(),
-            "personal".into(),
-        );
-        config.links.insert(
-            "/workspace/user/github.com/org/k9".into(),
-            "work".into(),
-        );
+        config
+            .links
+            .insert("/workspace/user/github.com/org".into(), "personal".into());
+        config
+            .links
+            .insert("/workspace/user/github.com/org/k9".into(), "work".into());
         config
     }
 
     #[test]
     fn resolve_profile_exact_match() {
         let config = test_config();
-        let profile = resolve_workspace_profile(
-            &config,
-            Path::new("/workspace/user/github.com/org/k9"),
-        );
+        let profile =
+            resolve_workspace_profile(&config, Path::new("/workspace/user/github.com/org/k9"));
         assert_eq!(profile.as_deref(), Some("work"));
     }
 
@@ -220,20 +215,15 @@ mod tests {
     #[test]
     fn resolve_profile_longest_prefix_wins() {
         let config = test_config();
-        let profile = resolve_workspace_profile(
-            &config,
-            Path::new("/workspace/user/github.com/org/k9/sub"),
-        );
+        let profile =
+            resolve_workspace_profile(&config, Path::new("/workspace/user/github.com/org/k9/sub"));
         assert_eq!(profile.as_deref(), Some("work"));
     }
 
     #[test]
     fn resolve_profile_no_match() {
         let config = test_config();
-        let profile = resolve_workspace_profile(
-            &config,
-            Path::new("/home/user/project"),
-        );
+        let profile = resolve_workspace_profile(&config, Path::new("/home/user/project"));
         assert!(profile.is_none());
     }
 
@@ -242,7 +232,10 @@ mod tests {
         let mut config = WorkspaceConfig::default();
         add_link(&mut config, "/workspace/user/github.com/org/repo", "work");
         assert_eq!(config.links.len(), 1);
-        assert!(remove_link(&mut config, "/workspace/user/github.com/org/repo"));
+        assert!(remove_link(
+            &mut config,
+            "/workspace/user/github.com/org/repo"
+        ));
         assert!(config.links.is_empty());
         assert!(!remove_link(&mut config, "/nonexistent"));
     }
@@ -252,7 +245,11 @@ mod tests {
         let mut config = WorkspaceConfig::default();
         config.settings.root = PathBuf::from("/mnt/workspace");
         config.settings.user = "testuser".into();
-        add_link(&mut config, "/mnt/workspace/testuser/github.com/org", "work");
+        add_link(
+            &mut config,
+            "/mnt/workspace/testuser/github.com/org",
+            "work",
+        );
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: WorkspaceConfig = toml::from_str(&toml_str).unwrap();
@@ -306,15 +303,15 @@ mod tests {
         std::fs::write(
             repo_dir.join(".sesame.toml"),
             "profile = \"repo-profile\"\n[env]\nSHARED = \"from-repo\"\nONLY_REPO = \"repo\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut user_config = WorkspaceConfig::default();
         user_config.settings.root = root.to_path_buf();
         user_config.settings.user = "user".into();
-        user_config.links.insert(
-            repo_dir.display().to_string(),
-            "user-link-profile".into(),
-        );
+        user_config
+            .links
+            .insert(repo_dir.display().to_string(), "user-link-profile".into());
 
         let eff = resolve_effective_config(&user_config, &repo_dir, root).unwrap();
         // Repo overrides workspace which overrides user link
@@ -330,16 +327,19 @@ mod tests {
     fn effective_config_user_link_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let repo_dir = root.join("user").join("github.com").join("org").join("repo");
+        let repo_dir = root
+            .join("user")
+            .join("github.com")
+            .join("org")
+            .join("repo");
         std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
 
         let mut user_config = WorkspaceConfig::default();
         user_config.settings.root = root.to_path_buf();
         user_config.settings.user = "user".into();
-        user_config.links.insert(
-            repo_dir.display().to_string(),
-            "linked-profile".into(),
-        );
+        user_config
+            .links
+            .insert(repo_dir.display().to_string(), "linked-profile".into());
 
         // No .sesame.toml files exist
         let eff = resolve_effective_config(&user_config, &repo_dir, root).unwrap();

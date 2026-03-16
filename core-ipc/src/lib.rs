@@ -6,18 +6,18 @@
 //! Wire format: `[4-byte BE length][postcard(Message<EventKind>)]`
 #![forbid(unsafe_code)]
 
-mod message;
+mod client;
 mod framing;
+mod message;
 pub mod noise;
 pub mod registry;
-mod transport;
 mod server;
-mod client;
+mod transport;
 
+pub use client::BusClient;
+pub use framing::{decode_frame, encode_frame};
 pub use message::{Message, MessageContext, WIRE_VERSION};
-pub use framing::{encode_frame, decode_frame};
 pub use noise::{NoiseTransport, ZeroizingKeypair, generate_keypair};
 pub use registry::ClearanceRegistry;
-pub use transport::{PeerCredentials, extract_ucred, local_credentials, socket_path};
 pub use server::{BusServer, ConfirmationGuard, SubscriptionFilter};
-pub use client::BusClient;
+pub use transport::{PeerCredentials, extract_ucred, local_credentials, socket_path};

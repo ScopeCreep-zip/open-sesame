@@ -18,7 +18,7 @@ pub use backend::{AuthInteraction, IpcUnlockStrategy, UnlockOutcome, VaultAuthBa
 pub use dispatcher::AuthDispatcher;
 pub use password::PasswordBackend;
 pub use ssh::SshAgentBackend;
-pub use ssh_types::{EnrollmentBlob, SshKeyType, ENROLLMENT_VERSION};
+pub use ssh_types::{ENROLLMENT_VERSION, EnrollmentBlob, SshKeyType};
 
 /// Errors from authentication backends.
 ///

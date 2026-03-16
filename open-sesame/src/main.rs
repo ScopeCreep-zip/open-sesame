@@ -11,13 +11,13 @@
 mod init;
 
 use anyhow::Context;
+use clap::ValueEnum;
 use clap::{Parser, Subcommand};
-use comfy_table::{presets::UTF8_FULL, Table};
+use comfy_table::{Table, presets::UTF8_FULL};
 use core_ipc::BusClient;
 use core_types::{DaemonId, EventKind, ProfileId, SecurityLevel, SensitiveBytes, TrustProfileName};
 use owo_colors::OwoColorize;
 use std::time::Duration;
-use clap::ValueEnum;
 use zeroize::Zeroize;
 
 /// Default RPC timeout.
@@ -25,7 +25,11 @@ pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Open Sesame — Platform Orchestration CLI.
 #[derive(Parser)]
-#[command(name = "sesame", about = "Open Sesame — platform orchestration CLI", version)]
+#[command(
+    name = "sesame",
+    about = "Open Sesame — platform orchestration CLI",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -189,8 +193,7 @@ fn default_workspace_root() -> std::path::PathBuf {
 fn resolve_workspace_path(path: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
     match path {
         Some(p) => Ok(p),
-        None => std::env::current_dir()
-            .context("failed to determine current directory"),
+        None => std::env::current_dir().context("failed to determine current directory"),
     }
 }
 
@@ -604,7 +607,11 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Init { no_keybinding, wipe_reset_destroy_all_data, org } => {
+        Command::Init {
+            no_keybinding,
+            wipe_reset_destroy_all_data,
+            org,
+        } => {
             if wipe_reset_destroy_all_data {
                 init::cmd_wipe()
             } else {
@@ -644,15 +651,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             WmCmd::OverlayResident => cmd_wm_overlay_resident().await,
         },
         Command::Launch(sub) => match sub {
-            LaunchCmd::Search { query, max_results, profile } => {
-                cmd_launch_search(&query, max_results, profile.as_deref()).await
-            }
+            LaunchCmd::Search {
+                query,
+                max_results,
+                profile,
+            } => cmd_launch_search(&query, max_results, profile.as_deref()).await,
             LaunchCmd::Run { entry_id, profile } => {
                 cmd_launch_run(&entry_id, profile.as_deref()).await
             }
         },
         Command::Clipboard(sub) => match sub {
-            ClipboardCmd::History { profile, limit } => cmd_clipboard_history(&profile, limit).await,
+            ClipboardCmd::History { profile, limit } => {
+                cmd_clipboard_history(&profile, limit).await
+            }
             ClipboardCmd::Clear { profile } => cmd_clipboard_clear(&profile).await,
             ClipboardCmd::Get { entry_id } => cmd_clipboard_get(&entry_id).await,
         },
@@ -663,9 +674,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Snippet(sub) => match sub {
             SnippetCmd::List { profile } => cmd_snippet_list(&profile).await,
             SnippetCmd::Expand { profile, trigger } => cmd_snippet_expand(&profile, &trigger).await,
-            SnippetCmd::Add { profile, trigger, template } => {
-                cmd_snippet_add(&profile, &trigger, &template).await
-            }
+            SnippetCmd::Add {
+                profile,
+                trigger,
+                template,
+            } => cmd_snippet_add(&profile, &trigger, &template).await,
         },
         #[cfg(all(target_os = "linux", feature = "desktop"))]
         Command::SetupKeybinding { launcher_key } => {
@@ -674,20 +687,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         #[cfg(all(target_os = "linux", feature = "desktop"))]
         Command::RemoveKeybinding => {
-            platform_linux::cosmic_keys::remove_keybinding()
-                .map_err(|e| anyhow::anyhow!("{e}"))
+            platform_linux::cosmic_keys::remove_keybinding().map_err(|e| anyhow::anyhow!("{e}"))
         }
         #[cfg(all(target_os = "linux", feature = "desktop"))]
         Command::KeybindingStatus => {
-            platform_linux::cosmic_keys::keybinding_status()
-                .map_err(|e| anyhow::anyhow!("{e}"))
+            platform_linux::cosmic_keys::keybinding_status().map_err(|e| anyhow::anyhow!("{e}"))
         }
-        Command::Env { profile, prefix, command } => {
-            cmd_env(profile.as_deref(), prefix.as_deref(), &command).await
-        }
-        Command::Export { profile, format, prefix } => {
-            cmd_export(profile.as_deref(), &format, prefix.as_deref()).await
-        }
+        Command::Env {
+            profile,
+            prefix,
+            command,
+        } => cmd_env(profile.as_deref(), prefix.as_deref(), &command).await,
+        Command::Export {
+            profile,
+            format,
+            prefix,
+        } => cmd_export(profile.as_deref(), &format, prefix.as_deref()).await,
         Command::Workspace(sub) => cmd_workspace(sub).await,
     }
 }
@@ -697,30 +712,37 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 // ============================================================================
 
 pub(crate) async fn connect() -> anyhow::Result<BusClient> {
-    let socket_path = core_ipc::socket_path()
-        .context("failed to resolve IPC socket path")?;
+    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
 
-    let server_pub = core_ipc::noise::read_bus_public_key().await
+    let server_pub = core_ipc::noise::read_bus_public_key()
+        .await
         .context("daemon-profile is not running (no bus public key found)")?;
 
     let daemon_id = DaemonId::new();
 
     // CLI uses ephemeral keypair — server assigns Open clearance for unknown keys.
-    let client_keypair = core_ipc::generate_keypair()
-        .context("failed to generate ephemeral keypair")?;
+    let client_keypair =
+        core_ipc::generate_keypair().context("failed to generate ephemeral keypair")?;
 
-    let mut client = BusClient::connect_encrypted(daemon_id, &socket_path, &server_pub, client_keypair.as_inner())
-        .await
-        .context("failed to connect to IPC bus — is daemon-profile running?")?;
+    let mut client = BusClient::connect_encrypted(
+        daemon_id,
+        &socket_path,
+        &server_pub,
+        client_keypair.as_inner(),
+    )
+    .await
+    .context("failed to connect to IPC bus — is daemon-profile running?")?;
 
     // Populate origin_installation on outbound messages if installation.toml exists.
     if let Ok(install_config) = core_config::load_installation() {
         let install_id = core_types::InstallationId {
             id: install_config.id,
-            org_ns: install_config.org.map(|o| core_types::OrganizationNamespace {
-                domain: o.domain,
-                namespace: o.namespace,
-            }),
+            org_ns: install_config
+                .org
+                .map(|o| core_types::OrganizationNamespace {
+                    domain: o.domain,
+                    namespace: o.namespace,
+                }),
             namespace: install_config.namespace,
             machine_binding: None,
         };
@@ -742,7 +764,11 @@ pub(crate) async fn rpc(
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("timed out") {
-                eprintln!("{}: no response within {}s", "timeout".yellow().bold(), RPC_TIMEOUT.as_secs());
+                eprintln!(
+                    "{}: no response within {}s",
+                    "timeout".yellow().bold(),
+                    RPC_TIMEOUT.as_secs()
+                );
                 std::process::exit(2);
             }
             anyhow::anyhow!("{e}")
@@ -779,14 +805,22 @@ async fn cmd_status() -> anyhow::Result<()> {
                 println!("Secrets daemon: {lock_status}");
             } else {
                 println!("Vaults:");
-                let max_name_len = lock_state.keys().map(|k| k.as_ref().len()).max().unwrap_or(0);
+                let max_name_len = lock_state
+                    .keys()
+                    .map(|k| k.as_ref().len())
+                    .max()
+                    .unwrap_or(0);
                 for (profile, is_locked) in &lock_state {
                     let status = if *is_locked {
                         "locked".red().bold().to_string()
                     } else {
                         "unlocked".green().bold().to_string()
                     };
-                    println!("  {:width$}  {status}", profile.as_ref(), width = max_name_len);
+                    println!(
+                        "  {:width$}  {status}",
+                        profile.as_ref(),
+                        width = max_name_len
+                    );
                 }
             }
 
@@ -797,7 +831,11 @@ async fn cmd_status() -> anyhow::Result<()> {
             } else {
                 println!("Active profiles:");
                 for p in &active_profiles {
-                    let marker = if p == &default_profile { " (default)" } else { "" };
+                    let marker = if p == &default_profile {
+                        " (default)"
+                    } else {
+                        ""
+                    };
                     println!("  - {p}{marker}");
                 }
             }
@@ -825,14 +863,21 @@ struct ProfileSpec {
 ///
 /// Designed for future extension to `docker.io/project/org:vault@sha256`.
 fn parse_profile_specs(input: &str) -> Vec<ProfileSpec> {
-    input.split(',')
+    input
+        .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|entry| {
             if let Some((org, vault)) = entry.rsplit_once(':') {
-                ProfileSpec { org: Some(org.to_string()), vault: vault.to_string() }
+                ProfileSpec {
+                    org: Some(org.to_string()),
+                    vault: vault.to_string(),
+                }
             } else {
-                ProfileSpec { org: None, vault: entry.to_string() }
+                ProfileSpec {
+                    org: None,
+                    vault: entry.to_string(),
+                }
             }
         })
         .collect()
@@ -882,7 +927,9 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("invalid profile name '{profile_name}': {e}"))?;
 
         // Try SSH-agent auto-unlock first
-        let salt_path = config_dir.join("vaults").join(format!("{target_profile}.salt"));
+        let salt_path = config_dir
+            .join("vaults")
+            .join(format!("{target_profile}.salt"));
         if let Ok(salt) = std::fs::read(&salt_path) {
             let dispatcher = core_auth::AuthDispatcher::new();
             if let Some(backend) = dispatcher
@@ -900,9 +947,7 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
                         // unprotected intermediate copy. into_vec() moves
                         // the backing allocation directly into SensitiveBytes.
                         let event = EventKind::SshUnlockRequest {
-                            master_key: SensitiveBytes::new(
-                                outcome.master_key.into_vec(),
-                            ),
+                            master_key: SensitiveBytes::new(outcome.master_key.into_vec()),
                             profile: target_profile.clone(),
                             ssh_fingerprint: fp,
                         };
@@ -918,29 +963,28 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
                                 continue;
                             }
                             EventKind::UnlockRejected {
-                                reason:
-                                    core_types::UnlockRejectedReason::AlreadyUnlocked,
+                                reason: core_types::UnlockRejectedReason::AlreadyUnlocked,
                                 profile,
                             } => {
                                 println!(
                                     "{}",
                                     format!(
                                         "Vault '{}' already unlocked.",
-                                        profile
-                                            .as_ref()
-                                            .map_or("unknown", |p| p.as_ref())
+                                        profile.as_ref().map_or("unknown", |p| p.as_ref())
                                     )
                                     .yellow()
                                 );
                                 continue;
                             }
-                            EventKind::UnlockResponse {
-                                success: false, ..
-                            } => {
-                                tracing::debug!("SSH unlock rejected by daemon-secrets, falling back to password");
+                            EventKind::UnlockResponse { success: false, .. } => {
+                                tracing::debug!(
+                                    "SSH unlock rejected by daemon-secrets, falling back to password"
+                                );
                             }
                             _ => {
-                                tracing::debug!("unexpected SSH unlock response, falling back to password");
+                                tracing::debug!(
+                                    "unexpected SSH unlock response, falling back to password"
+                                );
                             }
                         }
                     }
@@ -968,7 +1012,9 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
                 }
             }
             if buf.is_empty() {
-                anyhow::bail!("empty password from stdin for vault '{profile_name}' — refusing to unlock with no password");
+                anyhow::bail!(
+                    "empty password from stdin for vault '{profile_name}' — refusing to unlock with no password"
+                );
             }
             buf
         };
@@ -983,14 +1029,33 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
         password_bytes.zeroize();
 
         match rpc(&client, event, SecurityLevel::SecretsOnly).await? {
-            EventKind::UnlockResponse { success: true, profile } => {
+            EventKind::UnlockResponse {
+                success: true,
+                profile,
+            } => {
                 println!("{}", format!("Vault '{}' unlocked.", profile).green());
             }
-            EventKind::UnlockResponse { success: false, profile } => {
-                anyhow::bail!("unlock failed for vault '{}' — wrong password or keyring error", profile);
+            EventKind::UnlockResponse {
+                success: false,
+                profile,
+            } => {
+                anyhow::bail!(
+                    "unlock failed for vault '{}' — wrong password or keyring error",
+                    profile
+                );
             }
-            EventKind::UnlockRejected { reason: core_types::UnlockRejectedReason::AlreadyUnlocked, profile } => {
-                println!("{}", format!("Vault '{}' already unlocked.", profile.as_ref().map_or("unknown", |p| p.as_ref())).yellow());
+            EventKind::UnlockRejected {
+                reason: core_types::UnlockRejectedReason::AlreadyUnlocked,
+                profile,
+            } => {
+                println!(
+                    "{}",
+                    format!(
+                        "Vault '{}' already unlocked.",
+                        profile.as_ref().map_or("unknown", |p| p.as_ref())
+                    )
+                    .yellow()
+                );
             }
             other => anyhow::bail!("unexpected response: {other:?}"),
         }
@@ -1030,9 +1095,8 @@ async fn cmd_ssh_enroll(profile_arg: Option<String>) -> anyhow::Result<()> {
         // List SSH agent keys for user selection
         let sock_path = std::env::var("SSH_AUTH_SOCK")
             .context("SSH_AUTH_SOCK not set — is ssh-agent running?")?;
-        let mut agent =
-            ssh_agent_client_rs::Client::connect(std::path::Path::new(&sock_path))
-                .context("failed to connect to SSH agent")?;
+        let mut agent = ssh_agent_client_rs::Client::connect(std::path::Path::new(&sock_path))
+            .context("failed to connect to SSH agent")?;
         let identities = agent
             .list_all_identities()
             .context("failed to list SSH agent keys")?;
@@ -1109,7 +1173,13 @@ async fn cmd_ssh_list(profile_arg: Option<String>) -> anyhow::Result<()> {
 
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
-    table.set_header(vec!["Profile", "SSH Enrolled", "Key Fingerprint", "Key Type", "Agent Available"]);
+    table.set_header(vec![
+        "Profile",
+        "SSH Enrolled",
+        "Key Fingerprint",
+        "Key Type",
+        "Agent Available",
+    ]);
 
     for spec in &specs {
         let profile_name = &spec.vault;
@@ -1129,7 +1199,8 @@ async fn cmd_ssh_list(profile_arg: Option<String>) -> anyhow::Result<()> {
                 .map(|blob| (blob.key_fingerprint, blob.key_type.wire_name().to_string()))
                 .unwrap_or_else(|| ("<unreadable>".into(), "<unknown>".into()));
 
-            let available = core_auth::VaultAuthBackend::can_unlock(&backend, &target, &config_dir).await;
+            let available =
+                core_auth::VaultAuthBackend::can_unlock(&backend, &target, &config_dir).await;
 
             table.add_row(vec![
                 profile_name.clone(),
@@ -1189,15 +1260,23 @@ async fn cmd_lock(profile_arg: Option<String>) -> anyhow::Result<()> {
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid profile name: {e}"))?;
 
-    let event = EventKind::LockRequest { profile: target_profile };
+    let event = EventKind::LockRequest {
+        profile: target_profile,
+    };
 
     match rpc(&client, event, SecurityLevel::SecretsOnly).await? {
-        EventKind::LockResponse { success: true, profiles_locked } => {
+        EventKind::LockResponse {
+            success: true,
+            profiles_locked,
+        } => {
             if profiles_locked.is_empty() {
                 println!("{}", "All vaults locked. Key material zeroized.".green());
             } else {
                 for p in &profiles_locked {
-                    println!("{}", format!("Vault '{}' locked. Key material zeroized.", p).green());
+                    println!(
+                        "{}",
+                        format!("Vault '{}' locked. Key material zeroized.", p).green()
+                    );
                 }
             }
         }
@@ -1225,8 +1304,16 @@ async fn cmd_profile_list() -> anyhow::Result<()> {
             table.set_header(vec!["Name", "Active", "Default"]);
 
             for p in &profiles {
-                let active = if p.is_active { "yes".green().to_string() } else { "no".dimmed().to_string() };
-                let default = if p.is_default { "yes".green().to_string() } else { "".to_string() };
+                let active = if p.is_active {
+                    "yes".green().to_string()
+                } else {
+                    "no".dimmed().to_string()
+                };
+                let default = if p.is_default {
+                    "yes".green().to_string()
+                } else {
+                    "".to_string()
+                };
                 let name_str = p.name.to_string();
                 table.add_row(vec![&name_str, &active, &default]);
             }
@@ -1241,8 +1328,7 @@ async fn cmd_profile_list() -> anyhow::Result<()> {
 
 async fn cmd_profile_activate(name: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile_name = TrustProfileName::try_from(name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile_name = TrustProfileName::try_from(name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::ProfileActivate {
         target: ProfileId::new(),
@@ -1264,8 +1350,7 @@ async fn cmd_profile_activate(name: &str) -> anyhow::Result<()> {
 
 async fn cmd_profile_deactivate(name: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile_name = TrustProfileName::try_from(name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile_name = TrustProfileName::try_from(name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::ProfileDeactivate {
         target: ProfileId::new(),
@@ -1287,8 +1372,7 @@ async fn cmd_profile_deactivate(name: &str) -> anyhow::Result<()> {
 
 async fn cmd_profile_default(name: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile_name = TrustProfileName::try_from(name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile_name = TrustProfileName::try_from(name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::SetDefaultProfile { profile_name };
 
@@ -1306,16 +1390,14 @@ async fn cmd_profile_default(name: &str) -> anyhow::Result<()> {
 }
 
 fn cmd_profile_show(name: &str) -> anyhow::Result<()> {
-    let config = core_config::load_config(None)
-        .context("failed to load config")?;
+    let config = core_config::load_config(None).context("failed to load config")?;
 
     let profile = config
         .profiles
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("profile '{name}' not found in config"))?;
 
-    let toml_str = toml::to_string_pretty(profile)
-        .context("failed to serialize profile config")?;
+    let toml_str = toml::to_string_pretty(profile).context("failed to serialize profile config")?;
 
     println!("Profile: {}", name.bold());
     if name == config.global.default_profile.as_ref() {
@@ -1331,8 +1413,7 @@ async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<()> {
     validate_secret_key(key)?;
     validate_profile_in_config(profile)?;
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut value = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         dialoguer::Password::new()
@@ -1367,7 +1448,10 @@ async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<()> {
         EventKind::SecretSetResponse { success: true, .. } => {
             println!("Secret '{key}' stored in profile '{profile}'.");
         }
-        EventKind::SecretSetResponse { success: false, denial } => {
+        EventKind::SecretSetResponse {
+            success: false,
+            denial,
+        } => {
             if let Some(reason) = denial {
                 anyhow::bail!("{}", format_denial_reason(&reason, key, &profile));
             }
@@ -1383,8 +1467,7 @@ async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
     validate_secret_key(key)?;
     validate_profile_in_config(profile)?;
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::SecretGet {
         profile: profile.clone(),
@@ -1392,7 +1475,11 @@ async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
     };
 
     match rpc(&client, event, SecurityLevel::SecretsOnly).await? {
-        EventKind::SecretGetResponse { key: k, value, denial } => {
+        EventKind::SecretGetResponse {
+            key: k,
+            value,
+            denial,
+        } => {
             if let Some(reason) = denial {
                 anyhow::bail!("{}", format_denial_reason(&reason, &k, &profile));
             }
@@ -1408,7 +1495,11 @@ async fn cmd_secret_get(profile: &str, key: &str) -> anyhow::Result<()> {
                     s.zeroize();
                 }
                 Err(_) => {
-                    let mut hex: String = value.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                    let mut hex: String = value
+                        .as_bytes()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
                     println!("{hex}");
                     hex.zeroize();
                 }
@@ -1424,8 +1515,7 @@ async fn cmd_secret_delete(profile: &str, key: &str, skip_confirm: bool) -> anyh
     validate_secret_key(key)?;
     validate_profile_in_config(profile)?;
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Confirm deletion with TTY and non-TTY support.
     if !skip_confirm {
@@ -1460,7 +1550,10 @@ async fn cmd_secret_delete(profile: &str, key: &str, skip_confirm: bool) -> anyh
         EventKind::SecretDeleteResponse { success: true, .. } => {
             println!("Secret '{key}' deleted from profile '{profile}'.");
         }
-        EventKind::SecretDeleteResponse { success: false, denial } => {
+        EventKind::SecretDeleteResponse {
+            success: false,
+            denial,
+        } => {
             if let Some(reason) = denial {
                 anyhow::bail!("{}", format_denial_reason(&reason, key, &profile));
             }
@@ -1475,10 +1568,11 @@ async fn cmd_secret_delete(profile: &str, key: &str, skip_confirm: bool) -> anyh
 async fn cmd_secret_list(profile: &str) -> anyhow::Result<()> {
     validate_profile_in_config(profile)?;
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let event = EventKind::SecretList { profile: profile.clone() };
+    let event = EventKind::SecretList {
+        profile: profile.clone(),
+    };
 
     match rpc(&client, event, SecurityLevel::SecretsOnly).await? {
         EventKind::SecretListResponse { keys, denial } => {
@@ -1508,16 +1602,11 @@ fn cmd_audit_verify() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let contents = std::fs::read_to_string(&audit_path)
-        .context("failed to read audit log")?;
+    let contents = std::fs::read_to_string(&audit_path).context("failed to read audit log")?;
 
     match core_profile::verify_chain(&contents, &core_types::AuditHash::Blake3) {
         Ok(count) => {
-            println!(
-                "{} {} entries verified.",
-                "OK:".green().bold(),
-                count
-            );
+            println!("{} {} entries verified.", "OK:".green().bold(), count);
         }
         Err(e) => {
             eprintln!(
@@ -1539,8 +1628,7 @@ async fn cmd_audit_tail(count: usize, follow: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let contents = std::fs::read_to_string(&audit_path)
-        .context("failed to read audit log")?;
+    let contents = std::fs::read_to_string(&audit_path).context("failed to read audit log")?;
 
     let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(count);
@@ -1554,15 +1642,13 @@ async fn cmd_audit_tail(count: usize, follow: bool) -> anyhow::Result<()> {
     }
 
     // --follow: watch for new appends using notify.
-    let mut last_len = std::fs::metadata(&audit_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let mut last_len = std::fs::metadata(&audit_path).map(|m| m.len()).unwrap_or(0);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
 
     let watch_path = audit_path.clone();
     let _watcher = {
-        use notify::{RecommendedWatcher, RecursiveMode, Watcher, EventKind as NotifyEvent};
+        use notify::{EventKind as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
 
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
@@ -1573,10 +1659,14 @@ async fn cmd_audit_tail(count: usize, follow: bool) -> anyhow::Result<()> {
                 }
             },
             notify::Config::default(),
-        ).context("failed to start file watcher")?;
+        )
+        .context("failed to start file watcher")?;
 
         watcher
-            .watch(watch_path.parent().unwrap_or(watch_path.as_ref()), RecursiveMode::NonRecursive)
+            .watch(
+                watch_path.parent().unwrap_or(watch_path.as_ref()),
+                RecursiveMode::NonRecursive,
+            )
             .context("failed to watch audit log directory")?;
 
         watcher
@@ -1682,7 +1772,11 @@ async fn cmd_wm_switch(backward: bool) -> anyhow::Result<()> {
     // Find currently focused window index.
     let focused_idx = windows.iter().position(|w| w.is_focused).unwrap_or(0);
     let target_idx = if backward {
-        if focused_idx == 0 { windows.len() - 1 } else { focused_idx - 1 }
+        if focused_idx == 0 {
+            windows.len() - 1
+        } else {
+            focused_idx - 1
+        }
     } else {
         (focused_idx + 1) % windows.len()
     };
@@ -1691,9 +1785,13 @@ async fn cmd_wm_switch(backward: bool) -> anyhow::Result<()> {
 
     match rpc(
         &client,
-        EventKind::WmActivateWindow { window_id: target_id.clone() },
+        EventKind::WmActivateWindow {
+            window_id: target_id.clone(),
+        },
         SecurityLevel::Internal,
-    ).await? {
+    )
+    .await?
+    {
         EventKind::WmActivateWindowResponse { success: true } => {
             println!(
                 "Switched to: {} ({})",
@@ -1715,9 +1813,13 @@ async fn cmd_wm_focus(window_id: &str) -> anyhow::Result<()> {
 
     match rpc(
         &client,
-        EventKind::WmActivateWindow { window_id: window_id.to_owned() },
+        EventKind::WmActivateWindow {
+            window_id: window_id.to_owned(),
+        },
         SecurityLevel::Internal,
-    ).await? {
+    )
+    .await?
+    {
         EventKind::WmActivateWindowResponse { success: true } => {
             println!("Focused window: {}", window_id.green());
         }
@@ -1751,7 +1853,9 @@ async fn cmd_wm_overlay(launcher: bool, backward: bool) -> anyhow::Result<()> {
         "overlay-backward" => EventKind::WmActivateOverlayBackward,
         _ => EventKind::WmActivateOverlay,
     };
-    client.publish(event, SecurityLevel::Internal).await
+    client
+        .publish(event, SecurityLevel::Internal)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Spawn resident in background for next invocation.
@@ -1810,8 +1914,7 @@ fn spawn_resident() {
 ///
 /// Exits on IPC disconnect, datagram error, or 5-minute idle timeout.
 async fn cmd_wm_overlay_resident() -> anyhow::Result<()> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .context("XDG_RUNTIME_DIR not set")?;
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
     let pds_dir = format!("{runtime_dir}/pds");
     let pid_path = format!("{pds_dir}/wm-fast.pid");
     let sock_path = format!("{pds_dir}/wm-fast.sock");
@@ -1854,7 +1957,11 @@ async fn cmd_wm_overlay_resident() -> anyhow::Result<()> {
                     "overlay-launcher" => EventKind::WmActivateOverlayLauncher,
                     _ => continue,
                 };
-                if client.publish(event, SecurityLevel::Internal).await.is_err() {
+                if client
+                    .publish(event, SecurityLevel::Internal)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1874,7 +1981,11 @@ async fn cmd_wm_overlay_resident() -> anyhow::Result<()> {
 // Launch commands
 // ============================================================================
 
-async fn cmd_launch_search(query: &str, max_results: u32, profile: Option<&str>) -> anyhow::Result<()> {
+async fn cmd_launch_search(
+    query: &str,
+    max_results: u32,
+    profile: Option<&str>,
+) -> anyhow::Result<()> {
     let client = connect().await?;
     let profile = profile
         .map(|s| TrustProfileName::try_from(s).map_err(|e| anyhow::anyhow!("{e}")))
@@ -1896,11 +2007,7 @@ async fn cmd_launch_search(query: &str, max_results: u32, profile: Option<&str>)
                 table.set_header(vec!["Name", "ID", "Score"]);
 
                 for r in &results {
-                    table.add_row(vec![
-                        &r.name,
-                        &r.entry_id,
-                        &format!("{:.2}", r.score),
-                    ]);
+                    table.add_row(vec![&r.name, &r.entry_id, &format!("{:.2}", r.score)]);
                 }
 
                 println!("{table}");
@@ -1945,8 +2052,7 @@ async fn cmd_launch_run(entry_id: &str, profile: Option<&str>) -> anyhow::Result
 
 async fn cmd_clipboard_history(profile: &str, limit: u32) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::ClipboardHistory { profile, limit };
 
@@ -1979,10 +2085,15 @@ async fn cmd_clipboard_history(profile: &str, limit: u32) -> anyhow::Result<()> 
 
 async fn cmd_clipboard_clear(profile: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    match rpc(&client, EventKind::ClipboardClear { profile }, SecurityLevel::Internal).await? {
+    match rpc(
+        &client,
+        EventKind::ClipboardClear { profile },
+        SecurityLevel::Internal,
+    )
+    .await?
+    {
         EventKind::ClipboardClearResponse { success: true } => {
             println!("{}", "Clipboard history cleared.".green());
         }
@@ -1999,16 +2110,24 @@ async fn cmd_clipboard_get(entry_id: &str) -> anyhow::Result<()> {
     let client = connect().await?;
 
     let uuid = entry_id.strip_prefix("clip-").unwrap_or(entry_id);
-    let uuid: uuid::Uuid = uuid.parse()
+    let uuid: uuid::Uuid = uuid
+        .parse()
         .map_err(|_| anyhow::anyhow!("invalid clipboard entry ID: {entry_id}"))?;
     let entry_id_parsed = core_types::ClipboardEntryId::from_uuid(uuid);
 
     match rpc(
         &client,
-        EventKind::ClipboardGet { entry_id: entry_id_parsed },
+        EventKind::ClipboardGet {
+            entry_id: entry_id_parsed,
+        },
         SecurityLevel::Internal,
-    ).await? {
-        EventKind::ClipboardGetResponse { content: Some(c), content_type } => {
+    )
+    .await?
+    {
+        EventKind::ClipboardGetResponse {
+            content: Some(c),
+            content_type,
+        } => {
             if let Some(ct) = content_type {
                 eprintln!("Content-Type: {ct}");
             }
@@ -2095,10 +2214,15 @@ async fn cmd_input_status() -> anyhow::Result<()> {
 
 async fn cmd_snippet_list(profile: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    match rpc(&client, EventKind::SnippetList { profile }, SecurityLevel::Internal).await? {
+    match rpc(
+        &client,
+        EventKind::SnippetList { profile },
+        SecurityLevel::Internal,
+    )
+    .await?
+    {
         EventKind::SnippetListResponse { snippets } => {
             if snippets.is_empty() {
                 println!("{}", "No snippets configured.".dimmed());
@@ -2122,8 +2246,7 @@ async fn cmd_snippet_list(profile: &str) -> anyhow::Result<()> {
 
 async fn cmd_snippet_expand(profile: &str, trigger: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::SnippetExpand {
         profile,
@@ -2131,7 +2254,9 @@ async fn cmd_snippet_expand(profile: &str, trigger: &str) -> anyhow::Result<()> 
     };
 
     match rpc(&client, event, SecurityLevel::Internal).await? {
-        EventKind::SnippetExpandResponse { expanded: Some(text) } => {
+        EventKind::SnippetExpandResponse {
+            expanded: Some(text),
+        } => {
             println!("{text}");
         }
         EventKind::SnippetExpandResponse { expanded: None } => {
@@ -2145,8 +2270,7 @@ async fn cmd_snippet_expand(profile: &str, trigger: &str) -> anyhow::Result<()> 
 
 async fn cmd_snippet_add(profile: &str, trigger: &str, template: &str) -> anyhow::Result<()> {
     let client = connect().await?;
-    let profile = TrustProfileName::try_from(profile)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let profile = TrustProfileName::try_from(profile).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event = EventKind::SnippetAdd {
         profile,
@@ -2180,22 +2304,30 @@ fn validate_secret_key(key: &str) -> anyhow::Result<()> {
 /// Validate that a profile exists in config before sending an RPC.
 /// Fails fast at the CLI boundary with a clear error message.
 fn validate_profile_in_config(profile: &str) -> anyhow::Result<()> {
-    let config = core_config::load_config(None)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config = core_config::load_config(None).map_err(|e| anyhow::anyhow!("{e}"))?;
     if !config.profiles.contains_key(profile) {
         anyhow::bail!("profile '{}' not found in config", profile);
     }
     Ok(())
 }
 
-fn format_denial_reason(reason: &core_types::SecretDenialReason, key: &str, profile: &TrustProfileName) -> String {
+fn format_denial_reason(
+    reason: &core_types::SecretDenialReason,
+    key: &str,
+    profile: &TrustProfileName,
+) -> String {
     use core_types::SecretDenialReason;
     match reason {
         SecretDenialReason::Locked => "vault locked -- run `sesame unlock`".into(),
-        SecretDenialReason::ProfileNotActive => format!("profile '{}' is not active -- run `sesame profile activate {}`", profile, profile),
+        SecretDenialReason::ProfileNotActive => format!(
+            "profile '{}' is not active -- run `sesame profile activate {}`",
+            profile, profile
+        ),
         SecretDenialReason::AccessDenied => format!("access denied for secret '{}'", key),
         SecretDenialReason::RateLimited => "rate limited -- try again later".into(),
-        SecretDenialReason::NotFound => format!("secret '{}' not found in profile '{}'", key, profile),
+        SecretDenialReason::NotFound => {
+            format!("secret '{}' not found in profile '{}'", key, profile)
+        }
         SecretDenialReason::VaultError(e) => format!("vault error: {}", e),
         _ => format!("secret access denied for '{}': {:?}", key, reason),
     }
@@ -2217,9 +2349,13 @@ async fn fetch_profile_secrets(
     // 1. List all secret keys in this profile.
     let keys = match rpc(
         client,
-        EventKind::SecretList { profile: profile.clone() },
+        EventKind::SecretList {
+            profile: profile.clone(),
+        },
         SecurityLevel::SecretsOnly,
-    ).await? {
+    )
+    .await?
+    {
         EventKind::SecretListResponse { keys, denial } => {
             if let Some(reason) = denial {
                 anyhow::bail!("{}", format_denial_reason(&reason, "", profile));
@@ -2248,7 +2384,9 @@ async fn fetch_profile_secrets(
         };
 
         match rpc(client, event, SecurityLevel::SecretsOnly).await? {
-            EventKind::SecretGetResponse { value, denial, .. } if denial.is_none() && !value.is_empty() => {
+            EventKind::SecretGetResponse { value, denial, .. }
+                if denial.is_none() && !value.is_empty() =>
+            {
                 let env_name = secret_key_to_env_var(key, prefix);
                 if is_denied_env_var(&env_name) {
                     eprintln!(
@@ -2261,7 +2399,11 @@ async fn fetch_profile_secrets(
                 }
                 env_vars.push((env_name, value.as_bytes().to_vec()));
             }
-            EventKind::SecretGetResponse { denial: Some(reason), key: k, .. } => {
+            EventKind::SecretGetResponse {
+                denial: Some(reason),
+                key: k,
+                ..
+            } => {
                 eprintln!(
                     "{}: {}",
                     "warning".yellow().bold(),
@@ -2305,7 +2447,11 @@ fn secret_key_to_env_var(key: &str, prefix: Option<&str>) -> String {
     }
 }
 
-async fn cmd_env(profile: Option<&str>, prefix: Option<&str>, command: &[String]) -> anyhow::Result<()> {
+async fn cmd_env(
+    profile: Option<&str>,
+    prefix: Option<&str>,
+    command: &[String],
+) -> anyhow::Result<()> {
     if command.is_empty() {
         anyhow::bail!("no command specified");
     }
@@ -2324,12 +2470,14 @@ async fn cmd_env(profile: Option<&str>, prefix: Option<&str>, command: &[String]
     cmd.args(&command[1..]);
 
     // Inject SESAME_PROFILES so the child knows its context.
-    let profiles_csv: String = specs.iter().map(|s| {
-        match &s.org {
+    let profiles_csv: String = specs
+        .iter()
+        .map(|s| match &s.org {
             Some(org) => format!("{org}:{}", s.vault),
             None => s.vault.clone(),
-        }
-    }).collect::<Vec<_>>().join(",");
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     cmd.env("SESAME_PROFILES", &profiles_csv);
 
     // Inject each secret as an env var.
@@ -2338,11 +2486,9 @@ async fn cmd_env(profile: Option<&str>, prefix: Option<&str>, command: &[String]
         cmd.env(env_name, val_str.as_ref());
     }
 
-    let mut child = cmd.spawn()
-        .context("failed to spawn command")?;
+    let mut child = cmd.spawn().context("failed to spawn command")?;
 
-    let status = child.wait()
-        .context("failed to wait for child process")?;
+    let status = child.wait().context("failed to wait for child process")?;
 
     for (_, mut value) in env_vars {
         value.zeroize();
@@ -2359,33 +2505,85 @@ async fn cmd_env(profile: Option<&str>, prefix: Option<&str>, command: &[String]
 /// Covers dynamic linker, shell execution, path hijack, and privilege escalation vectors.
 const DENIED_ENV_VARS: &[&str] = &[
     // Dynamic linker — arbitrary code execution
-    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG",
-    "LD_DEBUG_OUTPUT", "LD_DYNAMIC_WEAK", "LD_PROFILE",
-    "LD_SHOW_AUXV", "LD_BIND_NOW", "LD_BIND_NOT",
-    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_DEBUG_OUTPUT",
+    "LD_DYNAMIC_WEAK",
+    "LD_PROFILE",
+    "LD_SHOW_AUXV",
+    "LD_BIND_NOW",
+    "LD_BIND_NOT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
     // Core execution environment
-    "PATH", "HOME", "USER", "SHELL", "LOGNAME", "LANG",
-    "TERM", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LOGNAME",
+    "LANG",
+    "TERM",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
     // Shell injection vectors
-    "BASH_ENV", "ENV", "BASH_FUNC_", "CDPATH", "GLOBIGNORE",
-    "SHELLOPTS", "BASHOPTS", "PROMPT_COMMAND", "PS1", "PS2", "PS4",
-    "MAIL", "MAILPATH", "MAILCHECK", "IFS",
+    "BASH_ENV",
+    "ENV",
+    "BASH_FUNC_",
+    "CDPATH",
+    "GLOBIGNORE",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PROMPT_COMMAND",
+    "PS1",
+    "PS2",
+    "PS4",
+    "MAIL",
+    "MAILPATH",
+    "MAILCHECK",
+    "IFS",
     // Language runtime code execution
-    "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
-    "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS",
-    "PERL5LIB", "PERL5OPT", "RUBYLIB", "RUBYOPT",
-    "GOPATH", "GOROOT", "GOFLAGS",
-    "JAVA_HOME", "CLASSPATH", "JAVA_TOOL_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "PERL5LIB",
+    "PERL5OPT",
+    "RUBYLIB",
+    "RUBYOPT",
+    "GOPATH",
+    "GOROOT",
+    "GOFLAGS",
+    "JAVA_HOME",
+    "CLASSPATH",
+    "JAVA_TOOL_OPTIONS",
     // Security / auth
-    "SSH_AUTH_SOCK", "GPG_AGENT_INFO", "KRB5_CONFIG", "KRB5CCNAME",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
-    "REQUESTS_CA_BUNDLE", "GIT_SSL_CAINFO", "NIX_SSL_CERT_FILE",
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
+    "KRB5_CONFIG",
+    "KRB5CCNAME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "NIX_SSL_CERT_FILE",
     // Nix
-    "NIX_PATH", "NIX_CONF_DIR",
+    "NIX_PATH",
+    "NIX_CONF_DIR",
     // Sudo / privilege
-    "SUDO_ASKPASS", "SUDO_EDITOR", "VISUAL", "EDITOR",
+    "SUDO_ASKPASS",
+    "SUDO_EDITOR",
+    "VISUAL",
+    "EDITOR",
     // Systemd
-    "SYSTEMD_UNIT_PATH", "DBUS_SESSION_BUS_ADDRESS",
+    "SYSTEMD_UNIT_PATH",
+    "DBUS_SESSION_BUS_ADDRESS",
     // Open Sesame's own namespace
     "SESAME_PROFILE",
 ];
@@ -2395,7 +2593,9 @@ fn is_denied_env_var(name: &str) -> bool {
     if name.starts_with("BASH_FUNC_") {
         return true;
     }
-    DENIED_ENV_VARS.iter().any(|&d| d.eq_ignore_ascii_case(name))
+    DENIED_ENV_VARS
+        .iter()
+        .any(|&d| d.eq_ignore_ascii_case(name))
 }
 
 /// Shell-escape a value for safe embedding in `export K="V"`.
@@ -2419,19 +2619,25 @@ fn shell_escape(s: &str) -> String {
 
 /// JSON-escape a string value.
 fn json_escape(s: &str) -> String {
-    s.chars().map(|c| match c {
-        '\0' => String::new(),
-        '"' => "\\\"".to_string(),
-        '\\' => "\\\\".to_string(),
-        '\n' => "\\n".to_string(),
-        '\r' => "\\r".to_string(),
-        '\t' => "\\t".to_string(),
-        c if c.is_control() => format!("\\u{:04x}", c as u32),
-        c => c.to_string(),
-    }).collect()
+    s.chars()
+        .map(|c| match c {
+            '\0' => String::new(),
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c if c.is_control() => format!("\\u{:04x}", c as u32),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
-async fn cmd_export(profile: Option<&str>, format: &ExportFormat, prefix: Option<&str>) -> anyhow::Result<()> {
+async fn cmd_export(
+    profile: Option<&str>,
+    format: &ExportFormat,
+    prefix: Option<&str>,
+) -> anyhow::Result<()> {
     let specs = resolve_profile_specs(profile);
     let client = connect().await?;
     let raw_secrets = fetch_multi_profile_secrets(&client, &specs, prefix).await?;
@@ -2463,7 +2669,9 @@ async fn cmd_export(profile: Option<&str>, format: &ExportFormat, prefix: Option
         ExportFormat::Json => {
             print!("{{");
             for (i, (k, v)) in entries.iter().enumerate() {
-                if i > 0 { print!(","); }
+                if i > 0 {
+                    print!(",");
+                }
                 print!("\"{}\":\"{}\"", json_escape(k), json_escape(v));
             }
             println!("}}");
@@ -2472,7 +2680,9 @@ async fn cmd_export(profile: Option<&str>, format: &ExportFormat, prefix: Option
 
     // 4. Zeroize secret copies.
     for (_, mut v) in entries {
-        unsafe { v.as_bytes_mut().zeroize(); }
+        unsafe {
+            v.as_bytes_mut().zeroize();
+        }
     }
 
     Ok(())
@@ -2508,7 +2718,9 @@ fn needs_privilege(path: &std::path::Path) -> bool {
 /// Compare two git remote URLs, normalizing `.git` suffix and trailing slashes.
 fn urls_match(a: &str, b: &str) -> bool {
     fn normalize(url: &str) -> String {
-        url.trim_end_matches('/').trim_end_matches(".git").to_lowercase()
+        url.trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_lowercase()
     }
     normalize(a) == normalize(b)
 }
@@ -2516,9 +2728,8 @@ fn urls_match(a: &str, b: &str) -> bool {
 async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
     match cmd {
         WorkspaceCmd::Init { root, user } => {
-            let user = user.unwrap_or_else(|| {
-                std::env::var("USER").unwrap_or_else(|_| "user".into())
-            });
+            let user =
+                user.unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "user".into()));
 
             #[cfg(target_os = "linux")]
             {
@@ -2549,19 +2760,16 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
             #[cfg(not(target_os = "linux"))]
             {
-                std::fs::create_dir_all(&root)
-                    .context("failed to create workspace root")?;
+                std::fs::create_dir_all(&root).context("failed to create workspace root")?;
             }
 
             let user_dir = root.join(&user);
-            std::fs::create_dir_all(&user_dir)
-                .context("failed to create user directory")?;
+            std::fs::create_dir_all(&user_dir).context("failed to create user directory")?;
 
             let mut config = core_config::load_workspace_config().unwrap_or_default();
             config.settings.root = root.clone();
             config.settings.user = user.clone();
-            core_config::save_workspace_config(&config)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            core_config::save_workspace_config(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
 
             println!("Workspace initialized: {}", user_dir.display());
             println!(
@@ -2571,7 +2779,12 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             Ok(())
         }
 
-        WorkspaceCmd::Clone { url, depth, profile, adopt } => {
+        WorkspaceCmd::Clone {
+            url,
+            depth,
+            profile,
+            adopt,
+        } => {
             let config = core_config::load_workspace_config().unwrap_or_default();
             let root = sesame_workspace::config::resolve_root(&config);
             let user = sesame_workspace::config::resolve_user(&config);
@@ -2586,14 +2799,15 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 sesame_workspace::CloneTarget::WorkspaceGit(p) => p.clone(),
             };
 
-            let adopted = if target_path.exists() && sesame_workspace::git::is_git_repo(&target_path) && adopt {
+            let adopted = if target_path.exists()
+                && sesame_workspace::git::is_git_repo(&target_path)
+                && adopt
+            {
                 // Verify the remote matches the requested URL.
                 let existing_remote = sesame_workspace::git::remote_url(&target_path)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 match existing_remote {
-                    Some(ref remote) if urls_match(remote, &url) => {
-                        true
-                    }
+                    Some(ref remote) if urls_match(remote, &url) => true,
                     Some(ref remote) => {
                         anyhow::bail!(
                             "directory exists with different remote:\n  existing: {remote}\n  requested: {url}\nRemove the directory or fix the remote manually."
@@ -2681,11 +2895,7 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     table.load_preset(UTF8_FULL);
                     table.set_header(vec!["SERVER", "ORG", "REPO", "PROFILE", "PATH"]);
                     for ws in &workspaces {
-                        let repo = ws
-                            .convention
-                            .repo
-                            .as_deref()
-                            .unwrap_or("(workspace)");
+                        let repo = ws.convention.repo.as_deref().unwrap_or("(workspace)");
                         let ws_profile = ws.linked_profile.as_deref().unwrap_or("-");
                         table.add_row(vec![
                             &ws.convention.server,
@@ -2728,13 +2938,14 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "unknown".into());
-            let branch = sesame_workspace::git::current_branch(&path)
-                .unwrap_or_else(|_| "unknown".into());
+            let branch =
+                sesame_workspace::git::current_branch(&path).unwrap_or_else(|_| "unknown".into());
             let clean = sesame_workspace::git::is_clean(&path).unwrap_or(false);
 
             // Use effective config for profile resolution.
-            let effective = sesame_workspace::config::resolve_effective_config(&config, &path, &root)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let effective =
+                sesame_workspace::config::resolve_effective_config(&config, &path, &root)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             let in_ws_git = sesame_workspace::convention::is_inside_workspace_git(&path);
 
             println!("Workspace:  {}", path.display());
@@ -2787,23 +2998,15 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             Ok(())
         }
 
-        WorkspaceCmd::Link {
-            profile,
-            path,
-        } => {
+        WorkspaceCmd::Link { profile, path } => {
             let _validated = TrustProfileName::try_from(profile.as_str())
                 .map_err(|e| anyhow::anyhow!("invalid profile name: {e}"))?;
 
             let path = resolve_workspace_path(path)?;
 
             let mut config = core_config::load_workspace_config().unwrap_or_default();
-            sesame_workspace::config::add_link(
-                &mut config,
-                &path.display().to_string(),
-                &profile,
-            );
-            core_config::save_workspace_config(&config)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sesame_workspace::config::add_link(&mut config, &path.display().to_string(), &profile);
+            core_config::save_workspace_config(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Linked {} -> profile \"{}\"", path.display(), profile);
             Ok(())
         }
@@ -2813,8 +3016,7 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             let mut config = core_config::load_workspace_config().unwrap_or_default();
             let path_str = path.display().to_string();
             if sesame_workspace::config::remove_link(&mut config, &path_str) {
-                core_config::save_workspace_config(&config)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                core_config::save_workspace_config(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("Unlinked {}", path.display());
             } else {
                 println!("No link found for {}", path.display());
@@ -2834,8 +3036,9 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             let root = sesame_workspace::config::resolve_root(&config);
 
             // Use effective config for profile resolution.
-            let effective = sesame_workspace::config::resolve_effective_config(&config, &path, &root)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let effective =
+                sesame_workspace::config::resolve_effective_config(&config, &path, &root)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             // Profile resolution: CLI flag > effective config > SESAME_PROFILES env > "default"
             let profile_csv = profile
@@ -2848,7 +3051,8 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
             // Connect to IPC and fetch secrets from all profiles.
             let client = connect().await?;
-            let env_vars = fetch_multi_profile_secrets(&client, &specs, secret_prefix.as_deref()).await?;
+            let env_vars =
+                fetch_multi_profile_secrets(&client, &specs, secret_prefix.as_deref()).await?;
 
             // Determine what to spawn.
             let (bin, args, is_interactive) = if !command.is_empty() {
@@ -2899,8 +3103,9 @@ async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 let config = core_config::load_workspace_config().unwrap_or_default();
                 let root = sesame_workspace::config::resolve_root(&config);
 
-                let effective = sesame_workspace::config::resolve_effective_config(&config, &path, &root)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let effective =
+                    sesame_workspace::config::resolve_effective_config(&config, &path, &root)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 println!("Workspace:      {}", path.display());
                 println!(
@@ -3025,7 +3230,10 @@ mod tests {
 
     #[test]
     fn secret_name_to_env_var_with_prefix() {
-        assert_eq!(secret_key_to_env_var("api-key", Some("MYAPP")), "MYAPP_API_KEY");
+        assert_eq!(
+            secret_key_to_env_var("api-key", Some("MYAPP")),
+            "MYAPP_API_KEY"
+        );
     }
 
     #[test]

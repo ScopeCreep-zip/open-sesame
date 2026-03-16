@@ -30,10 +30,7 @@ pub enum OverlayCmd {
         hints: Vec<String>,
     },
     /// Update input buffer and selection for redraw.
-    UpdateInput {
-        input: String,
-        selection: usize,
-    },
+    UpdateInput { input: String, selection: usize },
     /// Hide the overlay and return to idle.
     Hide,
     /// Hide the overlay, flush the Wayland unmap to the compositor via a
@@ -44,13 +41,9 @@ pub enum OverlayCmd {
     /// Show "Launching..." status.
     ShowLaunching,
     /// Show staged launch intent (waiting for Alt release to confirm).
-    ShowLaunchStaged {
-        command: String,
-    },
+    ShowLaunchStaged { command: String },
     /// Show launch error with message.
-    ShowLaunchError {
-        message: String,
-    },
+    ShowLaunchError { message: String },
     /// Show vault unlock password prompt with dot-masked field.
     /// Defense in depth: only the character count is sent, never password bytes.
     ShowUnlockPrompt {
@@ -59,10 +52,7 @@ pub enum OverlayCmd {
         error: Option<String>,
     },
     /// Show unlock progress indicator (auto-unlock, verifying, etc.).
-    ShowUnlockProgress {
-        profile: String,
-        message: String,
-    },
+    ShowUnlockProgress { profile: String, message: String },
     /// Reset the modifier-poll grace timer. Proves Alt is still held
     /// (an IPC re-activation wouldn't fire otherwise).
     ResetGrace,
@@ -239,7 +229,11 @@ fn run_gtk4_overlay(
 ) {
     gtk4::init().expect("failed to initialize GTK4");
 
-    let state = Rc::new(RefCell::new(OverlayState::new(theme, show_app_id, show_title)));
+    let state = Rc::new(RefCell::new(OverlayState::new(
+        theme,
+        show_app_id,
+        show_title,
+    )));
 
     // Create the window.
     let window = gtk4::Window::new();
@@ -312,29 +306,44 @@ fn run_gtk4_overlay(
             }
             OverlayPhase::Launching => {
                 render::draw_status_toast(
-                    cr, width as f64, height as f64,
-                    "Launching\u{2026}", &st.theme,
+                    cr,
+                    width as f64,
+                    height as f64,
+                    "Launching\u{2026}",
+                    &st.theme,
                 );
             }
             OverlayPhase::LaunchError => {
                 render::draw_error_toast(
-                    cr, width as f64, height as f64,
-                    &st.error_message, &st.theme,
+                    cr,
+                    width as f64,
+                    height as f64,
+                    &st.error_message,
+                    &st.theme,
                 );
             }
             OverlayPhase::UnlockPrompt => {
                 render::draw_unlock_prompt(
-                    cr, width as f64, height as f64,
+                    cr,
+                    width as f64,
+                    height as f64,
                     &st.unlock_profile,
                     st.unlock_password_len,
-                    if st.error_message.is_empty() { None } else { Some(&st.error_message) },
+                    if st.error_message.is_empty() {
+                        None
+                    } else {
+                        Some(&st.error_message)
+                    },
                     &st.theme,
                 );
             }
             OverlayPhase::UnlockProgress => {
                 render::draw_status_toast(
-                    cr, width as f64, height as f64,
-                    &st.unlock_message, &st.theme,
+                    cr,
+                    width as f64,
+                    height as f64,
+                    &st.unlock_message,
+                    &st.theme,
                 );
             }
         }
@@ -463,7 +472,7 @@ fn run_gtk4_overlay(
                         if st.activated_at.is_none() {
                             st.activated_at = Some(std::time::Instant::now());
                             st.received_key_event = false;
-                        st.ipc_keyboard_active = false;
+                            st.ipc_keyboard_active = false;
                         }
                     }
                     // Reset modifier poll flag for this activation cycle.
@@ -587,7 +596,11 @@ fn run_gtk4_overlay(
                     }
                     da_cmd.queue_draw();
                 }
-                OverlayCmd::ShowUnlockPrompt { profile, password_len, error } => {
+                OverlayCmd::ShowUnlockPrompt {
+                    profile,
+                    password_len,
+                    error,
+                } => {
                     {
                         let mut st = state_cmd.borrow_mut();
                         st.phase = OverlayPhase::UnlockPrompt;
@@ -663,7 +676,8 @@ fn run_gtk4_overlay(
         // Alt/Meta is no longer held.
         let st = state_poll.borrow();
         let phase = st.phase;
-        let elapsed_ms = st.activated_at
+        let elapsed_ms = st
+            .activated_at
             .map(|t| t.elapsed().as_millis())
             .unwrap_or(0);
         let within_grace = elapsed_ms < MODIFIER_POLL_GRACE_MS;
@@ -684,9 +698,7 @@ fn run_gtk4_overlay(
         // the compositor never granted us focus. Dismiss unconditionally —
         // modifier state is unreliable without keyboard focus, so don't check it.
         let stale = !keyboard_confirmed && elapsed_ms >= STALE_ACTIVATION_TIMEOUT_MS;
-        if phase != OverlayPhase::Hidden && stale
-            && !*modifier_released_flag.borrow()
-        {
+        if phase != OverlayPhase::Hidden && stale && !*modifier_released_flag.borrow() {
             *modifier_released_flag.borrow_mut() = true;
             let _ = event_tx_poll.blocking_send(OverlayEvent::Dismiss);
         }
@@ -697,7 +709,8 @@ fn run_gtk4_overlay(
         // modifier state is unreliable because COSMIC's system_actions
         // consumes Alt before our surface sees it.
         if phase != OverlayPhase::Hidden && !within_grace && keyboard_confirmed && !ipc_active {
-            let alt_held = window_poll.surface()
+            let alt_held = window_poll
+                .surface()
                 .and_then(|surface| surface.display().default_seat())
                 .and_then(|seat| seat.keyboard())
                 .map(|keyboard| {

@@ -32,20 +32,22 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     platform_linux::security::harden_process();
 
-    let config = core_config::load_config(None)
-        .context("failed to load config")?;
+    let config = core_config::load_config(None).context("failed to load config")?;
 
     let config_paths = core_config::resolve_config_paths(None);
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
     let (_config_watcher, _config_state) = core_config::ConfigWatcher::with_callback(
         &config_paths,
         config,
-        Some(Box::new(move || { let _ = reload_tx.blocking_send(()); })),
-    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Some(Box::new(move || {
+            let _ = reload_tx.blocking_send(());
+        })),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let socket_path = core_ipc::socket_path()
-        .context("failed to resolve IPC socket path")?;
-    let server_pub = core_ipc::noise::read_bus_public_key().await
+    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
+    let server_pub = core_ipc::noise::read_bus_public_key()
+        .await
         .context("daemon-profile is not running (no bus public key found)")?;
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
@@ -54,7 +56,9 @@ async fn main() -> anyhow::Result<()> {
     let mut keyboard_rx = keyboard::spawn_keyboard_readers();
     let mut xkb_ctx = keyboard::XkbContext::new();
     if xkb_ctx.is_none() {
-        tracing::warn!("failed to initialize XKB context — keyboard forwarding will send raw keycodes without keysym translation");
+        tracing::warn!(
+            "failed to initialize XKB context — keyboard forwarding will send raw keycodes without keysym translation"
+        );
     }
 
     // Grab state: tracks whether daemon-wm has requested keyboard forwarding.
@@ -62,9 +66,15 @@ async fn main() -> anyhow::Result<()> {
     let mut grab_requester: Option<DaemonId> = None;
 
     let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
-        "daemon-input", daemon_id, &socket_path, &server_pub, 5,
+        "daemon-input",
+        daemon_id,
+        &socket_path,
+        &server_pub,
+        5,
         std::time::Duration::from_millis(500),
-    ).await.context("failed to connect to IPC bus")?;
+    )
+    .await
+    .context("failed to connect to IPC bus")?;
     drop(_client_keypair);
 
     #[cfg(target_os = "linux")]
@@ -280,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
 async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sig = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         sig.recv().await;
     }
@@ -292,12 +302,9 @@ async fn sigterm() {
 
 #[cfg(target_os = "linux")]
 fn apply_sandbox() {
-    use platform_linux::sandbox::{
-        apply_sandbox, FsAccess, LandlockRule, SeccompProfile,
-    };
+    use platform_linux::sandbox::{FsAccess, LandlockRule, SeccompProfile, apply_sandbox};
 
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/run/user/1000".into());
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
 
     let pds_dir = std::path::PathBuf::from(&runtime_dir).join("pds");
     let keys_dir = pds_dir.join("keys");
@@ -334,35 +341,73 @@ fn apply_sandbox() {
     let seccomp = SeccompProfile {
         daemon_name: "daemon-input".into(),
         allowed_syscalls: vec![
-            "read".into(), "write".into(), "close".into(),
-            "openat".into(), "lseek".into(), "pread64".into(),
-            "fstat".into(), "stat".into(), "newfstatat".into(),
-            "statx".into(), "access".into(), "fcntl".into(),
-            "ioctl".into(), "mkdir".into(), "getdents64".into(),
-            "mmap".into(), "mprotect".into(), "munmap".into(),
-            "madvise".into(), "brk".into(),
-            "futex".into(), "clone3".into(), "clone".into(),
-            "set_robust_list".into(), "set_tid_address".into(),
-            "rseq".into(), "sched_getaffinity".into(),
-            "prlimit64".into(), "prctl".into(),
-            "getpid".into(), "gettid".into(), "getuid".into(), "geteuid".into(),
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "openat".into(),
+            "lseek".into(),
+            "pread64".into(),
+            "fstat".into(),
+            "stat".into(),
+            "newfstatat".into(),
+            "statx".into(),
+            "access".into(),
+            "fcntl".into(),
+            "ioctl".into(),
+            "mkdir".into(),
+            "getdents64".into(),
+            "mmap".into(),
+            "mprotect".into(),
+            "munmap".into(),
+            "madvise".into(),
+            "brk".into(),
+            "futex".into(),
+            "clone3".into(),
+            "clone".into(),
+            "set_robust_list".into(),
+            "set_tid_address".into(),
+            "rseq".into(),
+            "sched_getaffinity".into(),
+            "prlimit64".into(),
+            "prctl".into(),
+            "getpid".into(),
+            "gettid".into(),
+            "getuid".into(),
+            "geteuid".into(),
             "kill".into(),
-            "epoll_wait".into(), "epoll_ctl".into(),
-            "epoll_create1".into(), "eventfd2".into(),
-            "poll".into(), "ppoll".into(),
-            "clock_gettime".into(), "timer_create".into(),
-            "timer_settime".into(), "timer_delete".into(),
-            "socket".into(), "connect".into(), "sendto".into(),
-            "recvfrom".into(), "recvmsg".into(), "sendmsg".into(),
-            "getsockname".into(), "getpeername".into(),
-            "setsockopt".into(), "socketpair".into(),
-            "shutdown".into(), "getsockopt".into(),
-            "sigaltstack".into(), "rt_sigaction".into(),
-            "rt_sigprocmask".into(), "rt_sigreturn".into(),
+            "epoll_wait".into(),
+            "epoll_ctl".into(),
+            "epoll_create1".into(),
+            "eventfd2".into(),
+            "poll".into(),
+            "ppoll".into(),
+            "clock_gettime".into(),
+            "timer_create".into(),
+            "timer_settime".into(),
+            "timer_delete".into(),
+            "socket".into(),
+            "connect".into(),
+            "sendto".into(),
+            "recvfrom".into(),
+            "recvmsg".into(),
+            "sendmsg".into(),
+            "getsockname".into(),
+            "getpeername".into(),
+            "setsockopt".into(),
+            "socketpair".into(),
+            "shutdown".into(),
+            "getsockopt".into(),
+            "sigaltstack".into(),
+            "rt_sigaction".into(),
+            "rt_sigprocmask".into(),
+            "rt_sigreturn".into(),
             "tgkill".into(),
-            "exit_group".into(), "exit".into(), "getrandom".into(),
+            "exit_group".into(),
+            "exit".into(),
+            "getrandom".into(),
             "restart_syscall".into(),
-            "pipe2".into(), "dup".into(),
+            "pipe2".into(),
+            "dup".into(),
         ],
     };
 
@@ -379,8 +424,7 @@ fn apply_sandbox() {
 fn init_logging(format: &str) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     match format {
         "json" => {
@@ -390,9 +434,7 @@ fn init_logging(format: &str) -> anyhow::Result<()> {
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 

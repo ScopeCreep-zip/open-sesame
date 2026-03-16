@@ -55,10 +55,9 @@ impl EncryptionKey {
     /// Returns an error if the tag does not verify (tampered or wrong key/nonce).
     pub fn decrypt(&self, nonce: &[u8; 12], ciphertext: &[u8]) -> core_types::Result<SecureBytes> {
         let nonce = Nonce::from_slice(nonce);
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| core_types::Error::Crypto("decryption failed: tag verification error".into()))?;
+        let plaintext = self.cipher.decrypt(nonce, ciphertext).map_err(|_| {
+            core_types::Error::Crypto("decryption failed: tag verification error".into())
+        })?;
         Ok(SecureBytes::new(plaintext))
     }
 }

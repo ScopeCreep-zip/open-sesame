@@ -5,25 +5,24 @@
 //! from the signature, and unwraps the AES-256-GCM wrapped master key
 //! from the enrollment blob.
 
+use crate::AuthError;
 use crate::backend::{AuthInteraction, IpcUnlockStrategy, UnlockOutcome, VaultAuthBackend};
 use crate::ssh_types::{EnrollmentBlob, SshKeyType};
-use crate::AuthError;
 use core_crypto::SecureBytes;
 use core_types::TrustProfileName;
+use ssh_agent_client_rs::Identity;
 use std::collections::BTreeMap;
 use std::path::Path;
-use ssh_agent_client_rs::Identity;
 use zeroize::Zeroize;
 
 /// Get the fingerprint string for an identity.
 fn identity_fingerprint(id: &Identity<'_>) -> String {
     match id {
         Identity::PublicKey(cow) => cow.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
-        Identity::Certificate(cow) => {
-            cow.public_key()
-                .fingerprint(ssh_key::HashAlg::Sha256)
-                .to_string()
-        }
+        Identity::Certificate(cow) => cow
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string(),
     }
 }
 
@@ -130,9 +129,9 @@ impl VaultAuthBackend for SshAgentBackend {
             let Ok(identities) = agent.list_all_identities() else {
                 return false;
             };
-            identities.iter().any(|id| {
-                identity_fingerprint(id) == fingerprint
-            })
+            identities
+                .iter()
+                .any(|id| identity_fingerprint(id) == fingerprint)
         })
         .await
         .unwrap_or(false)
@@ -150,8 +149,8 @@ impl VaultAuthBackend for SshAgentBackend {
     ) -> Result<UnlockOutcome, AuthError> {
         // 1. Read enrollment blob
         let blob_path = Self::enrollment_path(config_dir, profile);
-        let blob_data = std::fs::read(&blob_path)
-            .map_err(|_| AuthError::NotEnrolled(profile.to_string()))?;
+        let blob_data =
+            std::fs::read(&blob_path).map_err(|_| AuthError::NotEnrolled(profile.to_string()))?;
         let blob = EnrollmentBlob::deserialize(&blob_data)?;
 
         // 2. Derive challenge
@@ -167,9 +166,7 @@ impl VaultAuthBackend for SshAgentBackend {
         let challenge = challenge_bytes.to_vec();
         let sign_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AuthError> {
             let mut agent = connect_agent().ok_or_else(|| {
-                AuthError::AgentUnavailable(
-                    "SSH_AUTH_SOCK not set or agent not running".into(),
-                )
+                AuthError::AgentUnavailable("SSH_AUTH_SOCK not set or agent not running".into())
             })?;
 
             let identities = agent.list_all_identities().map_err(|e| {
@@ -181,9 +178,9 @@ impl VaultAuthBackend for SshAgentBackend {
                 .find(|id| identity_fingerprint(id) == fingerprint)
                 .ok_or(AuthError::NoEligibleKey)?;
 
-            let signature = agent.sign(identity, &challenge).map_err(|e| {
-                AuthError::AgentProtocolError(format!("sign request failed: {e}"))
-            })?;
+            let signature = agent
+                .sign(identity, &challenge)
+                .map_err(|e| AuthError::AgentProtocolError(format!("sign request failed: {e}")))?;
 
             // Immediately copy the signature bytes so the Vec is the only
             // unprotected holder; zeroized promptly after KEK derivation below.
@@ -241,20 +238,16 @@ impl VaultAuthBackend for SshAgentBackend {
         let (fingerprint, key_type, sig_bytes) = tokio::task::spawn_blocking(
             move || -> Result<(String, SshKeyType, Vec<u8>), AuthError> {
                 let mut agent = connect_agent().ok_or_else(|| {
-                    AuthError::AgentUnavailable(
-                        "SSH_AUTH_SOCK not set or agent not running".into(),
-                    )
+                    AuthError::AgentUnavailable("SSH_AUTH_SOCK not set or agent not running".into())
                 })?;
 
-                let identities = agent.list_all_identities().map_err(|e| {
-                    AuthError::AgentProtocolError(format!("list identities: {e}"))
-                })?;
+                let identities = agent
+                    .list_all_identities()
+                    .map_err(|e| AuthError::AgentProtocolError(format!("list identities: {e}")))?;
 
                 let eligible: Vec<_> = identities
                     .into_iter()
-                    .filter(|id| {
-                        SshKeyType::from_algorithm(&identity_algorithm(id)).is_ok()
-                    })
+                    .filter(|id| SshKeyType::from_algorithm(&identity_algorithm(id)).is_ok())
                     .collect();
 
                 if eligible.is_empty() {
@@ -271,9 +264,9 @@ impl VaultAuthBackend for SshAgentBackend {
                 let algo = identity_algorithm(&identity);
                 let kt = SshKeyType::from_algorithm(&algo)?;
 
-                let sig = agent.sign(identity, &challenge_vec).map_err(|e| {
-                    AuthError::AgentProtocolError(format!("sign: {e}"))
-                })?;
+                let sig = agent
+                    .sign(identity, &challenge_vec)
+                    .map_err(|e| AuthError::AgentProtocolError(format!("sign: {e}")))?;
 
                 // Use a zeroizing container to minimize the window where raw
                 // signature bytes (KEK input) sit unprotected in memory.
@@ -326,10 +319,7 @@ impl VaultAuthBackend for SshAgentBackend {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &tmp_path,
-                std::fs::Permissions::from_mode(0o600),
-            )?;
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         std::fs::rename(&tmp_path, &blob_path)?;
@@ -344,11 +334,7 @@ impl VaultAuthBackend for SshAgentBackend {
         Ok(())
     }
 
-    async fn revoke(
-        &self,
-        profile: &TrustProfileName,
-        config_dir: &Path,
-    ) -> Result<(), AuthError> {
+    async fn revoke(&self, profile: &TrustProfileName, config_dir: &Path) -> Result<(), AuthError> {
         let path = Self::enrollment_path(config_dir, profile);
         if path.exists() {
             // Extract fingerprint for audit logging before deletion
@@ -403,7 +389,11 @@ mod tests {
     async fn can_unlock_false_when_not_enrolled() {
         let backend = SshAgentBackend::new();
         let profile = test_profile();
-        assert!(!backend.can_unlock(&profile, std::path::Path::new("/tmp")).await);
+        assert!(
+            !backend
+                .can_unlock(&profile, std::path::Path::new("/tmp"))
+                .await
+        );
     }
 
     #[tokio::test]

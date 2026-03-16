@@ -31,7 +31,9 @@ async fn daemon_keypair_persistence() {
 
     // Roundtrip: write + read.
     let kp = generate_keypair().unwrap();
-    noise::write_daemon_keypair("test-daemon", kp.as_inner()).await.unwrap();
+    noise::write_daemon_keypair("test-daemon", kp.as_inner())
+        .await
+        .unwrap();
 
     let (private, public) = noise::read_daemon_keypair("test-daemon").await.unwrap();
     assert_eq!(&*private, kp.private());
@@ -45,10 +47,7 @@ async fn daemon_keypair_persistence() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(
-            pds_dir.join("keys").join("test-daemon.key"),
-        )
-        .unwrap();
+        let meta = std::fs::metadata(pds_dir.join("keys").join("test-daemon.key")).unwrap();
         assert_eq!(
             meta.permissions().mode() & 0o777,
             0o600,
@@ -64,10 +63,7 @@ async fn daemon_keypair_persistence() {
     // Corrupt the checksum file.
     std::fs::write(&checksum_path, [0xDE; 32]).unwrap();
     let result = noise::read_daemon_keypair("test-daemon").await;
-    assert!(
-        result.is_err(),
-        "tampered checksum should be detected"
-    );
+    assert!(result.is_err(), "tampered checksum should be detected");
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("TAMPER DETECTED"),
@@ -85,7 +81,10 @@ async fn daemon_keypair_persistence() {
 
     assert!(pds_dir.join("bus.pub").exists(), "bus.pub must exist");
     assert!(pds_dir.join("bus.key").exists(), "bus.key must exist");
-    assert!(pds_dir.join("bus.checksum").exists(), "bus.checksum must exist");
+    assert!(
+        pds_dir.join("bus.checksum").exists(),
+        "bus.checksum must exist"
+    );
 
     #[cfg(unix)]
     {
@@ -109,10 +108,7 @@ async fn daemon_keypair_persistence() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(
-            pds_dir.join("keys").join("test-daemon.pub"),
-        )
-        .unwrap();
+        let meta = std::fs::metadata(pds_dir.join("keys").join("test-daemon.pub")).unwrap();
         assert_eq!(
             meta.permissions().mode() & 0o777,
             0o644,
