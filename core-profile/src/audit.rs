@@ -294,6 +294,8 @@ mod tests {
 
     #[test]
     fn chain_recovers_from_corrupt_last_entry() {
+        use std::io::Write;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
 
@@ -309,7 +311,6 @@ mod tests {
         }
 
         // Append garbage
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(file, "{{broken json").unwrap();
 

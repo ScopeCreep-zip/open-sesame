@@ -363,6 +363,29 @@ fn apply_sandbox() {
     }
 }
 
+fn init_logging(format: &str) -> anyhow::Result<()> {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match format {
+        "json" => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .json()
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .init();
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,27 +472,4 @@ mod tests {
         assert_eq!(content, "secret data");
         assert_eq!(sensitivity, "secret");
     }
-}
-
-fn init_logging(format: &str) -> anyhow::Result<()> {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
-    match format {
-        "json" => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
-        }
-    }
-
-    Ok(())
 }

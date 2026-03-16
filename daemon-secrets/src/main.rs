@@ -1550,6 +1550,29 @@ async fn keyring_delete_all(profiles: &[TrustProfileName]) {
     tracing::info!(count = profiles.len(), "per-profile keyring entries deleted");
 }
 
+fn init_logging(format: &str) -> anyhow::Result<()> {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match format {
+        "json" => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .json()
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .init();
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1878,7 +1901,7 @@ mod tests {
     fn test_load_salt_rejects_wrong_length() {
         let dir = tempfile::tempdir().unwrap();
         let sp = dir.path().join("bad.salt");
-        std::fs::write(&sp, &[0u8; 15]).unwrap();
+        std::fs::write(&sp, [0u8; 15]).unwrap();
         let err = load_salt(&sp).unwrap_err().to_string();
         assert!(err.contains("not 16 bytes"), "should reject wrong length: {err}");
     }
@@ -1974,27 +1997,4 @@ mod tests {
         let p = profile("work");
         assert_eq!(keylocker_account(&p), "vault-key-work");
     }
-}
-
-fn init_logging(format: &str) -> anyhow::Result<()> {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
-    match format {
-        "json" => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
-        }
-    }
-
-    Ok(())
 }

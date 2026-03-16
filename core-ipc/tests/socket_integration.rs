@@ -11,7 +11,8 @@ use uuid::Uuid;
 /// Helper: start an encrypted bus server with pre-registered client keypairs.
 ///
 /// `client_count` keypairs are generated and registered at `SecurityLevel::Internal`.
-/// Returns (server, temp_dir, server_public_key, client_keypairs).
+/// Returns (server, `temp_dir`, `server_public_key`, `client_keypairs`).
+#[allow(clippy::unused_async)]
 async fn start_server_with_clients(
     client_count: usize,
 ) -> (BusServer, tempfile::TempDir, [u8; 32], Vec<ZeroizingKeypair>) {
@@ -36,6 +37,7 @@ async fn start_server_with_clients(
 }
 
 /// Helper: start an encrypted bus server with an empty registry (all clients get Open).
+#[allow(clippy::unused_async)]
 async fn start_server() -> (BusServer, tempfile::TempDir, [u8; 32]) {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("bus.sock");
@@ -69,7 +71,7 @@ async fn connect_client(
         .unwrap()
 }
 
-/// Helper: make a DaemonId from a u128.
+/// Helper: make a `DaemonId` from a u128.
 fn did(n: u128) -> DaemonId {
     DaemonId::from_uuid(Uuid::from_u128(n))
 }
@@ -91,7 +93,7 @@ async fn client_connect_and_server_accept() {
     let server_handle = tokio::spawn(async move {
         tokio::select! {
             _ = server.run() => unreachable!(),
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
                 server.connection_count().await
             }
         }

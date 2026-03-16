@@ -387,7 +387,7 @@ mod tests {
     fn reorder_unknown_windows_go_last() {
         let state = parse("B\nA");
 
-        let mut items = vec!["X", "A", "B", "Y"];
+        let mut items = ["X", "A", "B", "Y"];
         items.sort_by(|a, b| {
             let pa = state.position(a).unwrap_or(usize::MAX);
             let pb = state.position(b).unwrap_or(usize::MAX);

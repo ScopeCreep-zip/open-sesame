@@ -465,9 +465,9 @@ mod tests {
         assert_eq!(backend.backend_id(), "ssh-agent");
     }
 
-    /// Verify connect_agent handles nonexistent socket paths gracefully.
+    /// Verify `connect_agent` handles nonexistent socket paths gracefully.
     /// We cannot mutate env vars (crate forbids unsafe), so this exercises
-    /// the connect path with a known-bad socket via direct Client::connect.
+    /// the connect path with a known-bad socket via direct `Client::connect`.
     #[test]
     fn connect_to_nonexistent_socket_returns_error() {
         let bad_path = std::path::Path::new("/tmp/nonexistent-ssh-agent-test.sock");
@@ -590,7 +590,7 @@ mod tests {
 
         // 1. Generate challenge (same as SshAgentBackend::enroll)
         let challenge_ctx = format!("pds v2 ssh-challenge {profile}");
-        let _challenge: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
+        let challenge: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
 
         // 2. Derive KEK from simulated signature
         let kek_ctx = format!("pds v2 ssh-vault-kek {profile}");
@@ -624,7 +624,7 @@ mod tests {
 
         // 6. Re-derive the same challenge (deterministic)
         let challenge2: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
-        assert_eq!(_challenge, challenge2);
+        assert_eq!(challenge, challenge2);
 
         // 7. Same signature -> same KEK -> successful unwrap
         let kek2: [u8; 32] = blake3::derive_key(&kek_ctx, &simulated_sig);
