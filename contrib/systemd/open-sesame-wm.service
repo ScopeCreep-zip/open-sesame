@@ -20,6 +20,7 @@ ProtectSystem=strict
 
 ReadWritePaths=%t/pds
 ReadWritePaths=%h/.cache/open-sesame
+ReadWritePaths=%h/.cache/fontconfig
 
 # Resource limits
 LimitNOFILE=4096

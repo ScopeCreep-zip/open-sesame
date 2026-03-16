@@ -174,6 +174,7 @@
               "d %t/pds 0700 - - -"
               "d %h/.config/pds 0700 - - -"
               "d %h/.cache/open-sesame 0700 - - -"
+              "d %h/.cache/fontconfig 0755 - - -"
             ];
 
             # Grouping target — start/stop all daemons together.
@@ -302,8 +303,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-
-                ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" ];
+                ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" "%h/.cache/fontconfig" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
@@ -334,8 +334,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-
-                ReadWritePaths = [ "%t/pds" ];
+                ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" ];
                 LimitNOFILE = 4096;
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];

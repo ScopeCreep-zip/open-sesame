@@ -19,6 +19,7 @@ ProtectHome=read-only
 ProtectSystem=strict
 
 ReadWritePaths=%t/pds
+ReadWritePaths=%h/.cache/open-sesame
 
 # Resource limits
 LimitNOFILE=4096
