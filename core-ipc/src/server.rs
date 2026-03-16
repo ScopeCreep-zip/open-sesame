@@ -748,52 +748,39 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
     }
 
     // Populate name_to_conn on DaemonStarted for O(1) unicast lookup.
-    // Reject duplicate registrations: if a daemon name is already mapped to a
-    // LIVE connection, log a security audit and keep the existing mapping.
-    // This prevents name squatting via compromised Noise IK keys.
+    // On key rotation, a daemon reconnects with a new connection while the old
+    // one is still technically alive (TCP hasn't noticed the drop yet). We must
+    // accept the new registration and evict the stale old connection, otherwise
+    // messages get routed to the dead old connection and the daemon starves.
     if let EventKind::DaemonStarted { .. } = &msg.payload
         && let Some(ref name) = verified_name
     {
         let existing = state.name_to_conn.read().await.get(name).copied();
-        if let Some(existing_conn_id) = existing {
-            let still_alive = state
-                .connections
-                .read()
-                .await
-                .contains_key(&existing_conn_id);
-            if still_alive && existing_conn_id != sender_conn_id {
-                tracing::warn!(
-                    audit = "security",
-                    event_type = "duplicate-name-registration",
-                    daemon_name = %name,
-                    existing_conn_id = existing_conn_id,
-                    new_conn_id = sender_conn_id,
-                    "rejecting duplicate name_to_conn registration — existing connection still alive"
-                );
-            } else {
-                state
-                    .name_to_conn
-                    .write()
-                    .await
-                    .insert(name.clone(), sender_conn_id);
-                tracing::debug!(
-                    daemon_name = %name,
-                    conn_id = sender_conn_id,
-                    "name_to_conn mapping updated (previous connection gone)"
-                );
-            }
-        } else {
-            state
-                .name_to_conn
-                .write()
-                .await
-                .insert(name.clone(), sender_conn_id);
-            tracing::debug!(
+        if let Some(existing_conn_id) = existing
+            && existing_conn_id != sender_conn_id
+        {
+            // New connection for the same daemon name (key rotation).
+            // Evict the old connection and accept the new one.
+            state.connections.write().await.remove(&existing_conn_id);
+            tracing::info!(
+                audit = "connection-lifecycle",
+                event_type = "key-rotation-reconnect",
                 daemon_name = %name,
-                conn_id = sender_conn_id,
-                "name_to_conn mapping registered"
+                old_conn_id = existing_conn_id,
+                new_conn_id = sender_conn_id,
+                "evicted stale connection, accepting reconnect"
             );
         }
+        state
+            .name_to_conn
+            .write()
+            .await
+            .insert(name.clone(), sender_conn_id);
+        tracing::debug!(
+            daemon_name = %name,
+            conn_id = sender_conn_id,
+            "name_to_conn mapping registered"
+        );
     }
 
     // Stamp server-verified sender identity onto the message.
