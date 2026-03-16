@@ -1513,6 +1513,11 @@ fn apply_sandbox() {
             path: std::path::PathBuf::from(&runtime_dir).join("bus"),
             access: FsAccess::ReadWriteFile,
         },
+        // dconf runtime cache (GLib/GTK4 settings backend).
+        LandlockRule {
+            path: std::path::PathBuf::from(&runtime_dir).join("dconf"),
+            access: FsAccess::ReadWrite,
+        },
         // System shared data (GTK schemas, icons, mime, locale).
         LandlockRule {
             path: std::path::PathBuf::from("/usr/share"),
@@ -1774,6 +1779,7 @@ fn apply_sandbox() {
             "mremap".into(),
             "unlink".into(),
             "sched_get_priority_max".into(),
+            "sysinfo".into(),
             // Misc
             "exit_group".into(),
             "exit".into(),

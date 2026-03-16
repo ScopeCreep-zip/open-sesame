@@ -1935,6 +1935,24 @@ fn apply_sandbox() {
             "recvmsg".into(),
             "shutdown".into(),
             "getsockopt".into(),
+            "getsockname".into(),
+            "getpeername".into(),
+            "setsockopt".into(),
+            // D-Bus credential passing (KeyLocker / SecretService)
+            "getresuid".into(),
+            "getresgid".into(),
+            "getgid".into(),
+            "getegid".into(),
+            // D-Bus / SSH agent I/O
+            "writev".into(),
+            "readv".into(),
+            "readlink".into(),
+            "readlinkat".into(),
+            "uname".into(),
+            "getcwd".into(),
+            // Timing
+            "nanosleep".into(),
+            "clock_nanosleep".into(),
             // Signals
             "sigaltstack".into(),
             "rt_sigaction".into(),
