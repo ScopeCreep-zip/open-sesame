@@ -373,7 +373,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // Reconcile with daemon-secrets every 30s (every other tick).
                 watchdog_tick_count += 1;
-                if watchdog_tick_count <= 3 || watchdog_tick_count % 20 == 0 {
+                if watchdog_tick_count <= 3 || watchdog_tick_count.is_multiple_of(20) {
                     tracing::info!(watchdog_tick_count, "watchdog tick");
                 }
                 if watchdog_tick_count.is_multiple_of(2) {
@@ -1363,6 +1363,9 @@ fn apply_sandbox() -> anyhow::Result<()> {
         }
     }
 
+    // Resolve config symlink targets (e.g. /nix/store) before Landlock.
+    let config_real_dirs = core_config::resolve_config_real_dirs(None);
+
     let mut rules = vec![
         LandlockRule {
             path: config_dir,
@@ -1465,6 +1468,15 @@ fn apply_sandbox() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // Config symlink targets (e.g. /nix/store paths) need read access
+    // for config hot-reload to follow symlinks after Landlock is applied.
+    for dir in &config_real_dirs {
+        rules.push(LandlockRule {
+            path: dir.clone(),
+            access: FsAccess::ReadOnly,
+        });
     }
 
     let seccomp = SeccompProfile {

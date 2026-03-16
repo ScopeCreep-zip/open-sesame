@@ -11,7 +11,8 @@ mod watcher;
 
 pub use loader::{
     atomic_write, config_dir, installation_path, load_config, load_installation,
-    load_workspace_config, resolve_config_paths, save_workspace_config, write_installation,
+    load_workspace_config, resolve_config_paths, resolve_config_real_dirs, save_workspace_config,
+    write_installation,
 };
 pub use schema::*;
 pub use validation::{ConfigDiagnostic, DiagnosticSeverity, validate};

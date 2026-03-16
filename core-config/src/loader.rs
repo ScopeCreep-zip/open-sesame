@@ -155,6 +155,50 @@ impl GlobalConfigDefaults {
     const DEFAULT_PROFILE: &str = "default";
 }
 
+/// Resolve all config file symlinks to their real filesystem paths.
+///
+/// On NixOS / home-manager, config files are often symlinks into `/nix/store`.
+/// Landlock grants access to `~/.config/pds` but not to the symlink targets.
+/// Call this **before** applying Landlock and add the returned directories
+/// as read-only rules so that config hot-reload can follow the symlinks.
+///
+/// Returns a deduplicated set of parent directories of resolved symlink targets
+/// that differ from the original config directory.
+#[must_use]
+pub fn resolve_config_real_dirs(profile_name: Option<&str>) -> Vec<PathBuf> {
+    let config_dir = config_dir();
+    let canonical_config =
+        std::fs::canonicalize(&config_dir).unwrap_or_else(|_| config_dir.clone());
+
+    let mut real_dirs = std::collections::BTreeSet::new();
+
+    // Resolve config file symlinks.
+    let paths = resolve_config_paths(profile_name);
+    for path in &paths {
+        if let Ok(real) = std::fs::canonicalize(path)
+            && let Some(parent) = real.parent()
+        {
+            let parent_path = parent.to_path_buf();
+            if !parent_path.starts_with(&canonical_config) {
+                real_dirs.insert(parent_path);
+            }
+        }
+    }
+
+    // Also resolve installation.toml in case it's a symlink.
+    let install_path = installation_path();
+    if let Ok(real) = std::fs::canonicalize(&install_path)
+        && let Some(parent) = real.parent()
+    {
+        let parent_path = parent.to_path_buf();
+        if !parent_path.starts_with(&canonical_config) {
+            real_dirs.insert(parent_path);
+        }
+    }
+
+    real_dirs.into_iter().collect()
+}
+
 /// Path to the installation identity file.
 #[must_use]
 pub fn installation_path() -> PathBuf {

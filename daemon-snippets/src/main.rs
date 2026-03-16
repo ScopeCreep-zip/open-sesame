@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
-                if watchdog_count <= 3 || watchdog_count % 20 == 0 {
+                if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
                     tracing::info!(watchdog_count, "watchdog tick");
                 }
                 #[cfg(target_os = "linux")]
@@ -238,7 +238,10 @@ fn apply_sandbox() {
 
     let config_dir = core_config::config_dir();
 
-    let rules = vec![
+    // Resolve config symlink targets (e.g. /nix/store) before Landlock.
+    let config_real_dirs = core_config::resolve_config_real_dirs(None);
+
+    let mut rules = vec![
         LandlockRule {
             path: keys_dir.clone(),
             access: FsAccess::ReadOnly,
@@ -256,6 +259,15 @@ fn apply_sandbox() {
             access: FsAccess::ReadOnly,
         },
     ];
+
+    // Config symlink targets (e.g. /nix/store paths) need read access
+    // for config hot-reload to follow symlinks after Landlock is applied.
+    for dir in &config_real_dirs {
+        rules.push(LandlockRule {
+            path: dir.clone(),
+            access: FsAccess::ReadOnly,
+        });
+    }
 
     let seccomp = SeccompProfile {
         daemon_name: "daemon-snippets".into(),

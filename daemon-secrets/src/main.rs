@@ -427,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
-                if watchdog_count <= 3 || watchdog_count % 20 == 0 {
+                if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
                     tracing::info!(watchdog_count, "watchdog tick");
                 }
                 #[cfg(target_os = "linux")]
@@ -1831,6 +1831,11 @@ fn apply_sandbox() {
     let pds_dir = PathBuf::from(&runtime_dir).join("pds");
     let keys_dir = pds_dir.join("keys");
 
+    // Resolve config symlink targets (e.g. /nix/store) before Landlock.
+    // On NixOS, config.toml is a symlink into /nix/store — without this,
+    // config hot-reload fails because Landlock blocks reading the target.
+    let config_real_dirs = core_config::resolve_config_real_dirs(None);
+
     let mut rules = vec![
         // Config dir: vault DBs + salt stored here.
         LandlockRule {
@@ -1872,6 +1877,15 @@ fn apply_sandbox() {
                 access: FsAccess::ReadWriteFile,
             });
         }
+    }
+
+    // Config symlink targets (e.g. /nix/store paths) need read access
+    // for config hot-reload to follow symlinks after Landlock is applied.
+    for dir in &config_real_dirs {
+        rules.push(LandlockRule {
+            path: dir.clone(),
+            access: FsAccess::ReadOnly,
+        });
     }
 
     let seccomp = SeccompProfile {

@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
-                if watchdog_count <= 3 || watchdog_count % 20 == 0 {
+                if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
                     tracing::info!(watchdog_count, "watchdog tick");
                 }
                 #[cfg(target_os = "linux")]
