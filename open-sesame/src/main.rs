@@ -1333,13 +1333,20 @@ async fn cmd_ssh_enroll(
             buf
         };
 
-        let salt_array: [u8; 16] = salt
-            .as_slice()
-            .try_into()
-            .context("vault salt must be exactly 16 bytes")?;
-        let master_key = core_crypto::derive_key_argon2(password.as_bytes(), &salt_array)
-            .context("failed to derive master key from password")?;
+        // Unwrap the real master key from the PasswordWrapBlob.
+        // In Any/Policy mode, the master key is a random value wrapped under
+        // the Argon2id-derived KEK. Each factor independently wraps this same
+        // master key, so factors can be added/revoked independently.
+        let mut password_sv = core_crypto::SecureVec::new();
+        for ch in password.chars() {
+            password_sv.push_char(ch);
+        }
         password.zeroize();
+        let pw_backend = core_auth::PasswordBackend::new().with_password(password_sv);
+        let outcome = core_auth::VaultAuthBackend::unlock(&pw_backend, &target, &config_dir, &salt)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to derive master key from password: {e}"))?;
+        let master_key = outcome.master_key;
 
         // List SSH agent keys for user selection
         let sock_path = std::env::var("SSH_AUTH_SOCK")
