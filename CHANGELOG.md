@@ -34,6 +34,50 @@ gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 
 ---
 
+## [1.4.1](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.4.0...v1.4.1) (2026-03-17)
+
+### 🐛 Bug Fixes
+
+* **auth:** match All-mode vault key derivation between init and daemon-secrets ([71d63b5](https://github.com/ScopeCreep-zip/open-sesame/commit/71d63b5d13d6adc0f03a2a47019e2bcc76565b73))
+* **auth:** unwrap real master key from PasswordWrapBlob during SSH enrollment ([dd63caa](https://github.com/ScopeCreep-zip/open-sesame/commit/dd63caac8e916c496a45ed458e0d0cf5e806821e))
+* **security:** audit remediations, centralize UUID and profile constants ([eec1a04](https://github.com/ScopeCreep-zip/open-sesame/commit/eec1a04ea859b88ed7a167ddb4bb7f40bbe1f772))
+
+## Quick Install
+
+### APT Repository (recommended)
+
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
+sudo apt update && sudo apt install -y open-sesame
+sesame --setup-keybinding
+```
+
+### Direct Download
+
+See release assets below for `.deb` packages (amd64/arm64) with SHA256 checksums.
+
+## What You Get
+
+- **Alt+Space** - Window switcher overlay with Vimium-style letter hints
+- **Alt+Tab** - Quick-switch to previous window
+
+## Documentation
+
+- **[User Guide](https://scopecreep-zip.github.io/open-sesame/book/)** - Configuration, keybindings, theming
+- **[API Docs](https://scopecreep-zip.github.io/open-sesame/doc/open_sesame/)** - Library reference
+
+## Supply Chain Security
+
+All `.deb` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
+```bash
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
+```
+
+---
+
 ## [1.4.0](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.3.2...v1.4.0) (2026-03-17)
 
 ### ✨ Features
