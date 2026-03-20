@@ -593,11 +593,19 @@ for dist in $DISTS; do
 
     PACKAGES_FILE="$DIST_DIR/Packages"
     true > "$PACKAGES_FILE"
+    FIRST_ENTRY=true
 
     # shellcheck disable=SC2231
     for deb in "$REPO_DIR"/pool/*-"${uname_arch}".deb; do
       if [[ -f "$deb" ]]; then
         DEB_NAME=$(basename "$deb")
+
+        # Blank line separator between entries (not before first, not after last)
+        if [[ "$FIRST_ENTRY" == true ]]; then
+          FIRST_ENTRY=false
+        else
+          echo "" >> "$PACKAGES_FILE"
+        fi
 
         dpkg-deb -f "$deb" >> "$PACKAGES_FILE"
 
@@ -612,7 +620,6 @@ for dist in $DISTS; do
           echo "SHA256: $SHA256"
           echo "SHA512: $SHA512"
           echo "MD5sum: $MD5"
-          echo ""
         } >> "$PACKAGES_FILE"
       fi
     done
