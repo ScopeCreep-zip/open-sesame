@@ -1,7 +1,14 @@
 //! Configuration loading and file I/O.
+//!
+//! Core config loading, layer merging, and filesystem utilities live here.
+//! Installation and workspace I/O are in sibling modules and re-exported.
 
 use crate::schema::Config;
 use std::path::{Path, PathBuf};
+
+// Re-export installation and workspace I/O for stable downstream paths.
+pub use crate::loader_installation::{installation_path, load_installation, write_installation};
+pub use crate::loader_workspace::{load_workspace_config, save_workspace_config};
 
 /// Return the platform-appropriate PDS config directory.
 #[must_use]
@@ -227,48 +234,6 @@ pub fn bootstrap_dirs() {
     }
 }
 
-/// Path to the installation identity file.
-#[must_use]
-pub fn installation_path() -> PathBuf {
-    config_dir().join("installation.toml")
-}
-
-/// Load installation identity from `installation.toml`.
-///
-/// # Errors
-///
-/// Returns an error if the file does not exist or contains invalid TOML.
-pub fn load_installation() -> core_types::Result<crate::schema::InstallationConfig> {
-    let path = installation_path();
-    let contents = std::fs::read_to_string(&path).map_err(|e| {
-        core_types::Error::Config(format!(
-            "failed to read {}: {e} (run `sesame init` to create it)",
-            path.display()
-        ))
-    })?;
-    toml::from_str(&contents)
-        .map_err(|e| core_types::Error::Config(format!("failed to parse {}: {e}", path.display())))
-}
-
-/// Write installation identity to `installation.toml` atomically.
-///
-/// # Errors
-///
-/// Returns an error if serialization or file I/O fails.
-pub fn write_installation(config: &crate::schema::InstallationConfig) -> core_types::Result<()> {
-    let path = installation_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            core_types::Error::Config(format!("failed to create {}: {e}", parent.display()))
-        })?;
-    }
-    let contents = toml::to_string_pretty(config).map_err(|e| {
-        core_types::Error::Config(format!("failed to serialize installation config: {e}"))
-    })?;
-    atomic_write(&path, contents.as_bytes())
-        .map_err(|e| core_types::Error::Config(format!("failed to write {}: {e}", path.display())))
-}
-
 /// Atomically write contents to a file using the POSIX rename pattern.
 ///
 /// Writes to a temporary file in the same directory, calls `fsync`, then
@@ -287,73 +252,6 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     file.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(())
-}
-
-/// Load workspace configuration from `~/.config/pds/workspaces.toml`.
-///
-/// Merges drop-in fragments from `~/.config/pds/workspaces.d/*.toml`
-/// (alphabetical order). Fragment links extend/override base links.
-///
-/// Returns a default config if the file does not exist.
-///
-/// # Errors
-///
-/// Returns an error string if the file exists but cannot be read or parsed.
-pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String> {
-    let path = config_dir().join("workspaces.toml");
-    let mut config = if path.exists() {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        toml::from_str(&contents).map_err(|e| format!("failed to parse {}: {e}", path.display()))?
-    } else {
-        crate::schema::WorkspaceConfig::default()
-    };
-
-    // Merge drop-in fragments from workspaces.d/
-    let dropin_dir = config_dir().join("workspaces.d");
-    if dropin_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&dropin_dir)
-    {
-        let mut fragments: Vec<std::path::PathBuf> = entries
-            .filter_map(std::result::Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
-            .collect();
-        fragments.sort();
-        for frag_path in fragments {
-            let contents = std::fs::read_to_string(&frag_path)
-                .map_err(|e| format!("failed to read {}: {e}", frag_path.display()))?;
-            let fragment: crate::schema::WorkspaceConfig = toml::from_str(&contents)
-                .map_err(|e| format!("failed to parse {}: {e}", frag_path.display()))?;
-            config.links.extend(fragment.links);
-            let defaults = crate::schema::WorkspaceSettings::default();
-            if fragment.settings.root != defaults.root {
-                config.settings.root = fragment.settings.root;
-            }
-            if fragment.settings.user != defaults.user {
-                config.settings.user = fragment.settings.user;
-            }
-        }
-    }
-
-    Ok(config)
-}
-
-/// Save workspace configuration atomically to `~/.config/pds/workspaces.toml`.
-///
-/// # Errors
-///
-/// Returns an error string if serialization or file I/O fails.
-pub fn save_workspace_config(config: &crate::schema::WorkspaceConfig) -> Result<(), String> {
-    let path = config_dir().join("workspaces.toml");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    }
-    let contents = toml::to_string_pretty(config)
-        .map_err(|e| format!("failed to serialize workspace config: {e}"))?;
-    atomic_write(&path, contents.as_bytes())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -395,43 +293,6 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.config_version, 3);
         assert_eq!(&*config.global.default_profile, "default");
-    }
-
-    #[test]
-    fn installation_config_roundtrips_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("installation.toml");
-        let config = crate::schema::InstallationConfig {
-            id: uuid::Uuid::from_u128(42),
-            namespace: uuid::Uuid::from_u128(99),
-            org: Some(crate::schema::OrgConfig {
-                domain: "braincraft.io".into(),
-                namespace: uuid::Uuid::from_u128(7),
-            }),
-            machine_binding: None,
-        };
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        atomic_write(&path, toml_str.as_bytes()).unwrap();
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let parsed: crate::schema::InstallationConfig = toml::from_str(&contents).unwrap();
-        assert_eq!(parsed.id, config.id);
-        assert_eq!(parsed.namespace, config.namespace);
-        assert_eq!(parsed.org.as_ref().unwrap().domain, "braincraft.io");
-    }
-
-    #[test]
-    fn installation_config_missing_file_returns_error() {
-        // Calling load_installation when the file doesn't exist should error.
-        // We can't easily test this without mocking config_dir, so just verify
-        // the schema deserializes correctly from a string.
-        let toml_str = r#"
-            id = "00000000-0000-0000-0000-00000000002a"
-            namespace = "00000000-0000-0000-0000-000000000063"
-        "#;
-        let parsed: crate::schema::InstallationConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(parsed.id, uuid::Uuid::from_u128(42));
-        assert!(parsed.org.is_none());
-        assert!(parsed.machine_binding.is_none());
     }
 
     #[test]

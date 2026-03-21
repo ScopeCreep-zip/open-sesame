@@ -5,7 +5,16 @@
 #![forbid(unsafe_code)]
 
 mod loader;
+mod loader_installation;
+mod loader_workspace;
 mod schema;
+mod schema_agents;
+mod schema_crypto;
+mod schema_installation;
+mod schema_peripheral;
+mod schema_secrets;
+mod schema_wm;
+mod schema_workspace;
 mod validation;
 mod watcher;
 
