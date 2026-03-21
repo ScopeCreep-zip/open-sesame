@@ -1,4 +1,5 @@
 pub mod commands;
+mod commands_unlock;
 pub mod controller;
 pub mod hints;
 pub mod ipc_keys;
