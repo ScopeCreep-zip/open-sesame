@@ -210,7 +210,7 @@ fn auto_key_from_simple_name() {
 fn app_hints_groups_by_app() {
     let apps = vec!["firefox", "firefox", "ghostty", "code"];
     let empty: BTreeMap<String, WmKeyBinding> = BTreeMap::new();
-    let result = assign_app_hints(&apps, "fgcasdjkl", &empty);
+    let result = assign_app_hints(&apps, &empty);
     assert_eq!(result.len(), 4);
 
     let ff_hints: Vec<&str> = result
@@ -550,7 +550,7 @@ fn key_for_app_last_segment_match() {
 fn assign_app_hints_with_config_overrides() {
     let bindings = make_bindings(&[("x", &["firefox"])]);
     let apps = vec!["firefox", "ghostty"];
-    let result = assign_app_hints(&apps, "xgasdjkl", &bindings);
+    let result = assign_app_hints(&apps, &bindings);
     let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
     assert!(hint_strs.contains(&"x"));
     assert!(hint_strs.contains(&"g"));

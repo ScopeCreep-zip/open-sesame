@@ -4,6 +4,8 @@
 //! (ADR-LNC-004). The fuzzy score provides relevance to the query while
 //! frecency biases toward frequently/recently used items.
 
+use std::collections::HashMap;
+
 use crate::frecency::FrecencyDb;
 use crate::matcher::FuzzyMatcher;
 use core_types::TrustProfileName;
@@ -26,7 +28,7 @@ pub struct SearchEngine {
     matcher: FuzzyMatcher,
     frecency: FrecencyDb,
     /// Cached frecency scores for the active profile, refreshed on query.
-    frecency_cache: Vec<(String, f64)>,
+    frecency_cache: HashMap<String, f64>,
     /// Maximum frecency score in cache (for normalization).
     frecency_max: f64,
     /// Active trust profile for frecency lookups.
@@ -44,7 +46,7 @@ impl SearchEngine {
         Self {
             matcher,
             frecency,
-            frecency_cache: Vec::new(),
+            frecency_cache: HashMap::new(),
             frecency_max: 0.0,
             profile_id,
         }
@@ -54,13 +56,9 @@ impl SearchEngine {
     ///
     /// Call this periodically or when the profile changes.
     pub fn refresh_frecency(&mut self) -> core_types::Result<()> {
-        self.frecency_cache = self.frecency.scores(&self.profile_id)?;
-        self.frecency_max = self
-            .frecency_cache
-            .first()
-            .map(|(_, s)| *s)
-            .unwrap_or(1.0)
-            .max(1.0); // avoid division by zero
+        let scores = self.frecency.scores(&self.profile_id)?;
+        self.frecency_max = scores.first().map(|(_, s)| *s).unwrap_or(1.0).max(1.0); // avoid division by zero
+        self.frecency_cache = scores.into_iter().collect();
         Ok(())
     }
 
@@ -143,9 +141,8 @@ impl SearchEngine {
     /// Normalized frecency score for an entry (0.0 - 1.0).
     fn frecency_for(&self, entry_id: &str) -> f64 {
         self.frecency_cache
-            .iter()
-            .find(|(id, _)| id == entry_id)
-            .map(|(_, score)| score / self.frecency_max)
+            .get(entry_id)
+            .map(|score| score / self.frecency_max)
             .unwrap_or(0.0)
     }
 }

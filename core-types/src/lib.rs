@@ -1448,6 +1448,8 @@ pub enum EventKind {
     WmActivateOverlayBackward,
     /// Trigger the overlay in launcher mode (skip border-only, start in `FullOverlay`).
     WmActivateOverlayLauncher,
+    /// Trigger the overlay in launcher mode with backward initial selection.
+    WmActivateOverlayLauncherBackward,
     WmOverlayShown,
     WmOverlayDismissed,
 
@@ -1800,6 +1802,7 @@ impl_event_debug! {
         WmActivateOverlay,
         WmActivateOverlayBackward,
         WmActivateOverlayLauncher,
+        WmActivateOverlayLauncherBackward,
         WmOverlayShown,
         WmOverlayDismissed,
         LaunchQuery { query, max_results, profile },

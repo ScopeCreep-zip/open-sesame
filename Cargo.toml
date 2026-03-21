@@ -94,7 +94,7 @@ ssh-key             = { version = "0.6.7", features = ["ed25519", "rsa"] }
 ssh-agent-client-rs = "1.1.2"
 
 # -- Database --
-rusqlite        = { version = "0.38", features = ["bundled-sqlcipher"] }
+rusqlite        = { version = "0.38", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # -- Fuzzy --
 # TODO: pinned to git HEAD because crates.io 0.5.0 does not expose
@@ -135,12 +135,14 @@ landlock                = "0.4"
 libseccomp              = "0.4"
 sd-notify               = "0.4"
 libc                    = "0.2"
-rustix                  = { version = "1", default-features = false, features = ["process"] }
+rustix                  = { version = "1", default-features = false, features = ["process", "event"] }
 
-# -- Linux UI --
+# -- Linux UI (SCTK overlay rendering) --
+tiny-skia           = { version = "0.12", default-features = false, features = ["std"] }
+cosmic-text         = "0.12"
+
+# -- Linux UI (GTK4, used by daemon-launcher behind feature flag) --
 gtk4                = { version = "0.10", features = ["v4_14"] }
-gtk4-layer-shell    = "0.7"
-pangocairo          = "0.21"
 
 # -- macOS platform --
 security-framework  = "3"

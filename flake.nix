@@ -291,13 +291,20 @@
                 TimeoutStopSec = 5;
                 WatchdogSec = 30;
                 NoNewPrivileges = true;
-                ProtectHome = "read-only";
-                ProtectSystem = "strict";
-
-                ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
+                # No ProtectHome/ProtectSystem/MemoryMax — mount namespace and
+                # cgroup limits inherit to children even through systemd-run --scope.
+                ProtectClock = true;
+                ProtectKernelTunables = true;
+                ProtectKernelModules = true;
+                ProtectKernelLogs = true;
+                ProtectControlGroups = true;
+                LockPersonality = true;
+                RestrictSUIDSGID = true;
+                SystemCallArchitectures = "native";
+                CapabilityBoundingSet = "";
+                KillMode = "process";
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
-                MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
               };
               Install = {
@@ -455,17 +462,7 @@
               # SQLCipher (rusqlite bundled-sqlcipher)
               openssl
 
-              # GTK4 UI (daemon-wm, daemon-launcher)
-              gtk4
-              gtk4-layer-shell
-              glib
-              cairo
-              pango
-              gdk-pixbuf
-              graphene
-              libadwaita
-
-              # Wayland (platform-linux)
+              # Wayland (platform-linux, daemon-wm overlay)
               wayland
               wayland-protocols
               libxkbcommon
@@ -481,13 +478,6 @@
               with pkgs;
               [
                 openssl.dev
-                gtk4.dev
-                gtk4-layer-shell.dev
-                glib.dev
-                cairo.dev
-                pango.dev
-                gdk-pixbuf.dev
-                graphene.dev
                 wayland.dev
                 wayland-protocols
                 libxkbcommon.dev
@@ -500,6 +490,21 @@
             # rust-lld does not consume NIX_LDFLAGS; LIBRARY_PATH ensures
             # the linker can find native .so/.a files from buildInputs.
             LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+              with pkgs;
+              [
+                libseccomp
+                openssl
+                pcsclite
+                fontconfig
+                wayland
+                libxkbcommon
+              ]
+            );
+
+            # Runtime library path for test binaries. Nix-built test executables
+            # have RUNPATH pointing to cargo's build dir, not the nix store where
+            # shared libs actually live. LD_LIBRARY_PATH fills the gap at runtime.
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
               with pkgs;
               [
                 libseccomp

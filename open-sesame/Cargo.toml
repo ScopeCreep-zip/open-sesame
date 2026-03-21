@@ -29,6 +29,7 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 comfy-table  = { workspace = true }
 dialoguer    = { workspace = true }
+dirs         = { workspace = true }
 owo-colors   = { workspace = true }
 zeroize      = { workspace = true }
 notify       = { workspace = true }
@@ -54,9 +55,9 @@ tempfile     = { workspace = true }
 [package.metadata.deb]
 name = "open-sesame"
 maintainer = "usrbinkat"
-copyright = "2024-2026 usrbinkat"
+copyright = "2024-2026 scopecreep.zip"
 license-file = ["../LICENSE", "0"]
-depends = "$auto"
+depends = "libc6, libgcc-s1, libseccomp2, libxkbcommon0, libwayland-client0, libfontconfig1, libfreetype6, fonts-dejavu-core"
 recommends = "xdg-utils, fontconfig"
 suggests = "cosmic-desktop, openssh-client"
 section = "utils"

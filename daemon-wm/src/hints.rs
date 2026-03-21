@@ -187,7 +187,6 @@ pub fn launch_args_for_key(
 #[must_use]
 pub fn assign_app_hints(
     app_ids: &[&str],
-    _hint_keys: &str,
     key_bindings: &BTreeMap<String, WmKeyBinding>,
 ) -> Vec<(String, usize)> {
     if app_ids.is_empty() {
@@ -285,7 +284,7 @@ mod tests {
     #[test]
     fn assign_app_hints_groups() {
         let apps = vec!["firefox", "firefox", "ghostty"];
-        let result = assign_app_hints(&apps, "", &empty_bindings());
+        let result = assign_app_hints(&apps, &empty_bindings());
         // Two firefox windows: "f", "ff"; one ghostty: "g"
         let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
         assert!(hint_strs.contains(&"f"));
@@ -314,7 +313,7 @@ mod tests {
     #[test]
     fn assign_app_hints_uses_first_letter() {
         let apps = vec!["vivaldi", "com.mitchellh.ghostty", "microsoft-edge"];
-        let result = assign_app_hints(&apps, "", &empty_bindings());
+        let result = assign_app_hints(&apps, &empty_bindings());
         let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
         assert!(hint_strs.contains(&"v"), "vivaldi should get 'v'");
         assert!(hint_strs.contains(&"g"), "ghostty should get 'g'");

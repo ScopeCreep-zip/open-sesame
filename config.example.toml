@@ -1,182 +1,208 @@
-# Open Sesame v3 Configuration
-# ================================
+# Open Sesame Configuration
+# =========================
 #
-# Key-centric configuration: each shortcut is fully defined in one [keys.*] section.
-# No jumping between sections to configure one app - everything in one place.
-#
-# Config locations (XDG inheritance, later overrides earlier):
-#   /etc/pds/config.toml                 # System defaults
-#   ~/.config/pds/config.toml            # User config
-#   ~/.config/pds/config.d/*.toml        # Overrides (alphabetical)
+# Config locations (XDG, later overrides earlier):
+#   /etc/pds/config.toml              # System defaults
+#   ~/.config/pds/config.toml         # User config
+#   ~/.config/pds/config.d/*.toml     # Overrides (alphabetical)
 #
 # Commands:
-#   sesame              # Launch interactive switcher
-#   sesame wm list      # Show windows with assigned hints
-#   sesame status       # Show daemon and config status
-#   sesame --help       # Full usage info
+#   sesame wm list       # Show windows with assigned hint keys
+#   sesame launch search # Fuzzy search desktop entries
+#   sesame status        # Show daemon and config status
+
+config_version = 3
 
 # =============================================================================
-# SETTINGS
+# GLOBAL
 # =============================================================================
 
-[settings]
+[global]
+default_profile = "default"
 
-# Delay (ms) before activating a match when multiple hints exist.
-# Allows time for typing gg, ggg without 'g' firing immediately.
-# Press Enter to activate without waiting.
-activation_delay = 200
+[global.ipc]
+# channel_capacity = 1024
+# slow_subscriber_timeout_ms = 5000
 
-# Delay (ms) before showing full overlay.
-# During this time, only a subtle border is shown.
-# Set to 0 for immediate overlay display.
-overlay_delay = 720
-
-# Border width (pixels) for the focus indicator.
-border_width = 3.0
-
-# Border color (hex: #RRGGBB or #RRGGBBAA).
-# Default is a soft lavender-purple with ~70% opacity.
-border_color = "#b4a0ffb4"
-
-# Global env files loaded for all launched apps (direnv .env style)
-# Paths support ~/ expansion. Later files override earlier ones.
-# env_files = [
-#     "~/.config/open-sesame/global.env",
-#     "/etc/open-sesame/env.d/system.env",
-# ]
+[global.logging]
+level = "info"
+# json = false
+# journald = true
 
 # =============================================================================
-# KEY BINDINGS
+# PROFILES
 # =============================================================================
 #
-# Each [keys.<letter>] section defines one shortcut completely:
-#   apps   = List of app_ids that match this key
-#   launch = Command to run if no matching window (focus-or-launch)
-#
-# Multiple windows of the same app use repeated keys: g, gg, ggg
-# You can also type g1, g2, g3 as alternative input
-#
-# Find your app_ids: sesame wm list
+# Each profile scopes secrets, clipboard, audit, and launch configuration.
+# The "default" profile is active unless overridden by activation rules
+# or workspace context.
 
-# --- Terminals ---
+[profiles.default]
+name = "default"
 
-[keys.g]
-apps = [ "ghostty", "com.mitchellh.ghostty" ]
+# --- Authentication ----------------------------------------------------------
+# How vault unlock factors combine: "any" (default), "all", or "policy".
+# "any"    — any single enrolled factor unlocks (password OR ssh-agent)
+# "all"    — all enrolled factors required (BLAKE3 combined key)
+# "policy" — required factors + threshold of additional enrolled factors
+
+[profiles.default.auth]
+mode = "any"
+# required = ["password", "ssh-agent"]  # for mode = "policy"
+# additional_required = 0               # for mode = "policy"
+
+# --- Window Manager ----------------------------------------------------------
+
+[profiles.default.wm]
+hint_keys = "asdfghjkl"
+overlay_delay_ms = 150          # ms before full overlay appears (border-only until then)
+activation_delay_ms = 200       # ms delay before committing a hint match
+quick_switch_threshold_ms = 250 # Alt+Tab released within this = instant switch
+border_width = 4.0
+border_color = "#89b4fa"
+background_color = "#000000c8"
+card_color = "#1e1e1ef0"
+text_color = "#ffffff"
+hint_color = "#646464"
+hint_matched_color = "#4caf50"
+show_title = true
+show_app_id = false
+max_visible_windows = 20
+
+# --- Key Bindings ------------------------------------------------------------
+#
+# Each [profiles.<profile>.wm.key_bindings.<letter>] section defines one
+# shortcut key completely:
+#
+#   apps        = list of app_id patterns that match this key
+#   launch      = command to run if no matching window (focus-or-launch)
+#   tags        = launch profile tags to compose at launch time
+#   launch_args = additional CLI arguments passed to the launched command
+#
+# Multiple windows of the same app get repeated keys: g, gg, ggg
+# Numeric shorthand: g2 = gg, g3 = ggg
+#
+# Find your app_ids:  sesame wm list
+
+# Terminals
+[profiles.default.wm.key_bindings.g]
+apps = ["ghostty", "com.mitchellh.ghostty"]
 launch = "ghostty"
 
-# --- Browsers ---
-
-[keys.f]
-apps = [ "firefox", "org.mozilla.firefox", "Firefox" ]
+# Browsers
+[profiles.default.wm.key_bindings.f]
+apps = ["firefox", "org.mozilla.firefox", "Firefox"]
 launch = "firefox"
 
-[keys.e]
-apps = [ "microsoft-edge", "Microsoft-edge" ]
+[profiles.default.wm.key_bindings.e]
+apps = ["microsoft-edge", "com.microsoft.Edge", "Microsoft-edge"]
 launch = "microsoft-edge"
 
-[keys.c]
-apps = [ "chromium", "google-chrome", "Chromium", "Google-chrome" ]
-# No launch - just focus existing windows
+[profiles.default.wm.key_bindings.v]
+apps = ["vivaldi", "vivaldi-stable"]
+launch = "vivaldi"
 
-# --- Development ---
+[profiles.default.wm.key_bindings.c]
+apps = ["chromium", "google-chrome", "Chromium", "Google-chrome"]
+# No launch — just focus existing windows
 
-[keys.v]
-# Multiple editors share one key - first match wins
-apps = [ "code", "Code", "cursor", "Cursor", "zed", "dev.zed.Zed" ]
-launch = "code"
+# Editors
+[profiles.default.wm.key_bindings.z]
+apps = ["zed", "dev.zed.Zed"]
+launch = "zed-editor"
 
-# --- File Managers ---
-
-[keys.n]
-apps = [ "nautilus", "org.gnome.Nautilus", "com.system76.CosmicFiles" ]
+# File Managers
+[profiles.default.wm.key_bindings.n]
+apps = ["nautilus", "org.gnome.Nautilus", "com.system76.CosmicFiles"]
 launch = "nautilus"
 
-# --- Communication ---
-
-[keys.s]
-apps = [ "slack", "Slack" ]
+# Communication
+[profiles.default.wm.key_bindings.s]
+apps = ["slack", "Slack"]
 launch = "slack"
 
-[keys.d]
-apps = [ "discord", "Discord" ]
+[profiles.default.wm.key_bindings.d]
+apps = ["discord", "Discord"]
 launch = "discord"
 
-[keys.t]
-apps = [ "thunderbird", "Thunderbird" ]
+[profiles.default.wm.key_bindings.t]
+apps = ["thunderbird", "Thunderbird"]
 launch = "thunderbird"
 
-# --- Media ---
-
-[keys.m]
-apps = [ "spotify", "Spotify" ]
+# Media
+[profiles.default.wm.key_bindings.m]
+apps = ["spotify", "Spotify"]
 launch = "spotify"
 
-# =============================================================================
-# ADVANCED LAUNCH CONFIGURATION
-# =============================================================================
+# --- Launch Profiles ---------------------------------------------------------
 #
-# For more control over how apps launch, use the advanced format:
+# Named, composable environment bundles applied via the `tags` field on
+# key bindings. Tags support cross-profile references: "work:corp" resolves
+# the "corp" launch profile in the "work" trust profile.
 #
-#   [keys.<letter>.launch]
-#   command = "/path/to/binary"   # Binary name or full path
-#   args = ["--flag", "value"]    # Command line arguments
-#   env_files = ["~/.env"]        # Load env vars from .env files
-#   env = { VAR = "value" }       # Explicit env vars (override env_files)
-#
-# Environment variable layering (later overrides earlier):
-#   1. Inherited (WAYLAND_DISPLAY, XDG_*, PATH, etc.)
-#   2. Global env_files from [settings]
-#   3. Per-app env_files from [keys.x.launch]
-#   4. Explicit env from [keys.x.launch]
-#
-# Env file format (direnv .env style):
-#   KEY=value
-#   KEY="value with spaces"
-#   KEY='literal value'
-#   export KEY=value
-#   # comments
-#
-# Examples:
+# When multiple tags are applied, env vars merge (later tag wins on conflict),
+# secrets accumulate, and last devshell/cwd wins.
 
-# Launch Chrome with a specific profile
-# [keys.w]
-# apps = ["google-chrome"]
-# [keys.w.launch]
-# command = "google-chrome"
-# args = ["--profile-directory=Work"]
+[profiles.default.launch_profiles.dev]
+env = { RUST_LOG = "debug" }
+secrets = ["github-token"]
+# devshell = "/workspace/myproject#rust"
+# cwd = "/workspace/usrbinkat/github.com/org/repo"
 
-# Launch terminal with custom config and env
-# [keys.g]
-# apps = ["ghostty"]
-# [keys.g.launch]
-# command = "ghostty"
-# args = ["--config-file=/path/to/config"]
-# env_files = ["~/.config/ghostty/.env"]
-# env = { TERM = "xterm-256color" }
+# --- Launcher ----------------------------------------------------------------
 
-# Launch app with full control
-# [keys.x]
-# apps = ["myapp"]
-# [keys.x.launch]
-# command = "/opt/myapp/bin/myapp"
-# args = ["--mode=production"]
-# env_files = [
-#     "~/.config/myapp/base.env",
-#     "~/.config/myapp/secrets.env",
-# ]
-# env = { DEBUG = "false" }
+[profiles.default.launcher]
+max_results = 20
+frecency = true
+
+# --- Clipboard ---------------------------------------------------------------
+
+[profiles.default.clipboard]
+max_history = 1000
+sensitive_ttl_s = 30
+detect_sensitive = true
+
+# --- Audit -------------------------------------------------------------------
+
+[profiles.default.audit]
+enabled = true
+retention_days = 90
 
 # =============================================================================
-# ADDING NEW SHORTCUTS
+# ADDITIONAL PROFILES
 # =============================================================================
 #
-# 1. Find your app_id:
-#    sesame wm list
+# Profiles scope secrets and launch configuration. Key bindings reference
+# cross-profile launch profiles via qualified tags: "work:corp".
+
+# [profiles.work]
+# name = "work"
 #
-# 2. Add a new section:
-#    [keys.x]
-#    apps = ["your-app-id"]
-#    launch = "your-app-command"
+# [profiles.work.auth]
+# mode = "all"
 #
-# 3. Verify:
-#    sesame status
+# [profiles.work.launch_profiles.corp]
+# env = { CORP_ENV = "production" }
+# secrets = ["corp-api-key", "corp-signing-key"]
+# cwd = "/workspace/usrbinkat/github.com/acme-corp"
+#
+# # Tag a key binding with a cross-profile launch profile:
+# # [profiles.default.wm.key_bindings.g]
+# # apps = ["ghostty", "com.mitchellh.ghostty"]
+# # launch = "ghostty"
+# # tags = ["dev", "work:corp"]
+# #
+# # This composes: "dev" from default profile + "corp" from work profile.
+# # Environment merges, secrets accumulate, last devshell/cwd wins.
+
+# =============================================================================
+# CRYPTOGRAPHY
+# =============================================================================
+
+[crypto]
+kdf = "argon2id"             # or "pbkdf2-sha256"
+hkdf = "blake3"              # or "hkdf-sha256"
+noise_cipher = "chacha-poly" # or "aes-gcm"
+noise_hash = "blake2s"       # or "sha256"
+audit_hash = "blake3"        # or "sha256"
+minimum_peer_profile = "leading-edge" # or "governance-compatible", "custom"

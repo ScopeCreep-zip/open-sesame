@@ -1,25 +1,27 @@
-//! Cairo + Pango rendering for the window switcher overlay.
+//! tiny-skia + cosmic-text rendering for the window switcher overlay.
 //!
-//! Ports the v1 overlay layout (Material Design spacing, three-column hint rows)
-//! to GTK4's Cairo drawing surface with Pango text layout. All dimensions are
-//! specified in logical pixels; GTK4 handles HiDPI scaling automatically via
-//! the drawing area's scale factor.
+//! Renders the overlay UI into a pixel buffer using tiny-skia for 2D path
+//! operations (rounded rectangles, fills, strokes) and cosmic-text for text
+//! shaping, layout, and glyph rasterization. All dimensions are specified in
+//! logical pixels; the caller handles HiDPI scaling via buffer size.
+
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
 
 // ---------------------------------------------------------------------------
 // Layout constants — Material Design 4-point grid
 // ---------------------------------------------------------------------------
 
-const BASE_PADDING: f64 = 20.0;
-const BASE_ROW_HEIGHT: f64 = 48.0;
-const BASE_ROW_SPACING: f64 = 8.0;
-const BASE_BADGE_WIDTH: f64 = 48.0;
-const BASE_BADGE_HEIGHT: f64 = 32.0;
-const BASE_BADGE_RADIUS: f64 = 8.0;
-const BASE_APP_COLUMN_WIDTH: f64 = 180.0;
-const BASE_TEXT_SIZE: f64 = 16.0;
-const BASE_BORDER_WIDTH: f64 = 3.0;
-const BASE_CORNER_RADIUS: f64 = 16.0;
-const BASE_COLUMN_GAP: f64 = 16.0;
+const BASE_PADDING: f32 = 20.0;
+const BASE_ROW_HEIGHT: f32 = 48.0;
+const BASE_ROW_SPACING: f32 = 8.0;
+const BASE_BADGE_WIDTH: f32 = 48.0;
+const BASE_BADGE_HEIGHT: f32 = 32.0;
+const BASE_BADGE_RADIUS: f32 = 8.0;
+const BASE_APP_COLUMN_WIDTH: f32 = 180.0;
+const BASE_TEXT_SIZE: f32 = 16.0;
+const BASE_BORDER_WIDTH: f32 = 3.0;
+const BASE_CORNER_RADIUS: f32 = 16.0;
+const BASE_COLUMN_GAP: f32 = 16.0;
 
 // ---------------------------------------------------------------------------
 // Color
@@ -68,10 +70,6 @@ impl Color {
         }
     }
 
-    fn set_source(&self, cr: &gtk4::cairo::Context) {
-        cr.set_source_rgba(self.r, self.g, self.b, self.a);
-    }
-
     fn brightened(&self, amount: f64) -> Self {
         Self {
             r: (self.r + amount).min(1.0),
@@ -79,6 +77,20 @@ impl Color {
             b: (self.b + amount).min(1.0),
             a: self.a,
         }
+    }
+
+    fn to_tiny_skia(self) -> tiny_skia::Color {
+        tiny_skia::Color::from_rgba(self.r as f32, self.g as f32, self.b as f32, self.a as f32)
+            .unwrap_or(tiny_skia::Color::TRANSPARENT)
+    }
+
+    fn to_cosmic_text(self) -> cosmic_text::Color {
+        cosmic_text::Color::rgba(
+            (self.r * 255.0) as u8,
+            (self.g * 255.0) as u8,
+            (self.b * 255.0) as u8,
+            (self.a * 255.0) as u8,
+        )
     }
 }
 
@@ -118,7 +130,7 @@ impl Default for OverlayTheme {
             selection_highlight: Color::rgba(255, 255, 255, 25),
             border_color: Color::from_hex("#89b4fa").unwrap_or(Color::rgba(137, 180, 250, 255)),
             border_width: 3.0,
-            corner_radius: BASE_CORNER_RADIUS,
+            corner_radius: BASE_CORNER_RADIUS as f64,
         }
     }
 }
@@ -127,12 +139,8 @@ impl OverlayTheme {
     /// Build theme from WmConfig settings.
     ///
     /// Priority: COSMIC system theme -> user config overrides -> hardcoded defaults.
-    /// Matches v1's `Theme::from_config` behavior (`src.v1/ui/theme.rs:110-118`).
     pub fn from_config(cfg: &core_config::WmConfig) -> Self {
-        // Try COSMIC system theme first (native desktop integration).
         let mut theme = Self::from_cosmic().unwrap_or_default();
-
-        // Apply user config overrides. Only override if the user set a non-default value.
         let defaults = core_config::WmConfig::default();
 
         if cfg.border_color != defaults.border_color
@@ -175,8 +183,6 @@ impl OverlayTheme {
     }
 
     /// Build theme from COSMIC desktop system theme.
-    ///
-    /// Returns `None` if COSMIC theme files are not present.
     #[cfg(target_os = "linux")]
     fn from_cosmic() -> Option<Self> {
         let cosmic = platform_linux::cosmic_theme::CosmicTheme::load()?;
@@ -212,7 +218,6 @@ impl OverlayTheme {
         })
     }
 
-    /// Non-Linux fallback: COSMIC theme not available.
     #[cfg(not(target_os = "linux"))]
     fn from_cosmic() -> Option<Self> {
         None
@@ -220,25 +225,25 @@ impl OverlayTheme {
 }
 
 // ---------------------------------------------------------------------------
-// Layout (computed once per draw, based on allocated size)
+// Layout
 // ---------------------------------------------------------------------------
 
 struct Layout {
-    padding: f64,
-    row_height: f64,
-    row_spacing: f64,
-    badge_width: f64,
-    badge_height: f64,
-    badge_radius: f64,
-    app_column_width: f64,
-    text_size: f64,
-    border_width: f64,
-    corner_radius: f64,
-    column_gap: f64,
+    padding: f32,
+    row_height: f32,
+    row_spacing: f32,
+    badge_width: f32,
+    badge_height: f32,
+    badge_radius: f32,
+    app_column_width: f32,
+    text_size: f32,
+    border_width: f32,
+    corner_radius: f32,
+    column_gap: f32,
 }
 
 impl Layout {
-    fn new(scale: f64) -> Self {
+    fn new(scale: f32) -> Self {
         Self {
             padding: BASE_PADDING * scale,
             row_height: BASE_ROW_HEIGHT * scale,
@@ -256,7 +261,7 @@ impl Layout {
 }
 
 // ---------------------------------------------------------------------------
-// Window hint row data passed into draw functions
+// Window hint row data
 // ---------------------------------------------------------------------------
 
 /// A single window hint row for rendering.
@@ -271,36 +276,243 @@ pub struct HintRow<'a> {
 // ---------------------------------------------------------------------------
 
 struct CardRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
 }
 
 // ---------------------------------------------------------------------------
-// Cairo rounded-rect helper
+// tiny-skia rounded-rect path builder
 // ---------------------------------------------------------------------------
 
-fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
     let r = r.min(w / 2.0).min(h / 2.0);
-    cr.new_sub_path();
-    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(
-        x + r,
-        y + h - r,
-        r,
-        std::f64::consts::FRAC_PI_2,
-        std::f64::consts::PI,
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.quad_to(x + w, y, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.quad_to(x, y + h, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.quad_to(x, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
+fn fill_rounded_rect(
+    pixmap: &mut tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    color: Color,
+) {
+    let Some(path) = rounded_rect_path(x, y, w, h, r) else {
+        return;
+    };
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(color.to_tiny_skia());
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        tiny_skia::Transform::identity(),
+        None,
     );
-    cr.arc(
-        x + r,
-        y + r,
-        r,
-        std::f64::consts::PI,
-        3.0 * std::f64::consts::FRAC_PI_2,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke_rounded_rect(
+    pixmap: &mut tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    color: Color,
+    stroke_width: f32,
+) {
+    let Some(path) = rounded_rect_path(x, y, w, h, r) else {
+        return;
+    };
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(color.to_tiny_skia());
+    paint.anti_alias = true;
+    let stroke = tiny_skia::Stroke {
+        width: stroke_width,
+        line_cap: tiny_skia::LineCap::Round,
+        line_join: tiny_skia::LineJoin::Round,
+        ..Default::default()
+    };
+    pixmap.stroke_path(
+        &path,
+        &paint,
+        &stroke,
+        tiny_skia::Transform::identity(),
+        None,
     );
-    cr.close_path();
+}
+
+// ---------------------------------------------------------------------------
+// Text rendering helpers
+// ---------------------------------------------------------------------------
+
+/// Measure text dimensions without rendering.
+fn measure_text(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size: f32,
+    attrs: Attrs<'_>,
+    max_width: Option<f32>,
+) -> (f32, f32) {
+    let metrics = Metrics::new(font_size, font_size * 1.3);
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(font_system, max_width, None);
+    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
+
+    let mut total_w: f32 = 0.0;
+    let mut total_h: f32 = 0.0;
+    for run in buffer.layout_runs() {
+        total_w = total_w.max(run.line_w);
+        total_h = run.line_y + metrics.line_height;
+    }
+    (total_w, total_h)
+}
+
+/// Render text onto a pixmap at the given position.
+#[allow(clippy::too_many_arguments)]
+fn draw_text(
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    x: f32,
+    y: f32,
+    text: &str,
+    font_size: f32,
+    attrs: Attrs<'_>,
+    color: Color,
+    max_width: Option<f32>,
+) -> (f32, f32) {
+    let metrics = Metrics::new(font_size, font_size * 1.3);
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(font_system, max_width, None);
+    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
+
+    let text_color = color.to_cosmic_text();
+    let pw = pixmap.width();
+    let ph = pixmap.height();
+    let data = pixmap.data_mut();
+
+    let mut total_w: f32 = 0.0;
+    let mut total_h: f32 = 0.0;
+
+    buffer.draw(
+        font_system,
+        swash_cache,
+        text_color,
+        |gx, gy, _gw, _gh, gcolor| {
+            let px = x as i32 + gx;
+            let py = y as i32 + gy;
+            if px < 0 || py < 0 {
+                return;
+            }
+            let ux = px as u32;
+            let uy = py as u32;
+            if ux >= pw || uy >= ph {
+                return;
+            }
+            let idx = ((uy * pw + ux) * 4) as usize;
+            let src_a = gcolor.a() as f32 / 255.0;
+            if src_a < f32::EPSILON {
+                return;
+            }
+            let inv_a = 1.0 - src_a;
+            let src_r = gcolor.r() as f32 * src_a;
+            let src_g = gcolor.g() as f32 * src_a;
+            let src_b = gcolor.b() as f32 * src_a;
+            data[idx] = (src_r + data[idx] as f32 * inv_a).min(255.0) as u8;
+            data[idx + 1] = (src_g + data[idx + 1] as f32 * inv_a).min(255.0) as u8;
+            data[idx + 2] = (src_b + data[idx + 2] as f32 * inv_a).min(255.0) as u8;
+            data[idx + 3] =
+                ((src_a + data[idx + 3] as f32 / 255.0 * inv_a) * 255.0).min(255.0) as u8;
+        },
+    );
+
+    for run in buffer.layout_runs() {
+        total_w = total_w.max(run.line_w);
+        total_h = run.line_y + metrics.line_height;
+    }
+    (total_w, total_h)
+}
+
+/// Truncate text with ellipsis to fit within `max_width`.
+fn ellipsize_text(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size: f32,
+    attrs: Attrs<'_>,
+    max_width: f32,
+) -> String {
+    let (full_w, _) = measure_text(font_system, text, font_size, attrs, None);
+    if full_w <= max_width {
+        return text.to_string();
+    }
+
+    let ellipsis = "\u{2026}";
+    let (ew, _) = measure_text(font_system, ellipsis, font_size, attrs, None);
+    let target = max_width - ew;
+    if target <= 0.0 {
+        return ellipsis.to_string();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0_usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let prefix: String = chars[..mid].iter().collect();
+        let (pw, _) = measure_text(font_system, &prefix, font_size, attrs, None);
+        if pw <= target {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    let prefix: String = chars[..lo].iter().collect();
+    format!("{prefix}{ellipsis}")
+}
+
+// ---------------------------------------------------------------------------
+// Screen border helper
+// ---------------------------------------------------------------------------
+
+fn draw_screen_border(
+    pixmap: &mut tiny_skia::Pixmap,
+    width: f32,
+    height: f32,
+    color: Color,
+    border_width: f32,
+    corner_radius: f32,
+) {
+    let bw = border_width * 2.0;
+    let half = bw / 2.0;
+    stroke_rounded_rect(
+        pixmap,
+        half,
+        half,
+        width - bw,
+        height - bw,
+        corner_radius,
+        color,
+        bw,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,27 +520,34 @@ fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f6
 // ---------------------------------------------------------------------------
 
 /// Draw border-only phase: transparent center, colored stroke around screen edges.
-pub fn draw_border_only(cr: &gtk4::cairo::Context, width: f64, height: f64, theme: &OverlayTheme) {
-    // Transparent background (GTK4 surface is already transparent if we set visual alpha).
-    cr.set_operator(gtk4::cairo::Operator::Source);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    cr.set_operator(gtk4::cairo::Operator::Over);
-
-    let bw = theme.border_width * 2.0;
-    let half = bw / 2.0;
-    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
-    theme.border_color.set_source(cr);
-    cr.set_line_width(bw);
-    let _ = cr.stroke();
+pub fn draw_border_only(
+    pixmap: &mut tiny_skia::Pixmap,
+    width: f32,
+    height: f32,
+    scale: f32,
+    theme: &OverlayTheme,
+) {
+    let layout = Layout::new(scale);
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    draw_screen_border(
+        pixmap,
+        width,
+        height,
+        theme.border_color,
+        layout.border_width,
+        layout.corner_radius,
+    );
 }
 
 /// Draw the full overlay: border + centered card with hint rows.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_full_overlay(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    width: f32,
+    height: f32,
+    scale: f32,
     rows: &[HintRow<'_>],
     input: &str,
     selection: usize,
@@ -338,21 +557,17 @@ pub fn draw_full_overlay(
     show_title: bool,
     staged_launch: Option<&str>,
 ) {
-    let layout = Layout::new(1.0);
+    let layout = Layout::new(scale);
 
-    // Clear to transparent, then draw border.
-    cr.set_operator(gtk4::cairo::Operator::Source);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    cr.set_operator(gtk4::cairo::Operator::Over);
-
-    // Screen border.
-    let bw = theme.border_width * 2.0;
-    let half = bw / 2.0;
-    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
-    theme.border_color.set_source(cr);
-    cr.set_line_width(bw);
-    let _ = cr.stroke();
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    draw_screen_border(
+        pixmap,
+        width,
+        height,
+        theme.border_color,
+        layout.border_width,
+        layout.corner_radius,
+    );
 
     // Filter visible rows by input matching.
     let visible: Vec<(usize, &HintRow<'_>)> = rows
@@ -365,7 +580,7 @@ pub fn draw_full_overlay(
             if *i < hints.len() {
                 let hint = &hints[*i];
                 let norm = input.to_lowercase();
-                hint.starts_with(&norm) || hint == &norm
+                hint.starts_with(&norm)
             } else {
                 false
             }
@@ -374,46 +589,58 @@ pub fn draw_full_overlay(
 
     if visible.is_empty() && !input.is_empty() {
         if let Some(command) = staged_launch {
-            draw_launch_staged(cr, width, height, command, &layout, theme);
+            draw_launch_staged(
+                pixmap,
+                font_system,
+                swash_cache,
+                width,
+                height,
+                command,
+                &layout,
+                theme,
+            );
         } else {
-            draw_no_matches(cr, width, height, input, &layout, theme);
+            draw_no_matches(
+                pixmap,
+                font_system,
+                swash_cache,
+                width,
+                height,
+                input,
+                &layout,
+                theme,
+            );
         }
         return;
     }
 
     let selection = selection.min(visible.len().saturating_sub(1));
-
-    // Card dimensions.
     let card = calculate_card(&visible, width, height, &layout, show_app_id, show_title);
 
     // Card background.
-    rounded_rect(
-        cr,
+    fill_rounded_rect(
+        pixmap,
         card.x,
         card.y,
         card.width,
         card.height,
         layout.corner_radius,
+        theme.card_background,
     );
-    theme.card_background.set_source(cr);
-    let _ = cr.fill();
-
-    // Card border.
-    rounded_rect(
-        cr,
+    stroke_rounded_rect(
+        pixmap,
         card.x,
         card.y,
         card.width,
         card.height,
         layout.corner_radius,
+        theme.card_border,
+        layout.border_width,
     );
-    theme.card_border.set_source(cr);
-    cr.set_line_width(layout.border_width);
-    let _ = cr.stroke();
 
     // Hint rows.
     for (vi, &(orig_idx, row)) in visible.iter().enumerate() {
-        let row_y = card.y + layout.padding + vi as f64 * (layout.row_height + layout.row_spacing);
+        let row_y = card.y + layout.padding + vi as f32 * (layout.row_height + layout.row_spacing);
         let is_selected = vi == selection;
 
         let match_state = if !input.is_empty() && orig_idx < hints.len() {
@@ -430,7 +657,9 @@ pub fn draw_full_overlay(
         };
 
         draw_hint_row(
-            cr,
+            pixmap,
+            font_system,
+            swash_cache,
             &card,
             row_y,
             row,
@@ -445,423 +674,190 @@ pub fn draw_full_overlay(
 
     // Input indicator.
     if !input.is_empty() {
-        draw_input_indicator(cr, &card, input, &layout, theme);
+        draw_input_indicator(
+            pixmap,
+            font_system,
+            swash_cache,
+            &card,
+            input,
+            &layout,
+            theme,
+        );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Internal draw helpers
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HintMatchState {
-    None,
-    Partial,
-    Exact,
-}
-
-fn calculate_card(
-    visible: &[(usize, &HintRow<'_>)],
-    screen_w: f64,
-    screen_h: f64,
-    layout: &Layout,
-    show_app_id: bool,
-    show_title: bool,
-) -> CardRect {
-    let min_title_width = 200.0;
-    let mut content_width = layout.padding * 2.0 + layout.badge_width + layout.column_gap;
-    if show_app_id {
-        content_width += layout.app_column_width + layout.column_gap;
-    }
-    if show_title {
-        content_width += min_title_width;
-    }
-
-    let max_width = (screen_w * 0.9).min(700.0);
-    let card_width = content_width.max(400.0).min(max_width);
-
-    let row_count = visible.len().max(1);
-    let content_height =
-        row_count as f64 * (layout.row_height + layout.row_spacing) - layout.row_spacing;
-    let card_height = content_height + layout.padding * 2.0;
-
-    CardRect {
-        x: (screen_w - card_width) / 2.0,
-        y: (screen_h - card_height) / 2.0,
-        width: card_width,
-        height: card_height,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_hint_row(
-    cr: &gtk4::cairo::Context,
-    card: &CardRect,
-    row_y: f64,
-    row: &HintRow<'_>,
-    is_selected: bool,
-    match_state: HintMatchState,
-    layout: &Layout,
-    theme: &OverlayTheme,
-    show_app_id: bool,
-    show_title: bool,
-) {
-    // Selection highlight.
-    if is_selected {
-        let hx = card.x + layout.padding / 2.0;
-        let hw = card.width - layout.padding;
-        rounded_rect(cr, hx, row_y, hw, layout.row_height, layout.badge_radius);
-        theme.selection_highlight.set_source(cr);
-        let _ = cr.fill();
-    }
-
-    // Column positions.
-    let badge_x = card.x + layout.padding;
-    let mut next_x = badge_x + layout.badge_width + layout.column_gap;
-
-    // Badge background color based on match state.
-    let badge_bg = match match_state {
-        HintMatchState::Exact => theme.badge_matched_background,
-        HintMatchState::Partial => theme.badge_background.brightened(0.12),
-        HintMatchState::None => theme.badge_background,
-    };
-    let badge_text_color = match match_state {
-        HintMatchState::Exact => theme.badge_matched_text,
-        _ => theme.badge_text,
-    };
-
-    // Draw badge.
-    let badge_y = row_y + (layout.row_height - layout.badge_height) / 2.0;
-    rounded_rect(
-        cr,
-        badge_x,
-        badge_y,
-        layout.badge_width,
-        layout.badge_height,
-        layout.badge_radius,
-    );
-    badge_bg.set_source(cr);
-    let _ = cr.fill();
-
-    // Badge text (centered, uppercase, semibold).
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_weight(gtk4::pango::Weight::Semibold);
-    font.set_absolute_size(layout.text_size * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-
-    let hint_text = row.hint.to_uppercase();
-    pango_layout.set_text(&hint_text);
-    let (tw, th) = pango_layout.pixel_size();
-    let tx = badge_x + (layout.badge_width - tw as f64) / 2.0;
-    let ty = badge_y + (layout.badge_height - th as f64) / 2.0;
-    cr.move_to(tx, ty);
-    badge_text_color.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
-
-    // App name column.
-    if show_app_id {
-        let app_name = extract_app_name(row.app_id);
-        font.set_weight(gtk4::pango::Weight::Normal);
-        pango_layout.set_font_description(Some(&font));
-        pango_layout.set_text(&app_name);
-        pango_layout.set_width((layout.app_column_width * gtk4::pango::SCALE as f64) as i32);
-        pango_layout.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-
-        let (_, th) = pango_layout.pixel_size();
-        let ty = row_y + (layout.row_height - th as f64) / 2.0;
-        cr.move_to(next_x, ty);
-        theme.text_primary.set_source(cr);
-        pangocairo::functions::show_layout(cr, &pango_layout);
-
-        // Reset width constraint.
-        pango_layout.set_width(-1);
-        next_x += layout.app_column_width + layout.column_gap;
-    }
-
-    // Title column.
-    if show_title {
-        let title_max = card.x + card.width - next_x - layout.padding;
-        if title_max > 50.0 {
-            pango_layout.set_text(row.title);
-            pango_layout.set_width((title_max * gtk4::pango::SCALE as f64) as i32);
-            pango_layout.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-
-            let (_, th) = pango_layout.pixel_size();
-            let ty = row_y + (layout.row_height - th as f64) / 2.0;
-            cr.move_to(next_x, ty);
-            theme.text_secondary.set_source(cr);
-            pangocairo::functions::show_layout(cr, &pango_layout);
-
-            pango_layout.set_width(-1);
-        }
-    }
-}
-
-fn draw_input_indicator(
-    cr: &gtk4::cairo::Context,
-    card: &CardRect,
-    input: &str,
-    layout: &Layout,
-    theme: &OverlayTheme,
-) {
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_absolute_size(layout.text_size * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-
-    let text = format!("\u{203a} {input}");
-    pango_layout.set_text(&text);
-    let (tw, th) = pango_layout.pixel_size();
-
-    let pill_pad_h = layout.padding;
-    let pill_pad_v = layout.padding / 2.0;
-    let pill_w = tw as f64 + pill_pad_h * 2.0;
-    let pill_h = th as f64 + pill_pad_v * 2.0;
-    let pill_x = card.x + (card.width - pill_w) / 2.0;
-    let pill_y = card.y + card.height + layout.padding;
-
-    // Fully rounded pill.
-    rounded_rect(cr, pill_x, pill_y, pill_w, pill_h, pill_h / 2.0);
-    theme.badge_background.set_source(cr);
-    let _ = cr.fill();
-
-    cr.move_to(pill_x + pill_pad_h, pill_y + pill_pad_v);
-    theme.text_primary.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
-}
-
-fn draw_no_matches(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
-    input: &str,
-    layout: &Layout,
-    theme: &OverlayTheme,
-) {
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_absolute_size(layout.text_size * 1.2 * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-
-    let message = format!("No matches for '{input}'");
-    pango_layout.set_text(&message);
-    let (tw, th) = pango_layout.pixel_size();
-
-    let pad = layout.padding * 2.0;
-    let cw = tw as f64 + pad * 2.0;
-    let ch = th as f64 + pad * 2.0;
-    let cx = (width - cw) / 2.0;
-    let cy = (height - ch) / 2.0;
-
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_background.set_source(cr);
-    let _ = cr.fill();
-
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_border.set_source(cr);
-    cr.set_line_width(layout.border_width);
-    let _ = cr.stroke();
-
-    cr.move_to(cx + pad, cy + pad);
-    theme.text_primary.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
-}
-
-fn draw_launch_staged(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
-    command: &str,
-    layout: &Layout,
-    theme: &OverlayTheme,
-) {
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_absolute_size(layout.text_size * 1.2 * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-
-    let message = format!("Launch {command}");
-    pango_layout.set_text(&message);
-    let (tw, th) = pango_layout.pixel_size();
-
-    let pad = layout.padding * 2.0;
-    let cw = tw as f64 + pad * 2.0;
-    let ch = th as f64 + pad * 2.0;
-    let cx = (width - cw) / 2.0;
-    let cy = (height - ch) / 2.0;
-
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_background.set_source(cr);
-    let _ = cr.fill();
-
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.badge_matched_background.set_source(cr);
-    cr.set_line_width(layout.border_width * 2.0);
-    let _ = cr.stroke();
-
-    cr.move_to(cx + pad, cy + pad);
-    theme.text_primary.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
-}
-
-// ---------------------------------------------------------------------------
-// Status / error toasts
-// ---------------------------------------------------------------------------
 
 /// Draw a centered status message (e.g. "Launching...").
+#[allow(clippy::too_many_arguments)]
 pub fn draw_status_toast(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    width: f32,
+    height: f32,
+    scale: f32,
     message: &str,
     theme: &OverlayTheme,
 ) {
-    let layout = Layout::new(1.0);
+    let layout = Layout::new(scale);
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    draw_screen_border(
+        pixmap,
+        width,
+        height,
+        theme.border_color,
+        layout.border_width,
+        layout.corner_radius,
+    );
 
-    cr.set_operator(gtk4::cairo::Operator::Source);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    cr.set_operator(gtk4::cairo::Operator::Over);
-
-    // Screen border.
-    let bw = theme.border_width * 2.0;
-    let half = bw / 2.0;
-    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
-    theme.border_color.set_source(cr);
-    cr.set_line_width(bw);
-    let _ = cr.stroke();
-
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_weight(gtk4::pango::Weight::Normal);
-    font.set_absolute_size(layout.text_size * 1.2 * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-    pango_layout.set_text(message);
-    let (tw, th) = pango_layout.pixel_size();
+    let attrs = Attrs::new()
+        .family(Family::SansSerif)
+        .weight(Weight::NORMAL);
+    let font_size = layout.text_size * 1.2;
+    let (tw, th) = measure_text(font_system, message, font_size, attrs, None);
 
     let pad = layout.padding * 2.0;
-    let cw = tw as f64 + pad * 2.0;
-    let ch = th as f64 + pad * 2.0;
+    let cw = tw + pad * 2.0;
+    let ch = th + pad * 2.0;
     let cx = (width - cw) / 2.0;
     let cy = (height - ch) / 2.0;
 
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_background.set_source(cr);
-    let _ = cr.fill();
+    fill_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_background,
+    );
+    stroke_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_border,
+        layout.border_width,
+    );
 
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_border.set_source(cr);
-    cr.set_line_width(layout.border_width);
-    let _ = cr.stroke();
-
-    cr.move_to(cx + pad, cy + pad);
-    theme.text_secondary.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        cx + pad,
+        cy + pad,
+        message,
+        font_size,
+        attrs,
+        theme.text_secondary,
+        None,
+    );
 }
 
 /// Draw a centered error message with red accent border.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_error_toast(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    width: f32,
+    height: f32,
+    scale: f32,
     message: &str,
     theme: &OverlayTheme,
 ) {
-    let layout = Layout::new(1.0);
-    let error_border = Color::rgba(239, 68, 68, 255); // red-500
+    let layout = Layout::new(scale);
+    let error_border = Color::rgba(239, 68, 68, 255);
 
-    cr.set_operator(gtk4::cairo::Operator::Source);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    cr.set_operator(gtk4::cairo::Operator::Over);
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    draw_screen_border(
+        pixmap,
+        width,
+        height,
+        error_border,
+        layout.border_width,
+        layout.corner_radius,
+    );
 
-    // Screen border — red to indicate error.
-    let bw = theme.border_width * 2.0;
-    let half = bw / 2.0;
-    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
-    error_border.set_source(cr);
-    cr.set_line_width(bw);
-    let _ = cr.stroke();
-
-    // Build display text: header + detail.
     let display = format!("Launch failed\n\n{message}\n\nPress any key to dismiss");
-
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_absolute_size(layout.text_size * 1.1 * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-    pango_layout.set_text(&display);
-    pango_layout.set_alignment(gtk4::pango::Alignment::Center);
+    let attrs = Attrs::new().family(Family::SansSerif);
+    let font_size = layout.text_size * 1.1;
     let max_width = (width * 0.6).min(500.0);
-    pango_layout.set_width((max_width * gtk4::pango::SCALE as f64) as i32);
-    pango_layout.set_wrap(gtk4::pango::WrapMode::WordChar);
-    let (tw, th) = pango_layout.pixel_size();
+    let (tw, th) = measure_text(font_system, &display, font_size, attrs, Some(max_width));
 
     let pad = layout.padding * 2.0;
-    let cw = tw as f64 + pad * 2.0;
-    let ch = th as f64 + pad * 2.0;
+    let cw = tw + pad * 2.0;
+    let ch = th + pad * 2.0;
     let cx = (width - cw) / 2.0;
     let cy = (height - ch) / 2.0;
 
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_background.set_source(cr);
-    let _ = cr.fill();
+    fill_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_background,
+    );
+    stroke_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        error_border,
+        layout.border_width * 1.5,
+    );
 
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    error_border.set_source(cr);
-    cr.set_line_width(layout.border_width * 1.5);
-    let _ = cr.stroke();
-
-    cr.move_to(cx + pad, cy + pad);
-    theme.text_primary.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        cx + pad,
+        cy + pad,
+        &display,
+        font_size,
+        attrs,
+        theme.text_primary,
+        Some(max_width),
+    );
 }
-
-// ---------------------------------------------------------------------------
-// Vault unlock prompt
-// ---------------------------------------------------------------------------
 
 /// Draw a vault unlock password prompt with dot-masked field.
 ///
 /// Defense in depth: this function receives only the CHARACTER COUNT
-/// (`password_len`), never the actual password bytes. The render thread
-/// cannot leak what it does not have.
+/// (`password_len`), never the actual password bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_unlock_prompt(
-    cr: &gtk4::cairo::Context,
-    width: f64,
-    height: f64,
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    width: f32,
+    height: f32,
+    scale: f32,
     profile: &str,
     password_len: usize,
     error: Option<&str>,
     theme: &OverlayTheme,
 ) {
-    let layout = Layout::new(1.0);
-    let unlock_border = Color::rgba(250, 204, 21, 255); // amber-400
+    let layout = Layout::new(scale);
+    let unlock_border = Color::rgba(250, 204, 21, 255);
 
-    cr.set_operator(gtk4::cairo::Operator::Source);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    cr.set_operator(gtk4::cairo::Operator::Over);
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    draw_screen_border(
+        pixmap,
+        width,
+        height,
+        unlock_border,
+        layout.border_width,
+        layout.corner_radius,
+    );
 
-    // Screen border — amber to indicate auth required.
-    let bw = theme.border_width * 2.0;
-    let half = bw / 2.0;
-    rounded_rect(cr, half, half, width - bw, height - bw, theme.corner_radius);
-    unlock_border.set_source(cr);
-    cr.set_line_width(bw);
-    let _ = cr.stroke();
-
-    // Build display text: header + dot field + optional error.
     let mut display = format!("Unlock \u{201C}{profile}\u{201D}\n\n");
     if password_len > 0 {
-        // Render dots for each character, capped at 32 for display sanity.
         let dot_count = password_len.min(32);
         for i in 0..dot_count {
             display.push('\u{25CF}');
@@ -877,41 +873,381 @@ pub fn draw_unlock_prompt(
         display.push_str(err);
     }
 
-    let pango_layout = pangocairo::functions::create_layout(cr);
-    let mut font = gtk4::pango::FontDescription::new();
-    font.set_family("Sans");
-    font.set_absolute_size(layout.text_size * 1.2 * gtk4::pango::SCALE as f64);
-    pango_layout.set_font_description(Some(&font));
-    pango_layout.set_text(&display);
-    pango_layout.set_alignment(gtk4::pango::Alignment::Center);
+    let attrs = Attrs::new().family(Family::SansSerif);
+    let font_size = layout.text_size * 1.2;
     let max_width = (width * 0.6).min(500.0);
-    pango_layout.set_width((max_width * gtk4::pango::SCALE as f64) as i32);
-    pango_layout.set_wrap(gtk4::pango::WrapMode::WordChar);
-    let (_tw, th) = pango_layout.pixel_size();
+    let (_tw, th) = measure_text(font_system, &display, font_size, attrs, Some(max_width));
 
-    // Use the pango layout width (max_width) as card content width, not the
-    // actual text pixel width. With Alignment::Center, pango centers the text
-    // relative to the layout width. If the card were sized to the text width
-    // instead, the centering offset would be lost and text would hang off the
-    // right edge.
     let pad = layout.padding * 2.0;
     let cw = max_width + pad * 2.0;
-    let ch = th as f64 + pad * 2.0;
+    let ch = th + pad * 2.0;
     let cx = (width - cw) / 2.0;
     let cy = (height - ch) / 2.0;
 
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    theme.card_background.set_source(cr);
-    let _ = cr.fill();
+    fill_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_background,
+    );
+    stroke_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        unlock_border,
+        layout.border_width * 1.5,
+    );
 
-    rounded_rect(cr, cx, cy, cw, ch, layout.corner_radius);
-    unlock_border.set_source(cr);
-    cr.set_line_width(layout.border_width * 1.5);
-    let _ = cr.stroke();
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        cx + pad,
+        cy + pad,
+        &display,
+        font_size,
+        attrs,
+        theme.text_primary,
+        Some(max_width),
+    );
+}
 
-    cr.move_to(cx + pad, cy + pad);
-    theme.text_primary.set_source(cr);
-    pangocairo::functions::show_layout(cr, &pango_layout);
+// ---------------------------------------------------------------------------
+// Internal draw helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HintMatchState {
+    None,
+    Partial,
+    Exact,
+}
+
+fn calculate_card(
+    visible: &[(usize, &HintRow<'_>)],
+    screen_w: f32,
+    screen_h: f32,
+    layout: &Layout,
+    show_app_id: bool,
+    show_title: bool,
+) -> CardRect {
+    let min_title_width: f32 = 200.0;
+    let mut content_width = layout.padding * 2.0 + layout.badge_width + layout.column_gap;
+    if show_app_id {
+        content_width += layout.app_column_width + layout.column_gap;
+    }
+    if show_title {
+        content_width += min_title_width;
+    }
+
+    let max_width = (screen_w * 0.9).min(700.0);
+    let card_width = content_width.max(400.0).min(max_width);
+
+    let row_count = visible.len().max(1);
+    let content_height =
+        row_count as f32 * (layout.row_height + layout.row_spacing) - layout.row_spacing;
+    let card_height = content_height + layout.padding * 2.0;
+
+    CardRect {
+        x: (screen_w - card_width) / 2.0,
+        y: (screen_h - card_height) / 2.0,
+        width: card_width,
+        height: card_height,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_hint_row(
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    card: &CardRect,
+    row_y: f32,
+    row: &HintRow<'_>,
+    is_selected: bool,
+    match_state: HintMatchState,
+    layout: &Layout,
+    theme: &OverlayTheme,
+    show_app_id: bool,
+    show_title: bool,
+) {
+    // Selection highlight.
+    if is_selected {
+        let hx = card.x + layout.padding / 2.0;
+        let hw = card.width - layout.padding;
+        fill_rounded_rect(
+            pixmap,
+            hx,
+            row_y,
+            hw,
+            layout.row_height,
+            layout.badge_radius,
+            theme.selection_highlight,
+        );
+    }
+
+    // Column positions.
+    let badge_x = card.x + layout.padding;
+    let mut next_x = badge_x + layout.badge_width + layout.column_gap;
+
+    let badge_bg = match match_state {
+        HintMatchState::Exact => theme.badge_matched_background,
+        HintMatchState::Partial => theme.badge_background.brightened(0.12),
+        HintMatchState::None => theme.badge_background,
+    };
+    let badge_text_color = match match_state {
+        HintMatchState::Exact => theme.badge_matched_text,
+        _ => theme.badge_text,
+    };
+
+    // Draw badge.
+    let badge_y = row_y + (layout.row_height - layout.badge_height) / 2.0;
+    fill_rounded_rect(
+        pixmap,
+        badge_x,
+        badge_y,
+        layout.badge_width,
+        layout.badge_height,
+        layout.badge_radius,
+        badge_bg,
+    );
+
+    // Badge text (centered, uppercase, semibold).
+    let hint_text = row.hint.to_uppercase();
+    let badge_attrs = Attrs::new()
+        .family(Family::SansSerif)
+        .weight(Weight::SEMIBOLD);
+    let (tw, _th) = measure_text(font_system, &hint_text, layout.text_size, badge_attrs, None);
+    let tx = badge_x + (layout.badge_width - tw) / 2.0;
+    let ty = badge_y + (layout.badge_height - layout.text_size) / 2.0;
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        tx,
+        ty,
+        &hint_text,
+        layout.text_size,
+        badge_attrs,
+        badge_text_color,
+        None,
+    );
+
+    // App name column.
+    if show_app_id {
+        let app_name = extract_app_name(row.app_id);
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight::NORMAL);
+        let truncated = ellipsize_text(
+            font_system,
+            &app_name,
+            layout.text_size,
+            attrs,
+            layout.app_column_width,
+        );
+        let ty = row_y + (layout.row_height - layout.text_size) / 2.0;
+        draw_text(
+            pixmap,
+            font_system,
+            swash_cache,
+            next_x,
+            ty,
+            &truncated,
+            layout.text_size,
+            attrs,
+            theme.text_primary,
+            None,
+        );
+        next_x += layout.app_column_width + layout.column_gap;
+    }
+
+    // Title column.
+    if show_title {
+        let title_max = card.x + card.width - next_x - layout.padding;
+        if title_max > 50.0 {
+            let attrs = Attrs::new()
+                .family(Family::SansSerif)
+                .weight(Weight::NORMAL);
+            let truncated =
+                ellipsize_text(font_system, row.title, layout.text_size, attrs, title_max);
+            let ty = row_y + (layout.row_height - layout.text_size) / 2.0;
+            draw_text(
+                pixmap,
+                font_system,
+                swash_cache,
+                next_x,
+                ty,
+                &truncated,
+                layout.text_size,
+                attrs,
+                theme.text_secondary,
+                None,
+            );
+        }
+    }
+}
+
+fn draw_input_indicator(
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    card: &CardRect,
+    input: &str,
+    layout: &Layout,
+    theme: &OverlayTheme,
+) {
+    let text = format!("\u{203a} {input}");
+    let attrs = Attrs::new().family(Family::SansSerif);
+    let (tw, _th) = measure_text(font_system, &text, layout.text_size, attrs, None);
+
+    let pill_pad_h = layout.padding;
+    let pill_pad_v = layout.padding / 2.0;
+    let pill_w = tw + pill_pad_h * 2.0;
+    // Use font size (not line height) for pill sizing to keep text visually centered.
+    let pill_h = layout.text_size + pill_pad_v * 2.0;
+    let pill_x = card.x + (card.width - pill_w) / 2.0;
+    let pill_y = card.y + card.height + layout.padding;
+
+    fill_rounded_rect(
+        pixmap,
+        pill_x,
+        pill_y,
+        pill_w,
+        pill_h,
+        pill_h / 2.0,
+        theme.badge_background,
+    );
+    // Center text vertically within the pill using font size.
+    let text_y = pill_y + (pill_h - layout.text_size) / 2.0;
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        pill_x + pill_pad_h,
+        text_y,
+        &text,
+        layout.text_size,
+        attrs,
+        theme.text_primary,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_no_matches(
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    width: f32,
+    height: f32,
+    input: &str,
+    layout: &Layout,
+    theme: &OverlayTheme,
+) {
+    let message = format!("No matches for '{input}'");
+    let attrs = Attrs::new().family(Family::SansSerif);
+    let font_size = layout.text_size * 1.2;
+    let (tw, th) = measure_text(font_system, &message, font_size, attrs, None);
+
+    let pad = layout.padding * 2.0;
+    let cw = tw + pad * 2.0;
+    let ch = th + pad * 2.0;
+    let cx = (width - cw) / 2.0;
+    let cy = (height - ch) / 2.0;
+
+    fill_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_background,
+    );
+    stroke_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_border,
+        layout.border_width,
+    );
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        cx + pad,
+        cy + pad,
+        &message,
+        font_size,
+        attrs,
+        theme.text_primary,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_launch_staged(
+    pixmap: &mut tiny_skia::Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    width: f32,
+    height: f32,
+    command: &str,
+    layout: &Layout,
+    theme: &OverlayTheme,
+) {
+    let message = format!("Launch {command}");
+    let attrs = Attrs::new().family(Family::SansSerif);
+    let font_size = layout.text_size * 1.2;
+    let (tw, th) = measure_text(font_system, &message, font_size, attrs, None);
+
+    let pad = layout.padding * 2.0;
+    let cw = tw + pad * 2.0;
+    let ch = th + pad * 2.0;
+    let cx = (width - cw) / 2.0;
+    let cy = (height - ch) / 2.0;
+
+    fill_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.card_background,
+    );
+    stroke_rounded_rect(
+        pixmap,
+        cx,
+        cy,
+        cw,
+        ch,
+        layout.corner_radius,
+        theme.badge_matched_background,
+        layout.border_width * 2.0,
+    );
+    draw_text(
+        pixmap,
+        font_system,
+        swash_cache,
+        cx + pad,
+        cy + pad,
+        &message,
+        font_size,
+        attrs,
+        theme.text_primary,
+        None,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +1262,20 @@ pub fn extract_app_name(app_id: &str) -> String {
         *first = first.to_ascii_uppercase();
     }
     chars.into_iter().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Pixel format conversion
+// ---------------------------------------------------------------------------
+
+/// Convert tiny-skia RGBA pixel buffer to Wayland ARGB8888 in-place.
+///
+/// Both formats use premultiplied alpha. Only the R and B channels
+/// are swapped (positions 0 and 2 in each 4-byte pixel).
+pub fn convert_rgba_to_argb8888(buffer: &mut [u8]) {
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
 }
 
 #[cfg(test)]
@@ -955,5 +1305,12 @@ mod tests {
         let theme = OverlayTheme::default();
         assert!(theme.border_width > 0.0);
         assert!(theme.corner_radius > 0.0);
+    }
+
+    #[test]
+    fn rgba_to_argb_conversion() {
+        let mut buf = [255u8, 0, 0, 128]; // R=255, G=0, B=0, A=128
+        convert_rgba_to_argb8888(&mut buf);
+        assert_eq!(buf, [0, 0, 255, 128]); // B=0, G=0, R=255, A=128
     }
 }

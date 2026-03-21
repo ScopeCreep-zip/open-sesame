@@ -25,15 +25,24 @@ snow         = { workspace = true }
 zeroize      = { workspace = true }
 
 [features]
-default = ["gtk"]
-gtk = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:pangocairo"]
+default = ["wayland"]
+wayland = [
+    "dep:smithay-client-toolkit",
+    "dep:wayland-client",
+    "dep:wayland-protocols-wlr",
+    "dep:tiny-skia",
+    "dep:cosmic-text",
+]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux      = { workspace = true, features = ["cosmic"] }
-gtk4                = { workspace = true, optional = true }
-gtk4-layer-shell    = { workspace = true, optional = true }
-pangocairo          = { workspace = true, optional = true }
-tracing-journald    = { workspace = true }
+platform-linux          = { workspace = true, features = ["cosmic"] }
+smithay-client-toolkit  = { workspace = true, optional = true }
+wayland-client          = { workspace = true, optional = true }
+wayland-protocols-wlr   = { workspace = true, optional = true }
+tiny-skia               = { workspace = true, optional = true }
+cosmic-text             = { workspace = true, optional = true }
+rustix                  = { workspace = true }
+tracing-journald        = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos  = { workspace = true }

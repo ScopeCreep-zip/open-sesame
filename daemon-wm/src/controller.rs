@@ -35,7 +35,7 @@ const MAX_INPUT_LENGTH: usize = 64;
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Send OverlayCmd::ShowBorder to GTK (acquires KeyboardMode::Exclusive).
+    /// Send OverlayCmd::ShowBorder to overlay (acquires KeyboardInteractivity::Exclusive).
     ShowBorder,
     /// Send OverlayCmd::ShowFull with the given data.
     ShowPicker {
@@ -49,10 +49,7 @@ pub enum Command {
     /// Send OverlayCmd::Hide (no sync needed).
     Hide,
     /// Activate a window via compositor backend + save MRU state.
-    ActivateWindow {
-        window: Window,
-        origin: Option<String>,
-    },
+    ActivateWindow { window: Window },
     /// Launch an application via IPC (request-response, not fire-and-forget).
     LaunchApp {
         command: String,
@@ -109,6 +106,8 @@ pub enum Event {
     ActivateBackward,
     /// Alt+Space / launcher mode (brief Armed dwell for keyboard focus, then Picking).
     ActivateLauncher,
+    /// Alt+Shift+Space / launcher mode with backward initial selection.
+    ActivateLauncherBackward,
     /// Modifier (Alt) released.
     ModifierReleased,
     /// Character typed.
@@ -178,8 +177,6 @@ struct Snapshot {
     hints: Vec<String>,
     /// Overlay-ready window info (parallel to windows).
     overlay_windows: Vec<WindowInfo>,
-    /// MRU origin window ID (focused window before switch).
-    mru_origin: Option<String>,
     /// Index of the origin window in `windows`, if present.
     /// Used to prevent auto-selection of origin on quick-switch.
     origin_index: Option<usize>,
@@ -191,7 +188,7 @@ impl Snapshot {
     fn build(windows: &[Window], config: &WmConfig) -> Self {
         let mru_state = mru::load();
         let mut win_list = windows.to_vec();
-        mru::reorder(&mut win_list, |w| w.id.to_string());
+        mru::reorder(&mut win_list, |w| w.id.to_string(), &mru_state);
         win_list.truncate(config.max_visible_windows as usize);
 
         // Rotate origin (MRU current, typically index 0) to the end of the
@@ -212,7 +209,7 @@ impl Snapshot {
         };
 
         let app_ids: Vec<&str> = win_list.iter().map(|w| w.app_id.as_str()).collect();
-        let app_hints = hints::assign_app_hints(&app_ids, &config.hint_keys, &config.key_bindings);
+        let app_hints = hints::assign_app_hints(&app_ids, &config.key_bindings);
         let hint_strings: Vec<String> = app_hints.iter().map(|(h, _)| h.clone()).collect();
 
         let overlay_windows: Vec<WindowInfo> = win_list
@@ -237,7 +234,6 @@ impl Snapshot {
             windows: win_list,
             hints: hint_strings,
             overlay_windows,
-            mru_origin: mru_state.current().map(|s| s.to_string()),
             origin_index,
             key_bindings: config.key_bindings.clone(),
         }
@@ -274,7 +270,7 @@ impl Snapshot {
     #[cfg(test)]
     fn with_origin(windows: &[Window], config: &WmConfig, origin_index: Option<usize>) -> Self {
         let app_ids: Vec<&str> = windows.iter().map(|w| w.app_id.as_str()).collect();
-        let app_hints = hints::assign_app_hints(&app_ids, &config.hint_keys, &config.key_bindings);
+        let app_hints = hints::assign_app_hints(&app_ids, &config.key_bindings);
         let hint_strings: Vec<String> = app_hints.iter().map(|(h, _)| h.clone()).collect();
         let overlay_windows: Vec<WindowInfo> = windows
             .iter()
@@ -283,13 +279,10 @@ impl Snapshot {
                 title: w.title.clone(),
             })
             .collect();
-        let mru_origin = origin_index.map(|i| windows[i].id.to_string());
-
         Self {
             windows: windows.to_vec(),
             hints: hint_strings,
             overlay_windows,
-            mru_origin,
             origin_index,
             key_bindings: config.key_bindings.clone(),
         }
@@ -371,16 +364,32 @@ enum ActivationMode {
     Backward,
     /// Alt+Space: brief Armed dwell for keyboard focus, then Picking.
     Launcher,
+    /// Alt+Shift+Space: launcher mode with backward initial selection.
+    LauncherBackward,
 }
+
+/// Window within which a SelectionDown/SelectionUp event is suppressed
+/// after an IPC re-activation already advanced the selection. Prevents
+/// the same physical keystroke from advancing twice (once via IPC
+/// WmActivateOverlay and once via the SCTK/IPC keyboard event).
+const REACTIVATION_DEDUP_MS: u128 = 100;
 
 #[derive(Debug)]
 pub struct OverlayController {
     phase: Phase,
+    /// Timestamp of the last IPC re-activation that advanced selection.
+    /// Used to suppress duplicate SelectionDown/SelectionUp events from
+    /// the SCTK keyboard handler or IPC InputKeyEvent that correspond to
+    /// the same physical keystroke that triggered the re-activation.
+    last_ipc_advance: Option<Instant>,
 }
 
 impl OverlayController {
     pub fn new() -> Self {
-        Self { phase: Phase::Idle }
+        Self {
+            phase: Phase::Idle,
+            last_ipc_advance: None,
+        }
     }
 
     /// Returns the next deadline the main loop should wake for, if any.
@@ -446,6 +455,9 @@ impl OverlayController {
             Event::Activate => self.on_activate(windows, config, ActivationMode::Forward),
             Event::ActivateBackward => self.on_activate(windows, config, ActivationMode::Backward),
             Event::ActivateLauncher => self.on_activate(windows, config, ActivationMode::Launcher),
+            Event::ActivateLauncherBackward => {
+                self.on_activate(windows, config, ActivationMode::LauncherBackward)
+            }
             Event::ModifierReleased => self.on_modifier_released(),
             Event::Char(ch) => self.on_char(ch),
             Event::Backspace => self.on_backspace(),
@@ -499,7 +511,11 @@ impl OverlayController {
                 // Launcher mode always activates — it's a launcher, not just
                 // a switcher. Zero windows is a valid state for launching apps.
                 // Forward/Backward require at least one switchable target.
-                if !matches!(mode, ActivationMode::Launcher) && !snap.has_targets() {
+                if !matches!(
+                    mode,
+                    ActivationMode::Launcher | ActivationMode::LauncherBackward
+                ) && !snap.has_targets()
+                {
                     return Vec::new();
                 }
 
@@ -534,12 +550,16 @@ impl OverlayController {
                             Command::Publish(EventKind::WmOverlayShown, SecurityLevel::Internal),
                         ]
                     }
-                    ActivationMode::Launcher => {
+                    ActivationMode::Launcher | ActivationMode::LauncherBackward => {
                         // Enter Armed with a short dwell to let the compositor
                         // grant keyboard exclusivity before the user's first
                         // keypress. on_char works in Armed, so fast typists
                         // are handled. DwellTimeout then transitions to Picking.
-                        let selection = snap.initial_forward();
+                        let selection = if matches!(mode, ActivationMode::LauncherBackward) {
+                            snap.initial_backward()
+                        } else {
+                            snap.initial_forward()
+                        };
                         self.phase = Phase::Armed {
                             entered_at: Instant::now(),
                             snap,
@@ -562,16 +582,21 @@ impl OverlayController {
                 pending_launch,
                 ..
             } => {
-                // Re-activation via IPC (e.g. repeated Alt+Space intercepted
+                // Re-activation via IPC (e.g. repeated Alt+Tab intercepted
                 // by compositor). Cycle selection, show the picker so the user
                 // sees feedback, and reset the modifier-poll grace timer to
                 // prevent premature commit.
                 if !snap.windows.is_empty() {
                     let len = snap.windows.len();
                     selection = match mode {
-                        ActivationMode::Backward => (selection + len - 1) % len,
+                        ActivationMode::Backward | ActivationMode::LauncherBackward => {
+                            (selection + len - 1) % len
+                        }
                         _ => (selection + 1) % len,
                     };
+                    // Record that we advanced via IPC so we can suppress the
+                    // duplicate SelectionDown/Up from the keyboard handler.
+                    self.last_ipc_advance = Some(Instant::now());
                 }
                 let cmds = vec![
                     Command::ShowPicker {
@@ -602,9 +627,12 @@ impl OverlayController {
                 if !snap.windows.is_empty() {
                     let len = snap.windows.len();
                     selection = match mode {
-                        ActivationMode::Backward => (selection + len - 1) % len,
+                        ActivationMode::Backward | ActivationMode::LauncherBackward => {
+                            (selection + len - 1) % len
+                        }
                         _ => (selection + 1) % len,
                     };
+                    self.last_ipc_advance = Some(Instant::now());
                 }
                 let cmds = vec![
                     Command::UpdatePicker {
@@ -698,6 +726,7 @@ impl OverlayController {
     /// Activate window at `index`. Honors any selection including origin.
     fn activate_index(&mut self, index: usize, snap: &Snapshot) -> Vec<Command> {
         self.phase = Phase::Idle;
+        self.last_ipc_advance = None;
 
         if let Some(w) = snap.windows.get(index) {
             tracing::info!(
@@ -708,10 +737,7 @@ impl OverlayController {
             );
             vec![
                 Command::HideAndSync,
-                Command::ActivateWindow {
-                    window: w.clone(),
-                    origin: snap.mru_origin.clone(),
-                },
+                Command::ActivateWindow { window: w.clone() },
                 Command::Publish(EventKind::WmOverlayDismissed, SecurityLevel::Internal),
             ]
         } else {
@@ -924,7 +950,26 @@ impl OverlayController {
     // Navigation — full-circle cycling, origin is just last in MRU order
     // -----------------------------------------------------------------------
 
+    /// Check if a recent IPC re-activation already advanced the selection,
+    /// making this keyboard-driven SelectionDown/Up redundant.
+    fn is_reactivation_duplicate(&mut self) -> bool {
+        if let Some(ts) = self.last_ipc_advance {
+            if ts.elapsed().as_millis() < REACTIVATION_DEDUP_MS {
+                // Consume the timestamp so only one keyboard event is suppressed
+                // per re-activation. This allows subsequent Tab presses (without
+                // a matching IPC re-activation) to work normally.
+                self.last_ipc_advance = None;
+                return true;
+            }
+            self.last_ipc_advance = None;
+        }
+        false
+    }
+
     fn on_selection_down(&mut self) -> Vec<Command> {
+        if self.is_reactivation_duplicate() {
+            return Vec::new();
+        }
         match &mut self.phase {
             Phase::Armed {
                 selection, snap, ..
@@ -953,6 +998,9 @@ impl OverlayController {
     }
 
     fn on_selection_up(&mut self) -> Vec<Command> {
+        if self.is_reactivation_duplicate() {
+            return Vec::new();
+        }
         match &mut self.phase {
             Phase::Armed {
                 selection, snap, ..
@@ -1074,6 +1122,7 @@ impl OverlayController {
     }
 
     fn on_escape(&mut self) -> Vec<Command> {
+        self.last_ipc_advance = None;
         match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Idle => Vec::new(),
             Phase::Unlocking { .. } => {

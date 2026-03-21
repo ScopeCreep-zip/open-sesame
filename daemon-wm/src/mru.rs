@@ -108,7 +108,7 @@ pub fn load() -> MruState {
 /// `target` moves to position 0. If it was already in the stack, it is
 /// removed from its old position first. Stack is capped at MAX_ENTRIES.
 /// No-op if target is already at position 0.
-pub fn save(_origin: Option<&str>, target: &str) {
+pub fn save(target: &str) {
     let Some(path) = mru_path() else {
         return;
     };
@@ -175,10 +175,10 @@ pub fn seed_if_empty(windows: &[core_types::Window]) {
     // Focused window goes first, then the rest.
     let focused = windows.iter().find(|w| w.is_focused);
     if let Some(f) = focused {
-        save(None, &f.id.to_string());
+        save(&f.id.to_string());
         tracing::info!(current = %f.app_id, "mru: seeded with focused window");
     } else {
-        save(None, &windows[0].id.to_string());
+        save(&windows[0].id.to_string());
         tracing::info!(current = %windows[0].app_id, "mru: seeded with first window (none focused)");
     }
 }
@@ -196,11 +196,14 @@ pub fn seed_if_empty(windows: &[core_types::Window]) {
 /// The closure returns a `String` rather than `&str` because ID types
 /// (e.g. `WindowId`) format via `Display` without storing a `String` field
 /// that could be borrowed.
-pub fn reorder<T, F>(windows: &mut [T], get_id: F)
+///
+/// Accepts a pre-loaded `MruState` to avoid redundant file I/O — the caller
+/// is responsible for loading the state (ideally off the async runtime via
+/// `spawn_blocking`).
+pub fn reorder<T, F>(windows: &mut [T], get_id: F, state: &MruState)
 where
     F: Fn(&T) -> String,
 {
-    let state = load();
     if state.stack.is_empty() {
         return;
     }
@@ -224,13 +227,15 @@ fn parse(contents: &str) -> MruState {
 #[cfg(unix)]
 fn lock_shared(file: &File) -> bool {
     use std::os::unix::io::AsRawFd;
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) == 0 }
+    // LOCK_NB: never block the tokio thread waiting for another process.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) == 0 }
 }
 
 #[cfg(unix)]
 fn lock_exclusive(file: &File) -> bool {
     use std::os::unix::io::AsRawFd;
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) == 0 }
+    // LOCK_NB: never block the tokio thread waiting for another process.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
 #[cfg(not(unix))]

@@ -49,6 +49,175 @@ fn parse_auth_policy(s: &str) -> anyhow::Result<core_types::AuthCombineMode> {
     }
 }
 
+/// Resolve an `--ssh-key` CLI value into a SHA256 fingerprint.
+///
+/// Accepts three forms:
+///   - Empty string (`--ssh-key` with no value): list keys from agent, interactive select.
+///   - File path (`--ssh-key ~/.ssh/id_ed25519.pub`): read public key, compute fingerprint.
+///   - Fingerprint (`--ssh-key SHA256:...`): use directly.
+pub(crate) async fn resolve_ssh_key(raw: &str) -> anyhow::Result<String> {
+    // Empty: interactive selection from SSH agent.
+    if raw.is_empty() {
+        return select_ssh_key_interactive().await;
+    }
+
+    // Looks like a fingerprint (starts with SHA256: or is base64-ish hash).
+    if raw.starts_with("SHA256:") {
+        return Ok(raw.to_string());
+    }
+
+    // Try as a file path (expand ~ to home dir).
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            let candidate = home.join(rest);
+            // Canonicalize to resolve ../ traversals, then verify the result
+            // is still within the user's home directory.
+            let canonical = candidate.canonicalize().unwrap_or(candidate.clone());
+            if !canonical.starts_with(&home) {
+                anyhow::bail!(
+                    "SSH key path '{}' resolves to '{}' which is outside your home directory.\n\
+                     Only paths within $HOME are accepted for security.",
+                    raw,
+                    canonical.display()
+                );
+            }
+            canonical
+        } else {
+            std::path::PathBuf::from(raw)
+        }
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+
+    if expanded.exists() {
+        // Guard against accidentally reading huge files — SSH public keys are
+        // never larger than a few KB.
+        let meta = std::fs::metadata(&expanded).with_context(|| {
+            format!("failed to stat SSH public key file: {}", expanded.display())
+        })?;
+        if meta.len() > 64 * 1024 {
+            anyhow::bail!(
+                "SSH public key file is too large ({} bytes). \
+                 Public keys should be under 64 KB.",
+                meta.len()
+            );
+        }
+        let contents = std::fs::read_to_string(&expanded).with_context(|| {
+            format!("failed to read SSH public key file: {}", expanded.display())
+        })?;
+        let pubkey = ssh_key::PublicKey::from_openssh(contents.trim()).with_context(|| {
+            format!(
+                "failed to parse SSH public key from: {}",
+                expanded.display()
+            )
+        })?;
+        let fingerprint = pubkey.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        tracing::info!(
+            fingerprint = %fingerprint,
+            path = %expanded.display(),
+            "resolved SSH key from file"
+        );
+        step_done(&format!(
+            "Resolved SSH key ({})",
+            expanded
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default()
+        ));
+        return Ok(fingerprint);
+    }
+
+    // Not a file, not a fingerprint — error with guidance.
+    anyhow::bail!(
+        "'{raw}' is not a valid SSH key fingerprint (SHA256:...) or public key file path.\n\
+         Usage:\n  \
+         --ssh-key                           (interactive selection from agent)\n  \
+         --ssh-key SHA256:abc123...          (fingerprint from `ssh-add -l`)\n  \
+         --ssh-key ~/.ssh/id_ed25519.pub    (public key file)"
+    );
+}
+
+/// Interactively select an SSH key from the running SSH agent.
+async fn select_ssh_key_interactive() -> anyhow::Result<String> {
+    let sock_path =
+        std::env::var("SSH_AUTH_SOCK").context("SSH_AUTH_SOCK not set — is ssh-agent running?")?;
+    let mut agent = ssh_agent_client_rs::Client::connect(std::path::Path::new(&sock_path))
+        .context("failed to connect to SSH agent")?;
+    let identities = agent
+        .list_all_identities()
+        .context("failed to list SSH agent keys")?;
+
+    let eligible: Vec<_> = identities
+        .into_iter()
+        .filter(|id| {
+            let algo = match id {
+                ssh_agent_client_rs::Identity::PublicKey(cow) => cow.algorithm(),
+                ssh_agent_client_rs::Identity::Certificate(cow) => cow.algorithm(),
+            };
+            core_auth::SshKeyType::from_algorithm(&algo).is_ok()
+        })
+        .collect();
+
+    if eligible.is_empty() {
+        anyhow::bail!(
+            "no eligible SSH keys found in agent.\n\
+             Only Ed25519 and RSA keys are supported (ECDSA uses non-deterministic signatures).\n\
+             Add a key with: ssh-add ~/.ssh/id_ed25519"
+        );
+    }
+
+    let key_labels: Vec<String> = eligible
+        .iter()
+        .map(|id| {
+            let (fp, comment) = match id {
+                ssh_agent_client_rs::Identity::PublicKey(cow) => (
+                    cow.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+                    cow.comment().to_string(),
+                ),
+                ssh_agent_client_rs::Identity::Certificate(cow) => (
+                    cow.public_key()
+                        .fingerprint(ssh_key::HashAlg::Sha256)
+                        .to_string(),
+                    cow.comment().to_string(),
+                ),
+            };
+            if comment.is_empty() {
+                fp
+            } else {
+                format!("{fp} ({comment})")
+            }
+        })
+        .collect();
+
+    let selection = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        dialoguer::Select::new()
+            .with_prompt("        Select SSH key for enrollment")
+            .items(&key_labels)
+            .default(0)
+            .interact()
+            .context("SSH key selection cancelled")?
+    } else {
+        anyhow::bail!(
+            "non-interactive mode requires an explicit SSH key.\n\
+             Usage:\n  \
+             --ssh-key SHA256:abc123...          (fingerprint from `ssh-add -l`)\n  \
+             --ssh-key ~/.ssh/id_ed25519.pub    (public key file)"
+        );
+    };
+
+    let fingerprint = match &eligible[selection] {
+        ssh_agent_client_rs::Identity::PublicKey(cow) => {
+            cow.fingerprint(ssh_key::HashAlg::Sha256).to_string()
+        }
+        ssh_agent_client_rs::Identity::Certificate(cow) => cow
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string(),
+    };
+
+    Ok(fingerprint)
+}
+
 // ============================================================================
 // sesame init
 // ============================================================================
@@ -56,7 +225,7 @@ fn parse_auth_policy(s: &str) -> anyhow::Result<core_types::AuthCombineMode> {
 pub async fn cmd_init(
     no_keybinding: bool,
     org: Option<String>,
-    key: Option<String>,
+    ssh_key: Option<String>,
     password: bool,
     auth_policy: String,
 ) -> anyhow::Result<()> {
@@ -77,10 +246,16 @@ pub async fn cmd_init(
     step_header(3, total_steps, "Services");
     init_services().await?;
 
+    // Resolve --ssh-key into a fingerprint before vault init.
+    let ssh_fingerprint = match ssh_key {
+        Some(val) => Some(resolve_ssh_key(&val).await?),
+        None => None,
+    };
+
     // Step 4: Vault initialization
     let combine_mode = parse_auth_policy(&auth_policy)?;
     step_header(4, total_steps, "Vault");
-    init_vault(key.as_deref(), password, combine_mode).await?;
+    init_vault(ssh_fingerprint.as_deref(), password, combine_mode).await?;
 
     // Step 5: Keybinding (conditional)
     if do_keybinding {

@@ -12,19 +12,32 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=5
 WatchdogSec=30
+
+# daemon-launcher spawns arbitrary desktop applications. Mount namespace
+# restrictions (ProtectHome, ProtectSystem, PrivateTmp, PrivateDevices)
+# and cgroup limits (MemoryMax) inherit to children — even through
+# systemd-run --scope — because scopes share the caller's mount namespace.
+# Evidence: firefox child gets "Read-only file system" on /run/user/1000/dconf/
+# when ProtectSystem=strict is set here.
 NoNewPrivileges=yes
 
-# Security hardening
-ProtectHome=read-only
-ProtectSystem=strict
+# Kernel control plane — safe to inherit, no user app needs these.
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
 
-ReadWritePaths=%t/pds
-ReadWritePaths=%h/.config/pds
+# Children spawned via systemd-run --scope survive launcher restarts.
+KillMode=process
 
 # Resource limits
 LimitNOFILE=4096
 LimitCORE=0
-MemoryMax=128M
 
 # Environment
 Environment=RUST_LOG=info

@@ -12,12 +12,6 @@
   libxkbcommon,
   xkeyboard-config,
   libseccomp,
-  glib,
-  gtk4,
-  cairo,
-  pango,
-  graphene,
-  gtk4-layer-shell,
 }:
 
 let
@@ -103,12 +97,6 @@ rustPlatform.buildRustPackage {
     wayland-protocols
     libxkbcommon
     libseccomp
-    glib
-    gtk4
-    cairo
-    pango
-    graphene
-    gtk4-layer-shell
   ];
 
   # Explicit --package flags for each binary crate. Using --workspace would
@@ -157,7 +145,7 @@ rustPlatform.buildRustPackage {
 
     install -Dm644 config.example.toml $out/share/doc/open-sesame/config.example.toml
 
-    # daemon-wm uses GTK4/libxkbcommon which needs evdev rules at runtime.
+    # daemon-wm uses libxkbcommon which needs evdev rules at runtime.
     wrapProgram $out/bin/daemon-wm \
       --set XKB_CONFIG_ROOT "${xkeyboard-config}/etc/X11/xkb"
 

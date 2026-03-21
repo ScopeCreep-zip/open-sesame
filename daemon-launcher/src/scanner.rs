@@ -17,7 +17,8 @@ pub struct CachedEntry {
     pub exec: String,
 }
 
-/// Scan all XDG desktop entry paths and return launchable items.
+/// Scan all XDG desktop entry paths in a single pass, returning both fuzzy
+/// matcher items and cached Exec lines for post-sandbox launching.
 ///
 /// Filters:
 /// - `NoDisplay=true` → skipped (non-launchable, e.g. D-Bus activatable only)
@@ -26,75 +27,59 @@ pub struct CachedEntry {
 /// - Duplicate IDs → only the first occurrence is kept
 ///
 /// This function is blocking. Call via `tokio::task::spawn_blocking`.
-pub fn scan() -> Vec<MatchItem> {
+pub fn scan_all() -> (Vec<MatchItem>, Vec<CachedEntry>) {
     let locales = freedesktop_desktop_entry::get_languages_from_env();
     let entries = freedesktop_desktop_entry::desktop_entries(&locales);
 
     let mut seen = HashSet::new();
-    entries
-        .into_iter()
-        .filter(|e| !e.no_display())
-        .filter(|e| !e.hidden())
-        .filter(|e| e.exec().is_some())
-        .filter(|e| seen.insert(e.id().to_owned()))
-        .map(|e| {
-            let id = e.id().to_owned();
-            let name = e
-                .name(&locales)
-                .map(|c| c.into_owned())
-                .unwrap_or_else(|| id.clone());
+    let mut items = Vec::new();
+    let mut cached = Vec::new();
 
-            let mut extra_parts: Vec<String> = Vec::new();
+    for e in entries {
+        if e.no_display() || e.hidden() || e.exec().is_none() {
+            continue;
+        }
+        let id = e.id().to_owned();
+        if !seen.insert(id.clone()) {
+            continue;
+        }
 
-            if let Some(keywords) = e.keywords(&locales) {
-                for kw in keywords {
-                    let s = kw.into_owned();
-                    if !s.is_empty() {
-                        extra_parts.push(s);
-                    }
+        let exec = e.exec().unwrap().to_owned();
+        cached.push(CachedEntry {
+            id: id.clone(),
+            exec,
+        });
+
+        let name = e
+            .name(&locales)
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|| id.clone());
+
+        let mut extra_parts: Vec<String> = Vec::new();
+        if let Some(keywords) = e.keywords(&locales) {
+            for kw in keywords {
+                let s = kw.into_owned();
+                if !s.is_empty() {
+                    extra_parts.push(s);
                 }
             }
-
-            if let Some(categories) = e.categories() {
-                for cat in categories {
-                    if !cat.is_empty() {
-                        extra_parts.push(cat.to_owned());
-                    }
+        }
+        if let Some(categories) = e.categories() {
+            for cat in categories {
+                if !cat.is_empty() {
+                    extra_parts.push(cat.to_owned());
                 }
             }
+        }
 
-            MatchItem {
-                id,
-                name,
-                extra: extra_parts.join(" "),
-            }
-        })
-        .collect()
-}
+        items.push(MatchItem {
+            id,
+            name,
+            extra: extra_parts.join(" "),
+        });
+    }
 
-/// Scan desktop entries and cache their Exec lines for post-sandbox launching.
-///
-/// Same filtering as `scan()`, but also captures the raw Exec field so that
-/// `launch_entry()` does not need filesystem access after sandbox is applied.
-///
-/// This function is blocking. Call via `tokio::task::spawn_blocking`.
-pub fn scan_cached() -> Vec<CachedEntry> {
-    let locales = freedesktop_desktop_entry::get_languages_from_env();
-    let entries = freedesktop_desktop_entry::desktop_entries(&locales);
-
-    let mut seen = HashSet::new();
-    entries
-        .into_iter()
-        .filter(|e| !e.no_display())
-        .filter(|e| !e.hidden())
-        .filter(|e| e.exec().is_some())
-        .filter(|e| seen.insert(e.id().to_owned()))
-        .map(|e| {
-            let id = e.id().to_owned();
-            let exec = e.exec().unwrap().to_owned();
-            CachedEntry { id, exec }
-        })
-        .collect()
+    (items, cached)
 }
 
 /// Strip freedesktop `%`-prefixed field codes from an Exec line (ADR-LNC-005).

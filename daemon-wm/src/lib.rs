@@ -1,7 +1,7 @@
 pub mod controller;
 pub mod hints;
 pub mod mru;
-#[cfg(feature = "gtk")]
+#[cfg(feature = "wayland")]
 pub mod overlay;
-#[cfg(feature = "gtk")]
+#[cfg(feature = "wayland")]
 pub mod render;

@@ -287,6 +287,17 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
         "sesame wm overlay --launcher",
     );
 
+    // Add a backward variant with Shift for the launcher key (e.g. Alt+Shift+Space).
+    let mut backward_mods = launcher_mods.clone();
+    if !backward_mods.contains(&"Shift".to_string()) {
+        backward_mods.push("Shift".to_string());
+    }
+    let launcher_backward_binding = format_keybinding(
+        &backward_mods,
+        &launcher_key,
+        "sesame wm overlay --launcher --backward",
+    );
+
     let mut content = read_shortcuts()?;
 
     if content.contains("sesame") {
@@ -294,15 +305,18 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
         content = remove_sesame_bindings(&content);
     }
 
-    let new_content = add_binding(&content, &launcher_binding);
+    let content = add_binding(&content, &launcher_binding);
+    let new_content = add_binding(&content, &launcher_backward_binding);
     write_shortcuts(&new_content)?;
 
     tracing::info!("configured COSMIC keybindings: system_actions override + {launcher_key_combo}");
+    let backward_combo = format!("shift+{launcher_key_combo}");
     println!("Keybindings configured:");
     println!("    alt+tab       -> sesame wm overlay (via system_actions override)");
     println!("    alt+shift+tab -> sesame wm overlay --backward (via system_actions override)");
     println!("    super+tab     -> sesame wm overlay (via system_actions override)");
     println!("    {launcher_key_combo:<14}-> sesame wm overlay --launcher");
+    println!("    {backward_combo:<14}-> sesame wm overlay --launcher --backward");
     println!(
         "  System actions: {}",
         cosmic_system_actions_path()?.display()

@@ -54,14 +54,16 @@ enum Command {
         #[arg(long)]
         org: Option<String>,
 
-        /// SSH key fingerprint for SSH-key-only or dual-factor init (e.g., "SHA256:...").
-        /// When provided without --password, creates an SSH-key-only vault with no password.
-        /// When provided with --password, creates a dual-factor vault.
-        #[arg(long)]
-        key: Option<String>,
+        /// Enroll an SSH key for vault unlock.
+        /// Accepts a fingerprint (SHA256:...), a public key file path (~/.ssh/id_ed25519.pub),
+        /// or no value to interactively select from the SSH agent.
+        /// Without --password, creates an SSH-key-only vault.
+        /// With --password, creates a dual-factor vault.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        ssh_key: Option<String>,
 
-        /// Use password authentication. Required with --key for dual-factor init.
-        /// Without --key, this is the default behavior.
+        /// Enroll a password for vault unlock. Required with --ssh-key for dual-factor init.
+        /// Without --ssh-key, this is the default behavior.
         #[arg(long)]
         password: bool,
 
@@ -396,12 +398,11 @@ enum SshCmd {
         #[arg(short, long)]
         profile: Option<String>,
 
-        /// SSH key fingerprint to enroll (SHA256:...).
-        /// Required in non-interactive mode. In interactive mode,
-        /// presents a selection menu if omitted.
-        /// Use `ssh-add -l` to list available fingerprints.
-        #[arg(short = 'k', long = "key")]
-        key_fingerprint: Option<String>,
+        /// SSH key to enroll. Accepts a fingerprint (SHA256:...),
+        /// a public key file path (~/.ssh/id_ed25519.pub), or omit
+        /// to interactively select from the SSH agent.
+        #[arg(short = 'k', long = "ssh-key")]
+        ssh_key: Option<String>,
     },
 
     /// List SSH key enrollments for profiles.
@@ -638,14 +639,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             no_keybinding,
             wipe_reset_destroy_all_data,
             org,
-            key,
+            ssh_key,
             password,
             auth_policy,
         } => {
             if wipe_reset_destroy_all_data {
                 init::cmd_wipe()
             } else {
-                init::cmd_init(no_keybinding, org, key, password, auth_policy).await
+                init::cmd_init(no_keybinding, org, ssh_key, password, auth_policy).await
             }
         }
         Command::Status => cmd_status().await,
@@ -659,10 +660,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ProfileCmd::Show { name } => cmd_profile_show(&name),
         },
         Command::Ssh(sub) => match sub {
-            SshCmd::Enroll {
-                profile,
-                key_fingerprint,
-            } => cmd_ssh_enroll(profile, key_fingerprint).await,
+            SshCmd::Enroll { profile, ssh_key } => cmd_ssh_enroll(profile, ssh_key).await,
             SshCmd::List { profile } => cmd_ssh_list(profile).await,
             SshCmd::Revoke { profile } => cmd_ssh_revoke(profile).await,
         },
@@ -1301,8 +1299,13 @@ async fn cmd_unlock(profile_arg: Option<String>) -> anyhow::Result<()> {
 
 async fn cmd_ssh_enroll(
     profile_arg: Option<String>,
-    key_fingerprint: Option<String>,
+    ssh_key: Option<String>,
 ) -> anyhow::Result<()> {
+    // Resolve --ssh-key into a fingerprint (interactive select, file path, or direct fingerprint).
+    let key_fingerprint: Option<String> = match ssh_key {
+        Some(ref val) => Some(init::resolve_ssh_key(val).await?),
+        None => None,
+    };
     let specs = resolve_profile_specs(profile_arg.as_deref());
     let config_dir = core_config::config_dir();
 
@@ -1435,9 +1438,9 @@ async fn cmd_ssh_enroll(
                 .interact()?
         } else {
             anyhow::bail!(
-                "no --key fingerprint specified (required for non-interactive use).\n\
+                "no --ssh-key specified (required for non-interactive use).\n\
                  Available keys:\n{}\n\
-                 Use --key <SHA256:fingerprint> to select one explicitly.",
+                 Use --ssh-key <SHA256:fingerprint> or --ssh-key ~/.ssh/id_ed25519.pub",
                 key_labels.join("\n")
             );
         };
@@ -2082,17 +2085,14 @@ async fn cmd_wm_switch(backward: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Find currently focused window index.
-    let focused_idx = windows.iter().position(|w| w.is_focused).unwrap_or(0);
-    let target_idx = if backward {
-        if focused_idx == 0 {
-            windows.len() - 1
-        } else {
-            focused_idx - 1
-        }
-    } else {
-        (focused_idx + 1) % windows.len()
-    };
+    // The WmListWindowsResponse returns windows in MRU order (most recent first).
+    // Index 0 = currently focused (MRU top). Forward = index 1 (previous window).
+    // Backward = last index (least recently used).
+    if windows.len() <= 1 {
+        tracing::debug!("only one window open, nothing to switch to");
+        return Ok(());
+    }
+    let target_idx = if backward { windows.len() - 1 } else { 1 };
 
     let target_id = windows[target_idx].id.to_string();
 
@@ -2146,12 +2146,11 @@ async fn cmd_wm_focus(window_id: &str) -> anyhow::Result<()> {
 }
 
 async fn cmd_wm_overlay(launcher: bool, backward: bool) -> anyhow::Result<()> {
-    let variant = if launcher {
-        "overlay-launcher"
-    } else if backward {
-        "overlay-backward"
-    } else {
-        "overlay"
+    let variant = match (launcher, backward) {
+        (true, true) => "overlay-launcher-backward",
+        (true, false) => "overlay-launcher",
+        (false, true) => "overlay-backward",
+        (false, false) => "overlay",
     };
 
     // Fast path: send datagram to resident process (~2ms).
@@ -2163,6 +2162,7 @@ async fn cmd_wm_overlay(launcher: bool, backward: bool) -> anyhow::Result<()> {
     let client = connect().await?;
     let event = match variant {
         "overlay-launcher" => EventKind::WmActivateOverlayLauncher,
+        "overlay-launcher-backward" => EventKind::WmActivateOverlayLauncherBackward,
         "overlay-backward" => EventKind::WmActivateOverlayBackward,
         _ => EventKind::WmActivateOverlay,
     };
@@ -2268,6 +2268,7 @@ async fn cmd_wm_overlay_resident() -> anyhow::Result<()> {
                     "overlay" => EventKind::WmActivateOverlay,
                     "overlay-backward" => EventKind::WmActivateOverlayBackward,
                     "overlay-launcher" => EventKind::WmActivateOverlayLauncher,
+                    "overlay-launcher-backward" => EventKind::WmActivateOverlayLauncherBackward,
                     _ => continue,
                 };
                 if client

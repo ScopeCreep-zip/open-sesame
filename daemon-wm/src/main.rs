@@ -33,20 +33,21 @@ struct Cli {
 // IPC keyboard event support
 // ---------------------------------------------------------------------------
 
-/// Tracks recently processed key events to deduplicate GTK4 and IPC sources.
+/// Tracks recently processed key events to deduplicate overlay and IPC sources.
 ///
-/// When compositor keyboard focus is working, both the GTK4 `EventControllerKey`
+/// When compositor keyboard focus is working, both the SCTK keyboard handler
 /// and the IPC `InputKeyEvent` will fire for the same physical keystroke. This
 /// ring buffer ensures only the first arrival is processed.
 struct KeyDeduplicator {
-    recent: [(u32, bool, u64); 8],
+    recent: [(u32, bool, std::time::Instant); 8],
     idx: usize,
 }
 
 impl KeyDeduplicator {
     fn new() -> Self {
+        let epoch = std::time::Instant::now();
         Self {
-            recent: [(0, false, 0); 8],
+            recent: [(0, false, epoch); 8],
             idx: 0,
         }
     }
@@ -56,18 +57,15 @@ impl KeyDeduplicator {
     /// An event is a duplicate if an event with the same keyval and pressed
     /// state was processed within the last 50ms.
     fn accept(&mut self, keyval: u32, pressed: bool) -> bool {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = std::time::Instant::now();
 
         for &(kv, pr, ts) in &self.recent {
-            if kv == keyval && pr == pressed && now_ms.saturating_sub(ts) < 50 {
+            if kv == keyval && pr == pressed && now.duration_since(ts).as_millis() < 50 {
                 return false;
             }
         }
 
-        self.recent[self.idx] = (keyval, pressed, now_ms);
+        self.recent[self.idx] = (keyval, pressed, now);
         self.idx = (self.idx + 1) % self.recent.len();
         true
     }
@@ -77,7 +75,7 @@ impl KeyDeduplicator {
 ///
 /// Uses X11 keysym values which are identical to GDK key constants.
 /// Returns None for keys that the overlay does not handle (space, modifiers, etc.).
-fn map_ipc_key_to_event(keyval: u32, modifiers: u32, unicode: Option<char>) -> Option<Event> {
+fn map_ipc_key_to_event(keyval: u32, _modifiers: u32, unicode: Option<char>) -> Option<Event> {
     const ESCAPE: u32 = 0xFF1B;
     const RETURN: u32 = 0xFF0D;
     const KP_ENTER: u32 = 0xFF8D;
@@ -86,17 +84,16 @@ fn map_ipc_key_to_event(keyval: u32, modifiers: u32, unicode: Option<char>) -> O
     const UP: u32 = 0xFF52;
     const BACKSPACE: u32 = 0xFF08;
     const SPACE: u32 = 0x0020;
-    const SHIFT_MASK: u32 = 1 << 0;
-
     match keyval {
         ESCAPE => Some(Event::Escape),
         RETURN | KP_ENTER => Some(Event::Confirm),
         TAB => {
-            if modifiers & SHIFT_MASK != 0 {
-                Some(Event::SelectionUp)
-            } else {
-                Some(Event::SelectionDown)
-            }
+            // Tab-based cycling is handled entirely by IPC re-activation
+            // (WmActivateOverlay / WmActivateOverlayBackward). The compositor
+            // intercepts Alt+Tab and spawns a new sesame process. Suppress
+            // Tab here to prevent double-advancement. Arrow keys remain
+            // available for non-Alt navigation.
+            None
         }
         DOWN => Some(Event::SelectionDown),
         UP => Some(Event::SelectionUp),
@@ -473,7 +470,9 @@ async fn main() -> anyhow::Result<()> {
 
                 let response_event = match &msg.payload {
                     EventKind::WmListWindows => {
-                        let win_list = windows.lock().await.clone();
+                        let mut win_list = windows.lock().await.clone();
+                        let mru_state = mru::load();
+                        mru::reorder(&mut win_list, |w| w.id.to_string(), &mru_state);
                         Some(EventKind::WmListWindowsResponse { windows: win_list })
                     }
 
@@ -485,11 +484,8 @@ async fn main() -> anyhow::Result<()> {
                         }).map(|w| w.id);
 
                         if let Some(wid) = found_window_id {
-                            let origin = win_list.iter()
-                                .find(|w| w.is_focused)
-                                .map(|w| w.id.to_string());
                             drop(win_list);
-                            mru::save(origin.as_deref(), window_id);
+                            mru::save(window_id);
 
                             #[cfg(target_os = "linux")]
                             if let Some(ref backend) = backend
@@ -530,6 +526,24 @@ async fn main() -> anyhow::Result<()> {
                         let win_list = windows.lock().await;
                         let cfg = wm_config.lock().await;
                         let cmds = controller.handle(Event::ActivateBackward, &win_list, &cfg);
+                        drop(cfg);
+                        drop(win_list);
+                        execute_commands(
+                            cmds, &overlay_cmd_tx, &mut overlay_event_rx,
+                            #[cfg(target_os = "linux")] &backend,
+                            &mut client, &config_state,
+                            &mut controller, &windows, &wm_config,
+                            &mut ipc_keyboard_confirmed,
+                            &mut password_buffer,
+                        ).await;
+                        None
+                    }
+
+                    EventKind::WmActivateOverlayLauncherBackward => {
+                        tracing::info!("launcher-mode overlay activation (backward) requested via IPC");
+                        let win_list = windows.lock().await;
+                        let cfg = wm_config.lock().await;
+                        let cmds = controller.handle(Event::ActivateLauncherBackward, &win_list, &cfg);
                         drop(cfg);
                         drop(win_list);
                         execute_commands(
@@ -776,10 +790,21 @@ async fn execute_commands(
                     tracing::error!("overlay thread has exited unexpectedly");
                     continue;
                 }
-                while let Some(ev) = overlay_event_rx.recv().await {
-                    if matches!(ev, OverlayEvent::SurfaceUnmapped) {
-                        break;
-                    }
+                let sync_deadline =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while let Some(ev) = overlay_event_rx.recv().await {
+                            if matches!(ev, OverlayEvent::SurfaceUnmapped) {
+                                return;
+                            }
+                        }
+                    });
+                if sync_deadline.await.is_err() {
+                    tracing::error!("timed out waiting for SurfaceUnmapped from overlay thread");
+                    // Recovery: force-hide the overlay. Even if the overlay thread is
+                    // stuck, this queues a Hide command that will be processed when
+                    // the thread resumes. If the thread has died, the send fails
+                    // silently and the channel is already disconnected.
+                    let _ = overlay_cmd_tx.send(OverlayCmd::Hide);
                 }
             }
             Command::Hide => {
@@ -797,9 +822,9 @@ async fn execute_commands(
                     tracing::error!("overlay thread has exited unexpectedly");
                 }
             }
-            Command::ActivateWindow { window, origin } => {
+            Command::ActivateWindow { window, .. } => {
                 let target_id = window.id.to_string();
-                mru::save(origin.as_deref(), &target_id);
+                mru::save(&target_id);
 
                 #[cfg(target_os = "linux")]
                 let activate_ok = if let Some(backend) = backend {
@@ -840,7 +865,7 @@ async fn execute_commands(
                     .ok();
 
                 // Keep the "Launching..." toast visible during the IPC request.
-                // The overlay runs on a separate GTK4 thread so it keeps rendering
+                // The overlay runs on a separate SCTK thread so it keeps rendering
                 // while tokio blocks on the launch request. This gives the user
                 // visual feedback that the action was received.
                 // (ShowLaunching was already sent by the controller before this command.)
@@ -1515,7 +1540,7 @@ fn apply_sandbox() {
                 .join("cosmic"),
             access: FsAccess::ReadOnly,
         },
-        // Nix store (read-only, GTK4/GLib shared libs, schemas, locale data, XKB).
+        // Nix store (read-only, shared libs, schemas, locale data, XKB).
         LandlockRule {
             path: std::path::PathBuf::from("/nix/store"),
             access: FsAccess::ReadOnly,
@@ -1525,17 +1550,7 @@ fn apply_sandbox() {
             path: std::path::PathBuf::from("/proc"),
             access: FsAccess::ReadOnly,
         },
-        // D-Bus session socket (GTK4 portal communication).
-        LandlockRule {
-            path: std::path::PathBuf::from(&runtime_dir).join("bus"),
-            access: FsAccess::ReadWriteFile,
-        },
-        // dconf runtime cache (GLib/GTK4 settings backend).
-        LandlockRule {
-            path: std::path::PathBuf::from(&runtime_dir).join("dconf"),
-            access: FsAccess::ReadWrite,
-        },
-        // System shared data (GTK schemas, icons, mime, locale).
+        // System shared data (fonts, icons, mime, locale).
         LandlockRule {
             path: std::path::PathBuf::from("/usr/share"),
             access: FsAccess::ReadOnly,
@@ -1545,45 +1560,16 @@ fn apply_sandbox() {
             path: std::path::PathBuf::from("/usr/share/X11/xkb"),
             access: FsAccess::ReadOnly,
         },
-        // GDK/GTK user data.
+        // User data directory (fonts, theme data).
         LandlockRule {
             path: dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("/nonexistent")),
             access: FsAccess::ReadOnly,
         },
-        // DRI devices: GPU-accelerated rendering for GTK4/Cairo overlay.
-        // Without this, GTK4 falls back to software rendering (llvmpipe) which
-        // takes ~5 seconds per frame vs <16ms with hardware acceleration.
-        LandlockRule {
-            path: std::path::PathBuf::from("/dev/dri"),
-            access: FsAccess::ReadWrite,
-        },
-        // sysfs (GPU driver discovery): Mesa's DRI loader resolves kernel
-        // driver names via /sys/dev/char/226:* → /sys/devices/pci*/*/drm/*
-        // → device/driver symlink. Four subtrees cover all GPU topologies
-        // without exposing unrelated kernel state.
-        LandlockRule {
-            path: std::path::PathBuf::from("/sys/dev/char"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: std::path::PathBuf::from("/sys/class/drm"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: std::path::PathBuf::from("/sys/devices"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: std::path::PathBuf::from("/sys/bus"),
-            access: FsAccess::ReadOnly,
-        },
-        // GTK4 user CSS (theme overrides).
-        LandlockRule {
-            path: dirs::config_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"))
-                .join("gtk-4.0"),
-            access: FsAccess::ReadOnly,
-        },
+        // NOTE: DRI device access and sysfs GPU discovery rules intentionally
+        // removed. daemon-wm uses wl_shm (CPU shared memory buffers) via
+        // tiny-skia for all overlay rendering. No GPU/DRI access is required.
+        // The Rust wayland-client crate does not dlopen Mesa or probe /dev/dri.
+        //
         // PDS vaults directory: salt files and SSH enrollment blobs needed
         // for auto-unlock (SSH-agent backend reads salt + blob at unlock time).
         LandlockRule {
@@ -1794,7 +1780,7 @@ fn apply_sandbox() {
             "rt_sigprocmask".into(),
             "rt_sigreturn".into(),
             "tgkill".into(),
-            // GTK4/GLib runtime
+            // Wayland/SCTK runtime
             "inotify_init1".into(),
             "inotify_add_watch".into(),
             "inotify_rm_watch".into(),
@@ -1829,12 +1815,11 @@ fn apply_sandbox() {
             "getcwd".into(),
             "pipe2".into(),
             "dup".into(),
-            "ioctl".into(),
         ],
     };
 
-    // daemon-wm needs D-Bus for GTK4 portal communication — use SignalOnly
-    // scope to allow abstract Unix sockets while still blocking cross-process signals.
+    // daemon-wm uses Wayland sockets only (no D-Bus). SignalOnly scope blocks
+    // cross-process signals while allowing abstract Unix sockets for Wayland.
     match apply_sandbox_with_scope(&rules, &seccomp, LandlockScope::SignalOnly) {
         Ok(status) => {
             tracing::info!(?status, "sandbox applied");
@@ -1898,19 +1883,15 @@ mod tests {
     }
 
     #[test]
-    fn map_tab_forward() {
-        assert!(matches!(
-            map_ipc_key_to_event(0xFF09, 0, None),
-            Some(Event::SelectionDown)
-        ));
+    fn map_tab_suppressed() {
+        // Tab is suppressed — cycling is handled by IPC re-activation.
+        assert!(map_ipc_key_to_event(0xFF09, 0, None).is_none());
     }
 
     #[test]
-    fn map_tab_with_shift() {
-        assert!(matches!(
-            map_ipc_key_to_event(0xFF09, 1, None),
-            Some(Event::SelectionUp)
-        ));
+    fn map_tab_with_shift_suppressed() {
+        // Shift+Tab is also suppressed — backward cycling via IPC.
+        assert!(map_ipc_key_to_event(0xFF09, 1, None).is_none());
     }
 
     #[test]

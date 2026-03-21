@@ -220,7 +220,7 @@ fn install_sigsys_handler() {
     #[allow(unsafe_code)]
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handler as usize;
+        sa.sa_sigaction = handler as *const () as usize;
         sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESETHAND;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGSYS, &sa, std::ptr::null_mut());

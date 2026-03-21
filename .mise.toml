@@ -144,7 +144,11 @@ description = "Build release binary (arm64)"
 
 [tasks."build:deb"]
 alias = [ "bde" ]
-description = "Build .deb package"
+description = "Build all .deb packages (open-sesame + dependencies)"
+depends = [ "build:deb:open-sesame" ]
+
+[tasks."build:deb:open-sesame"]
+description = "Build open-sesame .deb package"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -152,6 +156,21 @@ mise run test
 mise run cargo:build
 mise run docs:man
 mise run docs:completions
+
+# Strip nix store paths from release binaries so .deb works on stock Debian/Ubuntu.
+# The nix devshell's cc-wrapper bakes /nix/store/... as the ELF interpreter and RUNPATH;
+# patchelf resets both to standard system paths before packaging.
+BINS=(sesame daemon-profile daemon-secrets daemon-wm daemon-launcher daemon-clipboard daemon-input daemon-snippets)
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  INTERP="/lib64/ld-linux-x86-64.so.2" ;;
+  aarch64) INTERP="/lib/ld-linux-aarch64.so.1" ;;
+  *)       echo "ERROR: unsupported architecture '$ARCH' for patchelf" >&2; exit 1 ;;
+esac
+for bin in "${BINS[@]}"; do
+  patchelf --set-interpreter "$INTERP" --remove-rpath "target/release/${bin}"
+done
+
 cargo deb -p open-sesame --no-build
 """
 
@@ -177,10 +196,15 @@ mise run docs:completions
 mise run cargo:deb:arm64
 """
 
+[tasks."build:deb:all"]
+alias = [ "bda" ]
+description = "Build all .deb packages (all architectures)"
+depends = [ "build:deb", "build:deb:arm64" ]
+
 [tasks."build:all"]
 alias = [ "ba" ]
 description = "Build all packages"
-depends = [ "build:deb", "build:deb:arm64" ]
+depends = [ "build:deb:all" ]
 
 # =============================================================================
 # INSTALL (composed from build + install steps)
@@ -188,37 +212,79 @@ depends = [ "build:deb", "build:deb:arm64" ]
 
 [tasks.install]
 alias = [ "i" ]
-description = "Build and install .deb"
+description = "Build, install, and start all .deb packages"
 depends = [ "build:deb" ]
 env.BIN = "{{vars.bin}}"
-env.DIR_CFG = "{{vars.dir_cfg}}"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-pgrep -x "${BIN}" && pkill -x "${BIN}" && sleep 0.2 || true
-sudo dpkg -i "$(ls -t target/debian/*_amd64.deb | head -1)"
-mkdir -p ~/${DIR_CFG}/config.d
-[ -f ~/${DIR_CFG}/config.toml ] || ${BIN} --print-config > ~/${DIR_CFG}/config.toml
+
+# ── Stop running services ──────────────────────────────────────────────
+echo "==> Stopping open-sesame services..."
+systemctl --user stop open-sesame.target 2>/dev/null || true
+
+# ── Install .deb packages ─────────────────────────────────────────────
+echo "==> Installing .deb packages..."
+DEBS=()
+for deb in target/debian/open-sesame_*_amd64.deb; do
+  [ -f "$deb" ] && DEBS+=("$deb")
+done
+if [ -z "${DEBS[*]:-}" ]; then
+  echo "ERROR: no .deb packages found in target/debian/" >&2
+  exit 1
+fi
+sudo dpkg -i "${DEBS[@]}"
+
+# ── Reload and start services ─────────────────────────────────────────
+echo "==> Reloading systemd and starting services..."
+systemctl --user daemon-reload
+systemctl --user enable open-sesame.target
+systemctl --user restart open-sesame.target
+
+# ── Verify ────────────────────────────────────────────────────────────
+echo "==> Installed:"
 ${BIN} --version
+echo ""
+echo "==> Service status:"
+systemctl --user status open-sesame.target --no-pager 2>/dev/null || true
+echo ""
+UNIT_GLOB="open-sesame-*"
+systemctl --user list-units "$UNIT_GLOB" --no-pager 2>/dev/null || true
 """
 
 [tasks."install:debug"]
 alias = [ "id" ]
-description = "Nuclear clean + install debug .deb"
+description = "Nuclear clean + install debug .deb + start services"
 env.BIN = "{{vars.bin}}"
 env.DIR_CFG = "{{vars.dir_cfg}}"
 env.DIR_CACHE = "{{vars.dir_cache}}"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
+
+echo "==> Stopping open-sesame services..."
+systemctl --user stop open-sesame.target 2>/dev/null || true
+
 mise run clean:all
 mise run build:deb:debug
+
 sudo dpkg -i "$(ls -t target/debian/*_amd64.deb | head -1)"
+
 mkdir -p ~/${DIR_CFG}/config.d
 ${BIN} --print-config > ~/${DIR_CFG}/config.toml
+
+echo "==> Reloading systemd and starting services..."
+systemctl --user daemon-reload
+systemctl --user enable open-sesame.target
+systemctl --user restart open-sesame.target
+
 ${BIN} --version
+echo ""
 echo "Debug logging enabled. View logs with:"
 echo "  tail -f ~/${DIR_CACHE}/debug.log"
+echo ""
+echo "==> Service status:"
+systemctl --user status open-sesame.target --no-pager 2>/dev/null || true
 """
 
 # =============================================================================
@@ -449,17 +515,6 @@ run = """
 set -euxo pipefail
 sudo apt-get update && sudo apt-get install -y {{vars.apt_deps}}
 rustup component add rustfmt clippy
-
-# Build gtk4-layer-shell from source (not packaged in Ubuntu 24.04)
-if ! pkg-config --exists gtk4-layer-shell; then
-  GTK4LS_VERSION="1.1.0"
-  git clone --depth 1 --branch "v${GTK4LS_VERSION}" https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
-  meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell -Dexamples=false -Ddocs=false -Dtests=false -Dvapi=false --prefix=/usr
-  ninja -C /tmp/gtk4-layer-shell/build
-  sudo ninja -C /tmp/gtk4-layer-shell/build install
-  sudo ldconfig
-  rm -rf /tmp/gtk4-layer-shell
-fi
 """
 
 [tasks."ci:setup:apt-repo"]
