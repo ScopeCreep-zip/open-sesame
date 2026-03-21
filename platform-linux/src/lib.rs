@@ -33,7 +33,13 @@ pub mod security;
 pub mod systemd;
 
 // -- Desktop-only (requires `desktop` or `cosmic` feature) --
+#[cfg(all(target_os = "linux", feature = "cosmic"))]
+pub(crate) mod backend_cosmic;
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub(crate) mod backend_wlr;
 #[cfg(all(target_os = "linux", feature = "desktop"))]
 pub mod compositor;
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub mod focus_monitor;
 #[cfg(all(target_os = "linux", feature = "desktop"))]
 pub mod input;
