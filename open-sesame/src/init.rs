@@ -532,7 +532,7 @@ async fn init_vault(
     let config_dir = core_config::config_dir();
     let profile =
         TrustProfileName::try_from(core_types::DEFAULT_PROFILE_NAME).expect("hardcoded valid name");
-    let client = crate::connect().await?;
+    let client = crate::ipc::connect().await?;
 
     // Determine which factors to enroll.
     // Default: password-only if no --key provided.
@@ -541,7 +541,7 @@ async fn init_vault(
 
     // Check current state.
     let already_unlocked = matches!(
-        crate::rpc(&client, EventKind::StatusRequest, SecurityLevel::Internal).await?,
+        crate::ipc::rpc(&client, EventKind::StatusRequest, SecurityLevel::Internal).await?,
         EventKind::StatusResponse { locked: false, .. }
     );
 
@@ -650,7 +650,7 @@ async fn init_vault(
 
         // Enroll SSH factor.
         if let Some(fingerprint) = ssh_fingerprint {
-            let key_index = crate::find_ssh_key_index(fingerprint).await?;
+            let key_index = crate::ipc::find_ssh_key_index(fingerprint).await?;
             let ssh_backend = core_auth::SshAgentBackend::new();
             core_auth::VaultAuthBackend::enroll(
                 &ssh_backend,
@@ -731,7 +731,7 @@ async fn init_vault(
             profile: profile.clone(),
             ssh_fingerprint: "direct-init".to_string(),
         };
-        match crate::rpc(&client, event, SecurityLevel::SecretsOnly).await? {
+        match crate::ipc::rpc(&client, event, SecurityLevel::SecretsOnly).await? {
             EventKind::UnlockResponse { success: true, .. } => {
                 step_done("Secrets vault unlocked");
             }
@@ -753,7 +753,7 @@ async fn init_vault(
         target: ProfileId::new(),
         profile_name: profile,
     };
-    match crate::rpc(&client, event, SecurityLevel::Internal).await? {
+    match crate::ipc::rpc(&client, event, SecurityLevel::Internal).await? {
         EventKind::ProfileActivateResponse { success: true } => {
             step_done("Default profile activated");
         }
