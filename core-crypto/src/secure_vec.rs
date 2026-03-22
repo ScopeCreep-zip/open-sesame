@@ -27,6 +27,22 @@ impl SecureVec {
         }
     }
 
+    /// Maximum password buffer size in bytes (UTF-8 encoded).
+    const MAX_PASSWORD_BYTES: usize = 512;
+
+    /// Create a pre-allocated `SecureVec` for password collection.
+    ///
+    /// Pre-allocates and locks the full buffer so reallocation never occurs.
+    #[must_use]
+    pub fn for_password() -> Self {
+        let mut sv = Self {
+            inner: Vec::with_capacity(Self::MAX_PASSWORD_BYTES),
+            locked: false,
+        };
+        sv.lock_current_allocation();
+        sv
+    }
+
     /// Create a new `SecureVec` with pre-allocated capacity.
     ///
     /// The allocated region is immediately `mlock`'d and marked
@@ -43,26 +59,16 @@ impl SecureVec {
 
     /// Append a Unicode character encoded as UTF-8 bytes.
     ///
-    /// If the underlying allocation grows (realloc), the old allocation
-    /// is zeroized and munlock'd, and the new allocation is mlock'd.
+    /// Panics if the character would cause the buffer to exceed its
+    /// pre-allocated capacity, preventing reallocation.
     pub fn push_char(&mut self, ch: char) {
-        let old_cap = self.inner.capacity();
-        let old_ptr = self.inner.as_ptr();
-
         let mut buf = [0u8; 4];
         let encoded = ch.encode_utf8(&mut buf);
+        assert!(
+            self.inner.len() + encoded.len() <= self.inner.capacity(),
+            "password buffer full"
+        );
         self.inner.extend_from_slice(encoded.as_bytes());
-
-        // Check if reallocation occurred.
-        if self.inner.capacity() != old_cap || self.inner.as_ptr() != old_ptr {
-            // Old allocation was freed by Vec — we cannot munlock it (already deallocated).
-            // But we can lock the new allocation.
-            // Note: Vec zeroizes the old allocation only if we used zeroize — it does not
-            // here because realloc copies and frees. This is a known limitation: the old
-            // pages may retain data until the allocator reuses them. For password-length
-            // buffers (< 1KB), this window is negligible.
-            self.lock_current_allocation();
-        }
     }
 
     /// Remove the last Unicode character, returning it.
@@ -160,20 +166,19 @@ impl SecureVec {
             // mlock prevents the OS from swapping these pages to disk.
             unsafe {
                 if libc::mlock(ptr, cap) != 0 {
-                    tracing::warn!(
-                        cap,
-                        "SecureVec: mlock failed (process may lack CAP_IPC_LOCK or hit RLIMIT_MEMLOCK)"
+                    let errno = *libc::__errno_location();
+                    panic!(
+                        "mlock failed: errno {errno} (cap={cap}). \
+                         Check RLIMIT_MEMLOCK (ulimit -l) and CAP_IPC_LOCK."
                     );
-                } else {
-                    self.locked = true;
                 }
-            }
-
-            // SAFETY: madvise with MADV_DONTDUMP excludes these pages from core dumps.
-            // The pointer and length are valid for the Vec's backing allocation.
-            #[cfg(target_os = "linux")]
-            unsafe {
-                libc::madvise(ptr.cast_mut(), cap, libc::MADV_DONTDUMP);
+                self.locked = true;
+                #[cfg(target_os = "linux")]
+                {
+                    // MADV_DONTDUMP is defense-in-depth (exclude from core dumps).
+                    // Can fail on non-page-aligned heap allocations — not fatal.
+                    let _ = libc::madvise(ptr.cast_mut(), cap, libc::MADV_DONTDUMP);
+                }
             }
         }
     }
@@ -256,7 +261,7 @@ mod tests {
 
     #[test]
     fn push_pop_ascii() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('h');
         sv.push_char('e');
         sv.push_char('l');
@@ -274,7 +279,7 @@ mod tests {
 
     #[test]
     fn push_pop_multibyte_utf8() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         // 2-byte: e with acute (U+00E9)
         sv.push_char('\u{00E9}');
         assert_eq!(sv.len(), 2);
@@ -312,7 +317,7 @@ mod tests {
 
     #[test]
     fn clear_zeroizes_and_resets() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('s');
         sv.push_char('e');
         sv.push_char('c');
@@ -331,7 +336,7 @@ mod tests {
 
     #[test]
     fn take_returns_bytes_and_resets() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('a');
         sv.push_char('b');
         sv.push_char('c');
@@ -344,7 +349,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_contents() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('p');
         sv.push_char('@');
         sv.push_char('s');
@@ -358,7 +363,7 @@ mod tests {
 
     #[test]
     fn password_special_characters() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         for ch in "P@ssw0rd!#$%^&*()".chars() {
             sv.push_char(ch);
         }
@@ -377,7 +382,7 @@ mod tests {
 
     #[test]
     fn mixed_ascii_and_multibyte() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('a');
         sv.push_char('🔑');
         sv.push_char('b');
@@ -401,7 +406,7 @@ mod tests {
 
     #[test]
     fn pop_zeroizes_removed_bytes() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('x');
         sv.push_char('y');
         sv.push_char('z');
@@ -417,7 +422,7 @@ mod tests {
 
     #[test]
     fn push_after_clear_works() {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         sv.push_char('a');
         sv.push_char('b');
         sv.clear();
@@ -427,12 +432,11 @@ mod tests {
     }
 
     #[test]
-    fn push_after_take_works() {
-        let mut sv = SecureVec::new();
+    fn take_returns_bytes() {
+        let mut sv = SecureVec::for_password();
         sv.push_char('x');
-        let _ = sv.take();
-        sv.push_char('y');
-        assert_eq!(sv.char_count(), 1);
-        assert_eq!(sv.as_bytes(), b"y");
+        let taken = sv.take();
+        assert_eq!(taken, b"x");
+        assert!(sv.is_empty());
     }
 }

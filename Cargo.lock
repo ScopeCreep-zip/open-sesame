@@ -880,6 +880,7 @@ dependencies = [
 name = "core-types"
 version = "1.4.2"
 dependencies = [
+ "libc",
  "postcard",
  "proptest",
  "serde",

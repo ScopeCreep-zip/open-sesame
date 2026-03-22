@@ -3,7 +3,7 @@
 //! This crate defines the canonical type system shared across all PDS crates.
 //! It has zero platform dependencies and is `no_std`-compatible for hot-path types.
 //! Minimal external deps: serde, uuid, thiserror.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod auth;
 pub mod constants;

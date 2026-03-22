@@ -15,8 +15,7 @@ impl SecureBytes {
     /// Create a new `SecureBytes` from raw data.
     ///
     /// On Unix, the backing memory is immediately `mlock`'d and marked
-    /// `MADV_DONTDUMP`. Failure to mlock is logged but not fatal (the
-    /// process may lack `CAP_IPC_LOCK` or hit `RLIMIT_MEMLOCK`).
+    /// `MADV_DONTDUMP`. Panics if memory locking fails.
     pub fn new(data: Vec<u8>) -> Self {
         let sb = Self { inner: data };
         #[cfg(unix)]
@@ -28,16 +27,24 @@ impl SecureBytes {
             unsafe {
                 let ptr = sb.inner.as_ptr().cast::<libc::c_void>();
                 let len = sb.inner.len();
-                if libc::mlock(ptr, len) != 0 {
-                    tracing::warn!(
-                        len,
-                        "mlock failed (process may lack CAP_IPC_LOCK or hit RLIMIT_MEMLOCK)"
-                    );
-                }
-                // MADV_DONTDUMP is Linux-specific (value 16).
-                #[cfg(target_os = "linux")]
-                {
-                    libc::madvise(ptr.cast_mut(), len, libc::MADV_DONTDUMP);
+                if len > 0 {
+                    if libc::mlock(ptr, len) != 0 {
+                        let errno = *libc::__errno_location();
+                        panic!(
+                            "mlock failed: errno {errno} (len={len}). \
+                             Check RLIMIT_MEMLOCK (ulimit -l) and CAP_IPC_LOCK."
+                        );
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        // MADV_DONTDUMP is defense-in-depth (exclude from core dumps).
+                        // It can fail on non-page-aligned heap allocations — log but
+                        // do not abort, since LimitCORE=0 is the primary control.
+                        if libc::madvise(ptr.cast_mut(), len, libc::MADV_DONTDUMP) != 0 {
+                            // Cannot use tracing here (may not be initialized).
+                            // Silent — mlock is the critical control, MADV_DONTDUMP is bonus.
+                        }
+                    }
                 }
             }
         }

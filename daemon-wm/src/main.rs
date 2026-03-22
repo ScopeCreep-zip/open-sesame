@@ -258,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
     // to prevent password bytes from being swapped to disk or included in
     // core dumps. Lives in the tokio executor context — never crosses thread
     // boundaries to the render thread (which receives only dot counts).
-    let mut password_buffer = SecureVec::with_capacity(128);
+    let mut password_buffer = SecureVec::for_password();
 
     // Platform readiness.
     #[cfg(target_os = "linux")]

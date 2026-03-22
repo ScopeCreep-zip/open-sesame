@@ -57,7 +57,7 @@ pub(crate) async fn cmd_ssh_enroll(
         // In Any/Policy mode, the master key is a random value wrapped under
         // the Argon2id-derived KEK. Each factor independently wraps this same
         // master key, so factors can be added/revoked independently.
-        let mut password_sv = core_crypto::SecureVec::new();
+        let mut password_sv = core_crypto::SecureVec::for_password();
         for ch in password.chars() {
             password_sv.push_char(ch);
         }

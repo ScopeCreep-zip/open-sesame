@@ -2,14 +2,12 @@
 //!
 //! Argon2id for password-based key derivation (OWASP recommended).
 
+use crate::SecureBytes;
 use argon2::{Algorithm, Argon2, Params, Version};
 use core_types::KdfAlgorithm;
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
 use sha2::Sha256;
-use zeroize::Zeroize;
-
-use crate::SecureBytes;
 
 /// Derive a 32-byte AES-256 key from a password using Argon2id.
 ///
@@ -36,14 +34,12 @@ pub fn derive_key_argon2(password: &[u8], salt: &[u8; 16]) -> core_types::Result
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-    let mut key = [0u8; 32];
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
     argon2
-        .hash_password_into(password, salt, &mut key)
+        .hash_password_into(password, salt, &mut *key)
         .map_err(|e| core_types::Error::Crypto(format!("argon2 derivation failed: {e}")))?;
 
-    let result = SecureBytes::new(key.to_vec());
-    key.zeroize();
-    Ok(result)
+    Ok(SecureBytes::new(key.to_vec()))
 }
 
 /// Derive a 32-byte key from a password using PBKDF2-HMAC-SHA256.
@@ -51,13 +47,11 @@ pub fn derive_key_argon2(password: &[u8], salt: &[u8; 16]) -> core_types::Result
 /// Uses 600,000 iterations per OWASP recommendations for PBKDF2-SHA256.
 /// Returns `SecureBytes` (mlock'd, zeroize-on-drop).
 pub fn derive_key_pbkdf2(password: &[u8], salt: &[u8; 16]) -> core_types::Result<SecureBytes> {
-    let mut key = [0u8; 32];
-    pbkdf2::<Hmac<Sha256>>(password, salt, 600_000, &mut key)
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    pbkdf2::<Hmac<Sha256>>(password, salt, 600_000, &mut *key)
         .map_err(|e| core_types::Error::Crypto(format!("pbkdf2 derivation failed: {e}")))?;
 
-    let result = SecureBytes::new(key.to_vec());
-    key.zeroize();
-    Ok(result)
+    Ok(SecureBytes::new(key.to_vec()))
 }
 
 /// Dispatch key derivation based on the configured KDF algorithm.

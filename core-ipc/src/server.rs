@@ -532,11 +532,16 @@ async fn handle_connection(
             (entry.security_level, Some(entry.name.clone()))
         } else {
             tracing::info!(
+                audit = "connection-lifecycle",
+                event_type = "ephemeral-client-accepted",
                 conn_id,
+                clearance = ?core_types::SecurityLevel::SecretsOnly,
                 pubkey = %hex_encode(&client_pubkey),
-                "unregistered public key — assigning SecretsOnly clearance (Noise-authenticated, same-UID)"
+                peer_pid = peer_creds.pid,
+                peer_uid = peer_creds.uid,
+                "ephemeral client accepted via UCred same-UID validation"
             );
-            (SecurityLevel::SecretsOnly, None)
+            (core_types::SecurityLevel::SecretsOnly, None)
         }
     };
 

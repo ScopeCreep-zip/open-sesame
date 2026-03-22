@@ -107,6 +107,17 @@ pub fn apply_landlock(
             FsAccess::ReadWriteFile => AccessFs::from_file(abi),
             FsAccess::Execute => AccessFs::Execute.into(),
         };
+        // Skip rules for paths that don't exist yet (e.g., vaults directory
+        // before `sesame init` creates it). Landlock denies access to any path
+        // not in the ruleset, so omitting a missing path is strictly more
+        // restrictive than granting it — not a security degradation.
+        if !rule.path.exists() {
+            tracing::info!(
+                path = %rule.path.display(),
+                "landlock: skipping rule for non-existent path"
+            );
+            continue;
+        }
         let path_fd = PathFd::new(&rule.path).map_err(|e| {
             core_types::Error::Platform(format!(
                 "landlock PathFd::new({}) failed: {e}",

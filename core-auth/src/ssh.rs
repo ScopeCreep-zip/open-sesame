@@ -241,8 +241,9 @@ impl VaultAuthBackend for SshAgentBackend {
 
         // ssh-agent-client-rs is synchronous (Unix socket I/O), so all agent
         // calls run inside spawn_blocking to avoid blocking the tokio runtime.
-        let (fingerprint, key_type, sig_bytes) = tokio::task::spawn_blocking(
-            move || -> Result<(String, SshKeyType, Vec<u8>), AuthError> {
+        let kek_ctx = format!("pds v2 ssh-vault-kek {profile_str}");
+        let (fingerprint, key_type, mut kek_bytes) = tokio::task::spawn_blocking(
+            move || -> Result<(String, SshKeyType, [u8; 32]), AuthError> {
                 let mut agent = connect_agent().ok_or_else(|| {
                     AuthError::AgentUnavailable("SSH_AUTH_SOCK not set or agent not running".into())
                 })?;
@@ -260,9 +261,6 @@ impl VaultAuthBackend for SshAgentBackend {
                     return Err(AuthError::NoEligibleKey);
                 }
 
-                // Caller MUST provide an explicit key index. Silent default
-                // selection is never acceptable — the user must declare which
-                // key to use.
                 let idx = selected_key_index.ok_or(AuthError::NoEligibleKey)?;
                 if idx >= eligible.len() {
                     return Err(AuthError::NoEligibleKey);
@@ -276,22 +274,16 @@ impl VaultAuthBackend for SshAgentBackend {
                     .sign(identity, &challenge_vec)
                     .map_err(|e| AuthError::AgentProtocolError(format!("sign: {e}")))?;
 
-                // Use a zeroizing container to minimize the window where raw
-                // signature bytes (KEK input) sit unprotected in memory.
-                let mut sig_vec = sig.as_bytes().to_vec();
-                let result = (fp, kt, sig_vec.clone());
-                sig_vec.zeroize();
-                Ok(result)
+                // Derive KEK immediately, zeroize signature, return only the KEK.
+                let mut sig_bytes = sig.as_bytes().to_vec();
+                let kek: [u8; 32] = blake3::derive_key(&kek_ctx, &sig_bytes);
+                sig_bytes.zeroize();
+
+                Ok((fp, kt, kek))
             },
         )
         .await
         .map_err(|e| AuthError::AgentUnavailable(format!("spawn_blocking: {e}")))??;
-
-        // 2. Derive KEK from signature
-        let kek_ctx = format!("pds v2 ssh-vault-kek {profile_str}");
-        let mut kek_bytes: [u8; 32] = blake3::derive_key(&kek_ctx, &sig_bytes);
-        let mut sig_copy = sig_bytes;
-        sig_copy.zeroize();
 
         // 3. Wrap master key
         let encryption_key = core_crypto::EncryptionKey::from_bytes(&kek_bytes)

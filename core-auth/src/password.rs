@@ -204,7 +204,7 @@ mod tests {
     }
 
     fn make_password() -> SecureVec {
-        let mut sv = SecureVec::new();
+        let mut sv = SecureVec::for_password();
         for ch in "test-password".chars() {
             sv.push_char(ch);
         }
@@ -292,7 +292,7 @@ mod tests {
             .unwrap();
 
         // Try unlock with wrong password.
-        let mut wrong_pw = SecureVec::new();
+        let mut wrong_pw = SecureVec::for_password();
         for ch in "wrong-password".chars() {
             wrong_pw.push_char(ch);
         }

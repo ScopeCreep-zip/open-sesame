@@ -39,7 +39,7 @@ pub(crate) async fn keyring_store_profile(
 
     let kek = core_crypto::derive_kek(password, salt);
     let enc_key = match core_crypto::EncryptionKey::from_bytes(
-        kek.as_bytes().try_into().unwrap_or(&[0u8; 32]),
+        kek.as_bytes().try_into().expect("key derivation invariant"),
     ) {
         Ok(k) => k,
         Err(e) => {
@@ -130,7 +130,7 @@ pub(crate) async fn keyring_retrieve_profile(
 
     let kek = core_crypto::derive_kek(password, salt);
     let enc_key = match core_crypto::EncryptionKey::from_bytes(
-        kek.as_bytes().try_into().unwrap_or(&[0u8; 32]),
+        kek.as_bytes().try_into().expect("key derivation invariant"),
     ) {
         Ok(k) => k,
         Err(e) => {

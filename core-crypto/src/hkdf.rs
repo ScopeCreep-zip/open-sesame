@@ -28,10 +28,8 @@ use zeroize::Zeroize;
 /// Returns `SecureBytes` (mlock'd, zeroize-on-drop). The intermediate stack
 /// array is zeroized before the function returns.
 fn derive_32(context: &str, ikm: &[u8]) -> SecureBytes {
-    let mut key: [u8; 32] = blake3::derive_key(context, ikm);
-    let result = SecureBytes::new(key.to_vec());
-    key.zeroize();
-    result
+    let key = zeroize::Zeroizing::new(blake3::derive_key(context, ikm));
+    SecureBytes::new(key.to_vec())
 }
 
 /// Build the BLAKE3 context string: `"pds <version> <purpose> <profile_id>"`.

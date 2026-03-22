@@ -150,7 +150,7 @@ async fn prompt_password_factor(
         buf
     };
 
-    let mut password_sv = core_crypto::SecureVec::new();
+    let mut password_sv = core_crypto::SecureVec::for_password();
     for ch in password.chars() {
         password_sv.push_char(ch);
     }

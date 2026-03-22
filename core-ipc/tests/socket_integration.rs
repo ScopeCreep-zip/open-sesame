@@ -43,15 +43,20 @@ async fn start_server_with_clients(
     (server, dir, server_pub, client_keypairs)
 }
 
-/// Helper: start an encrypted bus server with an empty registry (all clients get Open).
+/// Helper: start an encrypted bus server with a single registered Internal client.
 #[allow(clippy::unused_async)]
-async fn start_server() -> (BusServer, tempfile::TempDir, [u8; 32]) {
+async fn start_server() -> (BusServer, tempfile::TempDir, [u8; 32], ZeroizingKeypair) {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("bus.sock");
     let keypair = generate_keypair().unwrap();
     let server_pub: [u8; 32] = keypair.public().try_into().unwrap();
-    let server = BusServer::bind(&sock, keypair.into_inner(), ClearanceRegistry::new()).unwrap();
-    (server, dir, server_pub)
+    let mut registry = ClearanceRegistry::new();
+    let client_kp = generate_keypair().unwrap();
+    let mut client_pub = [0u8; 32];
+    client_pub.copy_from_slice(client_kp.public());
+    registry.register(client_pub, "test-default".into(), SecurityLevel::Internal);
+    let server = BusServer::bind(&sock, keypair.into_inner(), registry).unwrap();
+    (server, dir, server_pub, client_kp)
 }
 
 /// Helper: connect a client with a specific keypair.
@@ -61,14 +66,6 @@ async fn connect_with_keypair(
     server_pub: &[u8; 32],
     kp: &ZeroizingKeypair,
 ) -> BusClient {
-    BusClient::connect_encrypted(id, sock, server_pub, kp.as_inner())
-        .await
-        .unwrap()
-}
-
-/// Helper: connect a client with an ephemeral (unregistered) keypair.
-async fn connect_client(id: DaemonId, sock: &std::path::Path, server_pub: &[u8; 32]) -> BusClient {
-    let kp = generate_keypair().unwrap();
     BusClient::connect_encrypted(id, sock, server_pub, kp.as_inner())
         .await
         .unwrap()
@@ -90,7 +87,7 @@ async fn server_bind_creates_socket_file() {
 
 #[tokio::test]
 async fn client_connect_and_server_accept() {
-    let (server, dir, server_pub) = start_server().await;
+    let (server, dir, server_pub, client_kp) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
     let server_handle = tokio::spawn(async move {
@@ -104,7 +101,7 @@ async fn client_connect_and_server_accept() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let _client = connect_client(did(1), &sock, &server_pub).await;
+    let _client = connect_with_keypair(did(1), &sock, &server_pub, &client_kp).await;
 
     let count = server_handle.await.unwrap();
     assert_eq!(count, 1, "server should have 1 connected client");
@@ -337,7 +334,7 @@ async fn launch_execute_error_roundtrip() {
 
 #[tokio::test]
 async fn sender_does_not_receive_own_message() {
-    let (server, dir, server_pub) = start_server().await;
+    let (server, dir, server_pub, client_kp) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
     tokio::spawn(async move {
@@ -345,7 +342,7 @@ async fn sender_does_not_receive_own_message() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut client = connect_client(did(1), &sock, &server_pub).await;
+    let mut client = connect_with_keypair(did(1), &sock, &server_pub, &client_kp).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     client
@@ -384,7 +381,7 @@ async fn client_connect_retry_on_missing_socket() {
 
 #[tokio::test]
 async fn request_timeout() {
-    let (server, dir, server_pub) = start_server().await;
+    let (server, dir, server_pub, client_kp) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
     tokio::spawn(async move {
@@ -392,7 +389,7 @@ async fn request_timeout() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let client = connect_client(did(1), &sock, &server_pub).await;
+    let client = connect_with_keypair(did(1), &sock, &server_pub, &client_kp).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let result = client
@@ -415,7 +412,7 @@ async fn request_timeout() {
 
 #[tokio::test]
 async fn noise_handshake_rejects_wrong_key() {
-    let (server, dir, _real_server_pub) = start_server().await;
+    let (server, dir, _real_server_pub, _client_kp) = start_server().await;
     let sock = dir.path().join("bus.sock");
 
     tokio::spawn(async move {
@@ -524,7 +521,7 @@ async fn secret_response_not_received_by_bystander() {
 
 #[tokio::test]
 async fn uncorrelated_response_is_dropped() {
-    let (server, dir, server_pub) = start_server().await;
+    let (server, dir, server_pub, kps) = start_server_with_clients(2).await;
     let sock = dir.path().join("bus.sock");
 
     tokio::spawn(async move {
@@ -532,8 +529,8 @@ async fn uncorrelated_response_is_dropped() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let client_a = connect_client(did(1), &sock, &server_pub).await;
-    let mut client_b = connect_client(did(2), &sock, &server_pub).await;
+    let client_a = connect_with_keypair(did(1), &sock, &server_pub, &kps[0]).await;
+    let mut client_b = connect_with_keypair(did(2), &sock, &server_pub, &kps[1]).await;
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -755,26 +752,55 @@ async fn verified_sender_name_stamped() {
     );
 }
 
-// ===== Unregistered CLI can publish at Internal to reach daemons =====
-// SecurityLevel ordering: Open < Internal < ProfileScoped < SecretsOnly.
-// Unregistered clients get SecretsOnly (highest) clearance.
-// daemon-wm is registered at Internal clearance.
-// Publishing at Internal works because:
-//   - Sender check: SecretsOnly >= Internal → allowed
-//   - Recipient check: Internal >= Internal → delivered
+// ===== Ephemeral clients get SecretsOnly clearance via UCred =====
+// SECURITY INVARIANT: Unregistered keys (ephemeral CLI connections) that pass
+// UCred same-UID validation receive SecretsOnly clearance. This allows the CLI
+// to send UnlockRequest and SecretCRUD messages to daemon-secrets.
 #[tokio::test]
-async fn unregistered_client_overlay_reaches_daemon_wm() {
+async fn ephemeral_client_gets_secrets_only_clearance() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("bus.sock");
     let server_kp = generate_keypair().unwrap();
     let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
 
-    // Register only daemon-wm (Internal clearance).
+    let server = BusServer::bind(&sock, server_kp.into_inner(), ClearanceRegistry::new()).unwrap();
+    let server_handle = tokio::spawn(async move {
+        tokio::select! {
+            _ = server.run() => unreachable!(),
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                server.connection_count().await
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Ephemeral client connects with an unregistered key.
+    let unreg_kp = generate_keypair().unwrap();
+    let _client = BusClient::connect_encrypted(did(1), &sock, &server_pub, unreg_kp.as_inner())
+        .await
+        .expect("ephemeral client should connect via UCred validation");
+
+    let count = server_handle.await.unwrap();
+    assert_eq!(count, 1, "ephemeral client should be connected");
+}
+
+// ===== Registered client can publish at Internal to reach daemons =====
+#[tokio::test]
+async fn registered_client_overlay_reaches_daemon_wm() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("bus.sock");
+    let server_kp = generate_keypair().unwrap();
+    let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
+
     let daemon_kp = generate_keypair().unwrap();
+    let cli_kp = generate_keypair().unwrap();
     let mut registry = ClearanceRegistry::new();
     let mut daemon_pub = [0u8; 32];
     daemon_pub.copy_from_slice(daemon_kp.public());
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
+    let mut cli_pub = [0u8; 32];
+    cli_pub.copy_from_slice(cli_kp.public());
+    registry.register(cli_pub, "cli".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
     tokio::spawn(async move {
@@ -782,23 +808,18 @@ async fn unregistered_client_overlay_reaches_daemon_wm() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // daemon-wm: registered, Internal clearance.
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
-
-    // CLI: unregistered ephemeral key → SecretsOnly clearance.
-    let cli = connect_client(did(2), &sock, &server_pub).await;
+    let cli = connect_with_keypair(did(2), &sock, &server_pub, &cli_kp).await;
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // CLI publishes WmActivateOverlay at Internal level.
     cli.publish(EventKind::WmActivateOverlay, SecurityLevel::Internal)
         .await
         .unwrap();
 
-    // daemon-wm (Internal) should receive it: Internal >= Internal.
     let msg = tokio::time::timeout(Duration::from_millis(500), daemon_wm.recv())
         .await
-        .expect("daemon-wm must receive WmActivateOverlay from CLI")
+        .expect("daemon-wm must receive WmActivateOverlay")
         .expect("channel closed");
 
     assert!(
@@ -819,10 +840,18 @@ async fn secrets_only_message_not_delivered_to_internal_daemon() {
     let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
 
     let daemon_kp = generate_keypair().unwrap();
+    let secrets_kp = generate_keypair().unwrap();
     let mut registry = ClearanceRegistry::new();
     let mut daemon_pub = [0u8; 32];
     daemon_pub.copy_from_slice(daemon_kp.public());
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
+    let mut secrets_pub = [0u8; 32];
+    secrets_pub.copy_from_slice(secrets_kp.public());
+    registry.register(
+        secrets_pub,
+        "daemon-secrets".into(),
+        SecurityLevel::SecretsOnly,
+    );
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
     tokio::spawn(async move {
@@ -831,13 +860,14 @@ async fn secrets_only_message_not_delivered_to_internal_daemon() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
-    let cli = connect_client(did(2), &sock, &server_pub).await;
+    let secrets = connect_with_keypair(did(2), &sock, &server_pub, &secrets_kp).await;
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // CLI (SecretsOnly) publishes at SecretsOnly level — daemon-wm (Internal)
+    // SecretsOnly client publishes at SecretsOnly level -- daemon-wm (Internal)
     // cannot receive it because Internal < SecretsOnly.
-    cli.publish(EventKind::WmActivateOverlay, SecurityLevel::SecretsOnly)
+    secrets
+        .publish(EventKind::WmActivateOverlay, SecurityLevel::SecretsOnly)
         .await
         .unwrap();
 
@@ -859,10 +889,14 @@ async fn shutdown_flushes_publish_before_disconnect() {
     let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
 
     let daemon_kp = generate_keypair().unwrap();
+    let cli_kp = generate_keypair().unwrap();
     let mut registry = ClearanceRegistry::new();
     let mut daemon_pub = [0u8; 32];
     daemon_pub.copy_from_slice(daemon_kp.public());
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
+    let mut cli_pub = [0u8; 32];
+    cli_pub.copy_from_slice(cli_kp.public());
+    registry.register(cli_pub, "cli".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
     tokio::spawn(async move {
@@ -871,10 +905,10 @@ async fn shutdown_flushes_publish_before_disconnect() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
-    let cli = connect_client(did(2), &sock, &server_pub).await;
+    let cli = connect_with_keypair(did(2), &sock, &server_pub, &cli_kp).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // CLI publishes then gracefully shuts down (like cmd_wm_overlay).
+    // CLI publishes then gracefully shuts down.
     cli.publish(EventKind::WmActivateOverlay, SecurityLevel::Internal)
         .await
         .unwrap();
@@ -904,10 +938,14 @@ async fn drop_without_shutdown_may_lose_message() {
     let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
 
     let daemon_kp = generate_keypair().unwrap();
+    let cli_kp = generate_keypair().unwrap();
     let mut registry = ClearanceRegistry::new();
     let mut daemon_pub = [0u8; 32];
     daemon_pub.copy_from_slice(daemon_kp.public());
     registry.register(daemon_pub, "daemon-wm".into(), SecurityLevel::Internal);
+    let mut cli_pub = [0u8; 32];
+    cli_pub.copy_from_slice(cli_kp.public());
+    registry.register(cli_pub, "cli".into(), SecurityLevel::Internal);
 
     let server = BusServer::bind(&sock, server_kp.into_inner(), registry).unwrap();
     tokio::spawn(async move {
@@ -916,10 +954,10 @@ async fn drop_without_shutdown_may_lose_message() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut daemon_wm = connect_with_keypair(did(1), &sock, &server_pub, &daemon_kp).await;
-    let cli = connect_client(did(2), &sock, &server_pub).await;
+    let cli = connect_with_keypair(did(2), &sock, &server_pub, &cli_kp).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // CLI publishes then drops immediately — no shutdown.
+    // CLI publishes then drops immediately -- no shutdown.
     cli.publish(EventKind::WmActivateOverlay, SecurityLevel::Internal)
         .await
         .unwrap();
