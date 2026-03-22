@@ -16,7 +16,7 @@
 //! 16 MiB are chunked into multiple Noise messages with a chunk-count header.
 //!
 //! Key management (generation, persistence, tamper detection) lives in
-//! [`crate::noise_keys`].
+//! `noise_keys`.
 
 use crate::framing::{MAX_FRAME_SIZE, read_frame, write_frame};
 use crate::transport::PeerCredentials;

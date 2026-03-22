@@ -1,6 +1,6 @@
 [package]
 name = "open-sesame"
-description = "Open Sesame CLI — platform orchestration for multi-agent desktop control"
+description = "Open Sesame CLI - platform orchestration for multi-agent desktop control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

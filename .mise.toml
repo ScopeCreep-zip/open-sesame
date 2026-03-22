@@ -695,7 +695,9 @@ for dist in $DISTS; do
           echo "" >> "$PACKAGES_FILE"
         fi
 
-        dpkg-deb -f "$deb" >> "$PACKAGES_FILE"
+        # dpkg-deb -f emits a trailing blank line after Description continuation
+        # lines. Strip it — APT interprets blank lines as record separators.
+        dpkg-deb -f "$deb" | sed -e '/^$/d' >> "$PACKAGES_FILE"
 
         SIZE=$(stat -c%s "$deb")
         SHA256=$(sha256sum "$deb" | cut -d' ' -f1)
