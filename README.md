@@ -1,12 +1,6 @@
 # Open Sesame
 
-## Programmable Desktop Suite for Linux
-
-Open Sesame is a multi-daemon platform for desktop orchestration and secret management on Linux. It combines Vimium-style window switching, an application launcher with fuzzy search, encrypted per-profile secret vaults, clipboard management with security classification, input remapping, text snippet expansion, and workspace-scoped developer environments -- all controlled through a single CLI and orchestrated over a Noise IK encrypted IPC bus.
-
-Press `Alt+Space` to see all windows with letter hints. Type a letter to switch. Store secrets in encrypted vaults and inject them into your applications as environment variables. Compose launch profiles that mix secrets, environment variables, and Nix devshells across trust profiles. No mouse required.
-
-Ships as two packages: **open-sesame** (headless core) runs everywhere -- servers, containers, VMs, bare metal, CI/CD pipelines. **open-sesame-desktop** adds the window switcher, clipboard manager, and keyboard input capture for COSMIC/Wayland desktops. Installing the desktop package automatically pulls in the headless package as a dependency.
+An Alt+Tab replacement, application launcher, and secret manager for Linux.
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/ScopeCreep-zip/open-sesame)](https://github.com/ScopeCreep-zip/open-sesame/releases)
@@ -15,32 +9,52 @@ Ships as two packages: **open-sesame** (headless core) runs everywhere -- server
 
 ![Open Sesame Screenshot](docs/src/open-sesame-screenshot.png)
 
+Open Sesame replaces your Alt+Tab with a window switcher that shows letter hints on every window. Tap `Alt+Tab` to quick-switch to your previous window, or hold it to see all your windows and type a letter to jump directly. `Alt+Shift+Tab` cycles backward. `Alt+Space` opens the full launcher overlay where you can also fuzzy-search and launch applications. All key combos are configurable.
+
+Each window can be bound to a letter in your config. If the app is already open, that letter focuses it. If it's not running, it launches it. Multiple windows of the same app get stacked hints: `g`, `gg`, `ggg`. You configure which apps map to which letters, what command to run if the app isn't open, and optionally which secrets and environment variables to inject at launch time.
+
+Beyond window switching, Open Sesame manages encrypted secret vaults with per-profile trust boundaries, clipboard history with sensitivity detection, keyboard input capture for compositor-independent shortcuts, and text snippet expansion. Secrets can be injected into any command as environment variables (`sesame env -p work -- aws s3 ls`) or exported in shell, dotenv, or JSON format. Vault unlock supports passwords, SSH agent keys, or both with configurable auth policies.
+
+Everything is scoped to trust profiles. A "work" profile has its own vault, its own secrets, its own clipboard history, its own frecency ranking, and its own launch configurations -- completely separate from "personal" or "default". Profiles activate based on context (WiFi network, connected hardware) or manually.
+
+The system runs as seven cooperating daemons under systemd, communicating over a Noise IK encrypted IPC bus. Each daemon is sandboxed with Landlock filesystem restrictions and seccomp syscall filtering. The whole thing is controlled through one CLI: `sesame`.
+
+### Two packages
+
+| Package | What's inside | Where it runs |
+|---------|--------------|---------------|
+| **open-sesame** | `sesame` CLI, daemon-profile, daemon-secrets, daemon-launcher, daemon-snippets | Desktops, servers, containers, VMs -- anywhere with systemd |
+| **open-sesame-desktop** | daemon-wm, daemon-clipboard, daemon-input | COSMIC and Wayland desktops (depends on open-sesame) |
+
+Install `open-sesame-desktop` and it pulls in `open-sesame` automatically. On a server or in a container, install just `open-sesame` for encrypted secrets and application launching without any GUI dependencies.
+
 ---
 
 ## Quick Start
 
 ```bash
-# Add APT repository
+# Add the APT repository
 curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
   | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
 echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
   | sudo tee /etc/apt/sources.list.d/open-sesame.list
 sudo apt update
 
-# Desktop (full suite: window switcher + clipboard + input + headless core)
+# On a desktop
 sudo apt install -y open-sesame open-sesame-desktop
 
-# Or headless only (servers, containers, VMs -- no GUI dependencies)
+# On a server (no GUI needed)
 sudo apt install -y open-sesame
+```
 
-# Initialize: creates config, generates keypairs, starts daemons, sets master password
+All daemons start automatically after install. Run `sesame init` to create your config directory, generate IPC keypairs, and set a master password for your first vault:
+
+```bash
 sesame init
-
-# Check everything is running
 sesame status
 ```
 
-**That's it.** All services start automatically on install -- no manual `systemctl` commands needed. Press `Alt+Space` to see all windows with letter hints. Type a letter to switch.
+Press `Alt+Tab` to switch windows. Press `Alt+Space` to open the launcher overlay. Configure your key bindings in `~/.config/pds/config.toml` (see [Configuration](#configuration) below).
 
 ---
 
