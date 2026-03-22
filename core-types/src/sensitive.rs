@@ -1,96 +1,107 @@
+use core_memory::ProtectedAlloc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use zeroize::Zeroize;
 
-/// Sensitive byte buffer with automatic zeroize-on-drop and memory locking.
+/// Sensitive byte buffer backed by page-aligned, guard-page-protected memory.
 ///
 /// Used for secret values and passwords in IPC `EventKind` variants.
-/// On Unix, the backing memory is `mlock`'d and marked `MADV_DONTDUMP`.
-/// Zeroes the backing memory when dropped to prevent heap forensics.
+/// Backed by [`core_memory::ProtectedAlloc`] which provides:
+/// - Page-aligned mmap with guard pages (SIGSEGV on overflow)
+/// - mlock to prevent swap exposure
+/// - Canary verification on drop
+/// - Volatile zeroize before munmap
+///
+/// Custom `Serialize`/`Deserialize` implementations ensure wire compatibility
+/// with postcard. During deserialization, a temporary `Vec<u8>` is created by
+/// postcard's deserializer, then immediately copied into protected memory and
+/// zeroized. The exposure window is bounded to the deserialization call.
+///
 /// Debug output is redacted to prevent log exposure.
-#[derive(Clone, Serialize, PartialEq, Eq)]
-#[allow(clippy::unsafe_derive_deserialize)]
-#[derive(Deserialize)]
-#[serde(transparent)]
-pub struct SensitiveBytes(Vec<u8>);
+pub struct SensitiveBytes {
+    inner: ProtectedAlloc,
+    /// Actual user data length. 0 for empty (backed by 1-byte sentinel).
+    actual_len: usize,
+}
 
 impl SensitiveBytes {
+    /// Create a new `SensitiveBytes` from a `Vec<u8>`.
+    ///
+    /// The data is copied into page-aligned protected memory and the source
+    /// Vec is zeroized. Empty data is permitted (for denial/error responses).
+    ///
     /// # Panics
     ///
-    /// Panics if the platform memory lock (`mlock`) syscall fails.
+    /// Panics if mlock or mmap fails.
     #[must_use]
-    #[allow(unsafe_code)]
-    pub fn new(data: Vec<u8>) -> Self {
-        let sb = Self(data);
-        #[cfg(unix)]
-        {
-            let len = sb.0.len();
-            if len > 0 {
-                let ptr = sb.0.as_ptr().cast::<libc::c_void>();
-                // SAFETY: mlock and madvise operate on the Vec's backing allocation.
-                // The pointer and length are valid for the lifetime of `sb.0`.
-                unsafe {
-                    if libc::mlock(ptr, len) != 0 {
-                        let errno = *libc::__errno_location();
-                        panic!(
-                            "mlock failed: errno {errno} (len={len}). \
-                             Check RLIMIT_MEMLOCK (ulimit -l) and CAP_IPC_LOCK."
-                        );
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        // MADV_DONTDUMP is defense-in-depth (exclude from core dumps).
-                        // Can fail on non-page-aligned heap allocations — not fatal.
-                        let _ = libc::madvise(ptr.cast_mut(), len, libc::MADV_DONTDUMP);
-                    }
-                }
-            }
+    pub fn new(mut data: Vec<u8>) -> Self {
+        let actual_len = data.len();
+        let alloc = ProtectedAlloc::from_slice_or_sentinel(&data)
+            .unwrap_or_else(|e| panic!("SensitiveBytes allocation failed: {e}"));
+        data.zeroize();
+        SensitiveBytes {
+            inner: alloc,
+            actual_len,
         }
-        sb
     }
 
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.inner.as_bytes()[..self.actual_len]
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.actual_len
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.actual_len == 0
+    }
+}
+
+impl Clone for SensitiveBytes {
+    fn clone(&self) -> Self {
+        Self::new(self.as_bytes().to_vec())
+    }
+}
+
+impl PartialEq for SensitiveBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for SensitiveBytes {}
+
+impl Serialize for SensitiveBytes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Serialize the actual bytes directly from protected memory.
+        // postcard reads the slice without copying.
+        self.as_bytes().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SensitiveBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // postcard deserializes into a temporary Vec<u8> on the heap.
+        // SensitiveBytes::new() copies into protected memory and zeroizes
+        // the source Vec. One copy, one zeroize, minimal exposure window.
+        let temp: Vec<u8> = Vec::deserialize(deserializer)?;
+        Ok(SensitiveBytes::new(temp))
     }
 }
 
 impl Drop for SensitiveBytes {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        #[cfg(unix)]
-        let original_len = self.0.len();
-        #[cfg(unix)]
-        let original_ptr = self.0.as_ptr();
-
-        self.0.zeroize();
-
-        #[cfg(unix)]
-        {
-            if original_len > 0 {
-                // SAFETY: munlock the previously mlock'd region using the
-                // pointer and length captured BEFORE zeroize cleared them.
-                unsafe {
-                    libc::munlock(original_ptr.cast::<libc::c_void>(), original_len);
-                }
-            }
-        }
+        // ProtectedAlloc::drop handles canary check, volatile zero, munlock, munmap.
     }
 }
 
 impl fmt::Debug for SensitiveBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[REDACTED; {} bytes]", self.0.len())
+        write!(f, "[REDACTED; {} bytes]", self.actual_len)
     }
 }
 

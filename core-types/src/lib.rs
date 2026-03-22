@@ -355,6 +355,67 @@ mod tests {
         assert_eq!(sb.as_bytes(), &[0xAA, 0xBB]);
     }
 
+    #[test]
+    fn sensitive_bytes_clone() {
+        let sb1 = SensitiveBytes::new(vec![1, 2, 3]);
+        let sb2 = sb1.clone();
+        assert_eq!(sb1.as_bytes(), sb2.as_bytes());
+        assert_eq!(sb1, sb2);
+        drop(sb1);
+        assert_eq!(sb2.as_bytes(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn sensitive_bytes_empty_clone() {
+        let sb1 = SensitiveBytes::new(vec![]);
+        let sb2 = sb1.clone();
+        assert!(sb2.is_empty());
+        assert_eq!(sb1, sb2);
+    }
+
+    #[test]
+    fn sensitive_bytes_postcard_round_trip() {
+        let original = SensitiveBytes::new(b"test secret value".to_vec());
+        let encoded = postcard::to_stdvec(&original).unwrap();
+        let decoded: SensitiveBytes = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.as_bytes(), b"test secret value");
+        assert_eq!(decoded.len(), 17);
+    }
+
+    #[test]
+    fn sensitive_bytes_postcard_round_trip_empty() {
+        let original = SensitiveBytes::new(vec![]);
+        let encoded = postcard::to_stdvec(&original).unwrap();
+        let decoded: SensitiveBytes = postcard::from_bytes(&encoded).unwrap();
+        assert!(decoded.is_empty());
+        assert_eq!(decoded.as_bytes(), b"");
+    }
+
+    #[test]
+    fn sensitive_bytes_postcard_round_trip_binary() {
+        // All byte values 0x00..0xFF to verify no encoding issues.
+        let data: Vec<u8> = (0..=255).collect();
+        let original = SensitiveBytes::new(data.clone());
+        let encoded = postcard::to_stdvec(&original).unwrap();
+        let decoded: SensitiveBytes = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.as_bytes(), &data);
+    }
+
+    #[test]
+    fn sensitive_bytes_postcard_wire_compat_with_vec() {
+        // Verify that the custom Serialize produces the same encoding
+        // as a plain Vec<u8> would. This ensures wire compatibility
+        // with the old #[serde(transparent)] implementation.
+        let data = b"wire compat test".to_vec();
+        let sb = SensitiveBytes::new(data.clone());
+        let sb_encoded = postcard::to_stdvec(&sb).unwrap();
+        let vec_encoded = postcard::to_stdvec(&data).unwrap();
+        assert_eq!(
+            sb_encoded, vec_encoded,
+            "SensitiveBytes and Vec<u8> must produce identical postcard encoding"
+        );
+    }
+
     // -- EventKind Debug redaction --
 
     #[test]

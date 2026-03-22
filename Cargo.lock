@@ -756,10 +756,10 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "blake3",
+ "core-memory",
  "core-types",
  "hkdf",
  "hmac",
- "libc",
  "pbkdf2",
  "proptest",
  "sha2",
@@ -842,6 +842,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-memory"
+version = "1.5.2"
+dependencies = [
+ "libc",
+ "zeroize",
+]
+
+[[package]]
 name = "core-profile"
 version = "1.5.2"
 dependencies = [
@@ -880,7 +888,7 @@ dependencies = [
 name = "core-types"
 version = "1.5.2"
 dependencies = [
- "libc",
+ "core-memory",
  "postcard",
  "proptest",
  "serde",

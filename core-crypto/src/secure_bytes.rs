@@ -1,124 +1,149 @@
-//! Heap-allocated byte buffer with mlock, MADV_DONTDUMP, and zeroize-on-drop.
+//! Secure byte buffer backed by page-aligned, guard-page-protected memory.
+//!
+//! This is the primary vehicle for carrying cryptographic key material
+//! (master keys, vault keys, derived keys, KEKs). The backing memory is
+//! provided by [`core_memory::ProtectedAlloc`] which guarantees:
+//!
+//! - Page-aligned `mmap(2)` allocation (not heap)
+//! - Guard pages before and after the data region (`PROT_NONE` → `SIGSEGV` on overflow)
+//! - `mlock(2)` to prevent swap
+//! - `madvise(MADV_DONTDUMP)` to exclude from core dumps (Linux)
+//! - Canary verification on drop (detects buffer corruption)
+//! - Volatile zeroize of all pages before `munmap(2)`
 
+use core_memory::ProtectedAlloc;
 use zeroize::Zeroize;
 
-/// A heap-allocated byte buffer that is:
-/// - `mlock`'d to prevent swapping to disk (Unix)
-/// - `MADV_DONTDUMP` to exclude from core dumps (Linux)
-/// - Zeroed on drop via `zeroize`
-/// - Redacted in `Debug` output
+/// A secure byte buffer backed by page-aligned, mlock'd, guard-page-protected memory.
+///
+/// Cannot be serialized (secrets must not cross serialization boundaries
+/// without explicit conversion to [`core_types::SensitiveBytes`]).
+///
+/// Debug output is redacted to prevent log exposure.
+///
+/// Empty `SecureBytes` is permitted (for denial/error paths where no key
+/// material exists). Internally, empty data is backed by a 1-byte sentinel
+/// allocation to satisfy `ProtectedAlloc` invariants.
 pub struct SecureBytes {
-    inner: Vec<u8>,
+    inner: ProtectedAlloc,
+    /// Actual user data length. May be 0 even though `inner` holds 1 byte
+    /// (sentinel for empty case). This field is the source of truth for
+    /// `len()`, `is_empty()`, `as_bytes()`, `into_vec()`, and `clone()`.
+    actual_len: usize,
 }
 
 impl SecureBytes {
-    /// Create a new `SecureBytes` from raw data.
+    /// Create a new `SecureBytes` from a `Vec<u8>`.
     ///
-    /// On Unix, the backing memory is immediately `mlock`'d and marked
-    /// `MADV_DONTDUMP`. Panics if memory locking fails.
-    pub fn new(data: Vec<u8>) -> Self {
-        let sb = Self { inner: data };
-        #[cfg(unix)]
-        {
-            // SAFETY: mlock and madvise operate on the Vec's backing allocation.
-            // The pointer and length are valid for the lifetime of `sb.inner`.
-            // mlock prevents the OS from swapping these pages to disk.
-            // MADV_DONTDUMP excludes pages from core dumps.
-            unsafe {
-                let ptr = sb.inner.as_ptr().cast::<libc::c_void>();
-                let len = sb.inner.len();
-                if len > 0 {
-                    if libc::mlock(ptr, len) != 0 {
-                        let errno = *libc::__errno_location();
-                        panic!(
-                            "mlock failed: errno {errno} (len={len}). \
-                             Check RLIMIT_MEMLOCK (ulimit -l) and CAP_IPC_LOCK."
-                        );
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        // MADV_DONTDUMP is defense-in-depth (exclude from core dumps).
-                        // It can fail on non-page-aligned heap allocations — log but
-                        // do not abort, since LimitCORE=0 is the primary control.
-                        if libc::madvise(ptr.cast_mut(), len, libc::MADV_DONTDUMP) != 0 {
-                            // Cannot use tracing here (may not be initialized).
-                            // Silent — mlock is the critical control, MADV_DONTDUMP is bonus.
-                        }
-                    }
-                }
-            }
+    /// The data is copied into a page-aligned protected allocation and the
+    /// source `Vec` is zeroized. Callers do not need to manually zeroize
+    /// the source after this call.
+    ///
+    /// Empty data is permitted and produces a valid `SecureBytes` with
+    /// `len() == 0` and `is_empty() == true`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `mlock` fails (check `ulimit -l` and `CAP_IPC_LOCK`)
+    /// - `mmap` or `mprotect` fails (out of address space or VMA limit)
+    pub fn new(mut data: Vec<u8>) -> Self {
+        let actual_len = data.len();
+        // ProtectedAlloc requires non-zero size. For empty data, use a
+        // 1-byte sentinel that is never exposed through the public API.
+        let alloc = ProtectedAlloc::from_slice_or_sentinel(&data)
+            .unwrap_or_else(|e| panic!("SecureBytes allocation failed: {e}"));
+        // Zeroize the source Vec — it was on the unprotected heap.
+        data.zeroize();
+        SecureBytes {
+            inner: alloc,
+            actual_len,
         }
-        sb
+    }
+
+    /// Create a `SecureBytes` directly from a byte slice.
+    ///
+    /// The caller retains ownership of the source slice and is responsible
+    /// for zeroizing it if it contains secret material.
+    ///
+    /// # Panics
+    ///
+    /// Same as [`SecureBytes::new`].
+    pub fn from_slice(data: &[u8]) -> Self {
+        let actual_len = data.len();
+        let alloc_data: &[u8] = if data.is_empty() { &[0u8] } else { data };
+        let alloc = ProtectedAlloc::from_slice(alloc_data)
+            .unwrap_or_else(|e| panic!("SecureBytes allocation failed: {e}"));
+        SecureBytes {
+            inner: alloc,
+            actual_len,
+        }
     }
 
     /// View the secret bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.inner
+        // Return only actual_len bytes, not the sentinel byte for empty case.
+        &self.inner.as_bytes()[..self.actual_len]
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.actual_len
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.actual_len == 0
     }
 
-    /// Consume the `SecureBytes` and return the inner `Vec<u8>`.
+    /// Consume the `SecureBytes` and return the inner data as a `Vec<u8>`.
     ///
-    /// The caller takes ownership of the raw bytes and is responsible for
-    /// zeroizing them. This avoids creating a temporary unprotected copy
-    /// when transferring key material to another zeroizing container.
+    /// The data is copied OUT of the protected allocation into a normal
+    /// heap `Vec<u8>`. The caller takes ownership and is responsible for
+    /// zeroizing it. The `ProtectedAlloc` is dropped (zeroed + munmap'd).
+    ///
+    /// This method exists to bridge between `SecureBytes` (protected memory)
+    /// and `SensitiveBytes` (IPC wire type backed by `Vec<u8>`).
     #[must_use]
-    pub fn into_vec(mut self) -> Vec<u8> {
-        // Take the inner Vec, replacing it with an empty Vec so that
-        // Drop::drop (which calls zeroize) operates on the empty Vec
-        // rather than double-zeroing the data the caller now owns.
-        std::mem::take(&mut self.inner)
+    pub fn into_vec(self) -> Vec<u8> {
+        // Copy out only actual_len bytes before ProtectedAlloc::drop zeroes the source.
+        self.as_bytes().to_vec()
+        // `self` is dropped here → ProtectedAlloc::drop runs → zeroes + munmap.
+    }
+}
+
+impl Clone for SecureBytes {
+    /// Clone creates a new independent `ProtectedAlloc` with its own
+    /// guard pages, mlock, and canary. Both original and clone independently
+    /// zeroize on drop.
+    fn clone(&self) -> Self {
+        Self::from_slice(self.as_bytes())
     }
 }
 
 impl Drop for SecureBytes {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        let original_len = self.inner.len();
-        #[cfg(unix)]
-        let original_ptr = self.inner.as_ptr();
-
-        // Zero the memory before releasing.
-        // zeroize() overwrites all bytes with 0x00 then sets len to 0.
-        self.inner.zeroize();
-
-        #[cfg(unix)]
-        {
-            // SAFETY: munlock the previously mlock'd region using the
-            // pointer and length captured BEFORE zeroize cleared them.
-            // The Vec's backing allocation is still alive (we're in Drop,
-            // before dealloc), even though its logical length is now 0.
-            if original_len > 0 {
-                unsafe {
-                    libc::munlock(original_ptr.cast::<libc::c_void>(), original_len);
-                }
-            }
-        }
-    }
-}
-
-impl Clone for SecureBytes {
-    /// Clone allocates a new `Vec`, copies bytes, and applies `mlock` +
-    /// `MADV_DONTDUMP` to the new allocation. Both the original and clone
-    /// independently zeroize + munlock on drop.
-    fn clone(&self) -> Self {
-        Self::new(self.inner.clone())
+        // ProtectedAlloc::drop handles:
+        // 1. Canary verification (abort on corruption)
+        // 2. Volatile zero of entire data region
+        // 3. munlock
+        // 4. munmap
+        //
+        // Nothing additional needed here — the ProtectedAlloc field is
+        // dropped automatically and performs all cleanup.
     }
 }
 
 impl std::fmt::Debug for SecureBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SecureBytes([REDACTED; {} bytes])", self.inner.len())
+        write!(f, "SecureBytes([REDACTED; {} bytes])", self.actual_len)
+    }
+}
+
+impl AsRef<[u8]> for SecureBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
     }
 }
 
@@ -143,9 +168,71 @@ mod tests {
     }
 
     #[test]
-    fn empty_secure_bytes() {
+    fn into_vec_returns_data() {
+        let data = vec![10, 20, 30];
+        let sb = SecureBytes::new(data.clone());
+        let v = sb.into_vec();
+        assert_eq!(v, data);
+    }
+
+    #[test]
+    fn clone_is_independent() {
+        let sb1 = SecureBytes::new(vec![1, 2, 3]);
+        let sb2 = sb1.clone();
+        assert_eq!(sb1.as_bytes(), sb2.as_bytes());
+        // Both can be dropped independently.
+        drop(sb1);
+        assert_eq!(sb2.as_bytes(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn from_slice_works() {
+        let data = [42u8; 32];
+        let sb = SecureBytes::from_slice(&data);
+        assert_eq!(sb.as_bytes(), &data);
+    }
+
+    #[test]
+    fn len_and_is_empty() {
+        let sb = SecureBytes::new(vec![1, 2, 3]);
+        assert_eq!(sb.len(), 3);
+        assert!(!sb.is_empty());
+    }
+
+    #[test]
+    fn empty_is_valid() {
         let sb = SecureBytes::new(Vec::new());
         assert!(sb.is_empty());
         assert_eq!(sb.len(), 0);
+        assert_eq!(sb.as_bytes(), &[]);
+    }
+
+    #[test]
+    fn empty_into_vec() {
+        let sb = SecureBytes::new(Vec::new());
+        let v = sb.into_vec();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn empty_clone() {
+        let sb1 = SecureBytes::new(Vec::new());
+        let sb2 = sb1.clone();
+        assert!(sb2.is_empty());
+        assert_eq!(sb2.as_bytes(), &[]);
+    }
+
+    #[test]
+    fn empty_from_slice() {
+        let sb = SecureBytes::from_slice(&[]);
+        assert!(sb.is_empty());
+        assert_eq!(sb.len(), 0);
+    }
+
+    #[test]
+    fn empty_debug() {
+        let sb = SecureBytes::new(Vec::new());
+        let debug = format!("{sb:?}");
+        assert!(debug.contains("0 bytes"));
     }
 }

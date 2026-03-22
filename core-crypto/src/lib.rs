@@ -1,13 +1,11 @@
 //! Cryptographic primitives for PDS.
 //!
-//! Provides AES-256-GCM encryption, Argon2id key derivation, and SecureBytes
-//! (mlock + zeroize + MADV_DONTDUMP).
+//! Provides AES-256-GCM encryption, Argon2id key derivation, `SecureBytes`
+//! and `SecureVec` — all backed by page-aligned guard-page-protected memory
+//! via `core_memory::ProtectedAlloc`.
 //!
-//! # Safety
-//!
-//! This crate uses `unsafe` for `mlock`/`munlock`/`madvise` syscalls on Unix
-//! to prevent secret memory pages from being swapped to disk or included in
-//! core dumps. All unsafe blocks are documented inline with justification.
+//! This crate contains no `unsafe` code. All memory protection (mmap, mlock,
+//! mprotect, guard pages, canary, volatile zeroize) is delegated to `core-memory`.
 
 mod encryption;
 pub mod hkdf;

@@ -1,102 +1,160 @@
-//! Growable byte buffer with mlock, MADV_DONTDUMP, and zeroize-on-drop.
+//! Password input buffer backed by page-aligned, guard-page-protected memory.
 //!
 //! Designed for collecting password input character-by-character in a
 //! graphical overlay where the full password is not known in advance.
 //! Provides UTF-8 aware push/pop for correct multi-byte character handling.
+//!
+//! Backed by [`core_memory::ProtectedAlloc`] for the same memory protection
+//! guarantees as [`SecureBytes`]: guard pages, mlock, canary, volatile zeroize.
 
-use zeroize::Zeroize;
+use core_memory::ProtectedAlloc;
 
-/// A growable byte buffer that is:
-/// - `mlock`'d to prevent swapping to disk (Unix)
-/// - `MADV_DONTDUMP` to exclude from core dumps (Linux)
-/// - Zeroed on drop via `zeroize`
-/// - Redacted in `Debug` output
-/// - UTF-8 aware for character-level push/pop operations
+/// Maximum password buffer size in bytes (UTF-8 encoded).
+/// 512 bytes accommodates passwords up to ~128 4-byte Unicode characters.
+const MAX_PASSWORD_BYTES: usize = 512;
+
+/// A password input buffer backed by page-aligned, mlock'd, guard-page-protected memory.
+///
+/// - Pre-allocates a fixed-size buffer via `ProtectedAlloc` (no reallocation)
+/// - Guard pages before and after (SIGSEGV on overflow)
+/// - `mlock(2)` prevents swap exposure
+/// - Canary verified on drop (detects corruption)
+/// - Volatile zeroize of all pages before `munmap(2)`
+/// - UTF-8 aware push/pop for correct multi-byte handling
+/// - Redacted Debug output
+///
+/// `SecureVec::new()` creates an empty instance with no allocation.
+/// `SecureVec::for_password()` allocates 512 bytes of protected memory.
 pub struct SecureVec {
-    inner: Vec<u8>,
-    locked: bool,
+    /// Page-aligned protected backing memory. `None` for empty instances
+    /// created via `new()` or `default()`. Allocated on `for_password()`
+    /// or `with_capacity()`.
+    inner: Option<ProtectedAlloc>,
+    /// Current write position (byte offset into the data region).
+    cursor: usize,
 }
 
 impl SecureVec {
-    /// Create a new empty `SecureVec`.
+    /// Create a new empty `SecureVec` with no allocation.
+    ///
+    /// No mmap, no mlock, no memory overhead. Call `for_password()` to
+    /// allocate protected memory for password collection.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: Vec::new(),
-            locked: false,
+        SecureVec {
+            inner: None,
+            cursor: 0,
         }
     }
 
-    /// Maximum password buffer size in bytes (UTF-8 encoded).
-    const MAX_PASSWORD_BYTES: usize = 512;
-
     /// Create a pre-allocated `SecureVec` for password collection.
     ///
-    /// Pre-allocates and locks the full buffer so reallocation never occurs.
+    /// Allocates 512 bytes in page-aligned, mlock'd, guard-page-protected
+    /// memory. No reallocation ever occurs — push_char panics if the buffer
+    /// is full.
+    ///
+    /// # Panics
+    ///
+    /// Panics if mlock or mmap fails.
     #[must_use]
     pub fn for_password() -> Self {
-        let mut sv = Self {
-            inner: Vec::with_capacity(Self::MAX_PASSWORD_BYTES),
-            locked: false,
-        };
-        sv.lock_current_allocation();
-        sv
+        let alloc = ProtectedAlloc::new(MAX_PASSWORD_BYTES)
+            .unwrap_or_else(|e| panic!("SecureVec::for_password allocation failed: {e}"));
+        SecureVec {
+            inner: Some(alloc),
+            cursor: 0,
+        }
     }
 
-    /// Create a new `SecureVec` with pre-allocated capacity.
+    /// Create a new `SecureVec` with specified capacity.
     ///
-    /// The allocated region is immediately `mlock`'d and marked
-    /// `MADV_DONTDUMP` so even unused capacity pages are protected.
+    /// # Panics
+    ///
+    /// Panics if mlock or mmap fails, or if `cap` is 0.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        let mut sv = Self {
-            inner: Vec::with_capacity(cap),
-            locked: false,
-        };
-        sv.lock_current_allocation();
-        sv
+        assert!(
+            cap > 0,
+            "SecureVec::with_capacity requires non-zero capacity"
+        );
+        let alloc = ProtectedAlloc::new(cap)
+            .unwrap_or_else(|e| panic!("SecureVec::with_capacity allocation failed: {e}"));
+        SecureVec {
+            inner: Some(alloc),
+            cursor: 0,
+        }
+    }
+
+    /// Returns a mutable reference to the backing allocation, panicking if
+    /// no allocation exists (i.e., created via `new()` without `for_password()`).
+    fn alloc_mut(&mut self) -> &mut ProtectedAlloc {
+        self.inner
+            .as_mut()
+            .expect("SecureVec has no allocation — call for_password() or with_capacity() first")
+    }
+
+    /// Returns a reference to the backing allocation, or None.
+    fn alloc(&self) -> Option<&ProtectedAlloc> {
+        self.inner.as_ref()
+    }
+
+    /// Capacity of the backing allocation in bytes, or 0 if unallocated.
+    fn capacity(&self) -> usize {
+        self.alloc().map_or(0, |a| a.len())
     }
 
     /// Append a Unicode character encoded as UTF-8 bytes.
     ///
+    /// # Panics
+    ///
     /// Panics if the character would cause the buffer to exceed its
-    /// pre-allocated capacity, preventing reallocation.
+    /// pre-allocated capacity, or if no allocation exists.
     pub fn push_char(&mut self, ch: char) {
         let mut buf = [0u8; 4];
         let encoded = ch.encode_utf8(&mut buf);
+        let encoded_bytes = encoded.as_bytes();
+        let cap = self.capacity();
+        let cur = self.cursor;
         assert!(
-            self.inner.len() + encoded.len() <= self.inner.capacity(),
-            "password buffer full"
+            cur + encoded_bytes.len() <= cap,
+            "password buffer full ({cur} + {} > {cap})",
+            encoded_bytes.len(),
         );
-        self.inner.extend_from_slice(encoded.as_bytes());
+        self.alloc_mut().as_bytes_mut()[cur..cur + encoded_bytes.len()]
+            .copy_from_slice(encoded_bytes);
+        self.cursor += encoded_bytes.len();
     }
 
     /// Remove the last Unicode character, returning it.
     ///
     /// Handles multi-byte UTF-8 correctly by scanning backwards to find
-    /// the start of the last character. The removed bytes are zeroized.
+    /// the start of the last character. The removed bytes are zeroized
+    /// in the protected allocation.
     pub fn pop_char(&mut self) -> Option<char> {
-        if self.inner.is_empty() {
+        if self.cursor == 0 {
             return None;
         }
 
+        let cur = self.cursor;
+        let alloc = self.alloc_mut();
+        let data = &alloc.as_bytes()[..cur];
+
         // Find the start of the last UTF-8 character by scanning backwards.
-        // UTF-8 continuation bytes have the pattern 10xxxxxx (0x80..0xBF).
-        let mut start = self.inner.len() - 1;
-        while start > 0 && (self.inner[start] & 0xC0) == 0x80 {
+        let mut start = cur - 1;
+        while start > 0 && (data[start] & 0xC0) == 0x80 {
             start -= 1;
         }
 
-        // Decode the character from the found position.
-        let ch = std::str::from_utf8(&self.inner[start..])
+        // Decode the character.
+        let ch = std::str::from_utf8(&data[start..cur])
             .ok()
             .and_then(|s| s.chars().next());
 
-        // Zeroize the bytes being removed before truncating.
-        for byte in &mut self.inner[start..] {
+        // Zeroize the removed bytes in the protected allocation.
+        for byte in &mut alloc.as_bytes_mut()[start..cur] {
             *byte = 0;
         }
-        self.inner.truncate(start);
+        self.cursor = start;
 
         ch
     }
@@ -104,100 +162,69 @@ impl SecureVec {
     /// Number of Unicode characters (not bytes).
     #[must_use]
     pub fn char_count(&self) -> usize {
-        // Count UTF-8 start bytes: any byte that is NOT a continuation byte (10xxxxxx).
-        self.inner.iter().filter(|b| (**b & 0xC0) != 0x80).count()
+        match self.alloc() {
+            Some(alloc) => alloc.as_bytes()[..self.cursor]
+                .iter()
+                .filter(|b| (**b & 0xC0) != 0x80)
+                .count(),
+            None => 0,
+        }
     }
 
     /// Byte length of the buffer contents.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.cursor
     }
 
     /// Returns true if the buffer contains no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.cursor == 0
     }
 
     /// View the buffer contents as a byte slice.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.inner
+        match self.alloc() {
+            Some(alloc) => &alloc.as_bytes()[..self.cursor],
+            None => &[],
+        }
     }
 
-    /// Consume the buffer contents, returning the raw bytes.
+    /// Extract the buffer contents as a `Vec<u8>`, zeroize the protected
+    /// region, and reset the cursor.
     ///
-    /// The caller is responsible for zeroizing the returned `Vec<u8>`.
-    /// The internal buffer is zeroized and reset to empty.
+    /// The caller receives a heap `Vec<u8>` and is responsible for zeroizing
+    /// it after use (e.g., passing to Argon2id which zeroizes its input).
     pub fn take(&mut self) -> Vec<u8> {
-        let taken = std::mem::take(&mut self.inner);
-        // The old Vec is now empty (std::mem::take replaced it with Vec::new()).
-        // The taken Vec retains the original allocation — caller must zeroize.
-        // We do NOT munlock here because the allocation moved to `taken`.
-        // When the caller drops/zeroizes `taken`, the memory is freed normally.
-        // We mark ourselves as unlocked since we no longer own that allocation.
-        self.locked = false;
-        taken
+        if self.cursor == 0 {
+            return Vec::new();
+        }
+        let cur = self.cursor;
+        let alloc = self.alloc_mut();
+        let data = alloc.as_bytes()[..cur].to_vec();
+        // Zeroize the protected region.
+        for byte in &mut alloc.as_bytes_mut()[..cur] {
+            *byte = 0;
+        }
+        self.cursor = 0;
+        data
     }
 
-    /// Zeroize all bytes and reset length to zero.
+    /// Zeroize all bytes and reset the cursor to zero.
     ///
-    /// Does NOT deallocate or munlock — the buffer can be reused for the
-    /// next password entry (e.g., multi-profile sequential unlock).
+    /// Does NOT deallocate — the buffer can be reused for the next password
+    /// entry (e.g., multi-profile sequential unlock).
     pub fn clear(&mut self) {
-        self.inner.zeroize();
-        // Note: zeroize on Vec<u8> fills with zeros AND sets len to 0,
-        // but capacity and allocation remain. This is what we want.
-    }
-
-    /// Apply `mlock` and `MADV_DONTDUMP` to the current backing allocation.
-    fn lock_current_allocation(&mut self) {
-        #[cfg(unix)]
+        if self.cursor > 0
+            && let Some(alloc) = self.inner.as_mut()
         {
-            let cap = self.inner.capacity();
-            if cap == 0 {
-                return;
-            }
-            let ptr = self.inner.as_ptr().cast::<libc::c_void>();
-
-            // SAFETY: mlock operates on the Vec's backing allocation.
-            // The pointer is valid and the capacity represents the allocated size.
-            // mlock prevents the OS from swapping these pages to disk.
-            unsafe {
-                if libc::mlock(ptr, cap) != 0 {
-                    let errno = *libc::__errno_location();
-                    panic!(
-                        "mlock failed: errno {errno} (cap={cap}). \
-                         Check RLIMIT_MEMLOCK (ulimit -l) and CAP_IPC_LOCK."
-                    );
-                }
-                self.locked = true;
-                #[cfg(target_os = "linux")]
-                {
-                    // MADV_DONTDUMP is defense-in-depth (exclude from core dumps).
-                    // Can fail on non-page-aligned heap allocations — not fatal.
-                    let _ = libc::madvise(ptr.cast_mut(), cap, libc::MADV_DONTDUMP);
-                }
+            for byte in &mut alloc.as_bytes_mut()[..self.cursor] {
+                *byte = 0;
             }
         }
-    }
-
-    /// Unlock the current backing allocation via `munlock`.
-    fn unlock_current_allocation(&mut self) {
-        #[cfg(unix)]
-        if self.locked {
-            let cap = self.inner.capacity();
-            if cap > 0 {
-                let ptr = self.inner.as_ptr().cast::<libc::c_void>();
-                // SAFETY: munlock on the same region previously mlock'd.
-                // The Vec's backing allocation is still alive (we're about to drop it).
-                unsafe {
-                    libc::munlock(ptr, cap);
-                }
-            }
-            self.locked = false;
-        }
+        self.cursor = 0;
     }
 }
 
@@ -209,22 +236,16 @@ impl Default for SecureVec {
 
 impl Drop for SecureVec {
     fn drop(&mut self) {
-        // Zeroize all allocated capacity (not just len).
-        // zeroize() on Vec<u8> overwrites bytes and sets len to 0, but the
-        // allocation remains until Vec itself is dropped.
-        let cap = self.inner.capacity();
-        if cap > 0 {
-            // Fill entire capacity with zeros, not just the logical length.
-            // SAFETY: the Vec's allocation is `cap` bytes. We temporarily set
-            // the length to capacity, zeroize, then let Drop free the allocation.
-            // This is safe because all byte patterns are valid for u8.
-            unsafe {
-                self.inner.set_len(cap);
+        // Zeroize any data in the buffer before ProtectedAlloc::drop
+        // performs its own volatile zero + canary check + munmap.
+        if self.cursor > 0
+            && let Some(alloc) = self.inner.as_mut()
+        {
+            for byte in &mut alloc.as_bytes_mut()[..self.cursor] {
+                *byte = 0;
             }
-            self.inner.zeroize();
         }
-
-        self.unlock_current_allocation();
+        // ProtectedAlloc::drop handles the rest (if inner is Some).
     }
 }
 
@@ -249,6 +270,13 @@ mod tests {
         assert!(sv.is_empty());
         assert_eq!(sv.len(), 0);
         assert_eq!(sv.char_count(), 0);
+        assert_eq!(sv.as_bytes(), &[]);
+    }
+
+    #[test]
+    fn new_has_no_allocation() {
+        let sv = SecureVec::new();
+        assert!(sv.inner.is_none());
     }
 
     #[test]
@@ -256,7 +284,7 @@ mod tests {
         let sv = SecureVec::with_capacity(128);
         assert!(sv.is_empty());
         assert_eq!(sv.len(), 0);
-        assert!(sv.inner.capacity() >= 128);
+        assert!(sv.inner.is_some());
     }
 
     #[test]
@@ -280,22 +308,18 @@ mod tests {
     #[test]
     fn push_pop_multibyte_utf8() {
         let mut sv = SecureVec::for_password();
-        // 2-byte: e with acute (U+00E9)
         sv.push_char('\u{00E9}');
         assert_eq!(sv.len(), 2);
         assert_eq!(sv.char_count(), 1);
 
-        // 3-byte: CJK character (U+4E16 = 世)
         sv.push_char('\u{4E16}');
         assert_eq!(sv.len(), 5);
         assert_eq!(sv.char_count(), 2);
 
-        // 4-byte: emoji (U+1F512 = 🔒)
         sv.push_char('\u{1F512}');
         assert_eq!(sv.len(), 9);
         assert_eq!(sv.char_count(), 3);
 
-        // Pop in reverse order
         assert_eq!(sv.pop_char(), Some('\u{1F512}'));
         assert_eq!(sv.len(), 5);
         assert_eq!(sv.char_count(), 2);
@@ -330,8 +354,6 @@ mod tests {
         assert!(sv.is_empty());
         assert_eq!(sv.len(), 0);
         assert_eq!(sv.char_count(), 0);
-        // Capacity still allocated (reusable).
-        assert!(sv.inner.capacity() > 0);
     }
 
     #[test]
@@ -345,6 +367,13 @@ mod tests {
         assert_eq!(taken, b"abc");
         assert!(sv.is_empty());
         assert_eq!(sv.len(), 0);
+    }
+
+    #[test]
+    fn take_empty_returns_empty_vec() {
+        let mut sv = SecureVec::new();
+        let taken = sv.take();
+        assert!(taken.is_empty());
     }
 
     #[test]
@@ -370,7 +399,6 @@ mod tests {
         assert_eq!(sv.char_count(), 17);
         assert_eq!(sv.as_bytes(), b"P@ssw0rd!#$%^&*()");
 
-        // Pop all and verify round-trip
         let mut popped = Vec::new();
         while let Some(ch) = sv.pop_char() {
             popped.push(ch);
@@ -388,7 +416,6 @@ mod tests {
         sv.push_char('b');
         sv.push_char('世');
         assert_eq!(sv.char_count(), 4);
-        // a=1, 🔑=4, b=1, 世=3 => 9 bytes
         assert_eq!(sv.len(), 9);
 
         assert_eq!(sv.pop_char(), Some('世'));
@@ -402,6 +429,7 @@ mod tests {
     fn default_is_new() {
         let sv = SecureVec::default();
         assert!(sv.is_empty());
+        assert!(sv.inner.is_none());
     }
 
     #[test]
@@ -411,12 +439,7 @@ mod tests {
         sv.push_char('y');
         sv.push_char('z');
 
-        // After popping 'z', the byte at position 2 should be zeroed.
         sv.pop_char();
-        // inner.len() is now 2, but the byte at index 2 in the allocation
-        // should have been zeroized by pop_char before truncation.
-        // We can't directly test this without unsafe, but we verify the
-        // visible state is correct.
         assert_eq!(sv.as_bytes(), b"xy");
     }
 
