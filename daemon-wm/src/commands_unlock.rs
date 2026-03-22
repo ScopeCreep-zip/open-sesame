@@ -52,7 +52,10 @@ pub(crate) async fn attempt_auto_unlock(
                         .cloned()
                         .unwrap_or_default();
                     let event = core_types::EventKind::SshUnlockRequest {
-                        master_key: core_types::SensitiveBytes::new(outcome.master_key.into_vec()),
+                        master_key: {
+                            let (alloc, len) = outcome.master_key.into_protected_alloc();
+                            core_types::SensitiveBytes::from_protected(alloc, len)
+                        },
                         profile: profile.clone(),
                         ssh_fingerprint: fp.clone(),
                     };
@@ -172,9 +175,7 @@ pub(crate) async fn submit_password_unlock(
         tracing::error!("overlay thread has exited unexpectedly");
     }
 
-    let password_bytes = password_buffer.take();
-
-    if password_bytes.is_empty() {
+    if password_buffer.is_empty() {
         tracing::warn!(%profile, "empty password buffer on submit");
         let win_list = windows.lock().await;
         let cfg = wm_config.lock().await;
@@ -206,11 +207,14 @@ pub(crate) async fn submit_password_unlock(
         return;
     }
 
-    // SensitiveBytes wraps the password and zeroizes on drop.
+    // Copy password directly from protected SecureVec into SensitiveBytes.
+    // from_slice reads from mlock'd ProtectedAlloc and copies into a new
+    // ProtectedAlloc — no heap exposure. SecureVec is cleared afterward.
     let unlock_event = EventKind::UnlockRequest {
-        password: core_types::SensitiveBytes::new(password_bytes),
+        password: core_types::SensitiveBytes::from_slice(password_buffer.as_bytes()),
         profile: Some(profile.clone()),
     };
+    password_buffer.clear();
 
     // 30s timeout accommodates Argon2id KDF with high memory parameters.
     let result = client

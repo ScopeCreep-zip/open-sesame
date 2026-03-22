@@ -103,13 +103,36 @@ impl SecureBytes {
     /// heap `Vec<u8>`. The caller takes ownership and is responsible for
     /// zeroizing it. The `ProtectedAlloc` is dropped (zeroed + munmap'd).
     ///
-    /// This method exists to bridge between `SecureBytes` (protected memory)
-    /// and `SensitiveBytes` (IPC wire type backed by `Vec<u8>`).
+    /// Prefer `into_protected_alloc()` when the destination also uses
+    /// `ProtectedAlloc` (e.g., `SensitiveBytes::from_protected()`) to
+    /// avoid exposing secrets on the unprotected heap.
     #[must_use]
     pub fn into_vec(self) -> Vec<u8> {
         // Copy out only actual_len bytes before ProtectedAlloc::drop zeroes the source.
         self.as_bytes().to_vec()
         // `self` is dropped here → ProtectedAlloc::drop runs → zeroes + munmap.
+    }
+
+    /// Consume the `SecureBytes` and return the inner `ProtectedAlloc` and
+    /// actual length. Zero-copy transfer — the `ProtectedAlloc` moves to
+    /// the caller with no heap exposure.
+    ///
+    /// Used by `SensitiveBytes::from_protected()` to transfer key material
+    /// between type wrappers without leaving copies on the heap.
+    #[must_use]
+    pub fn into_protected_alloc(self) -> (ProtectedAlloc, usize) {
+        let actual_len = self.actual_len;
+        // Prevent Drop from running — we're transferring ownership.
+        let inner = {
+            let me = std::mem::ManuallyDrop::new(self);
+            // SAFETY: We're moving the ProtectedAlloc out of the ManuallyDrop.
+            // The ManuallyDrop ensures SecureBytes::drop doesn't run (which
+            // would be a no-op anyway since ProtectedAlloc::drop does the work).
+            // We must ensure the ProtectedAlloc is either dropped by the new
+            // owner or consumed — it is, because we return it.
+            unsafe { std::ptr::read(&me.inner) }
+        };
+        (inner, actual_len)
     }
 }
 

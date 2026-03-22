@@ -19,7 +19,10 @@ async fn submit_factor(
 ) -> anyhow::Result<bool> {
     let event = EventKind::FactorSubmit {
         factor_id,
-        key_material: SensitiveBytes::new(outcome.master_key.into_vec()),
+        key_material: {
+            let (alloc, len) = outcome.master_key.into_protected_alloc();
+            SensitiveBytes::from_protected(alloc, len)
+        },
         profile: profile.clone(),
         audit_metadata: outcome.audit_metadata,
     };

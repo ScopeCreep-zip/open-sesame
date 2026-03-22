@@ -45,6 +45,39 @@ impl SensitiveBytes {
         }
     }
 
+    /// Create a `SensitiveBytes` from a byte slice.
+    ///
+    /// Copies directly into protected memory. No intermediate heap allocation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if mlock or mmap fails.
+    #[must_use]
+    pub fn from_slice(data: &[u8]) -> Self {
+        let actual_len = data.len();
+        let alloc = ProtectedAlloc::from_slice_or_sentinel(data)
+            .unwrap_or_else(|e| panic!("SensitiveBytes allocation failed: {e}"));
+        SensitiveBytes {
+            inner: alloc,
+            actual_len,
+        }
+    }
+
+    /// Create a `SensitiveBytes` by taking ownership of a `ProtectedAlloc`.
+    ///
+    /// Zero-copy transfer from `SecureBytes` — no heap exposure. Use via:
+    /// ```ignore
+    /// let (alloc, len) = secure_bytes.into_protected_alloc();
+    /// let sensitive = SensitiveBytes::from_protected(alloc, len);
+    /// ```
+    #[must_use]
+    pub fn from_protected(alloc: ProtectedAlloc, actual_len: usize) -> Self {
+        SensitiveBytes {
+            inner: alloc,
+            actual_len,
+        }
+    }
+
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.inner.as_bytes()[..self.actual_len]

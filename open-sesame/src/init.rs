@@ -755,7 +755,10 @@ async fn init_vault(
 
         // Send unlock key to daemon-secrets to create/open the vault.
         let event = EventKind::SshUnlockRequest {
-            master_key: SensitiveBytes::new(unlock_key.into_vec()),
+            master_key: {
+                let (alloc, len) = unlock_key.into_protected_alloc();
+                SensitiveBytes::from_protected(alloc, len)
+            },
             profile: profile.clone(),
             ssh_fingerprint: "direct-init".to_string(),
         };
