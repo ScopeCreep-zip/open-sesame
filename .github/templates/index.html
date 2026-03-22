@@ -1,20 +1,28 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Open Sesame - Vimium-style Window Switcher</title>
+  <title>Open Sesame - Alt+Tab Replacement, Launcher & Secret Manager for Linux</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
-    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; border-radius: 4px; }
-    code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 2px; }
-    h1 { color: #333; }
-    .nav { display: flex; gap: 1rem; margin: 2rem 0; flex-wrap: wrap; }
-    .nav a { display: inline-block; padding: 0.75rem 1.5rem; background: #0066cc; color: white; text-decoration: none; border-radius: 4px; }
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #222; }
+    pre { background: #1e1e2e; color: #cdd6f4; padding: 1rem; overflow-x: auto; border-radius: 6px; }
+    code { background: #f0f0f0; padding: 0.2rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    h1 { color: #333; margin-bottom: 0.25rem; }
+    h1 + p { color: #666; font-size: 1.1rem; margin-top: 0; }
+    h2 { margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+    .nav { display: flex; gap: 0.75rem; margin: 1.5rem 0; flex-wrap: wrap; }
+    .nav a { display: inline-block; padding: 0.6rem 1.2rem; background: #0066cc; color: white; text-decoration: none; border-radius: 4px; font-size: 0.95rem; }
     .nav a:hover { background: #0055aa; }
+    .packages { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+    .packages div { background: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 6px; padding: 1rem; }
+    .packages div h3 { margin: 0 0 0.5rem 0; font-size: 1rem; }
+    .packages div p { margin: 0; font-size: 0.9rem; color: #555; }
+    .packages div code { font-size: 0.85em; }
+    @media (max-width: 600px) { .packages { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <h1>Open Sesame</h1>
-  <p>Vimium-style window switcher for COSMIC desktop. Type a letter to instantly switch to any window.</p>
+  <p>An Alt+Tab replacement, application launcher, and secret manager for Linux.</p>
 
   <div class="nav">
     <a href="book/">📖 User Guide</a>
@@ -22,31 +30,52 @@
     <a href="https://github.com/ScopeCreep-zip/open-sesame">🔗 GitHub</a>
   </div>
 
-  <h2>Quick Install (Pop!_OS 24.04+)</h2>
-  <pre>
-# Add GPG key
-curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/open-sesame.gpg
+  <h2>Install</h2>
 
-# Add repository
-echo "deb [signed-by=/etc/apt/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list
+  <div class="packages">
+    <div>
+      <h3><code>open-sesame</code></h3>
+      <p>Headless core: encrypted vaults, profiles, app launcher, snippets. Runs on desktops, servers, containers, VMs.</p>
+    </div>
+    <div>
+      <h3><code>open-sesame-desktop</code></h3>
+      <p>Desktop layer: window switcher, clipboard, keyboard capture. Requires COSMIC/Wayland. Depends on <code>open-sesame</code>.</p>
+    </div>
+  </div>
 
-# Install
-sudo apt update && sudo apt install open-sesame
+  <p>Add the APT repository:</p>
+  <pre>curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg</pre>
+  <pre>echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list</pre>
 
-# Setup keybinding
-sesame --setup-keybinding
-  </pre>
+  <p>Desktop (full suite):</p>
+  <pre>sudo apt update && sudo apt install -y open-sesame open-sesame-desktop</pre>
+
+  <p>Headless only (servers, containers):</p>
+  <pre>sudo apt update && sudo apt install -y open-sesame</pre>
+
+  <p>Initialize:</p>
+  <pre>sesame init</pre>
+
+  <h2>What You Get</h2>
+  <ul>
+    <li><strong>Alt+Tab</strong> — Window switcher with letter hints (MRU forward/backward)</li>
+    <li><strong>Alt+Space</strong> — Launcher overlay with fuzzy search and focus-or-launch</li>
+    <li><strong>Encrypted vaults</strong> — Per-profile secrets with password and SSH agent unlock</li>
+    <li><strong>Environment injection</strong> — <code>sesame env -p work -- aws s3 ls</code></li>
+    <li><strong>Clipboard history</strong> — Per-profile with sensitivity detection</li>
+    <li><strong>Workspaces</strong> — Canonical paths, git-aware cloning, shell injection</li>
+  </ul>
 
   <h2>Documentation</h2>
   <ul>
-    <li><a href="book/">User Guide</a> - Installation, configuration, and usage</li>
-    <li><a href="doc/open_sesame/">API Documentation</a> - Library API reference for developers</li>
+    <li><a href="book/">User Guide</a> — Installation, configuration, keybindings, theming</li>
+    <li><a href="doc/open_sesame/">API Documentation</a> — Library reference for developers</li>
+    <li><a href="https://github.com/ScopeCreep-zip/open-sesame">GitHub</a> — Source code, issues, releases</li>
   </ul>
 
-  <h2>Verify Package Signature</h2>
-  <pre>
-# Verify with GitHub Attestations
-gh attestation verify open-sesame_*.deb --owner ScopeCreep-zip
-  </pre>
+  <h2>Verify Packages</h2>
+  <p>All <code>.deb</code> packages include <a href="https://slsa.dev/">SLSA Build Provenance</a> attestations:</p>
+  <pre>gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip</pre>
+  <pre>gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip</pre>
 </body>
 </html>
