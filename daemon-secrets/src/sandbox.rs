@@ -174,6 +174,7 @@ pub(crate) fn apply_sandbox() {
             "exit_group".into(),
             "exit".into(),
             "getrandom".into(),
+            "memfd_secret".into(),
             "restart_syscall".into(),
             "pipe2".into(),
             "dup".into(),

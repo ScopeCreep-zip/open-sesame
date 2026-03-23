@@ -23,3 +23,9 @@ pub use hkdf::{
 pub use kdf::{derive_key_argon2, derive_key_kdf, derive_key_pbkdf2};
 pub use secure_bytes::SecureBytes;
 pub use secure_vec::SecureVec;
+
+/// Initialize the secure memory subsystem. Must be called before seccomp
+/// sandbox is applied. See [`core_memory::init`] for details.
+pub fn init_secure_memory() {
+    core_memory::init();
+}

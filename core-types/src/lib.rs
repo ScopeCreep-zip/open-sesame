@@ -34,6 +34,17 @@ pub use security::*;
 pub use sensitive::*;
 pub use window::*;
 
+/// Initialize the secure memory subsystem. Must be called before seccomp
+/// sandbox is applied in every daemon process.
+///
+/// Probes for `memfd_secret(2)` support and caches the result. If seccomp
+/// is active when the first `ProtectedAlloc` is created, the probe syscall
+/// (447) would be blocked and kill the thread. Calling this function early
+/// ensures the probe happens before sandbox setup.
+pub fn init_secure_memory() {
+    core_memory::init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +425,41 @@ mod tests {
             sb_encoded, vec_encoded,
             "SensitiveBytes and Vec<u8> must produce identical postcard encoding"
         );
+    }
+
+    #[test]
+    fn sensitive_bytes_from_slice() {
+        let sb = SensitiveBytes::from_slice(b"from-slice-test");
+        assert_eq!(sb.as_bytes(), b"from-slice-test");
+        assert_eq!(sb.len(), 15);
+    }
+
+    #[test]
+    fn sensitive_bytes_from_slice_empty() {
+        let sb = SensitiveBytes::from_slice(b"");
+        assert!(sb.is_empty());
+        assert_eq!(sb.as_bytes(), b"");
+    }
+
+    #[test]
+    fn sensitive_bytes_from_protected_round_trip() {
+        // Simulate the SecureBytes → SensitiveBytes zero-copy path.
+        let alloc =
+            core_memory::ProtectedAlloc::from_slice(b"transfer-test").expect("alloc failed");
+        let sb = SensitiveBytes::from_protected(alloc, 13);
+        assert_eq!(sb.as_bytes(), b"transfer-test");
+        assert_eq!(sb.len(), 13);
+    }
+
+    #[test]
+    fn sensitive_bytes_from_protected_postcard_round_trip() {
+        // Verify that from_protected produces a SensitiveBytes that serializes
+        // correctly over postcard (the IPC wire format).
+        let alloc = core_memory::ProtectedAlloc::from_slice(b"wire-test").expect("alloc failed");
+        let sb = SensitiveBytes::from_protected(alloc, 9);
+        let encoded = postcard::to_stdvec(&sb).unwrap();
+        let decoded: SensitiveBytes = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.as_bytes(), b"wire-test");
     }
 
     // -- EventKind Debug redaction --

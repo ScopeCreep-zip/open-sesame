@@ -333,6 +333,7 @@ pub fn apply_sandbox() {
             "exit_group".into(),
             "exit".into(),
             "getrandom".into(),
+            "memfd_secret".into(),
             "restart_syscall".into(),
             "getcwd".into(),
             "pipe2".into(),

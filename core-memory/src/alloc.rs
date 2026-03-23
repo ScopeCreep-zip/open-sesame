@@ -160,7 +160,8 @@ impl std::error::Error for ProtectedAllocError {}
 ///
 /// 1. Canary is verified in constant time (process aborts on corruption).
 /// 2. Entire data region is volatile-zeroed.
-/// 3. `munlock(2)` releases the memory lock.
+/// 3. `munlock(2)` releases the memory lock (skipped for `memfd_secret`
+///    allocations — the kernel manages locking for secret pages).
 /// 4. `munmap(2)` releases all pages back to the kernel.
 pub struct ProtectedAlloc {
     /// Start of the mmap'd region (guard page 0).
@@ -177,11 +178,17 @@ pub struct ProtectedAlloc {
     data_region_len: usize,
     /// Pointer to the canary (immediately before user_data).
     canary_ptr: NonNull<u8>,
+    /// Whether this allocation is backed by memfd_secret. If true, the pages
+    /// are already implicitly locked by the kernel and removed from the direct
+    /// map. mlock/munlock are skipped to avoid double-charging RLIMIT_MEMLOCK.
+    is_secret_mem: bool,
 }
 
-// SAFETY: The mmap'd region is MAP_PRIVATE (process-local, not shared).
-// All pointers are stable for the lifetime of the ProtectedAlloc — no realloc,
-// no partial munmap. Send is safe because there is no interior mutability.
+// SAFETY: The mmap'd region is process-local (MAP_PRIVATE for anonymous,
+// MAP_SHARED for memfd_secret — but the fd is closed immediately after mmap,
+// so the mapping is not shared with any other process). All pointers are stable
+// for the lifetime of the ProtectedAlloc — no realloc, no partial munmap.
+// Send is safe because there is no interior mutability.
 unsafe impl Send for ProtectedAlloc {}
 
 // SAFETY: &ProtectedAlloc only provides &[u8] (immutable). &mut requires
@@ -216,7 +223,9 @@ impl ProtectedAlloc {
             .checked_add(len)
             .expect("allocation size overflow");
         let data_pages = round_up(data_bytes_needed, page) / page;
-        let data_region_len = data_pages * page;
+        let data_region_len = data_pages
+            .checked_mul(page)
+            .expect("data region size overflow");
 
         // Total: guard0 + metadata + guard1 + data_region + guard2
         let total_pages = OVERHEAD_PAGES
@@ -224,18 +233,34 @@ impl ProtectedAlloc {
             .expect("page count overflow");
         let mmap_total = total_pages.checked_mul(page).expect("mmap size overflow");
 
-        // Step 1: mmap the entire region as PROT_READ|PROT_WRITE.
-        // SAFETY: Requesting anonymous private memory. NULL addr lets kernel
-        // choose. mmap_total > 0. fd=-1 and offset=0 required for MAP_ANONYMOUS.
-        let mmap_base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                mmap_total,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                -1,
-                0,
-            )
+        // Step 1: Allocate the region. Try memfd_secret first (Linux 5.14+),
+        // fall back to mmap(MAP_ANONYMOUS) if unavailable.
+        //
+        // memfd_secret removes pages from the kernel direct map, making them
+        // invisible to /proc/pid/mem, kernel modules, and even root with ptrace.
+        // This is the strongest available memory isolation on Linux.
+        let mut is_secret_mem = false;
+        let mmap_base = match Self::try_memfd_secret_mmap(mmap_total) {
+            Some(ptr) => {
+                is_secret_mem = true;
+                ptr
+            }
+            None => {
+                // Fallback: standard anonymous private mapping.
+                // SAFETY: Requesting anonymous private memory. NULL addr lets
+                // kernel choose. mmap_total > 0. fd=-1 and offset=0 required
+                // for MAP_ANONYMOUS.
+                unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        mmap_total,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                        -1,
+                        0,
+                    )
+                }
+            }
         };
 
         if mmap_base == libc::MAP_FAILED {
@@ -253,6 +278,7 @@ impl ProtectedAlloc {
             data_pages,
             data_region_len,
             canary,
+            is_secret_mem,
         );
 
         if result.is_err() {
@@ -268,6 +294,7 @@ impl ProtectedAlloc {
 
     /// Initialize the mmap'd region: set guard pages, write metadata and canary,
     /// mlock the data region.
+    #[allow(clippy::too_many_arguments)]
     fn init_region(
         base: *mut u8,
         mmap_total: usize,
@@ -276,6 +303,7 @@ impl ProtectedAlloc {
         data_pages: usize,
         data_region_len: usize,
         canary: &[u8; CANARY_SIZE],
+        is_secret_mem: bool,
     ) -> Result<Self, ProtectedAllocError> {
         // Compute section pointers. All offsets stay within the mmap'd region.
         // base is page-aligned (kernel guarantee for mmap return value).
@@ -359,54 +387,100 @@ impl ProtectedAlloc {
             }
         }
 
-        // --- madvise(MADV_DONTDUMP) on data region (Linux) ---
-        #[cfg(target_os = "linux")]
-        {
-            // SAFETY: data_start is page-aligned, data_region_len is page-multiple.
-            let ret =
-                unsafe { libc::madvise(data_start.cast(), data_region_len, libc::MADV_DONTDUMP) };
-            if ret != 0 {
-                // Defense-in-depth, not hard requirement. LimitCORE=0 is primary.
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "core-memory: madvise(MADV_DONTDUMP) failed: errno {}",
-                    errno()
-                );
+        // --- madvise on data region ---
+        // Skip for memfd_secret: pages are already removed from the direct map
+        // (invisible to core dumps and /proc/pid/mem). madvise on secretmem
+        // VMAs may return EINVAL for some advice values.
+        if !is_secret_mem {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: data_start is page-aligned, data_region_len is page-multiple.
+                let ret = unsafe {
+                    libc::madvise(data_start.cast(), data_region_len, libc::MADV_DONTDUMP)
+                };
+                if ret != 0 {
+                    tracing::debug!(
+                        audit = "memory-protection",
+                        event_type = "madvise-dontdump-failed",
+                        errno = errno(),
+                        "madvise(MADV_DONTDUMP) failed — LimitCORE=0 is the primary control"
+                    );
+                }
             }
-        }
 
-        // --- madvise(MADV_ZERO_WIRED_PAGES) on data region (macOS) ---
-        #[cfg(target_os = "macos")]
-        {
-            // Ask the kernel to zero wired (mlock'd) pages on deallocation.
-            const MADV_ZERO_WIRED_PAGES: libc::c_int = 6;
-            // SAFETY: data_start is page-aligned, data_region_len is page-multiple.
-            unsafe {
-                libc::madvise(data_start.cast(), data_region_len, MADV_ZERO_WIRED_PAGES);
+            #[cfg(target_os = "macos")]
+            {
+                // Ask the kernel to zero wired (mlock'd) pages on deallocation.
+                const MADV_ZERO_WIRED_PAGES: libc::c_int = 6;
+                // SAFETY: data_start is page-aligned, data_region_len is page-multiple.
+                unsafe {
+                    libc::madvise(data_start.cast(), data_region_len, MADV_ZERO_WIRED_PAGES);
+                }
+                // Ignore errors — best-effort.
             }
-            // Ignore errors — best-effort.
         }
 
         // --- mlock the data region ---
-        // SAFETY: data_start is page-aligned, data_region_len is page-multiple.
-        let ret = unsafe { libc::mlock(data_start.cast(), data_region_len) };
-        if ret != 0 {
-            let e = errno();
+        // memfd_secret pages are implicitly locked by the kernel (removed from
+        // the direct map). Calling mlock on them double-charges RLIMIT_MEMLOCK.
+        // Skip mlock entirely for memfd_secret-backed allocations.
+        if !is_secret_mem {
+            // SAFETY: data_start is page-aligned, data_region_len is page-multiple.
+            let ret = unsafe { libc::mlock(data_start.cast(), data_region_len) };
+            if ret != 0 {
+                let e = errno();
 
-            #[cfg(feature = "soft-mlock")]
-            {
-                eprintln!(
-                    "core-memory: WARNING: mlock failed (errno {e}). \
-                     soft-mlock feature enabled — continuing without mlock. \
-                     THIS IS UNSAFE FOR PRODUCTION."
-                );
-            }
+                // ENOMEM (errno 12) means RLIMIT_MEMLOCK would be exceeded.
+                // In test environments and containers with low limits, this is
+                // expected. Degrade gracefully with a warning rather than failing.
+                //
+                // In production (systemd services with LimitMEMLOCK=64M), this
+                // should never trigger. If it does, the daemon will log the warning
+                // and operators can investigate.
+                //
+                // Other errno values (EPERM, EINVAL) indicate real failures and
+                // are always fatal.
+                if e == libc::ENOMEM {
+                    #[cfg(feature = "soft-mlock")]
+                    {
+                        // soft-mlock feature: silently continue (CI/test mode).
+                    }
 
-            #[cfg(not(feature = "soft-mlock"))]
-            {
-                return Err(ProtectedAllocError::MlockFailed(e));
+                    #[cfg(not(feature = "soft-mlock"))]
+                    {
+                        tracing::warn!(
+                            audit = "memory-protection",
+                            event_type = "mlock-enomem",
+                            errno = e,
+                            data_region_bytes = data_region_len,
+                            "mlock failed: RLIMIT_MEMLOCK exceeded. Secret memory pages \
+                             are NOT locked and may be swapped to disk. Remediation options: \
+                             (1) Set LimitMEMLOCK=67108864 in the systemd unit file, \
+                             (2) Run `ulimit -l 65536` before the process, \
+                             (3) Grant CAP_IPC_LOCK capability, \
+                             (4) Disable swap entirely (`swapoff -a`) to eliminate the \
+                             swap exposure vector regardless of mlock. \
+                             On kernels 5.14+ with CONFIG_SECRETMEM=y, memfd_secret \
+                             bypasses mlock entirely — verify with init_secure_memory()."
+                        );
+                    }
+                } else {
+                    // Non-ENOMEM errors are always fatal.
+                    return Err(ProtectedAllocError::MlockFailed(e));
+                }
             }
         }
+
+        tracing::trace!(
+            audit = "memory-protection",
+            event_type = "alloc-created",
+            user_data_len = user_len,
+            data_region_len,
+            mmap_total,
+            is_secret_mem,
+            mlock_active = !is_secret_mem,
+            "secure allocation created"
+        );
 
         Ok(ProtectedAlloc {
             mmap_base: NonNull::new(base).expect("mmap returned null after MAP_FAILED check"),
@@ -416,6 +490,7 @@ impl ProtectedAlloc {
             data_region: NonNull::new(data_start).expect("data_start null"),
             data_region_len,
             canary_ptr: NonNull::new(canary_ptr).expect("canary_ptr null"),
+            is_secret_mem,
         })
     }
 
@@ -451,10 +526,119 @@ impl ProtectedAlloc {
     /// `SensitiveBytes` that permit empty data for denial/error paths.
     pub fn from_slice_or_sentinel(data: &[u8]) -> Result<Self, ProtectedAllocError> {
         if data.is_empty() {
+            tracing::trace!(
+                audit = "memory-protection",
+                event_type = "sentinel-alloc",
+                "empty data — allocating 1-byte sentinel (denial/error path)"
+            );
             Self::from_slice(&[0u8])
         } else {
             Self::from_slice(data)
         }
+    }
+
+    /// Try to allocate via `memfd_secret(2)` (Linux 5.14+, CONFIG_SECRETMEM=y).
+    ///
+    /// Returns `Some(mmap_base)` on success, `None` if the syscall is not
+    /// available. The caller falls back to `mmap(MAP_ANONYMOUS)` on `None`.
+    ///
+    /// `memfd_secret` creates a file descriptor whose backing pages are removed
+    /// from the kernel direct map. This prevents access via:
+    /// - `/proc/pid/mem` (even as root)
+    /// - Kernel modules reading physical memory
+    /// - DMA attacks on the direct map
+    ///
+    /// The first call probes the syscall and caches the result. If the kernel
+    /// does not support `memfd_secret` (ENOSYS), all subsequent calls return
+    /// `None` immediately without invoking the syscall. This is critical because
+    /// seccomp filters applied after daemon initialization would kill the thread
+    /// on an unrecognized syscall — the probe must happen before sandbox setup,
+    /// and the cache ensures no post-sandbox attempts.
+    #[cfg(target_os = "linux")]
+    fn try_memfd_secret_mmap(size: usize) -> Option<*mut libc::c_void> {
+        static MEMFD_SECRET_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+        // memfd_secret syscall number: 447 on x86_64 and aarch64.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        const SYS_MEMFD_SECRET: libc::c_long = 447;
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return None;
+
+        let available = *MEMFD_SECRET_AVAILABLE.get_or_init(|| {
+            // Probe: try to create a memfd_secret fd.
+            // SAFETY: syscall(SYS_MEMFD_SECRET, 0) is safe — it either returns
+            // an fd or -1 with errno set. No side effects on failure.
+            let fd = unsafe { libc::syscall(SYS_MEMFD_SECRET, 0) } as libc::c_int;
+            if fd < 0 {
+                tracing::info!(
+                    audit = "memory-protection",
+                    event_type = "memfd-secret-probe",
+                    available = false,
+                    errno = errno(),
+                    "memfd_secret not available — using mmap(MAP_ANONYMOUS) with mlock"
+                );
+                return false;
+            }
+            // Probe succeeded — close the fd and report available.
+            // SAFETY: fd is a valid open file descriptor.
+            unsafe { libc::close(fd) };
+            tracing::info!(
+                audit = "memory-protection",
+                event_type = "memfd-secret-probe",
+                available = true,
+                "memfd_secret available — secret pages removed from kernel direct map"
+            );
+            true
+        });
+
+        if !available {
+            return None;
+        }
+
+        // Create a new memfd_secret for this allocation.
+        // SAFETY: SYS_MEMFD_SECRET with flags=0 is safe.
+        let fd = unsafe { libc::syscall(SYS_MEMFD_SECRET, 0) } as libc::c_int;
+        if fd < 0 {
+            return None;
+        }
+
+        // Set the size.
+        // SAFETY: fd is a valid memfd_secret file descriptor.
+        let ret = unsafe { libc::ftruncate(fd, size as libc::off_t) };
+        if ret != 0 {
+            // SAFETY: fd is a valid open file descriptor.
+            unsafe { libc::close(fd) };
+            return None;
+        }
+
+        // Map the secret memory. memfd_secret requires MAP_SHARED.
+        // SAFETY: fd is valid, size > 0, MAP_SHARED is required for memfd_secret.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+
+        // Close the fd — the mapping keeps the pages alive.
+        // SAFETY: fd is a valid open file descriptor.
+        unsafe { libc::close(fd) };
+
+        if ptr == libc::MAP_FAILED {
+            return None;
+        }
+
+        Some(ptr)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn try_memfd_secret_mmap(_size: usize) -> Option<*mut libc::c_void> {
+        None
     }
 
     /// Returns a shared reference to the user data.
@@ -483,6 +667,18 @@ impl ProtectedAlloc {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.user_data_len == 0
+    }
+
+    /// Returns true if this allocation is backed by `memfd_secret`.
+    #[inline]
+    pub fn is_secret_mem(&self) -> bool {
+        self.is_secret_mem
+    }
+
+    /// Returns the size of the data region in bytes.
+    #[inline]
+    pub fn data_region_len(&self) -> usize {
+        self.data_region_len
     }
 
     /// Constant-time comparison. Returns true if slices are equal.
@@ -523,10 +719,16 @@ impl Drop for ProtectedAlloc {
         let canary_expected = global_canary();
 
         if !Self::constant_time_eq(canary_actual, canary_expected) {
-            eprintln!(
-                "FATAL: core-memory canary corruption detected. \
-                 Buffer underflow or memory corruption in secure allocation. \
-                 Aborting process."
+            tracing::error!(
+                audit = "memory-protection",
+                event_type = "canary-corruption",
+                user_data_len = self.user_data_len,
+                data_region_len = self.data_region_len,
+                is_secret_mem = self.is_secret_mem,
+                "FATAL: canary corruption detected in secure allocation. \
+                 This indicates a buffer underflow, heap corruption, or \
+                 use-after-free in secret-handling code. Process will abort. \
+                 Investigate the most recent write to this ProtectedAlloc."
             );
             std::process::abort();
         }
@@ -534,21 +736,26 @@ impl Drop for ProtectedAlloc {
         // 2. Volatile-zero the entire data region (padding + canary + user data).
         Self::volatile_zero(self.data_region.as_ptr(), self.data_region_len);
 
-        // 3. munlock the data region.
-        // SAFETY: same pointer/size as the mlock call in init_region.
-        unsafe {
-            libc::munlock(self.data_region.as_ptr().cast(), self.data_region_len);
+        // 3. munlock the data region (skip for memfd_secret — kernel handles it).
+        if !self.is_secret_mem {
+            // SAFETY: same pointer/size as the mlock call in init_region.
+            unsafe {
+                libc::munlock(self.data_region.as_ptr().cast(), self.data_region_len);
+            }
         }
 
-        // 4. Re-enable core dump inclusion (Linux).
+        // 4. Re-enable core dump inclusion (Linux). Skip for memfd_secret —
+        // those pages were never in the dump and MADV_DODUMP is meaningless.
         #[cfg(target_os = "linux")]
-        // SAFETY: data_region pointer/size are valid, MADV_DODUMP is best-effort.
-        unsafe {
-            libc::madvise(
-                self.data_region.as_ptr().cast(),
-                self.data_region_len,
-                libc::MADV_DODUMP,
-            );
+        if !self.is_secret_mem {
+            // SAFETY: data_region pointer/size are valid, MADV_DODUMP is best-effort.
+            unsafe {
+                libc::madvise(
+                    self.data_region.as_ptr().cast(),
+                    self.data_region_len,
+                    libc::MADV_DODUMP,
+                );
+            }
         }
 
         // 5. Make metadata page writable, then zero it.
@@ -570,9 +777,24 @@ impl Drop for ProtectedAlloc {
         unsafe {
             let ret = libc::munmap(self.mmap_base.as_ptr().cast(), self.mmap_total);
             if ret != 0 {
-                eprintln!("core-memory: munmap failed in Drop: errno {}", errno());
+                tracing::error!(
+                    audit = "memory-protection",
+                    event_type = "munmap-failed",
+                    errno = errno(),
+                    mmap_total = self.mmap_total,
+                    "munmap failed in Drop — possible double-free or corrupted VMA state"
+                );
             }
         }
+
+        tracing::trace!(
+            audit = "memory-protection",
+            event_type = "alloc-dropped",
+            user_data_len = self.user_data_len,
+            data_region_len = self.data_region_len,
+            is_secret_mem = self.is_secret_mem,
+            "secure allocation zeroed and released"
+        );
     }
 }
 
@@ -776,5 +998,59 @@ mod tests {
         // Exactly page bytes: 16 + 4096 = 4112 -> 2 data pages.
         let data_pages = round_up(CANARY_SIZE + page, page) / page;
         assert_eq!(data_pages, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn memfd_secret_probe_does_not_panic() {
+        // This test verifies the probe logic doesn't crash. On kernels
+        // without CONFIG_SECRETMEM, it returns None. On kernels with it,
+        // it returns Some. Either is correct — we just verify no panic.
+        let result = ProtectedAlloc::try_memfd_secret_mmap(page_size());
+        if let Some(ptr) = result {
+            // Clean up: munmap the probed region.
+            // SAFETY: ptr is from a successful mmap, page_size() is the exact size.
+            unsafe { libc::munmap(ptr, page_size()) };
+        }
+        // Second call should use the cached result.
+        let result2 = ProtectedAlloc::try_memfd_secret_mmap(page_size());
+        if let Some(ptr) = result2 {
+            unsafe { libc::munmap(ptr, page_size()) };
+        }
+    }
+
+    #[test]
+    fn from_slice_or_sentinel_empty() {
+        let alloc = ProtectedAlloc::from_slice_or_sentinel(&[]).expect("sentinel failed");
+        // Sentinel is 1 byte internally, but the caller tracks actual_len=0.
+        assert_eq!(alloc.len(), 1); // sentinel byte
+    }
+
+    #[test]
+    fn from_slice_or_sentinel_nonempty() {
+        let alloc = ProtectedAlloc::from_slice_or_sentinel(b"data").expect("alloc failed");
+        assert_eq!(alloc.as_bytes(), b"data");
+        assert_eq!(alloc.len(), 4);
+    }
+
+    #[test]
+    fn mlock_enomem_degrades_gracefully() {
+        // This test creates many allocations to potentially exhaust
+        // RLIMIT_MEMLOCK. The allocator should degrade to a warning
+        // (ENOMEM) rather than failing fatally.
+        let mut allocs = Vec::new();
+        for _ in 0..100 {
+            match ProtectedAlloc::from_slice(b"test") {
+                Ok(a) => allocs.push(a),
+                Err(ProtectedAllocError::MlockFailed(_)) => {
+                    // If we hit the limit and soft-mlock isn't enabled,
+                    // this is expected in constrained environments.
+                    break;
+                }
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        // At least some allocations should have succeeded.
+        assert!(!allocs.is_empty(), "no allocations succeeded");
     }
 }

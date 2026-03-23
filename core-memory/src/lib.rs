@@ -41,6 +41,63 @@ pub use alloc::ProtectedAlloc;
 #[cfg(unix)]
 pub use alloc::ProtectedAllocError;
 
+/// Initialize the secure memory subsystem.
+///
+/// **Must be called before seccomp/sandbox is applied.** This probes for
+/// `memfd_secret(2)` support (Linux 5.14+) via a raw syscall. If seccomp
+/// is already active and doesn't allow syscall 447, the probe would kill
+/// the calling thread. Calling `init()` early caches the probe result so
+/// all subsequent allocations skip the probe.
+///
+/// Also initializes the process-wide canary and page size cache.
+///
+/// Safe to call multiple times — all initializations are idempotent via
+/// `OnceLock`.
+pub fn init() {
+    #[cfg(unix)]
+    {
+        // Query RLIMIT_MEMLOCK for diagnostic logging.
+        // SAFETY: getrlimit with RLIMIT_MEMLOCK is always safe. rlim is
+        // a stack-allocated struct zeroed before the call.
+        let memlock_limit = unsafe {
+            let mut rlim: libc::rlimit = std::mem::zeroed();
+            libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim);
+            rlim.rlim_cur
+        };
+
+        // Force canary, page size, and memfd_secret probe initialization.
+        // The probe allocation exercises all code paths. The memfd_secret
+        // probe result is logged from within try_memfd_secret_mmap().
+        match ProtectedAlloc::new(1) {
+            Ok(probe) => {
+                let backend = if probe.is_secret_mem() {
+                    "memfd_secret (pages removed from kernel direct map)"
+                } else {
+                    "mmap(MAP_ANONYMOUS) with mlock"
+                };
+                tracing::info!(
+                    audit = "memory-protection",
+                    event_type = "secure-memory-ready",
+                    backend,
+                    rlimit_memlock_bytes = memlock_limit,
+                    "secure memory subsystem ready"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    audit = "memory-protection",
+                    event_type = "secure-memory-init-failed",
+                    error = %e,
+                    rlimit_memlock_bytes = memlock_limit,
+                    "secure memory initialization failed — all secret-carrying \
+                     types will panic on allocation. Check RLIMIT_MEMLOCK, \
+                     CAP_IPC_LOCK, and available address space."
+                );
+            }
+        }
+    }
+}
+
 // Stub for non-Unix platforms so the crate compiles in workspace checks.
 #[cfg(not(unix))]
 mod stub {

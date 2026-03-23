@@ -132,6 +132,9 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     tracing::info!(default_profile = %default_profile_name, "config loaded");
 
+    // Probe memfd_secret and initialize secure memory BEFORE sandbox.
+    core_types::init_secure_memory();
+
     // -- Sandbox (Linux) --
     // apply_sandbox() ensures all Landlock target directories exist before
     // opening PathFd handles. This handles the post-wipe restart case where

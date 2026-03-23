@@ -86,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
     .context("failed to connect to IPC bus")?;
     drop(_client_keypair);
 
+    core_types::init_secure_memory();
+
     #[cfg(target_os = "linux")]
     apply_sandbox();
 
@@ -436,6 +438,8 @@ fn apply_sandbox() {
             "exit_group".into(),
             "exit".into(),
             "getrandom".into(),
+            "memfd_secret".into(),
+            "ftruncate".into(),
             "restart_syscall".into(),
             "pipe2".into(),
             "dup".into(),

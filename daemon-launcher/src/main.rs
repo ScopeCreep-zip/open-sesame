@@ -119,6 +119,9 @@ async fn main() -> anyhow::Result<()> {
     // No sandbox: seccomp/Landlock inherit across fork+exec and would kill
     // every child process. Security boundary is IPC bus auth (Noise IK).
 
+    // Initialize secure memory (probe memfd_secret before any ProtectedAlloc use).
+    core_types::init_secure_memory();
+
     // Announce startup.
     client
         .publish(

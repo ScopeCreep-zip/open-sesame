@@ -13,9 +13,12 @@ use zeroize::Zeroize;
 /// - Volatile zeroize before munmap
 ///
 /// Custom `Serialize`/`Deserialize` implementations ensure wire compatibility
-/// with postcard. During deserialization, a temporary `Vec<u8>` is created by
-/// postcard's deserializer, then immediately copied into protected memory and
-/// zeroized. The exposure window is bounded to the deserialization call.
+/// with postcard. Deserialization uses a custom `Visitor` that copies directly
+/// from the deserializer's input buffer into protected memory — no intermediate
+/// heap `Vec<u8>` is created when the deserializer supports `visit_bytes`
+/// (which postcard does for in-memory deserialization). If the deserializer
+/// can only provide owned bytes (`visit_byte_buf`), the `Vec<u8>` is zeroized
+/// immediately after copying into protected memory.
 ///
 /// Debug output is redacted to prevent log exposure.
 pub struct SensitiveBytes {
@@ -96,7 +99,7 @@ impl SensitiveBytes {
 
 impl Clone for SensitiveBytes {
     fn clone(&self) -> Self {
-        Self::new(self.as_bytes().to_vec())
+        Self::from_slice(self.as_bytes())
     }
 }
 
@@ -112,17 +115,59 @@ impl Serialize for SensitiveBytes {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // Serialize the actual bytes directly from protected memory.
         // postcard reads the slice without copying.
-        self.as_bytes().serialize(serializer)
+        serializer.serialize_bytes(self.as_bytes())
+    }
+}
+
+/// Visitor for deserializing bytes directly into protected memory.
+///
+/// When the deserializer provides borrowed bytes (`visit_bytes`), the data
+/// is copied directly from the input buffer into a `ProtectedAlloc` with no
+/// heap allocation. This is the zero-copy path used by postcard for
+/// in-memory deserialization.
+///
+/// When the deserializer provides owned bytes (`visit_byte_buf`), the
+/// `Vec<u8>` is copied into protected memory and immediately zeroized.
+/// This path handles deserializers that must allocate (e.g., streaming).
+struct SensitiveBytesVisitor;
+
+impl<'de> serde::de::Visitor<'de> for SensitiveBytesVisitor {
+    type Value = SensitiveBytes;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a byte sequence")
+    }
+
+    /// Zero-copy path: deserializer provides a borrowed slice.
+    /// postcard uses this for in-memory deserialization.
+    fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+        Ok(SensitiveBytes::from_slice(v))
+    }
+
+    /// Fallback path: deserializer provides an owned Vec.
+    /// The Vec is zeroized after copying into protected memory.
+    fn visit_byte_buf<E: serde::de::Error>(self, mut v: Vec<u8>) -> Result<Self::Value, E> {
+        let sb = SensitiveBytes::from_slice(&v);
+        v.zeroize();
+        Ok(sb)
+    }
+
+    /// Handle sequences (serde may encode bytes as a sequence of u8).
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        // Collect into a Vec, copy to protected memory, zeroize.
+        let mut buf: Vec<u8> = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(byte) = seq.next_element()? {
+            buf.push(byte);
+        }
+        let sb = SensitiveBytes::from_slice(&buf);
+        buf.zeroize();
+        Ok(sb)
     }
 }
 
 impl<'de> Deserialize<'de> for SensitiveBytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // postcard deserializes into a temporary Vec<u8> on the heap.
-        // SensitiveBytes::new() copies into protected memory and zeroizes
-        // the source Vec. One copy, one zeroize, minimal exposure window.
-        let temp: Vec<u8> = Vec::deserialize(deserializer)?;
-        Ok(SensitiveBytes::new(temp))
+        deserializer.deserialize_byte_buf(SensitiveBytesVisitor)
     }
 }
 

@@ -262,6 +262,8 @@ pub(crate) fn apply_sandbox() -> anyhow::Result<()> {
             "exit_group".into(),
             "exit".into(),
             "getrandom".into(),
+            "memfd_secret".into(),
+            "ftruncate".into(),
             "restart_syscall".into(),
             "inotify_init1".into(),
             "inotify_add_watch".into(),

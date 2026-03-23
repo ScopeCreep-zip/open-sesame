@@ -253,6 +253,23 @@ mod tests {
     }
 
     #[test]
+    fn into_protected_alloc_transfers_data() {
+        let sb = SecureBytes::new(vec![0xAA, 0xBB, 0xCC]);
+        let (alloc, len) = sb.into_protected_alloc();
+        assert_eq!(len, 3);
+        assert_eq!(&alloc.as_bytes()[..len], &[0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn into_protected_alloc_empty() {
+        let sb = SecureBytes::new(Vec::new());
+        let (alloc, len) = sb.into_protected_alloc();
+        assert_eq!(len, 0);
+        // The alloc holds a 1-byte sentinel but len=0 means no user data.
+        assert!(alloc.len() >= 1); // sentinel
+    }
+
+    #[test]
     fn empty_debug() {
         let sb = SecureBytes::new(Vec::new());
         let debug = format!("{sb:?}");
