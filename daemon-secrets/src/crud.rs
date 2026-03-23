@@ -11,7 +11,6 @@ use core_secrets::SecretsStore;
 use core_types::{
     DaemonId, EventKind, SecretDenialReason, SecurityLevel, SensitiveBytes, TrustProfileName,
 };
-use zeroize::Zeroize;
 
 /// Validate a secret key name (defense-in-depth).
 /// Delegates to the canonical implementation in core-types.
