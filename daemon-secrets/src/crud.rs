@@ -359,11 +359,15 @@ pub(crate) async fn handle_secret_set(
             .await;
         }
     };
+    // Pass secret bytes directly from SensitiveBytes' ProtectedAlloc to the vault
+    // store — no heap copy. For IPC-encrypted mode, the decrypted Vec is used instead.
     #[cfg(not(feature = "ipc-field-encryption"))]
-    let mut store_value = value.as_bytes().to_vec();
+    let store_bytes: &[u8] = value.as_bytes();
+    #[cfg(feature = "ipc-field-encryption")]
+    let store_bytes: &[u8] = &store_value;
 
     let (success, denial) = match state.vault_for(profile).await {
-        Ok(vault) => match vault.store().set(key, &store_value).await {
+        Ok(vault) => match vault.store().set(key, store_bytes).await {
             Ok(()) => {
                 vault.flush().await;
                 (true, None)
@@ -378,7 +382,8 @@ pub(crate) async fn handle_secret_set(
             (false, Some(SecretDenialReason::VaultError(e.to_string())))
         }
     };
-    // Zeroize the intermediate plaintext copy.
+    // Zeroize the IPC-decrypted intermediate (only exists with ipc-field-encryption).
+    #[cfg(feature = "ipc-field-encryption")]
     store_value.zeroize();
     let outcome = if success { "success" } else { "failed" };
     audit_secret_access("set", msg.sender, profile, Some(key), outcome);

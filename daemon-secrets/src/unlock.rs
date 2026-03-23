@@ -238,8 +238,9 @@ pub(crate) async fn handle_ssh_unlock(
         .await;
     }
 
-    // Convert SensitiveBytes to SecureBytes (copy into mlock'd memory).
-    let secure_master_key = SecureBytes::new(master_key.as_bytes().to_vec());
+    // Copy directly from SensitiveBytes' ProtectedAlloc into SecureBytes' ProtectedAlloc.
+    // No heap intermediate — both sides are page-aligned, mlock'd memory.
+    let secure_master_key = SecureBytes::from_slice(master_key.as_bytes());
 
     // Verify against existing vault DB if it exists.
     let vault_path = ctx.config_dir.join("vaults").join(format!("{target}.db"));
@@ -365,8 +366,8 @@ pub(crate) async fn handle_factor_submit(
         .await;
     }
 
-    // Convert SensitiveBytes to SecureBytes (copy into mlock'd memory).
-    let secure_key = SecureBytes::new(key_material.as_bytes().to_vec());
+    // Copy directly from SensitiveBytes' ProtectedAlloc into SecureBytes' ProtectedAlloc.
+    let secure_key = SecureBytes::from_slice(key_material.as_bytes());
 
     // For any/policy mode: verify the key against the vault DB.
     let vault_path = ctx
