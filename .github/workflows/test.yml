@@ -31,4 +31,7 @@ jobs:
           install_args: "rust"
           cache: true
 
-      - run: mise run ci:test
+      - name: Run tests (with raised mlock limit for ProtectedAlloc)
+        run: |
+          sudo prlimit --pid $$ --memlock=268435456:268435456
+          mise run ci:test
