@@ -126,6 +126,12 @@ rustPlatform.buildRustPackage {
         "$out/lib/systemd/user/open-sesame-$svc.service"
     done
 
+    # Patch systemd unit ExecStart from FHS /usr/bin/ to nix store path.
+    for unit in $out/lib/systemd/user/*.service; do
+      substituteInPlace "$unit" \
+        --replace-fail "/usr/bin/" "$out/bin/"
+    done
+
     runHook postInstall
   '';
 
