@@ -712,7 +712,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-auth"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-types",
  "dirs",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -787,7 +787,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-types",
  "criterion",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "blake3",
  "core-types",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "libc",
  "tracing",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "blake3",
  "core-types",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "core-config",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-types",
  "proptest",
@@ -2931,9 +2931,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1744e39d1d6a9948f4f388969627434e31128196de472883b39f148769bfe30a"
+checksum = "7ddbf48fd451246b1f8c2610bd3b4ac0cc6e149d89832867093ab69a17194f08"
 dependencies = [
  "libc",
 ]
@@ -3304,7 +3304,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3524,7 +3524,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "platform-linux"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-types",
  "proptest",
@@ -3753,9 +3753,9 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37566cb3fdacef14c0737f9546df7cfeadbfbc9fef10991038bf5015d0c80532"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bit-set",
  "bit-vec",
@@ -4357,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.6.6"
+version = "1.6.7"
 dependencies = [
  "core-config",
  "core-types",
@@ -5209,9 +5209,9 @@ checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.12.0"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6ccf251212114b54433ec949fd6a7841275f9ada20dddd2f29e9ceea4501493"
+checksum = "a559e63b5d8004e12f9bce88af5c6d939c58de839b7532cfe9653846cedd2a9e"
 
 [[package]]
 name = "unicode-width"
