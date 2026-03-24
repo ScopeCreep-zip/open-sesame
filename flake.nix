@@ -470,6 +470,8 @@
               rustfmt
               tokei
               pkg-config
+              mdbook
+              lychee
             ];
 
             buildInputs = with pkgs; [

@@ -1,90 +1,60 @@
-# Open Sesame
+# Introduction
 
-## Vimium-style window switcher for COSMIC desktop
+Open Sesame is a trust-scoped secret and identity fabric for the desktop. It manages encrypted secret
+vaults with per-profile trust boundaries, provides window switching with letter-hint overlays, clipboard
+history with sensitivity detection, keyboard input capture, and text snippet expansion. Everything is
+scoped to trust profiles that activate based on context or manual selection.
 
-Open Sesame brings the efficiency of Vimium browser navigation to the entire COSMIC desktop. Type a letter to
-instantly switch to any window, or launch an application if it isn't running. No mouse required.
+## Packages
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://github.com/ScopeCreep-zip/open-sesame/blob/main/LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/ScopeCreep-zip/open-sesame)](https://github.com/ScopeCreep-zip/open-sesame/releases)
-[![CI](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml/badge.svg)](https://github.com/ScopeCreep-zip/open-sesame/actions/workflows/test.yml)
-[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
+Open Sesame ships as two packages:
 
-![Open Sesame Screenshot](open-sesame-screenshot.png)
+**`open-sesame`** (headless core) contains the `sesame` CLI, daemon-profile, daemon-secrets,
+daemon-launcher, and daemon-snippets. It runs anywhere with systemd: desktops, servers, containers,
+and VMs. This package provides encrypted vaults, secret management, environment variable injection,
+application launching, and profile management without any GUI dependencies.
 
-## Features
+**`open-sesame-desktop`** (GUI layer) depends on `open-sesame` and adds daemon-wm, daemon-clipboard,
+and daemon-input. It requires a COSMIC or Wayland desktop. This package provides the window switcher
+overlay, clipboard history, and keyboard input capture.
 
-- **Vimium-style hints** - Every window gets a letter (g, gg, ggg for multiple instances)
-- **Quick switch** - Tap Alt+Space to toggle between last two windows
-- **Focus-or-launch** - Type a letter to focus an app or launch it if not running
-- **Arrow navigation** - Use arrows and Enter as an alternative to typing letters
-- **Zero configuration** - Works out-of-the-box with sensible defaults
-- **COSMIC integration** - Automatic keybinding setup, native theme support
-- **Instant activation** - Sub-200ms latency with smart disambiguation
-- **Configurable** - Per-app key bindings, launch commands, and environment variables
+Installing `open-sesame-desktop` pulls in `open-sesame` automatically. On a server or in a container,
+install just `open-sesame` for encrypted secrets and application launching.
 
-## Quick Example
+## Audience
 
-**Add APT repository (one-time setup):**
+This documentation is written for:
 
-```bash
-curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
-  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
-```
+- **Contributors** working on the Open Sesame codebase. The architecture and platform sections describe
+  internal design, crate structure, IPC protocols, and implementation patterns.
+- **Extension authors** building WASM component model extensions. The extending section covers the
+  extension host runtime, SDK, WIT interfaces, and OCI distribution.
+- **Platform implementors** adding support for new operating systems or compositor backends. The platform
+  section documents the trait abstractions, factory patterns, and feature gating used across platform
+  crates.
+- **Security auditors** reviewing the trust model, cryptographic primitives, sandbox enforcement, and key
+  hierarchy. The secrets, authentication, and compliance sections provide the relevant detail.
+- **Deployment engineers** operating Open Sesame in production. The deployment and packaging sections
+  cover systemd integration, service topology, and package structure.
 
-```bash
-echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
-  | sudo tee /etc/apt/sources.list.d/open-sesame.list
-```
+## Navigating the Documentation
 
-**Install and configure:**
+- **[Architecture](./architecture/overview.md)** -- internal design: crate map, daemon topology, IPC
+  bus, data flows. Start here for a structural understanding of the system.
+- **[Secrets](./secrets/overview.md)** -- vault system: SQLCipher storage, key hierarchy, Argon2id KDF,
+  key-encryption keys, per-profile isolation.
+- **[Authentication](./authentication/overview.md)** -- unlock mechanisms: password, SSH agent,
+  multi-factor auth policy engine.
+- **[Platform](./platform/linux.md)** -- OS abstraction layer: Linux (Wayland, D-Bus, evdev, systemd),
+  macOS (Accessibility, Keychain, launchd), Windows (UI Automation, Credential Manager, Task Scheduler).
+- **[Extending](./extending/getting-started.md)** -- extension system: Wasmtime host, WASI component
+  model, WIT bindings, OCI packaging.
+- **[Desktop](./desktop/overview.md)** -- window management: compositor integration, overlay rendering,
+  focus tracking.
+- **[Deployment](./deployment/overview.md)** -- operations: systemd units, service readiness, watchdog,
+  packaging.
+- **[Compliance](./compliance/overview.md)** -- security posture: Landlock, seccomp, mlock, guard pages,
+  audit logging.
 
-```bash
-sudo apt update && sudo apt install -y open-sesame
-```
-
-```bash
-sesame --setup-keybinding
-```
-
-Press **Alt+Space**, type a letter to switch windows.
-
-See [Installation Guide](./user-guide/installation.md) for alternative methods.
-
-## How It Works
-
-Open Sesame displays a visual overlay showing all your open windows, each labeled with a letter hint. Type the
-letter to instantly switch to that window. If you've configured an app with a key binding and it's not running,
-Open Sesame will launch it for you.
-
-### Two Modes
-
-#### Launcher Mode (Default: Alt+Space)
-
-- Shows a centered overlay with all windows and letter hints immediately
-- Type a letter to switch, or use arrows to navigate
-- Perfect for quick access to any window
-
-#### Switcher Mode (Optional: Alt+Tab)
-
-- Acts like traditional Alt+Tab but with letter hints for instant selection
-- Tap to quickly switch to the previous window
-- Hold to see the full overlay
-
-## Next Steps
-
-- [Quick Start Guide](./user-guide/quick-start.md) - Get up and running in 30 seconds
-- [Installation Guide](./user-guide/installation.md) - Detailed installation instructions
-- [Configuration Guide](./user-guide/configuration.md) - Customize key bindings and behavior
-- [CLI Reference](./user-guide/cli-reference.md) - Complete command-line reference
-
-## Requirements
-
-- **COSMIC Desktop Environment** (Pop!_OS 24.04+ or other COSMIC-based distributions)
-- **Wayland** (X11 not supported)
-- **fontconfig** with at least one font installed
-
-## Acknowledgments
-
-Built with Rust and inspired by [Vimium](https://github.com/philc/vimium) - the browser extension that proves
-keyboard navigation is superior.
+For user-facing quick start instructions, CLI reference, and configuration guide, see the
+[README](https://github.com/ScopeCreep-zip/open-sesame#readme).

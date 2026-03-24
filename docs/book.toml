@@ -1,7 +1,7 @@
 [book]
-title = "Open Sesame User Guide"
+title = "Open Sesame"
 authors = [ "usrbinkat" ]
-description = "Vimium-style window switcher for COSMIC desktop"
+description = "Trust-scoped secret and identity fabric for Linux"
 language = "en"
 src = "src"
 
