@@ -96,7 +96,7 @@ ssh-key             = { version = "0.6.7", features = ["ed25519", "rsa"] }
 ssh-agent-client-rs = "1.1.2"
 
 # -- Database --
-rusqlite        = { version = "0.38", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite        = { version = "0.38", features = ["bundled-sqlcipher"] }
 
 # -- Fuzzy --
 # TODO: pinned to git HEAD because crates.io 0.5.0 does not expose

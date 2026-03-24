@@ -1,6 +1,11 @@
 {
   description = "Open Sesame v2 — Programmable Desktop Suite";
 
+  nixConfig = {
+    extra-substituters = [ "https://scopecreep-zip.cachix.org" ];
+    extra-trusted-public-keys = [ "scopecreep-zip.cachix.org-1:LPiVDsYXJvgljVfZPN43zBWB7ZCGFr2jZ/lBinnPGvU=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
@@ -231,7 +236,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-profile";
+                ExecStart = "${headlessPkg}/bin/daemon-profile";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
@@ -263,7 +268,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-secrets";
+                ExecStart = "${headlessPkg}/bin/daemon-secrets";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
@@ -295,7 +300,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-launcher";
+                ExecStart = "${headlessPkg}/bin/daemon-launcher";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
@@ -332,7 +337,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-snippets";
+                ExecStart = "${headlessPkg}/bin/daemon-snippets";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
@@ -365,7 +370,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-wm";
+                ExecStart = "${desktopPkg}/bin/daemon-wm";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
@@ -397,7 +402,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-clipboard";
+                ExecStart = "${desktopPkg}/bin/daemon-clipboard";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
@@ -428,7 +433,7 @@
               };
               Service = {
                 Type = "notify";
-                ExecStart = "${cfg.package}/bin/daemon-input";
+                ExecStart = "${desktopPkg}/bin/daemon-input";
                 Restart = "on-failure";
                 RestartSec = 5;
                 TimeoutStopSec = 5;
