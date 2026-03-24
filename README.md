@@ -23,7 +23,7 @@ Beyond window switching, Open Sesame manages encrypted secret vaults with per-pr
 
 Everything is scoped to trust profiles. A "work" profile has its own vault, its own secrets, its own clipboard history, its own frecency ranking, and its own launch configurations -- completely separate from "personal" or "default". Profiles activate based on context (WiFi network, connected hardware) or manually.
 
-The system runs as seven cooperating daemons under systemd, communicating over a Noise IK encrypted IPC bus. Each daemon is sandboxed with Landlock filesystem restrictions and seccomp syscall filtering. The whole thing is controlled through one CLI: `sesame`.
+The system runs as seven cooperating daemons under systemd, communicating over a Noise IK encrypted IPC bus. Each daemon is sandboxed with Landlock filesystem restrictions and seccomp syscall filtering. All key material lives in page-aligned secure memory with guard pages and canary verification -- on Linux 5.14+, secret pages use `memfd_secret(2)` and are removed from the kernel direct map entirely. The whole thing is controlled through one CLI: `sesame`.
 
 ### 📦 Two packages
 
@@ -106,7 +106,7 @@ Press `Alt+Tab` to switch windows. Press `Alt+Space` to open the launcher overla
 - Auth policies: `any` (either factor), `all` (every factor required), or threshold
 - Secrets injected as environment variables at launch time
 - Export as shell eval, dotenv, or JSON
-- mlock'd key material with zeroize-on-drop -- never hits swap or core dumps
+- Page-aligned secure memory with guard pages, canary, and `memfd_secret(2)` -- keys invisible to `/proc/pid/mem` and ptrace
 - Rate-limited unlock attempts to prevent brute-force
 - Hash-chained BLAKE3 audit log for all vault operations
 
@@ -135,7 +135,7 @@ Press `Alt+Tab` to switch windows. Press `Alt+Space` to open the launcher overla
 
 - Two-package split with automatic systemd user service lifecycle
 - COSMIC keybinding integration via `sesame setup-keybinding`
-- Nix flake with overlay and home-manager module (`headless` option)
+- Nix flake with overlay, home-manager module (`headless` option), and [Cachix binary cache](https://app.cachix.org/cache/scopecreep-zip)
 - GPG-signed APT repository with SLSA build provenance attestations
 - Landlock + seccomp sandbox per daemon, systemd hardening directives
 - macOS and Windows platform crates scaffolded for future support
@@ -268,6 +268,16 @@ sesame init
 
 <details>
 <summary><b>🔹 Nix Flake (NixOS / home-manager)</b></summary>
+
+Pre-built binaries for `x86_64-linux` and `aarch64-linux` are served from [scopecreep-zip.cachix.org](https://app.cachix.org/cache/scopecreep-zip). The flake includes `nixConfig` that configures the substituter automatically -- pass `--accept-flake-config` on first use (or add the cache to your `nix.conf`):
+
+```nix
+# Add to your nix.conf or configuration.nix if you prefer not to use --accept-flake-config
+nix.settings = {
+  substituters = [ "https://scopecreep-zip.cachix.org" ];
+  trusted-public-keys = [ "scopecreep-zip.cachix.org-1:LPiVDsYXJvgljVfZPN43zBWB7ZCGFr2jZ/lBinnPGvU=" ];
+};
+```
 
 Add the flake input:
 
@@ -967,6 +977,46 @@ RUST_LOG=debug daemon-wm
 </details>
 
 <details>
+<summary><b>Memory lock limit exhausted (mlock ENOMEM)</b></summary>
+
+`memfd_secret` pages are implicitly locked by the kernel and count against `RLIMIT_MEMLOCK`. If daemons fail with mlock errors, raise the limit:
+
+```bash
+# Check current limit
+ulimit -l
+```
+
+The systemd units set `LimitMEMLOCK=64M`. If running daemons manually:
+
+```bash
+ulimit -l 65536 && daemon-secrets
+```
+
+For system-wide configuration:
+
+```bash
+# /etc/security/limits.d/open-sesame.conf
+*  soft  memlock  65536
+*  hard  memlock  65536
+```
+
+</details>
+
+<details>
+<summary><b>memfd_secret not available (ERROR in daemon logs)</b></summary>
+
+If daemon startup logs show `memfd_secret unavailable`, the fallback to `mmap(MAP_ANONYMOUS)` is active. Secrets are functional but remain on the kernel direct map.
+
+```bash
+# Check kernel support
+grep SECRETMEM /boot/config-$(uname -r)
+```
+
+Expected: `CONFIG_SECRETMEM=y`. If `CONFIG_SECRETMEM` is not set or equals `n`, your kernel was built without it. This is common on older distributions and some cloud provider kernels. Upgrade to a kernel with `CONFIG_SECRETMEM=y` for full security posture.
+
+</details>
+
+<details>
 <summary><b>Overlay feels slow</b></summary>
 
 Reduce delays in your config:
@@ -1007,6 +1057,7 @@ graph TB
     subgraph "Core Libraries"
         IPC[core-ipc<br/>Noise IK Transport]
         CRYPTO[core-crypto<br/>Argon2id / BLAKE3 / AES-GCM]
+        MEM[core-memory<br/>memfd_secret / Guard Pages]
         AUTH[core-auth<br/>Password + SSH Agent]
         TYPES[core-types<br/>Protocol Schema]
     end
@@ -1021,6 +1072,8 @@ graph TB
 
     P --- IPC
     SEC --- CRYPTO
+    CRYPTO --- MEM
+    TYPES --- MEM
     SEC --- AUTH
     P --- TYPES
 
@@ -1028,6 +1081,7 @@ graph TB
     style SEC fill:#ff6b6b
     style WM fill:#50c878
     style S fill:#ffa500
+    style MEM fill:#9b59b6
 ```
 
 ### 🔌 IPC Bus
@@ -1048,7 +1102,7 @@ The desktop target `Requires` the headless target. Starting desktop starts headl
 ### 🗝️ Key Hierarchy
 
 ```text
-Password --> Argon2id(password, per-profile-salt) --> Master Key (32 bytes, mlock'd)
+Password --> Argon2id(password, per-profile-salt) --> Master Key (32 bytes, ProtectedAlloc)
   |
   +--> BLAKE3 derive_key("pds v2 vault-key {profile}")          --> SQLCipher page key
   +--> BLAKE3 derive_key("pds v2 clipboard-key {profile}")       --> Clipboard encryption key
@@ -1069,9 +1123,10 @@ All-mode (both factors required):
 
 | Crate | Purpose |
 |-------|---------|
+| `core-memory` | Page-aligned secure allocator: `ProtectedAlloc` with guard pages, canary, `memfd_secret(2)` backend, volatile zeroize. All secret-carrying types are backed by this |
 | `core-ipc` | Noise IK transport (X25519 + ChaChaPoly + BLAKE2s), BusServer/BusClient, clearance registry, postcard framing, UCred binding |
-| `core-types` | Canonical type system: `EventKind` protocol schema, `DaemonId`, `SecurityLevel`, `TrustProfileName`, `SensitiveBytes` with mlock |
-| `core-crypto` | Argon2id KDF, BLAKE3 HKDF, AES-256-GCM encryption, `SecureBytes`/`SecureVec` with mlock + zeroize-on-drop |
+| `core-types` | Canonical type system: `EventKind` protocol schema, `DaemonId`, `SecurityLevel`, `TrustProfileName`, `SensitiveBytes` with ProtectedAlloc backing and custom serde Visitor |
+| `core-crypto` | Argon2id KDF, BLAKE3 HKDF, AES-256-GCM encryption, `SecureBytes`/`SecureVec` with ProtectedAlloc backing and zero-copy transfer |
 | `core-config` | TOML configuration schema with XDG layered inheritance, inotify hot-reload watcher, config validation |
 | `core-auth` | Multi-factor authentication: `PasswordBackend` (Argon2id KEK wrapping), `SshAgentBackend` (deterministic signature KEK), `AuthDispatcher`, `VaultMetadata` persistence |
 | `core-secrets` | SQLCipher database abstraction, `KeyLocker` trait, JIT secret cache |
@@ -1092,14 +1147,15 @@ All-mode (both factors required):
 - **Noise IK encrypted IPC** -- All inter-daemon communication authenticated and encrypted with forward secrecy
 - **SQLCipher encrypted vaults** -- AES-256-CBC with HMAC-SHA512 per page, Argon2id key derivation (19 MiB memory, 2 iterations)
 - **SSH agent unlock** -- Master key wrapped under KEK derived from deterministic SSH signatures (Ed25519/RSA PKCS#1 v1.5)
-- **mlock'd key material** -- `SecureBytes` and `SecureVec` use `mlock(2)` to prevent swap exposure, `MADV_DONTDUMP` to exclude from core dumps, and zeroize all bytes on drop
+- **Page-aligned secure memory (`core-memory`)** -- All secret-carrying types (`SecureBytes`, `SecureVec`, `SensitiveBytes`) backed by `ProtectedAlloc`: guard pages (PROT_NONE) on both sides of every allocation, 16-byte random canary with constant-time verification on drop, user data right-aligned so overflows hit the trailing guard page (SIGSEGV), volatile zeroize before munmap. On Linux 5.14+ with `CONFIG_SECRETMEM=y`, allocations use `memfd_secret(2)` -- pages are removed from the kernel direct map and invisible to `/proc/pid/mem`, kernel modules, DMA, and ptrace even as root. Older kernels fall back to `mmap(MAP_ANONYMOUS)` with `mlock(2)` + `MADV_DONTDUMP`, logged at ERROR with compliance impact statement
+- **Zero-copy secret lifecycle** -- Derived keys go directly from stack arrays into ProtectedAlloc via `from_slice()`. SecureBytes transfers to SensitiveBytes via `into_protected_alloc()` with zero heap intermediaries. Custom serde `Visitor` deserializes directly from postcard's borrowed input buffer into ProtectedAlloc. Secret bytes never touch the unprotected heap during normal operation
 - **Landlock filesystem sandboxing** -- Per-daemon path-based access control. Daemons can only access their specific runtime directories. Partially enforced Landlock is treated as a fatal error -- no degradation
 - **seccomp-bpf syscall filtering** -- Per-daemon allowlists. Unallowed syscalls terminate the offending thread (`SECCOMP_RET_KILL_THREAD`) with a SIGSYS handler for visibility
 - **Hash-chained audit log** -- BLAKE3 hash chain provides tamper evidence for all vault operations. `sesame audit verify` detects modifications, deletions, and reorderings
 - **Rate limiting** -- Vault unlock attempts throttled via governor token bucket
 - **systemd hardening** -- `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateNetwork` (secrets daemon), `LimitCORE=0`, memory limits, capability bounding
 - **Environment injection denylist** -- Blocks `LD_PRELOAD`, `BASH_ENV`, `NODE_OPTIONS`, `PYTHONSTARTUP`, `JAVA_TOOL_OPTIONS`, and 30+ other injection vectors across all major runtimes
-- **Zero graceful degradation** -- Security controls that fail are fatal. No silent fallbacks to weaker modes
+- **Explicit security posture** -- Security controls that fail are fatal. The one exception is `memfd_secret` availability: systems without it fall back to `mmap` with an ERROR-level audit log naming the compliance frameworks not met (IL5/IL6, STIG, PCI-DSS) and the exact remediation command. Silent degradation does not exist
 
 </details>
 
@@ -1127,6 +1183,7 @@ All-mode (both factors required):
 
 - Linux with systemd (255+)
 - libc6, libseccomp2
+- Linux 5.14+ with `CONFIG_SECRETMEM=y` for full security posture (`memfd_secret`). Older kernels fall back to `mmap` with `mlock` -- functional but secrets remain on the kernel direct map. Check: `grep SECRETMEM /boot/config-$(uname -r)`
 
 </td>
 <td width="50%" valign="top">
@@ -1147,7 +1204,19 @@ All-mode (both factors required):
 
 ## 🤝 Contributing
 
-Contributions are welcome. Run the quality gates before submitting:
+Contributions are welcome. The test suite allocates `memfd_secret` pages which count against `RLIMIT_MEMLOCK`. Raise the limit before running tests:
+
+```bash
+sudo prlimit --pid $$ --memlock=268435456:268435456
+```
+
+Or use the Nix devshell which handles this automatically:
+
+```bash
+nix develop
+```
+
+Run the quality gates before submitting:
 
 ```bash
 cargo fmt --check
