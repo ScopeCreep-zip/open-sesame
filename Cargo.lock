@@ -712,7 +712,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-auth"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-types",
  "dirs",
@@ -744,14 +744,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "toml 1.0.7+spec-1.1.0",
+ "toml 1.1.0+spec-1.1.0",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "core-crypto"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -787,7 +787,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-types",
  "criterion",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "libc",
  "tracing",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "core-config",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-types",
  "proptest",
@@ -3305,7 +3305,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3333,7 +3333,7 @@ dependencies = [
  "ssh-key",
  "tempfile",
  "tokio",
- "toml 1.0.7+spec-1.1.0",
+ "toml 1.1.0+spec-1.1.0",
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
@@ -3547,7 +3547,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "platform-linux"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -3576,7 +3576,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -3593,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-types",
  "proptest",
@@ -3762,7 +3762,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.25.5+spec-1.1.0",
+ "toml_edit 0.25.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -4371,16 +4371,16 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
-version = "1.0.4"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8bbf91e5a4d6315eee45e704372590b30e260ee83af6639d64557f51b067776"
+checksum = "876ac351060d4f882bb1032b6369eb0aef79ad9df1ea8bc404874d8cc3d0cd98"
 dependencies = [
  "serde_core",
 ]
 
 [[package]]
 name = "sesame-workspace"
-version = "1.5.2"
+version = "1.6.0"
 dependencies = [
  "core-config",
  "core-types",
@@ -4389,7 +4389,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 2.0.18",
- "toml 1.0.7+spec-1.1.0",
+ "toml 1.1.0+spec-1.1.0",
  "tracing",
 ]
 
@@ -4965,7 +4965,7 @@ checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned 1.0.4",
+ "serde_spanned 1.1.0",
  "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
  "toml_writer",
@@ -4974,14 +4974,14 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.0.7+spec-1.1.0"
+version = "1.1.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd28d57d8a6f6e458bc0b8784f8fdcc4b99a437936056fa122cb234f18656a96"
+checksum = "f8195ca05e4eb728f4ba94f3e3291661320af739c4e43779cbdfae82ab239fcc"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned 1.0.4",
- "toml_datetime 1.0.1+spec-1.1.0",
+ "serde_spanned 1.1.0",
+ "toml_datetime 1.1.0+spec-1.1.0",
  "toml_parser",
  "toml_writer",
  "winnow 1.0.0",
@@ -5007,9 +5007,9 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "1.0.1+spec-1.1.0"
+version = "1.1.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b320e741db58cac564e26c607d3cc1fdc4a88fd36c879568c07856ed83ff3e9"
+checksum = "97251a7c317e03ad83774a8752a7e81fb6067740609f75ea2b585b569a59198f"
 dependencies = [
  "serde_core",
 ]
@@ -5030,21 +5030,21 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.5+spec-1.1.0"
+version = "0.25.8+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ca1a40644a28bce036923f6a431df0b34236949d111cc07cb6dca830c9ef2e1"
+checksum = "16bff38f1d86c47f9ff0647e6838d7bb362522bdf44006c7068c2b1e606f1f3c"
 dependencies = [
  "indexmap",
- "toml_datetime 1.0.1+spec-1.1.0",
+ "toml_datetime 1.1.0+spec-1.1.0",
  "toml_parser",
  "winnow 1.0.0",
 ]
 
 [[package]]
 name = "toml_parser"
-version = "1.0.10+spec-1.1.0"
+version = "1.1.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df25b4befd31c4816df190124375d5a20c6b6921e2cad937316de3fccd63420"
+checksum = "2334f11ee363607eb04df9b8fc8a13ca1715a72ba8662a26ac285c98aabb4011"
 dependencies = [
  "winnow 1.0.0",
 ]
@@ -5057,9 +5057,9 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
-version = "1.0.7+spec-1.1.0"
+version = "1.1.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f17aaa1c6e3dc22b1da4b6bba97d066e354c7945cac2f7852d4e4e7ca7a6b56d"
+checksum = "d282ade6016312faf3e41e57ebbba0c073e4056dab1232ab1cb624199648f8ed"
 
 [[package]]
 name = "tracing"

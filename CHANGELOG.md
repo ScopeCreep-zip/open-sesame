@@ -53,6 +53,86 @@ gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeC
 
 ---
 
+## [1.6.0](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.5.2...v1.6.0) (2026-03-24)
+
+### ✨ Features
+
+* **core-memory:** page-aligned secure memory allocator with guard pages ([ffad7e0](https://github.com/ScopeCreep-zip/open-sesame/commit/ffad7e00252b7c391c4c92b98f7edd7894182a76))
+* **security:** memfd_secret backend, zero-copy deserialization, structured audit logging ([901d236](https://github.com/ScopeCreep-zip/open-sesame/commit/901d236d348eafff2223c34a6358723330666dbe))
+
+### 🐛 Bug Fixes
+
+* **ci:** raise RLIMIT_MEMLOCK for ProtectedAlloc tests and builds ([1668a79](https://github.com/ScopeCreep-zip/open-sesame/commit/1668a7950b959133240b7854ae0a77bca0f9650d))
+* **docs:** update GitHub Pages landing page for two-package model ([c43229c](https://github.com/ScopeCreep-zip/open-sesame/commit/c43229c9369b1c7c6e088b80a1f0a4687bc07278))
+* remove unused zeroize import from daemon-secrets crud ([0a17f35](https://github.com/ScopeCreep-zip/open-sesame/commit/0a17f351de83668aca61835692ac869fa96ae71e))
+* **security:** eliminate all heap exposure paths for secret-carrying types ([bb19ea6](https://github.com/ScopeCreep-zip/open-sesame/commit/bb19ea65fbbdafc7e8d5b74e2dc438eebcea0464))
+* **security:** eliminate heap exposure in SecureBytes-to-SensitiveBytes transfer ([4786eb1](https://github.com/ScopeCreep-zip/open-sesame/commit/4786eb137d2a3a5557d5a722deb652e05e485974))
+* **security:** eliminate remaining heap copies in daemon-secrets unlock and CRUD ([7d04627](https://github.com/ScopeCreep-zip/open-sesame/commit/7d0462725e91be2ea73668112cd569f9ac556a80))
+* **security:** require memfd_secret, remove soft-mlock, zero-copy serde visitor ([889d1c6](https://github.com/ScopeCreep-zip/open-sesame/commit/889d1c6db4aaa79b02a0aeff517cd66195d90221))
+* **systemd:** add LimitMEMLOCK=64M to all daemon units, improve postinst output ([4692f28](https://github.com/ScopeCreep-zip/open-sesame/commit/4692f2823590ca48c84255106f09ccfd32dc38a9))
+
+### 📚 Documentation
+
+* comprehensive README with visual composition and progressive disclosure ([118fca3](https://github.com/ScopeCreep-zip/open-sesame/commit/118fca35b103a3178b10fe910c9ba9b805457753))
+* replace packages table with blockquotes for GitHub rendering ([fadd531](https://github.com/ScopeCreep-zip/open-sesame/commit/fadd5317938f7b56904aea313863cb36bf0b769d))
+* rewrite README intro for progressive disclosure ([ca8c65c](https://github.com/ScopeCreep-zip/open-sesame/commit/ca8c65c6bca1294adc2be0fe627a8ac1d7985fb1))
+* split Quick Start into one-command-per-codeblock for copy/paste ([865e68e](https://github.com/ScopeCreep-zip/open-sesame/commit/865e68e40f330109d512b0c6c39790f794641012))
+
+## Quick Install
+
+### APT Repository (recommended)
+
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
+sudo apt update
+```
+
+**Desktop** (window switcher + clipboard + input + headless):
+```bash
+sudo apt install -y open-sesame open-sesame-desktop
+```
+
+**Headless** (secrets, profiles, launcher, snippets — no GUI):
+```bash
+sudo apt install -y open-sesame
+```
+
+### Direct Download
+
+See release assets below for `.deb` packages (amd64/arm64) with SHA256 checksums.
+
+## What You Get
+
+### open-sesame (headless)
+- **Encrypted secret vaults** with multi-factor auth (password + SSH agent)
+- **Trust profiles** with context-driven activation
+- **Application launcher** with fuzzy search and secret injection
+- **Snippet expansion** with variable substitution
+
+### open-sesame-desktop (requires open-sesame)
+- **Alt+Space** — Window switcher overlay with Vimium-style letter hints
+- **Alt+Tab** — Quick-switch to previous window
+- **Clipboard manager** with security classification
+- **Keyboard input capture** for compositor-independent shortcuts
+
+## Documentation
+
+- **[User Guide](https://scopecreep-zip.github.io/open-sesame/book/)** — Configuration, keybindings, theming
+- **[API Docs](https://scopecreep-zip.github.io/open-sesame/doc/open_sesame/)** — Library reference
+
+## Supply Chain Security
+
+All `.deb` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
+```bash
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip
+```
+
+---
+
 ## [1.5.2](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.5.1...v1.5.2) (2026-03-22)
 
 ### 🐛 Bug Fixes
