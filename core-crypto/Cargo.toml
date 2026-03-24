@@ -6,10 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# This crate uses unsafe for mlock/madvise syscalls — no workspace lints override.
-# Safety justification documented inline.
+# All memory protection is delegated to core-memory. No direct unsafe in this crate.
 
 [dependencies]
+core-memory = { workspace = true }
 core-types  = { workspace = true }
 aes-gcm     = { workspace = true }
 argon2      = { workspace = true }
@@ -21,9 +21,6 @@ pbkdf2      = { workspace = true }
 sha2        = { workspace = true }
 hmac        = { workspace = true }
 hkdf        = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-libc        = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }

@@ -102,7 +102,10 @@ jobs:
           install_args: "rust cargo:cargo-deb"
           cache: true
 
-      - run: mise run ${{ matrix.build_task }}
+      - name: Build packages (with raised mlock limit for ProtectedAlloc)
+        run: |
+          sudo prlimit --pid $$ --memlock=268435456:268435456
+          mise run ${{ matrix.build_task }}
 
       - run: mise run ${{ matrix.rename_task }}
 

@@ -103,6 +103,9 @@ async fn main() -> anyhow::Result<()> {
     // ZeroizingKeypair: private key zeroized on drop (no manual zeroize needed).
     drop(_client_keypair);
 
+    // Probe memfd_secret and initialize secure memory BEFORE sandbox.
+    core_types::init_secure_memory();
+
     // Sandbox (Linux) — applied AFTER keypair read + connect, BEFORE IPC traffic.
     #[cfg(target_os = "linux")]
     daemon_wm::sandbox::apply_sandbox();

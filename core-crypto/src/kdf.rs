@@ -39,7 +39,7 @@ pub fn derive_key_argon2(password: &[u8], salt: &[u8; 16]) -> core_types::Result
         .hash_password_into(password, salt, &mut *key)
         .map_err(|e| core_types::Error::Crypto(format!("argon2 derivation failed: {e}")))?;
 
-    Ok(SecureBytes::new(key.to_vec()))
+    Ok(SecureBytes::from_slice(&*key))
 }
 
 /// Derive a 32-byte key from a password using PBKDF2-HMAC-SHA256.
@@ -51,7 +51,7 @@ pub fn derive_key_pbkdf2(password: &[u8], salt: &[u8; 16]) -> core_types::Result
     pbkdf2::<Hmac<Sha256>>(password, salt, 600_000, &mut *key)
         .map_err(|e| core_types::Error::Crypto(format!("pbkdf2 derivation failed: {e}")))?;
 
-    Ok(SecureBytes::new(key.to_vec()))
+    Ok(SecureBytes::from_slice(&*key))
 }
 
 /// Dispatch key derivation based on the configured KDF algorithm.

@@ -25,6 +25,7 @@ ReadWritePaths=%h/.cache/fontconfig
 # Resource limits
 LimitNOFILE=4096
 LimitCORE=0
+LimitMEMLOCK=64M
 MemoryMax=128M
 
 # Environment

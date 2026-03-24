@@ -29,7 +29,7 @@ use zeroize::Zeroize;
 /// array is zeroized before the function returns.
 fn derive_32(context: &str, ikm: &[u8]) -> SecureBytes {
     let key = zeroize::Zeroizing::new(blake3::derive_key(context, ikm));
-    SecureBytes::new(key.to_vec())
+    SecureBytes::from_slice(&*key)
 }
 
 /// Build the BLAKE3 context string: `"pds <version> <purpose> <profile_id>"`.
@@ -122,7 +122,7 @@ fn derive_32_hkdf_sha256(context: &str, ikm: &[u8]) -> SecureBytes {
     let mut key = [0u8; 32];
     hk.expand(context.as_bytes(), &mut key)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
-    let result = SecureBytes::new(key.to_vec());
+    let result = SecureBytes::from_slice(&key);
     key.zeroize();
     result
 }

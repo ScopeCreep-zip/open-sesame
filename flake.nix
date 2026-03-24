@@ -242,6 +242,7 @@
                 ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
+                LimitMEMLOCK = "64M";
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
                 EnvironmentFile = [ "-%h/.config/pds/ssh-agent.env" ];
@@ -312,6 +313,7 @@
                 KillMode = "process";
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
+                LimitMEMLOCK = "64M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
               };
               Install = {
@@ -341,6 +343,7 @@
                 ReadWritePaths = [ "%t/pds" ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
+                LimitMEMLOCK = "64M";
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
               };
@@ -373,6 +376,7 @@
                 ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" "%h/.cache/fontconfig" ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
+                LimitMEMLOCK = "64M";
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
                 EnvironmentFile = [ "-%h/.config/pds/ssh-agent.env" ];
@@ -404,6 +408,7 @@
                 ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
+                LimitMEMLOCK = "64M";
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
               };
@@ -434,6 +439,7 @@
                 ReadWritePaths = [ "%t/pds" ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
+                LimitMEMLOCK = "64M";
                 MemoryMax = "128M";
                 Environment = [ "RUST_LOG=${cfg.logLevel}" ];
               };

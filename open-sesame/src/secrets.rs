@@ -31,15 +31,12 @@ pub(crate) async fn cmd_secret_set(profile: &str, key: &str) -> anyhow::Result<(
         buf
     };
 
-    let mut value_bytes = value.as_bytes().to_vec();
-    value.zeroize();
-
     let event = EventKind::SecretSet {
         profile: profile.clone(),
         key: key.to_owned(),
-        value: SensitiveBytes::new(std::mem::take(&mut value_bytes)),
+        value: SensitiveBytes::from_slice(value.as_bytes()),
     };
-    value_bytes.zeroize();
+    value.zeroize();
 
     match rpc(&client, event, SecurityLevel::SecretsOnly).await? {
         EventKind::SecretSetResponse { success: true, .. } => {

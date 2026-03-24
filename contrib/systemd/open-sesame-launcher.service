@@ -38,6 +38,7 @@ KillMode=process
 # Resource limits
 LimitNOFILE=4096
 LimitCORE=0
+LimitMEMLOCK=64M
 
 # Environment
 Environment=RUST_LOG=info

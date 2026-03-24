@@ -11,7 +11,6 @@ use core_secrets::SecretsStore;
 use core_types::{
     DaemonId, EventKind, SecretDenialReason, SecurityLevel, SensitiveBytes, TrustProfileName,
 };
-use zeroize::Zeroize;
 
 /// Validate a secret key name (defense-in-depth).
 /// Delegates to the canonical implementation in core-types.
@@ -204,7 +203,7 @@ async fn secret_gate_pipeline(
 fn deny_get(key: &str, reason: SecretDenialReason) -> EventKind {
     EventKind::SecretGetResponse {
         key: key.to_owned(),
-        value: SensitiveBytes::new(vec![]),
+        value: SensitiveBytes::from_slice(&[]),
         denial: Some(reason),
     }
 }
@@ -245,11 +244,15 @@ pub(crate) async fn handle_secret_get(
             Ok(secret) => {
                 #[cfg(feature = "ipc-field-encryption")]
                 let (value, denial) = match state.encrypt_for_ipc(profile, secret.as_bytes()) {
-                    Ok(v) => (SensitiveBytes::new(v), None),
+                    Ok(mut v) => {
+                        let sb = SensitiveBytes::from_slice(&v);
+                        zeroize::Zeroize::zeroize(&mut v);
+                        (sb, None)
+                    }
                     Err(e) => {
                         tracing::error!(profile = %profile, key, error = %e, "IPC encryption failed");
                         (
-                            SensitiveBytes::new(vec![]),
+                            SensitiveBytes::from_slice(&[]),
                             Some(SecretDenialReason::VaultError(format!(
                                 "IPC encryption failed: {e}"
                             ))),
@@ -258,7 +261,7 @@ pub(crate) async fn handle_secret_get(
                 };
                 #[cfg(not(feature = "ipc-field-encryption"))]
                 let (value, denial): (SensitiveBytes, Option<SecretDenialReason>) =
-                    (SensitiveBytes::new(secret.as_bytes().to_vec()), None);
+                    (SensitiveBytes::from_slice(secret.as_bytes()), None);
 
                 audit_secret_access("get", msg.sender, profile, Some(key), "success");
                 emit_audit_event(
@@ -292,7 +295,7 @@ pub(crate) async fn handle_secret_get(
                 .await;
                 Ok(Some(EventKind::SecretGetResponse {
                     key: key.to_owned(),
-                    value: SensitiveBytes::new(vec![]),
+                    value: SensitiveBytes::from_slice(&[]),
                     denial: Some(SecretDenialReason::NotFound),
                 }))
             }
@@ -312,7 +315,7 @@ pub(crate) async fn handle_secret_get(
             .await;
             Ok(Some(EventKind::SecretGetResponse {
                 key: key.to_owned(),
-                value: SensitiveBytes::new(vec![]),
+                value: SensitiveBytes::from_slice(&[]),
                 denial: Some(SecretDenialReason::VaultError(e.to_string())),
             }))
         }
@@ -355,11 +358,15 @@ pub(crate) async fn handle_secret_set(
             .await;
         }
     };
+    // Pass secret bytes directly from SensitiveBytes' ProtectedAlloc to the vault
+    // store — no heap copy. For IPC-encrypted mode, the decrypted Vec is used instead.
     #[cfg(not(feature = "ipc-field-encryption"))]
-    let mut store_value = value.as_bytes().to_vec();
+    let store_bytes: &[u8] = value.as_bytes();
+    #[cfg(feature = "ipc-field-encryption")]
+    let store_bytes: &[u8] = &store_value;
 
     let (success, denial) = match state.vault_for(profile).await {
-        Ok(vault) => match vault.store().set(key, &store_value).await {
+        Ok(vault) => match vault.store().set(key, store_bytes).await {
             Ok(()) => {
                 vault.flush().await;
                 (true, None)
@@ -374,7 +381,8 @@ pub(crate) async fn handle_secret_set(
             (false, Some(SecretDenialReason::VaultError(e.to_string())))
         }
     };
-    // Zeroize the intermediate plaintext copy.
+    // Zeroize the IPC-decrypted intermediate (only exists with ipc-field-encryption).
+    #[cfg(feature = "ipc-field-encryption")]
     store_value.zeroize();
     let outcome = if success { "success" } else { "failed" };
     audit_secret_access("set", msg.sender, profile, Some(key), outcome);

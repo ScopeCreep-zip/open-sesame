@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "core-memory",
     "core-types",
     "core-config",
     "core-ipc",
@@ -43,6 +44,7 @@ authors = ["usrbinkat"]
 [workspace.dependencies]
 
 # -- Internal crates --
+core-memory     = { path = "core-memory" }
 core-types      = { path = "core-types" }
 core-config     = { path = "core-config" }
 core-ipc        = { path = "core-ipc" }
