@@ -118,20 +118,6 @@ async fn main() -> anyhow::Result<()> {
     // -- Config --
     let config = core_config::load_config(None).context("failed to load config")?;
 
-    let install_config = core_config::load_installation()
-        .context("installation.toml not found — run `sesame init` first")?;
-    let install_ns = install_config.namespace;
-
-    let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
-    // Collect all configured profile names so ProfileList can report them
-    // regardless of activation state.
-    let mut config_profile_names: Vec<TrustProfileName> = config
-        .profiles
-        .keys()
-        .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
-        .collect();
-    tracing::info!(default_profile = %default_profile_name, "config loaded");
-
     // Probe memfd_secret and initialize secure memory BEFORE sandbox.
     core_types::init_secure_memory();
 
@@ -187,6 +173,58 @@ async fn main() -> anyhow::Result<()> {
     let bus = BusServer::bind(&socket_path, bus_keypair.into_inner(), registry)
         .context("failed to bind IPC bus server")?;
     tracing::info!(path = %socket_path.display(), "IPC bus server bound (Noise IK encrypted)");
+
+    // -- Platform readiness (early): tell systemd we are alive before blocking on installation.toml --
+    #[cfg(target_os = "linux")]
+    platform_linux::systemd::notify_ready();
+
+    // -- Wait for installation.toml (may not exist yet on fresh multi-user VMs) --
+    let install_config = if let Ok(cfg) = core_config::load_installation() {
+        cfg
+    } else {
+        tracing::info!("waiting for sesame init — installation.toml not found");
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let cfg = loop {
+            tokio::select! {
+                _ = poll_interval.tick() => {
+                    if let Ok(cfg) = core_config::load_installation() {
+                        tracing::info!("installation.toml found, transitioning to full mode");
+                        break cfg;
+                    }
+                }
+                _ = watchdog_interval.tick() => {
+                    #[cfg(target_os = "linux")]
+                    platform_linux::systemd::notify_watchdog();
+                }
+                result = bus.run() => {
+                    match result {
+                        Ok(()) => tracing::info!("bus server exited while waiting for init"),
+                        Err(e) => tracing::error!(error = %e, "bus server error while waiting for init"),
+                    }
+                    return Ok(());
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("SIGINT received while waiting for installation.toml");
+                    return Ok(());
+                }
+                _ = sandbox::sigterm() => {
+                    tracing::info!("SIGTERM received while waiting for installation.toml");
+                    return Ok(());
+                }
+            }
+        };
+        cfg
+    };
+    let install_ns = install_config.namespace;
+
+    let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
+    let mut config_profile_names: Vec<TrustProfileName> = config
+        .profiles
+        .keys()
+        .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
+        .collect();
+    tracing::info!(default_profile = %default_profile_name, "config loaded");
 
     // -- Default agent identity (needed by audit logger) --
     let uid = rustix::process::getuid().as_raw();
@@ -351,10 +389,6 @@ async fn main() -> anyhow::Result<()> {
         })),
     )
     .context("failed to start config watcher")?;
-
-    // -- Platform readiness --
-    #[cfg(target_os = "linux")]
-    platform_linux::systemd::notify_ready();
 
     tracing::info!("daemon-profile ready");
 

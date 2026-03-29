@@ -474,25 +474,42 @@ async fn init_services() -> anyhow::Result<()> {
         .args(["--user", "daemon-reload"])
         .status();
 
+    // Detect whether desktop units are installed before reset-failed / start.
+    let desktop_installed = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "list-unit-files",
+            "open-sesame-desktop.target",
+            "--no-pager",
+            "--no-legend",
+        ])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
     // Reset any failed units from prior crash-loops.
-    // Headless units are always present; desktop units may not be installed.
-    for target in ["open-sesame-headless.target", "open-sesame-desktop.target"] {
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "reset-failed", target])
-            .status();
-    }
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "open-sesame-headless.target"])
+        .status();
     for unit in [
         "open-sesame-profile",
         "open-sesame-secrets",
         "open-sesame-launcher",
         "open-sesame-snippets",
-        "open-sesame-wm",
-        "open-sesame-clipboard",
-        "open-sesame-input",
     ] {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "reset-failed", unit])
             .status();
+    }
+    if desktop_installed {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "reset-failed", "open-sesame-desktop.target"])
+            .status();
+        for unit in ["open-sesame-wm", "open-sesame-clipboard", "open-sesame-input"] {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "reset-failed", unit])
+                .status();
+        }
     }
 
     // Start the headless target (always present).
@@ -510,19 +527,6 @@ async fn init_services() -> anyhow::Result<()> {
     }
 
     step_done("Starting headless daemons");
-
-    // Start the desktop target if installed (non-fatal if missing).
-    let desktop_installed = std::process::Command::new("systemctl")
-        .args([
-            "--user",
-            "list-unit-files",
-            "open-sesame-desktop.target",
-            "--no-pager",
-            "--no-legend",
-        ])
-        .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
 
     if desktop_installed {
         let _ = std::process::Command::new("systemctl")

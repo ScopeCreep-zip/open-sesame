@@ -2,6 +2,8 @@
 Description=Open Sesame profile daemon (IPC bus)
 Documentation=https://github.com/scopecreep-zip/open-sesame
 PartOf=open-sesame-headless.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=notify
