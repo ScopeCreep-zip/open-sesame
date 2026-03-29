@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("waiting for sesame init — installation.toml not found");
         let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(15));
-        let cfg = loop {
+        loop {
             tokio::select! {
                 _ = poll_interval.tick() => {
                     if let Ok(cfg) = core_config::load_installation() {
@@ -213,8 +213,7 @@ async fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
-        };
-        cfg
+        }
     };
     let install_ns = install_config.namespace;
 
