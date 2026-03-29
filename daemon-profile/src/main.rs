@@ -239,10 +239,10 @@ async fn main() -> anyhow::Result<()> {
                                 SecurityLevel::Internal,
                                 bus.epoch(),
                             ).with_correlation(msg.msg_id);
-                            if let Ok(reply_bytes) = core_ipc::encode_frame(&reply) {
-                                if let Some(origin) = bus.take_pending_request(&msg.msg_id).await {
-                                    let _ = bus.send_to(origin, &reply_bytes).await;
-                                }
+                            if let Ok(reply_bytes) = core_ipc::encode_frame(&reply)
+                                && let Some(origin) = bus.take_pending_request(&msg.msg_id).await
+                            {
+                                let _ = bus.send_to(origin, &reply_bytes).await;
                             }
                         }
                     }
@@ -259,6 +259,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let install_ns = install_config.namespace;
+
+    // Reload config after transitioning from pre-init state. The initial
+    // load_config at startup may have returned Config::default() (empty
+    // profiles) because config.toml didn't exist yet. sesame init creates
+    // both config.toml and installation.toml, so by the time we get here
+    // the config file should have the full profile definitions.
+    let config = core_config::load_config(None).unwrap_or(config);
 
     let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
     let mut config_profile_names: Vec<TrustProfileName> = config

@@ -505,7 +505,11 @@ async fn init_services() -> anyhow::Result<()> {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "reset-failed", "open-sesame-desktop.target"])
             .status();
-        for unit in ["open-sesame-wm", "open-sesame-clipboard", "open-sesame-input"] {
+        for unit in [
+            "open-sesame-wm",
+            "open-sesame-clipboard",
+            "open-sesame-input",
+        ] {
             let _ = std::process::Command::new("systemctl")
                 .args(["--user", "reset-failed", unit])
                 .status();
