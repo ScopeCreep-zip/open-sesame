@@ -183,6 +183,22 @@ async fn main() -> anyhow::Result<()> {
         cfg
     } else {
         tracing::info!("waiting for sesame init — installation.toml not found");
+
+        // Register a temporary in-process subscriber so we can respond to
+        // StatusRequest RPCs while waiting. Without this, `sesame status`
+        // times out because nobody reads from the bus host channel.
+        let pre_init_id = DaemonId::new();
+        let pre_init_ctx = core_ipc::MessageContext::new(pre_init_id);
+        let (pre_init_tx, mut pre_init_rx) = mpsc::channel::<Vec<u8>>(256);
+        bus.register(
+            pre_init_id,
+            core_ipc::PeerCredentials::in_process(),
+            SecurityLevel::Internal,
+            vec![],
+            pre_init_tx,
+        )
+        .await;
+
         let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
@@ -190,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
                 _ = poll_interval.tick() => {
                     if let Ok(cfg) = core_config::load_installation() {
                         tracing::info!("installation.toml found, transitioning to full mode");
+                        bus.unregister(&pre_init_id).await;
                         break cfg;
                     }
                 }
@@ -203,6 +220,32 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => tracing::error!(error = %e, "bus server error while waiting for init"),
                     }
                     return Ok(());
+                }
+                Some(frame) = pre_init_rx.recv() => {
+                    if let Ok(msg) = core_ipc::decode_frame::<Message<EventKind>>(&frame) {
+                        if msg.sender == pre_init_id {
+                            continue;
+                        }
+                        if matches!(msg.payload, EventKind::StatusRequest) {
+                            let reply = Message::new(
+                                &pre_init_ctx,
+                                EventKind::StatusResponse {
+                                    active_profiles: vec![],
+                                    default_profile: TrustProfileName::try_from("default").unwrap_or_else(|_| unreachable!()),
+                                    daemon_uptimes_ms: vec![],
+                                    locked: true,
+                                    lock_state: std::collections::BTreeMap::new(),
+                                },
+                                SecurityLevel::Internal,
+                                bus.epoch(),
+                            ).with_correlation(msg.msg_id);
+                            if let Ok(reply_bytes) = core_ipc::encode_frame(&reply) {
+                                if let Some(origin) = bus.take_pending_request(&msg.msg_id).await {
+                                    let _ = bus.send_to(origin, &reply_bytes).await;
+                                }
+                            }
+                        }
+                    }
                 }
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("SIGINT received while waiting for installation.toml");
