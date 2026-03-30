@@ -2,37 +2,9 @@
 # Usage: mise run <task>
 # Help:  mise run help
 
+# All build tools provided by nix flake devshell (flake.nix devShells.default).
+# mise is used only for task definitions. Run `direnv allow` to load the devshell.
 [tools]
-# Core
-rust = "1.91"
-node = "22"
-"cargo:cargo-deb" = "latest"
-"cargo:cross" = "latest"
-
-# Linting & Formatting
-"cargo:taplo-cli" = "0.10.0" # TOML formatter/linter
-shellcheck = "0.11.0"        # Shell script linter
-shfmt = "3.12.0"             # Shell script formatter
-actionlint = "1.7.7"         # GitHub Actions linter
-
-# Documentation
-markdownlint-cli2 = "0.18.1" # Markdown linter
-lychee = "0.20.1"            # Link checker
-
-# Git Hooks & Commits
-lefthook = "latest" # Git hooks manager
-
-# npm packages installed via `mise run setup:npm` for proper dependency resolution
-# "npm:@commitlint/cli" = "latest"                 # Commit message linter
-# "npm:@commitlint/config-conventional" = "latest"
-# "npm:semantic-release" = "24.2.9"
-# "npm:@semantic-release/git" = "10.0.1"
-# "npm:@semantic-release/changelog" = "6.0.3"
-# "npm:@semantic-release/exec" = "7.1.0"
-# "npm:@semantic-release/commit-analyzer" = "13.0.1"
-# "npm:@semantic-release/release-notes-generator" = "14.1.0"
-# "npm:@semantic-release/github" = "11.0.6"
-# "npm:conventional-changelog-conventionalcommits" = "9.1.0"
 
 [vars]
 bin = "sesame"

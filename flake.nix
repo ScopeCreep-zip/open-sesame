@@ -463,16 +463,33 @@
         {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
+              # Rust toolchain
               cargo
               rustc
               rust-analyzer
               clippy
               rustfmt
-              tokei
+
+              # Build tools
               pkg-config
               patchelf
+              cargo-deb
+
+              # Documentation
               mdbook
               lychee
+              tokei
+
+              # Node (semantic-release, commitlint)
+              nodejs
+
+              # Linting & formatting
+              taplo
+              shellcheck
+              shfmt
+              actionlint
+              markdownlint-cli2
+              lefthook
             ];
 
             buildInputs = with pkgs; [
