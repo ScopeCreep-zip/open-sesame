@@ -53,6 +53,68 @@ gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeC
 
 ---
 
+## [1.6.13](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.6.12...v1.6.13) (2026-03-30)
+
+### 🐛 Bug Fixes
+
+* **nix:** add patchelf to devshell nativeBuildInputs for deb builds ([bc0678c](https://github.com/ScopeCreep-zip/open-sesame/commit/bc0678cb447b7e4b61806abc1ed71d293e11a2b7))
+* **nix:** move all dev tools from mise to flake devshell ([a4374a7](https://github.com/ScopeCreep-zip/open-sesame/commit/a4374a77035b72b782437e7d391e20cafda5aeff))
+
+## Quick Install
+
+### APT Repository (recommended)
+
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
+sudo apt update
+```
+
+**Desktop** (window switcher + clipboard + input + headless):
+```bash
+sudo apt install -y open-sesame open-sesame-desktop
+```
+
+**Headless** (secrets, profiles, launcher, snippets — no GUI):
+```bash
+sudo apt install -y open-sesame
+```
+
+### Direct Download
+
+See release assets below for `.deb` packages (amd64/arm64) with SHA256 checksums.
+
+## What You Get
+
+### open-sesame (headless)
+- **Encrypted secret vaults** with multi-factor auth (password + SSH agent)
+- **Trust profiles** with context-driven activation
+- **Application launcher** with fuzzy search and secret injection
+- **Snippet expansion** with variable substitution
+
+### open-sesame-desktop (requires open-sesame)
+- **Alt+Space** — Window switcher overlay with Vimium-style letter hints
+- **Alt+Tab** — Quick-switch to previous window
+- **Clipboard manager** with security classification
+- **Keyboard input capture** for compositor-independent shortcuts
+
+## Documentation
+
+- **[User Guide](https://scopecreep-zip.github.io/open-sesame/book/)** — Configuration, keybindings, theming
+- **[API Docs](https://scopecreep-zip.github.io/open-sesame/doc/open_sesame/)** — Library reference
+
+## Supply Chain Security
+
+All `.deb` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
+```bash
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip
+```
+
+---
+
 ## [1.6.12](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.6.11...v1.6.12) (2026-03-30)
 
 ### 🐛 Bug Fixes
