@@ -18,8 +18,11 @@ NoNewPrivileges=yes
 ProtectHome=read-only
 ProtectSystem=strict
 
+ConfigurationDirectory=pds
+CacheDirectory=open-sesame
 ReadWritePaths=%t/pds
 ReadWritePaths=%h/.config/pds
+ReadWritePaths=%h/.cache/open-sesame
 
 # Resource limits
 LimitNOFILE=4096

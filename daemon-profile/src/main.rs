@@ -199,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .await;
 
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(500));
         let mut watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
             tokio::select! {
