@@ -3,9 +3,13 @@
 # Help:  mise run help
 
 # Local dev tools provided by nix flake devshell (flake.nix devShells.default).
-# CI tools installed explicitly via mise-action install_args in .github/workflows/.
-# mise is used for task definitions only. Run `direnv allow` to load the devshell.
+# CI-only tools below: GitHub Actions runners install these via mise-action.
+# Local dev: `direnv allow` loads the devshell with all deps including cargo-deb.
 [tools]
+node = "22"
+"cargo:cargo-deb" = "latest"
+"cargo:cross" = "latest"
+
 # npm packages installed via `mise run setup:npm` for proper dependency resolution
 # "npm:@commitlint/cli" = "latest"                 # Commit message linter
 # "npm:@commitlint/config-conventional" = "latest"
