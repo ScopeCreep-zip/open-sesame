@@ -2,9 +2,21 @@
 # Usage: mise run <task>
 # Help:  mise run help
 
-# All build tools provided by nix flake devshell (flake.nix devShells.default).
-# mise is used only for task definitions. Run `direnv allow` to load the devshell.
+# Local dev tools provided by nix flake devshell (flake.nix devShells.default).
+# CI tools installed explicitly via mise-action install_args in .github/workflows/.
+# mise is used for task definitions only. Run `direnv allow` to load the devshell.
 [tools]
+# npm packages installed via `mise run setup:npm` for proper dependency resolution
+# "npm:@commitlint/cli" = "latest"                 # Commit message linter
+# "npm:@commitlint/config-conventional" = "latest"
+# "npm:semantic-release" = "24.2.9"
+# "npm:@semantic-release/git" = "10.0.1"
+# "npm:@semantic-release/changelog" = "6.0.3"
+# "npm:@semantic-release/exec" = "7.1.0"
+# "npm:@semantic-release/commit-analyzer" = "13.0.1"
+# "npm:@semantic-release/release-notes-generator" = "14.1.0"
+# "npm:@semantic-release/github" = "11.0.6"
+# "npm:conventional-changelog-conventionalcommits" = "9.1.0"
 
 [vars]
 bin = "sesame"
