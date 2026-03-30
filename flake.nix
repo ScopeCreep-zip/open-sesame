@@ -470,6 +470,7 @@
               rustfmt
               tokei
               pkg-config
+              patchelf
               mdbook
               lychee
             ];
