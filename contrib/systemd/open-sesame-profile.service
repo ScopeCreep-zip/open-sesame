@@ -20,7 +20,7 @@ ProtectSystem=strict
 
 ConfigurationDirectory=pds
 CacheDirectory=open-sesame
-ReadWritePaths=%t/pds
+RuntimeDirectory=pds
 ReadWritePaths=%h/.config/pds
 ReadWritePaths=%h/.cache/open-sesame
 

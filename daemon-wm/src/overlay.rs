@@ -148,6 +148,14 @@ const MODIFIER_POLL_GRACE_MS: u128 = 150;
 /// keyboard focus and dismiss. Prevents the overlay getting permanently stuck.
 const STALE_ACTIVATION_TIMEOUT_MS: u128 = 3000;
 
+/// IPC idle timeout (ms). When the overlay is proactively told that IPC
+/// keyboard input is available (zero-window launcher mode) but no real user
+/// input ever arrives, dismiss after this period. This is the safety net for
+/// daemon-input being down or the IPC bus being broken while the overlay is
+/// open with `ipc_keyboard_active = true`. Generous (30s) because this is an
+/// operational failure, not a normal user flow.
+const IPC_IDLE_TIMEOUT_MS: u128 = 30_000;
+
 /// Modifier poll interval in milliseconds, equivalent to the GTK4 timeout.
 const POLL_INTERVAL_MS: u64 = 4;
 
@@ -189,6 +197,7 @@ struct OverlayApp {
     activated_at: Option<std::time::Instant>,
     received_key_event: bool,
     ipc_keyboard_active: bool,
+    last_real_input_at: Option<std::time::Instant>,
     error_message: String,
     staged_launch: Option<String>,
     unlock_profile: String,
@@ -232,6 +241,7 @@ impl OverlayApp {
         self.activated_at = None;
         self.received_key_event = false;
         self.ipc_keyboard_active = false;
+        self.last_real_input_at = None;
         self.staged_launch = None;
         self.needs_redraw = true;
         self.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -425,6 +435,7 @@ impl OverlayApp {
                 self.activated_at = Some(std::time::Instant::now());
                 self.received_key_event = false;
                 self.ipc_keyboard_active = false;
+                self.last_real_input_at = None;
                 self.staged_launch = None;
                 self.modifier_released_sent = false;
                 self.needs_redraw = true;
@@ -438,6 +449,7 @@ impl OverlayApp {
                     self.activated_at = Some(std::time::Instant::now());
                     self.received_key_event = false;
                     self.ipc_keyboard_active = false;
+                    self.last_real_input_at = None;
                 }
                 self.modifier_released_sent = false;
                 self.needs_redraw = true;
@@ -447,6 +459,7 @@ impl OverlayApp {
                 self.input_buffer = input;
                 self.staged_launch = None;
                 self.selection = selection;
+                self.last_real_input_at = Some(std::time::Instant::now());
                 self.needs_redraw = true;
             }
             OverlayCmd::Hide => {
@@ -470,11 +483,13 @@ impl OverlayApp {
             }
             OverlayCmd::ShowLaunchStaged { command } => {
                 self.staged_launch = Some(command);
+                self.last_real_input_at = Some(std::time::Instant::now());
                 self.needs_redraw = true;
             }
             OverlayCmd::ShowLaunching => {
                 self.phase = OverlayPhase::Launching;
                 self.error_message.clear();
+                self.last_real_input_at = Some(std::time::Instant::now());
                 self.needs_redraw = true;
                 self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
             }
@@ -511,6 +526,7 @@ impl OverlayApp {
                 self.activated_at = Some(std::time::Instant::now());
                 self.received_key_event = false;
                 self.ipc_keyboard_active = false;
+                self.last_real_input_at = None;
                 self.modifier_released_sent = false;
             }
             OverlayCmd::ConfirmKeyboardInput => {
@@ -545,11 +561,26 @@ impl OverlayApp {
             self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         }
 
-        // Stale activation timeout.
+        // Stale activation timeout: no input path confirmed at all.
         if !self.received_key_event
             && elapsed_ms >= STALE_ACTIVATION_TIMEOUT_MS
             && !self.modifier_released_sent
         {
+            self.modifier_released_sent = true;
+            self.send_event(OverlayEvent::Dismiss);
+            return;
+        }
+
+        // IPC idle timeout: proactive confirmation was sent (zero-window launcher)
+        // but no real user input has arrived. daemon-input may be down.
+        if self.ipc_keyboard_active
+            && self.last_real_input_at.is_none()
+            && elapsed_ms >= IPC_IDLE_TIMEOUT_MS
+            && !self.modifier_released_sent
+        {
+            tracing::warn!(
+                "IPC keyboard confirmed but no input received after {IPC_IDLE_TIMEOUT_MS}ms, dismissing"
+            );
             self.modifier_released_sent = true;
             self.send_event(OverlayEvent::Dismiss);
             return;
@@ -1028,6 +1059,7 @@ fn run_sctk_overlay(
         activated_at: None,
         received_key_event: false,
         ipc_keyboard_active: false,
+        last_real_input_at: None,
         error_message: String::new(),
         staged_launch: None,
         unlock_profile: String::new(),

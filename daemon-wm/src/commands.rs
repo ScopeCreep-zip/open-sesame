@@ -29,11 +29,17 @@ pub async fn execute_commands(
 ) {
     for cmd in commands {
         match cmd {
-            Command::ShowBorder => {
+            Command::ShowBorder {
+                zero_window_launcher,
+            } => {
                 // Reset IPC keyboard confirmation for new activation cycle.
                 *ipc_keyboard_confirmed = false;
                 if overlay_cmd_tx.send(OverlayCmd::ShowBorder).is_err() {
                     tracing::error!("overlay thread has exited unexpectedly");
+                }
+                if zero_window_launcher {
+                    *ipc_keyboard_confirmed = true;
+                    let _ = overlay_cmd_tx.send(OverlayCmd::ConfirmKeyboardInput);
                 }
                 // Request keyboard event forwarding from daemon-input.
                 client

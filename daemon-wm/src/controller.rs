@@ -36,7 +36,10 @@ const MAX_INPUT_LENGTH: usize = 64;
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Send OverlayCmd::ShowBorder to overlay (acquires KeyboardInteractivity::Exclusive).
-    ShowBorder,
+    /// When `zero_window_launcher` is true, immediately confirm IPC keyboard input
+    /// to prevent the stale activation timeout (the Wayland compositor will not
+    /// grant keyboard focus when zero toplevel windows exist).
+    ShowBorder { zero_window_launcher: bool },
     /// Send OverlayCmd::ShowFull with the given data.
     ShowPicker {
         windows: Vec<WindowInfo>,
@@ -258,12 +261,11 @@ impl Snapshot {
         }
     }
 
-    /// Whether there's at least one non-origin window to switch to.
+    /// Whether there are any windows to activate. A single window is a valid
+    /// target — the user may be on a different workspace and Alt+Tab should
+    /// bring it to them.
     fn has_targets(&self) -> bool {
-        match self.origin_index {
-            Some(_) => self.windows.len() > 1,
-            None => !self.windows.is_empty(),
-        }
+        !self.windows.is_empty()
     }
 
     /// Test-only constructor with explicit origin_index.
@@ -531,7 +533,9 @@ impl OverlayController {
                             pending_launch: None,
                         };
                         vec![
-                            Command::ShowBorder,
+                            Command::ShowBorder {
+                                zero_window_launcher: false,
+                            },
                             Command::Publish(EventKind::WmOverlayShown, SecurityLevel::Internal),
                         ]
                     }
@@ -546,7 +550,9 @@ impl OverlayController {
                             pending_launch: None,
                         };
                         vec![
-                            Command::ShowBorder,
+                            Command::ShowBorder {
+                                zero_window_launcher: false,
+                            },
                             Command::Publish(EventKind::WmOverlayShown, SecurityLevel::Internal),
                         ]
                     }
@@ -555,6 +561,7 @@ impl OverlayController {
                         // grant keyboard exclusivity before the user's first
                         // keypress. on_char works in Armed, so fast typists
                         // are handled. DwellTimeout then transitions to Picking.
+                        let zero_window_launcher = !snap.has_targets();
                         let selection = if matches!(mode, ActivationMode::LauncherBackward) {
                             snap.initial_backward()
                         } else {
@@ -569,7 +576,9 @@ impl OverlayController {
                             pending_launch: None,
                         };
                         vec![
-                            Command::ShowBorder,
+                            Command::ShowBorder {
+                                zero_window_launcher,
+                            },
                             Command::Publish(EventKind::WmOverlayShown, SecurityLevel::Internal),
                         ]
                     }
@@ -683,6 +692,20 @@ impl OverlayController {
                     ];
                 }
 
+                if snap.windows.is_empty() {
+                    let cmds = vec![Command::ShowPicker {
+                        windows: snap.overlay_windows.clone(),
+                        hints: snap.hints.clone(),
+                    }];
+                    self.phase = Phase::Picking {
+                        snap,
+                        selection,
+                        input,
+                        pending_launch: None,
+                    };
+                    return cmds;
+                }
+
                 let elapsed = entered_at.elapsed().as_millis() as u32;
 
                 if elapsed < dwell_ms && selection == snap.initial_forward() && input.is_empty() {
@@ -697,7 +720,7 @@ impl OverlayController {
                 selection,
                 snap,
                 pending_launch,
-                ..
+                input,
             } => {
                 // Pending launch takes priority over window activation.
                 if let Some(launch) = pending_launch {
@@ -711,6 +734,17 @@ impl OverlayController {
                         },
                     ];
                 }
+
+                if snap.windows.is_empty() {
+                    self.phase = Phase::Picking {
+                        snap,
+                        selection,
+                        input,
+                        pending_launch: None,
+                    };
+                    return Vec::new();
+                }
+
                 self.activate_index(selection, &snap)
             }
             other @ (Phase::Idle
@@ -1459,7 +1493,7 @@ mod tests {
     fn activate_emits_show_border() {
         let mut ctrl = OverlayController::new();
         let cmds = ctrl.handle(Event::Activate, &test_windows(), &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+        assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })));
         assert!(!ctrl.is_idle());
     }
 
@@ -1510,7 +1544,7 @@ mod tests {
     fn launcher_enters_armed_with_short_dwell() {
         let mut ctrl = OverlayController::new();
         let cmds = ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
-        assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+        assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })));
         assert!(matches!(ctrl.phase, Phase::Armed { .. }));
         // Short dwell means a deadline is set.
         assert!(ctrl.next_deadline().is_some());
@@ -1567,7 +1601,7 @@ mod tests {
         let mut ctrl = OverlayController::new();
         let cmds = ctrl.handle(Event::ActivateLauncher, &[], &test_config());
         assert!(
-            cmds.iter().any(|c| matches!(c, Command::ShowBorder)),
+            cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })),
             "launcher must activate even with zero windows"
         );
         assert!(!ctrl.is_idle());
@@ -2139,12 +2173,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_has_targets_with_origin_needs_more_than_one() {
+    fn snapshot_has_targets_single_window_with_origin() {
         let single = vec![test_windows()[0].clone()];
         let snap = Snapshot::with_origin(&single, &test_config(), Some(0));
         assert!(
-            !snap.has_targets(),
-            "single window that is origin = no targets"
+            snap.has_targets(),
+            "single window is a valid target (user may be on a different workspace)"
         );
     }
 
@@ -2237,10 +2271,10 @@ mod tests {
     }
 
     #[test]
-    fn single_window_is_origin_no_activation() {
+    fn single_window_is_origin_still_activatable() {
         let single = vec![test_windows()[0].clone()];
         let snap = Snapshot::with_origin(&single, &test_config(), Some(0));
-        assert!(!snap.has_targets());
+        assert!(snap.has_targets());
     }
 
     #[test]
@@ -2843,5 +2877,134 @@ mod tests {
             assert!(profiles.iter().any(|p| p.as_ref() == "alpha"));
             assert!(profiles.iter().any(|p| p.as_ref() == "beta"));
         }
+    }
+
+    // === Zero-window launcher mode ===
+
+    #[test]
+    fn launcher_zero_windows_emits_show_border_with_flag() {
+        let mut ctrl = OverlayController::new();
+        let cmds = ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::ShowBorder {
+                    zero_window_launcher: true
+                }
+            )),
+            "launcher with zero windows must set zero_window_launcher flag, got: {cmds:?}"
+        );
+        assert!(!ctrl.is_idle());
+    }
+
+    #[test]
+    fn launcher_zero_windows_dwell_shows_picker() {
+        let mut ctrl = OverlayController::new();
+        ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        let cmds = ctrl.handle(Event::DwellTimeout, &[], &test_config());
+        assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
+    }
+
+    #[test]
+    fn launcher_zero_windows_alt_release_is_noop_in_picking() {
+        let mut ctrl = OverlayController::new();
+        ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        ctrl.handle(Event::DwellTimeout, &[], &test_config());
+        let cmds = ctrl.handle(Event::ModifierReleased, &[], &test_config());
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                Command::Hide | Command::HideAndSync | Command::ActivateWindow { .. }
+            )),
+            "Alt release in zero-window launcher should be no-op, got: {cmds:?}"
+        );
+        assert!(!ctrl.is_idle());
+    }
+
+    #[test]
+    fn launcher_zero_windows_alt_release_in_armed_transitions_to_picking() {
+        let mut ctrl = OverlayController::new();
+        ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        let cmds = ctrl.handle(Event::ModifierReleased, &[], &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })),
+            "Alt release from Armed with zero windows should show picker, got: {cmds:?}"
+        );
+        assert!(!ctrl.is_idle());
+    }
+
+    #[test]
+    fn launcher_zero_windows_escape_dismisses() {
+        let mut ctrl = OverlayController::new();
+        ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        ctrl.handle(Event::DwellTimeout, &[], &test_config());
+        let cmds = ctrl.handle(Event::Escape, &[], &test_config());
+        assert!(cmds.iter().any(|c| matches!(c, Command::Hide)));
+        assert!(ctrl.is_idle());
+    }
+
+    #[test]
+    fn launcher_zero_windows_char_stages_launch() {
+        let mut ctrl = OverlayController::new();
+        ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        ctrl.handle(Event::DwellTimeout, &[], &test_config());
+        let cmds = ctrl.handle(Event::Char('g'), &[], &test_config());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ShowLaunchStaged { .. })),
+            "typing configured key in zero-window launcher should stage launch, got: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn launcher_zero_windows_alt_release_executes_staged_launch() {
+        let mut ctrl = OverlayController::new();
+        ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+        ctrl.handle(Event::DwellTimeout, &[], &test_config());
+        ctrl.handle(Event::Char('g'), &[], &test_config());
+        let cmds = ctrl.handle(Event::ModifierReleased, &[], &test_config());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")),
+            "Alt release with staged launch should execute it, got: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn switcher_zero_windows_still_noop() {
+        let mut ctrl = OverlayController::new();
+        let cmds = ctrl.handle(Event::Activate, &[], &test_config());
+        assert!(cmds.is_empty(), "Alt+Tab with zero windows must be no-op");
+        assert!(ctrl.is_idle());
+    }
+
+    #[test]
+    fn launcher_with_windows_flag_is_false() {
+        let mut ctrl = OverlayController::new();
+        let cmds = ctrl.handle(Event::ActivateLauncher, &test_windows(), &test_config());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::ShowBorder {
+                    zero_window_launcher: false
+                }
+            )),
+            "launcher with windows should NOT set zero_window_launcher, got: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn launcher_with_windows_alt_release_activates() {
+        let mut ctrl = OverlayController::new();
+        let windows = test_windows();
+        ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
+        ctrl.handle(Event::DwellTimeout, &windows, &test_config());
+        let cmds = ctrl.handle(Event::ModifierReleased, &windows, &test_config());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ActivateWindow { .. })),
+            "Alt release with windows should activate, got: {cmds:?}"
+        );
+        assert!(ctrl.is_idle());
     }
 }

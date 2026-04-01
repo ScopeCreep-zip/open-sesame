@@ -254,7 +254,7 @@ fn mru_file_roundtrip() {
 fn controller_activate_emits_show_border() {
     let mut ctrl = OverlayController::new();
     let cmds = ctrl.handle(Event::Activate, &test_windows(), &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })));
     assert!(!ctrl.is_idle());
     assert!(ctrl.next_deadline().is_some());
 }
@@ -289,7 +289,7 @@ fn controller_activate_no_windows_is_noop() {
 fn controller_backward_emits_show_border() {
     let mut ctrl = OverlayController::new();
     let cmds = ctrl.handle(Event::ActivateBackward, &test_windows(), &test_config());
-    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })));
     assert!(!ctrl.is_idle());
 }
 
@@ -317,7 +317,7 @@ fn controller_launcher_skips_armed() {
     let windows = test_windows();
     let cmds = ctrl.handle(Event::ActivateLauncher, &windows, &test_config());
     // Launcher now enters brief Armed phase for keyboard focus acquisition.
-    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder)));
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })));
     assert!(ctrl.next_deadline().is_some());
     // DwellTimeout transitions to Picking.
     let cmds = ctrl.handle(Event::DwellTimeout, &windows, &test_config());
@@ -649,4 +649,65 @@ fn wm_config_warns_on_extreme_delay() {
         }),
         "expected warning for extreme delay: {diagnostics:?}"
     );
+}
+
+// ============================================================================
+// Controller: Zero-Window Launcher Mode (cold-start bug fix)
+// ============================================================================
+
+#[test]
+fn controller_launcher_zero_windows_activates() {
+    let mut ctrl = OverlayController::new();
+    let cmds = ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            Command::ShowBorder {
+                zero_window_launcher: true
+            }
+        )),
+        "zero-window launcher must emit ShowBorder with flag"
+    );
+    assert!(!ctrl.is_idle());
+}
+
+#[test]
+fn controller_launcher_zero_windows_full_flow() {
+    let mut ctrl = OverlayController::new();
+    let cmds = ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowBorder { .. })));
+
+    let cmds = ctrl.handle(Event::DwellTimeout, &[], &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::ShowPicker { .. })));
+
+    let cmds = ctrl.handle(Event::ModifierReleased, &[], &test_config());
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, Command::Hide | Command::HideAndSync))
+    );
+    assert!(!ctrl.is_idle());
+
+    let cmds = ctrl.handle(Event::Char('g'), &[], &test_config());
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::ShowLaunchStaged { .. }))
+    );
+
+    let cmds = ctrl.handle(Event::ModifierReleased, &[], &test_config());
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::LaunchApp { command, .. } if command == "ghostty")),
+        "staged launch should execute on Alt release: {cmds:?}"
+    );
+}
+
+#[test]
+fn controller_launcher_zero_windows_escape_dismisses() {
+    let mut ctrl = OverlayController::new();
+    ctrl.handle(Event::ActivateLauncher, &[], &test_config());
+    ctrl.handle(Event::DwellTimeout, &[], &test_config());
+    let cmds = ctrl.handle(Event::Escape, &[], &test_config());
+    assert!(cmds.iter().any(|c| matches!(c, Command::Hide)));
+    assert!(ctrl.is_idle());
 }
