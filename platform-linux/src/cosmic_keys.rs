@@ -46,17 +46,14 @@ fn cosmic_system_actions_path() -> core_types::Result<PathBuf> {
     Ok(cosmic_shortcuts_dir()?.join("system_actions"))
 }
 
-/// Capitalize a key name to match COSMIC's expected format.
+/// Normalize a key name to lowercase XKB keysym format.
 ///
-/// COSMIC uses X11-style key names with initial caps: "Tab", "Space", "Escape",
-/// "Return", etc. Single-character keys (a-z) stay lowercase per XKB convention.
+/// COSMIC's key matching compares against XKB keysym names which are
+/// lowercase: "space", "tab", "escape", "return". Capitalized names like
+/// "Space" trigger a "only matched case insensitive" warning in cosmic-comp
+/// and may fail to dispatch the binding entirely.
 fn capitalize_key(key: &str) -> String {
-    if key.len() <= 1 {
-        return key.to_string();
-    }
-    let mut chars = key.chars();
-    let first = chars.next().unwrap().to_uppercase().to_string();
-    format!("{first}{}", chars.as_str().to_lowercase())
+    key.to_lowercase()
 }
 
 /// Parse a key combo string like "super+space" into (modifiers, key).
@@ -405,14 +402,14 @@ mod tests {
     fn parse_key_combo_super_space() {
         let (mods, key) = parse_key_combo("super+space").unwrap();
         assert_eq!(mods, vec!["Super"]);
-        assert_eq!(key, "Space");
+        assert_eq!(key, "space");
     }
 
     #[test]
     fn parse_key_combo_alt_tab() {
         let (mods, key) = parse_key_combo("alt+tab").unwrap();
         assert_eq!(mods, vec!["Alt"]);
-        assert_eq!(key, "Tab");
+        assert_eq!(key, "tab");
     }
 
     #[test]
@@ -424,9 +421,9 @@ mod tests {
 
     #[test]
     fn format_keybinding_basic() {
-        let result = format_keybinding(&["Super".to_string()], "Space", "sesame");
+        let result = format_keybinding(&["Super".to_string()], "space", "sesame");
         assert!(result.contains("modifiers: [Super]"));
-        assert!(result.contains("key: \"Space\""));
+        assert!(result.contains("key: \"space\""));
         assert!(result.contains("Spawn(\"sesame\")"));
     }
 
