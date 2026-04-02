@@ -143,6 +143,8 @@ async fn main() -> anyhow::Result<()> {
                 std::thread::Builder::new()
                     .name("wm-winlist-poll".into())
                     .spawn(move || {
+                        let mut consecutive_failures: u32 = 0;
+                        const MAX_CONSECUTIVE_FAILURES: u32 = 10;
                         loop {
                             // list_windows() returns BoxFuture wrapping sync Wayland I/O.
                             // Use a noop-waker poll since the future never yields.
@@ -160,10 +162,23 @@ async fn main() -> anyhow::Result<()> {
                             };
                             match result {
                                 Ok(win_list) => {
+                                    consecutive_failures = 0;
                                     let _ = win_tx.blocking_send(win_list);
                                 }
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "failed to refresh window list");
+                                    consecutive_failures += 1;
+                                    tracing::warn!(
+                                        error = %e,
+                                        consecutive_failures,
+                                        "failed to refresh window list"
+                                    );
+                                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                        tracing::error!(
+                                            "compositor connection dead after {MAX_CONSECUTIVE_FAILURES} \
+                                             consecutive failures, exiting for systemd restart"
+                                        );
+                                        std::process::exit(1);
+                                    }
                                 }
                             }
                             std::thread::sleep(std::time::Duration::from_secs(2));
