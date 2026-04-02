@@ -712,7 +712,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-auth"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-types",
  "dirs",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -787,7 +787,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-types",
  "criterion",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "blake3",
  "core-types",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "libc",
  "tracing",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "blake3",
  "core-types",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "core-config",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-types",
  "proptest",
@@ -2731,9 +2731,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.13.0"
+version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
+checksum = "45a8a2b9cb3e0b0c1803dbb0758ffac5de2f425b23c28f518faabd9d805342ff"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.1",
@@ -3314,7 +3314,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3534,7 +3534,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "platform-linux"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-types",
  "proptest",
@@ -4367,7 +4367,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.6.17"
+version = "1.6.18"
 dependencies = [
  "core-config",
  "core-types",
@@ -6618,9 +6618,9 @@ dependencies = [
 
 [[package]]
 name = "writeable"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "wyz"
