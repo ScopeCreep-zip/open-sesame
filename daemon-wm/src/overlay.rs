@@ -253,6 +253,29 @@ impl OverlayApp {
         }
     }
 
+    /// Recreate the layer-shell surface after the compositor closed the
+    /// previous one. Reuses the existing Wayland connection and globals.
+    fn recreate_layer_surface(&mut self, qh: &QueueHandle<Self>) {
+        let surface = self.compositor_state.create_surface(qh);
+        let layer_surface = self.layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Overlay,
+            Some("sesame"),
+            None, // all outputs
+        );
+        layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        // Click-through while hidden.
+        layer_surface
+            .wl_surface()
+            .set_input_region(Some(self.empty_input_region.wl_region()));
+        layer_surface.commit();
+        self.layer_surface = Some(layer_surface);
+        tracing::info!("layer surface recreated");
+    }
+
     fn set_keyboard_interactivity(&self, mode: KeyboardInteractivity) {
         if let Some(ref surface) = self.layer_surface {
             surface.set_keyboard_interactivity(mode);
@@ -853,8 +876,21 @@ impl KeyboardHandler for OverlayApp {
 }
 
 impl LayerShellHandler for OverlayApp {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.running = false;
+    fn closed(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+        tracing::warn!("compositor closed layer surface, recreating");
+        // The compositor closed our layer surface (output reconfiguration,
+        // session change, etc.). Drop the old surface and recreate. The
+        // Wayland connection and globals (compositor_state, layer_shell, shm)
+        // survive — only the per-surface state is invalidated.
+        self.hide_common();
+        self.layer_surface = None;
+        self.slot_pool = None;
+        self.configured_size = (0, 0);
+
+        // Recreate immediately — the compositor may have already advertised
+        // a replacement output, or the surface was closed for a transient
+        // reason (e.g. output hotplug settling during boot).
+        self.recreate_layer_surface(qh);
     }
 
     fn configure(
@@ -1087,7 +1123,11 @@ fn run_sctk_overlay(
     while app.running {
         // Flush outgoing requests.
         if let Err(e) = conn.flush() {
-            tracing::error!("Wayland connection flush failed: {e}");
+            tracing::error!(
+                error = %e,
+                phase = ?app.phase,
+                "overlay: Wayland connection flush failed, thread will exit"
+            );
             // Best-effort: unblock main loop if a HideAndSync is pending.
             if app.pending_sync {
                 app.send_event(OverlayEvent::SurfaceUnmapped);
@@ -1102,7 +1142,11 @@ fn run_sctk_overlay(
             None => {
                 // Events are pending in the internal queue — dispatch them.
                 if let Err(e) = event_queue.dispatch_pending(&mut app) {
-                    tracing::error!("Wayland dispatch error: {e}");
+                    tracing::error!(
+                        error = %e,
+                        phase = ?app.phase,
+                        "overlay: Wayland dispatch error (pending queue), thread will exit"
+                    );
                     if app.pending_sync {
                         app.send_event(OverlayEvent::SurfaceUnmapped);
                     }
@@ -1136,7 +1180,11 @@ fn run_sctk_overlay(
             Err(wayland_client::backend::WaylandError::Io(ref e))
                 if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
-                tracing::error!("Wayland read error: {e}");
+                tracing::error!(
+                    error = %e,
+                    phase = ?app.phase,
+                    "overlay: Wayland read error, thread will exit"
+                );
                 if app.pending_sync {
                     app.send_event(OverlayEvent::SurfaceUnmapped);
                 }
@@ -1146,7 +1194,11 @@ fn run_sctk_overlay(
 
         // Dispatch any events that were read.
         if let Err(e) = event_queue.dispatch_pending(&mut app) {
-            tracing::error!("Wayland dispatch error: {e}");
+            tracing::error!(
+                error = %e,
+                phase = ?app.phase,
+                "overlay: Wayland dispatch error (post-read), thread will exit"
+            );
             if app.pending_sync {
                 app.send_event(OverlayEvent::SurfaceUnmapped);
             }

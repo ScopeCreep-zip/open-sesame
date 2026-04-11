@@ -21,6 +21,13 @@ use daemon_wm::render::OverlayTheme;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Maximum overlay thread respawns within the time window before exit(1).
+const OVERLAY_MAX_RESPAWNS: usize = 5;
+/// Time window (seconds) for overlay respawn rate limiting.
+const OVERLAY_RESPAWN_WINDOW_SECS: u64 = 120;
+/// Delay (seconds) before respawning overlay thread after death.
+const OVERLAY_RESPAWN_DELAY_SECS: u64 = 2;
+
 /// Window manager daemon.
 #[derive(Parser, Debug)]
 #[command(name = "daemon-wm", about = "Window manager overlay daemon")]
@@ -263,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
     let mut dedup = KeyDeduplicator::new();
     let mut ipc_keyboard_confirmed = false;
 
-    let (overlay_cmd_tx, mut overlay_event_rx) = {
+    let (mut overlay_cmd_tx, mut overlay_event_rx) = {
         let cfg = wm_config.lock().await;
         let theme = OverlayTheme::from_config(&cfg);
         let show_app_id = cfg.show_app_id;
@@ -277,6 +284,12 @@ async fn main() -> anyhow::Result<()> {
     // core dumps. Lives in the tokio executor context — never crosses thread
     // boundaries to the render thread (which receives only dot counts).
     let mut password_buffer = SecureVec::for_password();
+
+    // -- Overlay respawn tracking --
+    let mut overlay_respawn_times: Vec<std::time::Instant> = Vec::new();
+    // Pending respawn: set to a deadline when the overlay thread dies.
+    // The select loop waits for this deadline before spawning a new thread.
+    let mut overlay_respawn_at: Option<tokio::time::Instant> = None;
 
     // Platform readiness.
     #[cfg(target_os = "linux")]
@@ -308,8 +321,85 @@ async fn main() -> anyhow::Result<()> {
                 platform_linux::systemd::notify_watchdog();
             }
 
+            // Deferred overlay respawn — non-blocking delay before thread recreation.
+            _ = async {
+                match overlay_respawn_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if overlay_respawn_at.is_some() => {
+                overlay_respawn_at = None;
+
+                // Respawn overlay thread with fresh channels.
+                let (new_cmd_tx, new_event_rx) = {
+                    let cfg = wm_config.lock().await;
+                    let theme = OverlayTheme::from_config(&cfg);
+                    let show_app_id = cfg.show_app_id;
+                    let show_title = cfg.show_title;
+                    drop(cfg);
+                    overlay::spawn_overlay(theme, show_app_id, show_title)
+                };
+                overlay_cmd_tx = new_cmd_tx;
+                overlay_event_rx = new_event_rx;
+
+                tracing::info!(
+                    respawn_count = overlay_respawn_times.len(),
+                    "overlay thread respawned successfully"
+                );
+            }
+
             // Overlay keyboard events — highest priority.
-            Some(event) = overlay_event_rx.recv() => {
+            overlay_msg = overlay_event_rx.recv() => {
+                let event = match overlay_msg {
+                    Some(ev) => ev,
+                    None => {
+                        // Respawn already scheduled — don't re-process.
+                        if overlay_respawn_at.is_some() {
+                            // Channel is closed; yield to let the respawn deadline arm fire.
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+
+                        // Overlay thread died — channel closed.
+                        tracing::error!("overlay thread has died (event channel closed), scheduling respawn");
+
+                        // Prune old respawn timestamps outside the window.
+                        let now = std::time::Instant::now();
+                        let window = std::time::Duration::from_secs(OVERLAY_RESPAWN_WINDOW_SECS);
+                        overlay_respawn_times.retain(|t| now.duration_since(*t) < window);
+
+                        if overlay_respawn_times.len() >= OVERLAY_MAX_RESPAWNS {
+                            tracing::error!(
+                                respawns_in_window = overlay_respawn_times.len(),
+                                window_secs = OVERLAY_RESPAWN_WINDOW_SECS,
+                                "overlay respawn limit exceeded, exiting for systemd restart"
+                            );
+                            std::process::exit(1);
+                        }
+
+                        overlay_respawn_times.push(now);
+
+                        // Force controller to idle and clear sensitive state.
+                        controller.force_idle();
+                        password_buffer.clear();
+                        ipc_keyboard_confirmed = false;
+                        dedup = KeyDeduplicator::new();
+
+                        // Release any keyboard grab that was active.
+                        client.publish(
+                            EventKind::InputGrabRelease {
+                                requester: client.daemon_id(),
+                            },
+                            SecurityLevel::Internal,
+                        ).await.ok();
+
+                        // Schedule deferred respawn — does not block the event loop.
+                        overlay_respawn_at = Some(tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(OVERLAY_RESPAWN_DELAY_SECS));
+                        continue;
+                    }
+                };
+
                 // Log at trace level — event may contain keystroke content (KeyChar).
                 tracing::trace!(?event, "overlay event received");
                 let ctrl_event = match event {

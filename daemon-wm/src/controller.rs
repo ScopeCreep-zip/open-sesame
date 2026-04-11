@@ -411,6 +411,13 @@ impl OverlayController {
         matches!(self.phase, Phase::Idle)
     }
 
+    /// Force the controller back to Idle, discarding all in-flight state.
+    /// Used when the overlay thread dies and must be respawned.
+    pub fn force_idle(&mut self) {
+        self.phase = Phase::Idle;
+        self.last_ipc_advance = None;
+    }
+
     /// Return the profile currently being unlocked, if in the unlocking phase.
     pub fn current_unlock_profile(&self) -> Option<&TrustProfileName> {
         if let Phase::Unlocking {
