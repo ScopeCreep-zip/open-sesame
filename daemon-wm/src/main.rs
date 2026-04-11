@@ -132,21 +132,33 @@ async fn main() -> anyhow::Result<()> {
 
     // Window list — populated by compositor backend (when available).
     let windows: Arc<Mutex<Vec<Window>>> = Arc::new(Mutex::new(Vec::new()));
+    // Generation counter: incremented after each successful enumeration.
+    // The main loop reads this before/after wake to confirm fresh data arrived.
+    let win_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Compositor backend: shared via Arc for both polling and activation.
+    // Poll wake channel: sent to request an immediate window list re-enumeration.
     #[cfg(target_os = "linux")]
-    let backend: Option<Arc<Box<dyn platform_linux::compositor::CompositorBackend>>> = {
+    type Backend = Option<Arc<Box<dyn platform_linux::compositor::CompositorBackend>>>;
+    #[cfg(target_os = "linux")]
+    type PollWake = Option<std::sync::mpsc::Sender<()>>;
+    #[cfg(target_os = "linux")]
+    let (backend, poll_wake_tx): (Backend, PollWake) = {
         match platform_linux::compositor::detect_compositor() {
             Ok(backend) => {
                 tracing::info!(backend = backend.name(), "compositor backend detected");
                 let arc = Arc::new(backend);
                 let poll_backend = Arc::clone(&arc);
                 let win_ref = Arc::clone(&windows);
+                let win_gen_ref = Arc::clone(&win_generation);
                 // Window list polling runs on a dedicated OS thread because the
                 // compositor backend does synchronous Wayland roundtrips with
                 // libc::poll(). On the current_thread runtime this would block
                 // the single tokio thread and stall all IPC message processing.
                 let (win_tx, mut win_rx) = tokio::sync::mpsc::channel(1);
+                // Wake channel: main loop sends () to request immediate re-enumeration.
+                // The poll thread waits on this with a 2-second timeout for background refresh.
+                let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
                 std::thread::Builder::new()
                     .name("wm-winlist-poll".into())
                     .spawn(move || {
@@ -188,16 +200,28 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            // Wait for a wake signal or 2-second timeout for background refresh.
+                            // recv_timeout returns Err(Timeout) after 2s — normal background poll.
+                            // recv_timeout returns Ok(()) — main loop requested immediate refresh.
+                            // recv_timeout returns Err(Disconnected) — main loop exited, keep polling.
+                            match wake_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                                Ok(()) => {
+                                    // Drain any additional queued wake signals to avoid redundant enumerations.
+                                    while wake_rx.try_recv().is_ok() {}
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                            }
                         }
                     })
                     .expect("failed to spawn window list poll thread");
                 tokio::spawn(async move {
                     while let Some(win_list) = win_rx.recv().await {
                         *win_ref.lock().await = win_list;
+                        win_gen_ref.fetch_add(1, std::sync::atomic::Ordering::Release);
                     }
                 });
-                Some(arc)
+                (Some(arc), Some(wake_tx))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "no compositor backend available");
@@ -248,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 });
-                None
+                (None, None)
             }
         }
     };
@@ -536,65 +560,42 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    EventKind::WmActivateOverlay => {
-                        tracing::info!("overlay activation requested via IPC");
-                        let win_list = windows.lock().await;
-                        let cfg = wm_config.lock().await;
-                        let cmds = controller.handle(Event::Activate, &win_list, &cfg);
-                        drop(cfg);
-                        drop(win_list);
-                        daemon_wm::commands::execute_commands(
-                            cmds, &overlay_cmd_tx, &mut overlay_event_rx,
-                            #[cfg(target_os = "linux")] &backend,
-                            &mut client, &config_state,
-                            &mut controller, &windows, &wm_config,
-                            &mut ipc_keyboard_confirmed,
-                            &mut password_buffer,
-                        ).await;
-                        None
-                    }
+                    EventKind::WmActivateOverlay
+                    | EventKind::WmActivateOverlayBackward
+                    | EventKind::WmActivateOverlayLauncher
+                    | EventKind::WmActivateOverlayLauncherBackward => {
+                        let (event, label) = match &msg.payload {
+                            EventKind::WmActivateOverlay => (Event::Activate, "overlay activation"),
+                            EventKind::WmActivateOverlayBackward => (Event::ActivateBackward, "overlay activation (backward)"),
+                            EventKind::WmActivateOverlayLauncher => (Event::ActivateLauncher, "launcher-mode overlay activation"),
+                            EventKind::WmActivateOverlayLauncherBackward => (Event::ActivateLauncherBackward, "launcher-mode overlay activation (backward)"),
+                            _ => unreachable!(),
+                        };
+                        tracing::info!("{label} requested via IPC");
 
-                    EventKind::WmActivateOverlayBackward => {
-                        tracing::info!("overlay activation (backward) requested via IPC");
-                        let win_list = windows.lock().await;
-                        let cfg = wm_config.lock().await;
-                        let cmds = controller.handle(Event::ActivateBackward, &win_list, &cfg);
-                        drop(cfg);
-                        drop(win_list);
-                        daemon_wm::commands::execute_commands(
-                            cmds, &overlay_cmd_tx, &mut overlay_event_rx,
-                            #[cfg(target_os = "linux")] &backend,
-                            &mut client, &config_state,
-                            &mut controller, &windows, &wm_config,
-                            &mut ipc_keyboard_confirmed,
-                            &mut password_buffer,
-                        ).await;
-                        None
-                    }
+                        // Request fresh window list from the poll thread before
+                        // building the overlay snapshot. Without this, the cached
+                        // list can be up to 2 seconds stale and include windows
+                        // that have already been closed.
+                        #[cfg(target_os = "linux")]
+                        if let Some(ref wake) = poll_wake_tx {
+                            let gen_before = win_generation.load(std::sync::atomic::Ordering::Acquire);
+                            let _ = wake.send(());
+                            // Wait up to 200ms for the poll thread to enumerate
+                            // and the background task to update the mutex.
+                            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+                            while win_generation.load(std::sync::atomic::Ordering::Acquire) == gen_before {
+                                if tokio::time::Instant::now() >= deadline {
+                                    tracing::debug!("fresh window list not ready in 200ms, using cached");
+                                    break;
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                        }
 
-                    EventKind::WmActivateOverlayLauncherBackward => {
-                        tracing::info!("launcher-mode overlay activation (backward) requested via IPC");
                         let win_list = windows.lock().await;
                         let cfg = wm_config.lock().await;
-                        let cmds = controller.handle(Event::ActivateLauncherBackward, &win_list, &cfg);
-                        drop(cfg);
-                        drop(win_list);
-                        daemon_wm::commands::execute_commands(
-                            cmds, &overlay_cmd_tx, &mut overlay_event_rx,
-                            #[cfg(target_os = "linux")] &backend,
-                            &mut client, &config_state,
-                            &mut controller, &windows, &wm_config,
-                            &mut ipc_keyboard_confirmed,
-                            &mut password_buffer,
-                        ).await;
-                        None
-                    }
-
-                    EventKind::WmActivateOverlayLauncher => {
-                        tracing::info!("launcher-mode overlay activation requested via IPC");
-                        let win_list = windows.lock().await;
-                        let cfg = wm_config.lock().await;
-                        let cmds = controller.handle(Event::ActivateLauncher, &win_list, &cfg);
+                        let cmds = controller.handle(event, &win_list, &cfg);
                         drop(cfg);
                         drop(win_list);
                         daemon_wm::commands::execute_commands(

@@ -156,6 +156,51 @@ pub fn save(target: &str) {
     let _ = file.write_all(serialized.as_bytes());
 }
 
+/// Remove MRU entries that no longer correspond to live windows.
+///
+/// Called during overlay activation to keep the MRU file accurate.
+/// `live_ids` is the set of window ID strings currently reported by the
+/// compositor. Any MRU entry not in this set is removed.
+pub fn prune(live_ids: &std::collections::HashSet<String>) {
+    let Some(path) = mru_path() else {
+        return;
+    };
+
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .open(&path)
+    else {
+        return;
+    };
+
+    if !lock_exclusive(&file) {
+        return;
+    }
+
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+    let mut state = parse(&contents);
+
+    let before = state.stack.len();
+    state.stack.retain(|id| live_ids.contains(id));
+    let removed = before - state.stack.len();
+
+    if removed > 0 {
+        tracing::info!(
+            removed,
+            remaining = state.stack.len(),
+            "mru: pruned dead entries"
+        );
+        let serialized = state.stack.join("\n");
+        let _ = file.seek(std::io::SeekFrom::Start(0));
+        let _ = file.set_len(0);
+        let _ = file.write_all(serialized.as_bytes());
+    }
+}
+
 /// Seed MRU stack from a window list if empty.
 ///
 /// Sets focused window at top, all others in compositor order below.
@@ -291,6 +336,30 @@ fn save_to(path: &std::path::Path, target: &str) {
     state.stack.insert(0, target.to_string());
     state.stack.truncate(MAX_ENTRIES);
 
+    let serialized = state.stack.join("\n");
+    let _ = file.seek(std::io::SeekFrom::Start(0));
+    let _ = file.set_len(0);
+    let _ = file.write_all(serialized.as_bytes());
+}
+
+#[cfg(test)]
+fn prune_from(path: &std::path::Path, live_ids: &std::collections::HashSet<String>) {
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .open(path)
+    else {
+        return;
+    };
+    if !lock_exclusive(&file) {
+        return;
+    }
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+    let mut state = parse(&contents);
+    state.stack.retain(|id| live_ids.contains(id));
     let serialized = state.stack.join("\n");
     let _ = file.seek(std::io::SeekFrom::Start(0));
     let _ = file.set_len(0);
@@ -439,5 +508,76 @@ mod tests {
         let state = load_from(&path);
         assert_eq!(state.stack.len(), MAX_ENTRIES);
         assert_eq!(state.current(), Some("win-99"));
+    }
+
+    #[test]
+    fn prune_removes_dead_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mru");
+
+        save_to(&path, "A");
+        save_to(&path, "B");
+        save_to(&path, "C");
+        assert_eq!(load_from(&path).stack, vec!["C", "B", "A"]);
+
+        // B was closed — only A and C are live.
+        let live: std::collections::HashSet<String> =
+            ["A", "C"].iter().map(|s| s.to_string()).collect();
+        prune_from(&path, &live);
+        assert_eq!(load_from(&path).stack, vec!["C", "A"]);
+    }
+
+    #[test]
+    fn prune_preserves_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mru");
+
+        save_to(&path, "A");
+        save_to(&path, "B");
+        save_to(&path, "C");
+        save_to(&path, "D");
+        // Stack: D, C, B, A. Remove C and A.
+        let live: std::collections::HashSet<String> =
+            ["D", "B"].iter().map(|s| s.to_string()).collect();
+        prune_from(&path, &live);
+        assert_eq!(load_from(&path).stack, vec!["D", "B"]);
+    }
+
+    #[test]
+    fn prune_all_dead_leaves_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mru");
+
+        save_to(&path, "A");
+        save_to(&path, "B");
+
+        let live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        prune_from(&path, &live);
+        assert!(load_from(&path).stack.is_empty());
+    }
+
+    #[test]
+    fn prune_all_live_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mru");
+
+        save_to(&path, "A");
+        save_to(&path, "B");
+        save_to(&path, "C");
+
+        let live: std::collections::HashSet<String> =
+            ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        prune_from(&path, &live);
+        assert_eq!(load_from(&path).stack, vec!["C", "B", "A"]);
+    }
+
+    #[test]
+    fn prune_no_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mru");
+        // File doesn't exist — prune should not panic or create it.
+        let live: std::collections::HashSet<String> = ["A"].iter().map(|s| s.to_string()).collect();
+        prune_from(&path, &live);
+        assert!(load_from(&path).stack.is_empty());
     }
 }

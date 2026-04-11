@@ -189,6 +189,13 @@ struct Snapshot {
 
 impl Snapshot {
     fn build(windows: &[Window], config: &WmConfig) -> Self {
+        // Prune MRU entries for windows that no longer exist. This prevents
+        // stale origin detection and keeps the MRU file accurate across
+        // window open/close cycles.
+        let live_ids: std::collections::HashSet<String> =
+            windows.iter().map(|w| w.id.to_string()).collect();
+        mru::prune(&live_ids);
+
         let mru_state = mru::load();
         let mut win_list = windows.to_vec();
         mru::reorder(&mut win_list, |w| w.id.to_string(), &mru_state);
