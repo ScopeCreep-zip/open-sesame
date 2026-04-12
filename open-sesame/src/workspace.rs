@@ -1,5 +1,4 @@
 use anyhow::Context;
-use comfy_table::{Table, presets::UTF8_FULL};
 use core_types::TrustProfileName;
 use owo_colors::OwoColorize;
 use zeroize::Zeroize;
@@ -100,6 +99,10 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             depth,
             profile,
             adopt,
+            workspace_init,
+            workspace_update,
+            no_workspace,
+            force,
         } => {
             let config = core_config::load_workspace_config().unwrap_or_default();
             let root = sesame_workspace::config::resolve_root(&config);
@@ -108,6 +111,149 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             let conv = sesame_workspace::convention::parse_url(&url)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let target = sesame_workspace::convention::canonical_path(&root, &user, &conv);
+
+            // Workspace.git auto-discovery.
+            //
+            // Behavior is driven by config (`workspace_auto`) with CLI flag overrides:
+            //   --no-workspace      → skip everything
+            //   --workspace-init    → force init even if org dir exists
+            //   --workspace-update  → force pull if behind
+            //
+            // Config modes:
+            //   "auto"   → init on new org dir, inform on existing
+            //   "always" → init or update without asking
+            //   "never"  → no probes, no informs
+            //   "prompt" → interactive confirmation (TODO: future)
+            //
+            // This block is best-effort — probe failures or clone failures are
+            // non-fatal. The project repo clone always proceeds.
+            if !conv.is_workspace_git && !no_workspace {
+                let mode = if workspace_init || workspace_update {
+                    "always" // CLI flags override config
+                } else {
+                    config.settings.workspace_auto.as_str()
+                };
+
+                if mode != "never" {
+                    let org_dir = root.join(&user).join(&conv.server).join(&conv.org);
+                    let ws_repo_name = &config.settings.workspace_repo;
+                    let ws_url =
+                        format!("https://{}/{}/{}.git", conv.server, conv.org, ws_repo_name,);
+
+                    let has_workspace_git = org_dir.join(".git").is_dir();
+                    let org_dir_exists = org_dir.exists();
+
+                    if has_workspace_git {
+                        // Workspace.git already initialized.
+                        if workspace_update || mode == "always" {
+                            // User or config requested update — pull.
+                            eprintln!("Updating org workspace at {}...", org_dir.display());
+                            match sesame_workspace::git::pull_ff_only(&org_dir) {
+                                Ok(()) => eprintln!("  Workspace updated."),
+                                Err(e) => eprintln!("  Warning: workspace pull failed: {e}"),
+                            }
+                        } else if mode == "auto" {
+                            // Auto mode: show local vs remote state, don't modify.
+                            let local = sesame_workspace::git::head_commit_short(&org_dir)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| "(unborn)".into());
+                            let branch = sesame_workspace::git::current_branch(&org_dir)
+                                .unwrap_or_else(|_| "main".into());
+                            let tracking = sesame_workspace::git::remote_tracking_commit_short(
+                                &org_dir, &branch,
+                            )
+                            .ok()
+                            .flatten();
+
+                            if let Some(ref remote_commit) = tracking
+                                && *remote_commit != local
+                            {
+                                eprintln!(
+                                    "Note: org workspace at {} is at {local}, origin/{branch} is at {remote_commit}",
+                                    org_dir.display(),
+                                );
+                                eprintln!(
+                                    "  Update with: sesame workspace clone {} --workspace-update",
+                                    url,
+                                );
+                            }
+                        }
+                    } else if !org_dir_exists {
+                        // Org dir is new (doesn't exist) — safe to init assertively.
+                        if sesame_workspace::git::probe_remote(&ws_url) {
+                            eprintln!(
+                                "Detected {}/{}/{}.git — setting up org workspace...",
+                                conv.server, conv.org, ws_repo_name,
+                            );
+                            let ws_conv = sesame_workspace::convention::WorkspaceConvention {
+                                server: conv.server.clone(),
+                                org: conv.org.clone(),
+                                repo: None,
+                                is_workspace_git: true,
+                            };
+                            let ws_target = sesame_workspace::convention::canonical_path(
+                                &root, &user, &ws_conv,
+                            );
+                            match sesame_workspace::git::clone_repo(
+                                &ws_url, &ws_target, None, force,
+                            ) {
+                                Ok(p) => eprintln!("  Workspace initialized: {}", p.display()),
+                                Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
+                            }
+                        }
+                    } else if (workspace_init || mode == "always") && org_dir_exists {
+                        // Org dir exists without .git — user or config wants init.
+                        // This will overwrite existing files (.envrc, .gitignore, etc.)
+                        // so require --force for explicit consent.
+                        if !force {
+                            if sesame_workspace::git::probe_remote(&ws_url) {
+                                eprintln!(
+                                    "Warning: --workspace-init would overwrite files in {}",
+                                    org_dir.display(),
+                                );
+                                eprintln!(
+                                    "  Add --force to proceed: sesame workspace clone {} --workspace-init --force",
+                                    url,
+                                );
+                            }
+                        } else if sesame_workspace::git::probe_remote(&ws_url) {
+                            eprintln!(
+                                "Initializing workspace.git around existing {}...",
+                                org_dir.display(),
+                            );
+                            let ws_conv = sesame_workspace::convention::WorkspaceConvention {
+                                server: conv.server.clone(),
+                                org: conv.org.clone(),
+                                repo: None,
+                                is_workspace_git: true,
+                            };
+                            let ws_target = sesame_workspace::convention::canonical_path(
+                                &root, &user, &ws_conv,
+                            );
+                            match sesame_workspace::git::clone_repo(
+                                &ws_url, &ws_target, None, force,
+                            ) {
+                                Ok(p) => eprintln!("  Workspace initialized: {}", p.display()),
+                                Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
+                            }
+                        }
+                    } else if mode == "auto" && org_dir_exists {
+                        // Org dir exists without .git, auto mode — inform only.
+                        if sesame_workspace::git::probe_remote(&ws_url) {
+                            eprintln!(
+                                "Tip: {}/{}/{}.git is available for this org.",
+                                conv.server, conv.org, ws_repo_name,
+                            );
+                            eprintln!(
+                                "  Initialize with: sesame workspace clone {} --workspace-init",
+                                url,
+                            );
+                            eprintln!("  Or directly: sesame workspace clone {ws_url}",);
+                        }
+                    }
+                }
+            }
 
             // Check if the target directory already exists and can be adopted.
             let target_path = match &target {
@@ -147,7 +293,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 );
                 target_path
             } else {
-                let rp = sesame_workspace::git::clone_repo(&url, &target, depth)
+                let rp = sesame_workspace::git::clone_repo(&url, &target, depth, force)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 // Contextual output based on clone target type.
@@ -207,21 +353,80 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                         println!("No workspaces found.");
                         return Ok(());
                     }
-                    let mut table = Table::new();
-                    table.load_preset(UTF8_FULL);
-                    table.set_header(vec!["SERVER", "ORG", "REPO", "PROFILE", "PATH"]);
+
+                    // Group by server/org for hierarchical display.
+                    let mut groups: std::collections::BTreeMap<
+                        (String, String),
+                        Vec<&sesame_workspace::DiscoveredWorkspace>,
+                    > = std::collections::BTreeMap::new();
                     for ws in &workspaces {
-                        let repo = ws.convention.repo.as_deref().unwrap_or("(workspace)");
-                        let ws_profile = ws.linked_profile.as_deref().unwrap_or("-");
-                        table.add_row(vec![
-                            &ws.convention.server,
-                            &ws.convention.org,
-                            repo,
-                            ws_profile,
-                            &ws.path.display().to_string(),
-                        ]);
+                        let key = (ws.convention.server.clone(), ws.convention.org.clone());
+                        groups.entry(key).or_default().push(ws);
                     }
-                    println!("{table}");
+
+                    let mut total_repos = 0usize;
+                    for ((srv, org_name), entries) in &groups {
+                        // Section header: server/org with workspace indicator.
+                        let has_ws = entries.iter().any(|e| e.is_workspace_git);
+                        let ws_tag = if has_ws {
+                            format!(" {}", "(workspace)".dimmed())
+                        } else {
+                            String::new()
+                        };
+                        println!("{}{ws_tag}", format!("{srv}/{org_name}").bold(),);
+
+                        // Repo lines under this org.
+                        for ws in entries {
+                            if ws.is_workspace_git {
+                                continue; // Don't list workspace.git as a repo row.
+                            }
+                            total_repos += 1;
+                            let repo_name = ws.convention.repo.as_deref().unwrap_or("?");
+
+                            let branch = sesame_workspace::git::current_branch(&ws.path)
+                                .unwrap_or_else(|_| "?".into());
+                            let commit = sesame_workspace::git::head_commit_short(&ws.path)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| "?".into());
+                            let clean = sesame_workspace::git::is_clean(&ws.path).unwrap_or(true);
+                            let status_str = if clean {
+                                "clean".green().to_string()
+                            } else {
+                                "dirty".yellow().to_string()
+                            };
+
+                            let profile_str = match &ws.linked_profile {
+                                Some(p) => format!("  profile: {}", p.green()),
+                                None => String::new(),
+                            };
+
+                            println!(
+                                "  {:<20} {:<14} {}  {}{profile_str}",
+                                repo_name,
+                                branch,
+                                commit.dimmed(),
+                                status_str,
+                            );
+                        }
+                    }
+
+                    let org_count = groups.len();
+                    let server_count = groups
+                        .keys()
+                        .map(|(s, _)| s.as_str())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len();
+                    println!(
+                        "\n{}",
+                        format!(
+                            "{server_count} server{}, {org_count} org{}, {total_repos} repo{}",
+                            if server_count != 1 { "s" } else { "" },
+                            if org_count != 1 { "s" } else { "" },
+                            if total_repos != 1 { "s" } else { "" },
+                        )
+                        .dimmed(),
+                    );
                 }
                 WorkspaceListFormat::Json => {
                     let json: Vec<serde_json::Value> = workspaces
@@ -267,6 +472,36 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             println!("Workspace:  {}", path.display());
             println!("Remote:     {remote}");
             println!("Branch:     {branch}");
+
+            // Commit info.
+            let head_short = sesame_workspace::git::head_commit_short(&path)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "(unborn)".into());
+            let head_summary = sesame_workspace::git::head_commit_summary(&path)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let tracking_short =
+                sesame_workspace::git::remote_tracking_commit_short(&path, &branch)
+                    .ok()
+                    .flatten();
+            print!("Commit:     {head_short}");
+            if !head_summary.is_empty() {
+                print!(" {head_summary}");
+            }
+            println!();
+            if let Some(ref tracking) = tracking_short {
+                if *tracking != head_short {
+                    println!(
+                        "Tracking:   {} (origin/{branch} — {})",
+                        tracking,
+                        "behind".yellow(),
+                    );
+                } else {
+                    println!("Tracking:   {tracking} (origin/{branch} — up to date)");
+                }
+            }
 
             // Color-coded status.
             let status_str = if clean {

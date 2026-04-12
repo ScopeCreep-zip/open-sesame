@@ -175,6 +175,10 @@ predicates      = "3"
 insta           = { version = "1", features = ["yaml", "json", "redactions"] }
 tokio-test      = "0.4"
 
+# -- Git (pure-Rust + bundled libgit2) --
+gix             = { version = "0.72", default-features = false, features = ["blocking-network-client", "blocking-http-transport-curl", "worktree-mutation", "status"] }
+git2            = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+
 # -- Build/xtask --
 flate2          = "1"
 

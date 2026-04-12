@@ -13,12 +13,14 @@ toml.workspace = true
 dirs.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+gix.workspace = true
+git2.workspace = true
+tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 
 [dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

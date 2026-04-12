@@ -136,6 +136,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::KeybindingStatus => {
             platform_linux::cosmic_keys::keybinding_status().map_err(|e| anyhow::anyhow!("{e}"))
         }
+        Command::Clone {
+            url,
+            depth,
+            profile,
+            no_workspace,
+        } => {
+            // Top-level clone delegates to workspace clone with sane defaults.
+            workspace::cmd_workspace(WorkspaceCmd::Clone {
+                url,
+                depth,
+                profile,
+                adopt: true,
+                workspace_init: false,
+                workspace_update: false,
+                no_workspace,
+                force: false,
+            })
+            .await
+        }
         Command::Env {
             profile,
             prefix,

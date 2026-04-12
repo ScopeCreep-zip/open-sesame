@@ -3,8 +3,9 @@
 //! Provides deterministic workspace paths derived from git remote URLs:
 //! `{ROOT}/{USER}/{GIT_SERVER}/{ORG}/{REPO}`
 //!
-//! All git operations use explicit `std::process::Command` argument arrays.
-//! No shell interpolation. No temp files. No secret material on disk.
+//! Git operations use `gix` (pure Rust) for most tasks and `git2` (bundled
+//! libgit2) for init-around-existing-directory and pull --ff-only.
+//! No git CLI dependency. No shell interpolation. No secret material on disk.
 #![forbid(unsafe_code)]
 
 pub mod config;

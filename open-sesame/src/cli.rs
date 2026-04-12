@@ -53,6 +53,31 @@ pub(crate) enum Command {
     /// Show daemon status, active profiles, and lock state.
     Status,
 
+    /// Clone a repository to its canonical workspace path.
+    ///
+    /// Automatically discovers and sets up the org-level workspace.git if one
+    /// exists on the server. Equivalent to `sesame workspace clone` with sane
+    /// defaults.
+    ///
+    /// Usage: sesame clone https://github.com/org/repo
+    #[command(alias = "cl")]
+    Clone {
+        /// Git remote URL (HTTPS or SSH).
+        url: String,
+
+        /// Shallow clone depth.
+        #[arg(long)]
+        depth: Option<u32>,
+
+        /// Link to a profile after cloning.
+        #[arg(short, long)]
+        profile: Option<String>,
+
+        /// Skip workspace.git auto-discovery for this clone.
+        #[arg(long)]
+        no_workspace: bool,
+    },
+
     /// Unlock a vault with its password.
     Unlock {
         /// Target profiles (CSV: "default,work" or "org:vault,org:vault").
@@ -227,6 +252,30 @@ pub(crate) enum WorkspaceCmd {
         /// Enabled by default; use --no-adopt to require a fresh clone.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         adopt: bool,
+
+        /// Initialize the org-level workspace.git even if the org directory
+        /// already exists. Overrides the `workspace_auto` config setting.
+        /// If the org directory has existing files that would be overwritten,
+        /// requires `--force` to proceed.
+        #[arg(long)]
+        workspace_init: bool,
+
+        /// Pull workspace.git updates if behind remote.
+        /// Overrides the `workspace_auto` config setting.
+        #[arg(long)]
+        workspace_update: bool,
+
+        /// Skip all workspace.git auto-discovery for this clone.
+        /// Overrides the `workspace_auto` config setting.
+        #[arg(long)]
+        no_workspace: bool,
+
+        /// Allow destructive workspace operations: overwrite existing files
+        /// during `--workspace-init`, recover from broken partial init.
+        /// Without this flag, operations that would modify existing content
+        /// will print what would happen and refuse.
+        #[arg(long)]
+        force: bool,
     },
 
     /// List all discovered workspaces.

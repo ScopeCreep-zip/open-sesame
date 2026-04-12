@@ -29,6 +29,18 @@ pub struct WorkspaceSettings {
     pub user: String,
     /// Prefer SSH URLs when cloning.
     pub default_ssh: bool,
+    /// Conventional repo name for org-level workspace.git.
+    /// When cloning a project repo, sesame probes `{server}/{org}/{workspace_repo}.git`
+    /// and auto-clones it to the org directory if it exists.
+    pub workspace_repo: String,
+    /// Workspace auto-discovery behavior on `sesame workspace clone`:
+    ///
+    /// - `"auto"` (default): init workspace.git when org dir is new, inform when
+    ///   it exists and is behind, never modify an existing directory without a flag.
+    /// - `"always"`: always init or update workspace.git without asking.
+    /// - `"never"`: skip all workspace.git auto-discovery.
+    /// - `"prompt"`: ask interactively before init or update.
+    pub workspace_auto: String,
 }
 
 impl Default for WorkspaceSettings {
@@ -40,6 +52,8 @@ impl Default for WorkspaceSettings {
             ),
             user: std::env::var("USER").unwrap_or_else(|_| "user".into()),
             default_ssh: true,
+            workspace_repo: "workspace".into(),
+            workspace_auto: "auto".into(),
         }
     }
 }
