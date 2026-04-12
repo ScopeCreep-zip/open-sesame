@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "core-auth"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-types",
  "dirs",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -852,7 +852,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-types",
  "criterion",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "blake3",
  "core-types",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "libc",
  "tracing",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "blake3",
  "core-types",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "core-config",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-types",
  "proptest",
@@ -4490,7 +4490,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4745,7 +4745,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform-linux"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -4774,7 +4774,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -4791,7 +4791,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-types",
  "proptest",
@@ -5656,7 +5656,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "core-config",
  "core-types",
