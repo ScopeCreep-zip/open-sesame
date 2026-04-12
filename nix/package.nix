@@ -4,6 +4,7 @@
   rustPlatform,
   pkg-config,
   installShellFiles,
+  perl,
   openssl,
   libseccomp,
 }:
@@ -78,6 +79,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     installShellFiles
+    perl
   ];
 
   buildInputs = [

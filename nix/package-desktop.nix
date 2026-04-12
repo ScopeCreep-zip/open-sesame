@@ -5,6 +5,7 @@
   pkg-config,
   installShellFiles,
   makeWrapper,
+  perl,
   openssl,
   fontconfig,
   wayland,
@@ -79,6 +80,7 @@ rustPlatform.buildRustPackage {
     pkg-config
     installShellFiles
     makeWrapper
+    perl
   ];
 
   buildInputs = [

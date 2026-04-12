@@ -177,7 +177,7 @@ tokio-test      = "0.4"
 
 # -- Git (pure-Rust + bundled libgit2) --
 gix             = { version = "0.72", default-features = false, features = ["blocking-network-client", "blocking-http-transport-curl", "worktree-mutation", "status"] }
-git2            = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https"] }
+git2            = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 
 # -- HTTP client (forge API calls) --
 ureq            = { version = "3", default-features = false, features = ["rustls", "json"] }
