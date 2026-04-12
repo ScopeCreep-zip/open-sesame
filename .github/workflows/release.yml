@@ -72,13 +72,19 @@ jobs:
   # ==========================================================================
   # Build Nix packages and push to Cachix binary cache
   # ==========================================================================
+  # Nix cache must run AFTER semantic-release pushes the changelog commit
+  # to main. semantic-release creates a tag then commits CHANGELOG.md +
+  # Cargo.toml version bump back to main. `nix flake update` resolves to
+  # that post-release main commit, not the tag. Building from the tag
+  # produces derivation hashes that don't match what consumers fetch,
+  # causing full rebuilds instead of cachix hits.
   nix-cache:
     name: Nix Cache
-    needs: semantic-release
+    needs: [semantic-release, publish]
     if: needs.semantic-release.outputs.new_release == 'true'
     uses: ./.github/workflows/nix.yml
     with:
-      tag: ${{ needs.semantic-release.outputs.tag }}
+      tag: main
     secrets:
       SCOPE_CREEP_CACHIX_PRIVATE_KEY: ${{ secrets.SCOPE_CREEP_CACHIX_PRIVATE_KEY }}
 
