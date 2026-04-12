@@ -142,7 +142,7 @@ fn systemctl_prop(unit: &str, prop: &str) -> Option<String> {
     }
 }
 
-/// Read a value from /proc/<pid>/status by key (e.g. "VmRSS").
+/// Read a value from `/proc/<pid>/status` by key (e.g. "VmRSS").
 /// Returns the value in kB.
 fn read_proc_status(pid: u32, key: &str) -> Option<u64> {
     let path = format!("/proc/{pid}/status");
@@ -158,7 +158,7 @@ fn read_proc_status(pid: u32, key: &str) -> Option<u64> {
     None
 }
 
-/// Read process uptime from /proc/<pid>/stat and format as human-readable.
+/// Read process uptime from `/proc/<pid>/stat` and format as human-readable.
 fn read_proc_uptime(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let uptime_secs = std::fs::read_to_string("/proc/uptime").ok()?;

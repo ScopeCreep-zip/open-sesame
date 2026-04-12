@@ -108,7 +108,7 @@ fn check_kernel_config(key: &str) -> Option<String> {
     None
 }
 
-/// Check that all daemon PIDs have a specific /proc/<pid>/limits value.
+/// Check that all daemon PIDs have a specific `/proc/<pid>/limits` value.
 fn check_all_daemon_limits(limit_name: &str, expected: &str) -> bool {
     let pids = daemon_pids();
     if pids.is_empty() {
