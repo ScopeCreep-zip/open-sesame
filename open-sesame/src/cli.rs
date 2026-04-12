@@ -51,7 +51,27 @@ pub(crate) enum Command {
     },
 
     /// Show daemon status, active profiles, and lock state.
-    Status,
+    Status {
+        /// Run diagnostic checks across system health categories.
+        /// Accepts a comma-separated list of categories to check:
+        /// daemon, memory, sandbox, ipc, crypto, vault, platform, all.
+        /// Omit the value or pass "all" to run every category.
+        #[arg(long, value_name = "CATEGORIES", default_missing_value = "all", num_args = 0..=1)]
+        doctor: Option<String>,
+
+        /// Output format for --doctor results.
+        #[arg(long, default_value = "text", requires = "doctor")]
+        output: Option<String>,
+
+        /// Exit with code 0 if all checks pass, 1 if any fail, 2 if any warn.
+        /// Useful for systemd health checks and CI.
+        #[arg(long, requires = "doctor")]
+        exit_code: bool,
+
+        /// Suppress output, only set exit code. Implies --exit-code.
+        #[arg(long, requires = "doctor")]
+        quiet: bool,
+    },
 
     /// Clone a repository to its canonical workspace path.
     ///
@@ -59,7 +79,7 @@ pub(crate) enum Command {
     /// exists on the server. Equivalent to `sesame workspace clone` with sane
     /// defaults.
     ///
-    /// Usage: sesame clone https://github.com/org/repo
+    /// Usage: sesame clone <https://github.com/org/repo>
     #[command(alias = "cl")]
     Clone {
         /// Git remote URL (HTTPS or SSH).

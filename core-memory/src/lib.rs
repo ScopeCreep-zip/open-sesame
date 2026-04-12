@@ -169,7 +169,7 @@ mod stub {
         }
 
         /// Stub — unreachable on non-Unix.
-        pub(crate) fn is_secret_mem(&self) -> bool {
+        pub fn is_secret_mem(&self) -> bool {
             unreachable!()
         }
     }

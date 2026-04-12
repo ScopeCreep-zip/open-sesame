@@ -16,6 +16,7 @@ desktop = []
 
 [dependencies]
 core-types   = { workspace = true }
+core-memory  = { workspace = true }
 core-config  = { workspace = true }
 core-ipc     = { workspace = true }
 core-profile = { workspace = true }

@@ -11,6 +11,7 @@
 mod audit;
 mod cli;
 mod clipboard;
+mod doctor;
 mod env;
 mod helpers;
 mod init;
@@ -57,7 +58,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 init::cmd_init(no_keybinding, org, ssh_key, password, auth_policy).await
             }
         }
-        Command::Status => status::cmd_status().await,
+        Command::Status {
+            doctor,
+            output,
+            exit_code,
+            quiet,
+        } => {
+            if let Some(categories) = doctor {
+                doctor::cmd_doctor(
+                    &categories,
+                    output.as_deref().unwrap_or("text"),
+                    exit_code || quiet,
+                    quiet,
+                )
+            } else {
+                status::cmd_status().await
+            }
+        }
         Command::Unlock { profile } => unlock::cmd_unlock(profile).await,
         Command::Lock { profile } => unlock::cmd_lock(profile).await,
         Command::Profile(sub) => match sub {

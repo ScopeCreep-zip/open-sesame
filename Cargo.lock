@@ -4501,6 +4501,7 @@ dependencies = [
  "core-config",
  "core-crypto",
  "core-ipc",
+ "core-memory",
  "core-profile",
  "core-types",
  "dialoguer",

@@ -20,8 +20,7 @@ use std::sync::{Arc, Mutex};
 
 /// UUID v5 namespace for deterministic WindowId derivation from COSMIC protocol identifiers.
 const COSMIC_WINDOW_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x6f, 0x70, 0x65, 0x6e, 0x2d, 0x73, 0x65, 0x73, 0x61, 0x6d, 0x65, 0x2d, 0x77, 0x69, 0x6e,
-    0x64,
+    0x6f, 0x70, 0x65, 0x6e, 0x2d, 0x73, 0x65, 0x73, 0x61, 0x6d, 0x65, 0x2d, 0x77, 0x69, 0x6e, 0x64,
 ]); // "open-sesame-wind" as bytes
 
 // ============================================================================
@@ -60,21 +59,20 @@ impl CosmicBackend {
         let conn = Connection::connect_to_env()
             .map_err(|e| core_types::Error::Platform(format!("Wayland connection failed: {e}")))?;
 
-        let (globals, mut event_queue) =
-            registry_queue_init::<CosmicDispatchState>(&conn).map_err(|e| {
+        let (globals, mut event_queue) = registry_queue_init::<CosmicDispatchState>(&conn)
+            .map_err(|e| {
                 core_types::Error::Platform(format!("Wayland registry init failed: {e}"))
             })?;
 
         let qh = event_queue.handle();
 
         // Bind protocol objects ONCE. These live for the connection lifetime.
-        let _list: ExtForeignToplevelListV1 =
-            globals.bind(&qh, 1..=1, ()).map_err(|e| {
-                core_types::Error::Platform(format!("ext_foreign_toplevel_list bind: {e}"))
-            })?;
-        let _info: ZcosmicToplevelInfoV1 = globals.bind(&qh, 2..=3, ()).map_err(|e| {
-            core_types::Error::Platform(format!("zcosmic_toplevel_info bind: {e}"))
+        let _list: ExtForeignToplevelListV1 = globals.bind(&qh, 1..=1, ()).map_err(|e| {
+            core_types::Error::Platform(format!("ext_foreign_toplevel_list bind: {e}"))
         })?;
+        let _info: ZcosmicToplevelInfoV1 = globals
+            .bind(&qh, 2..=3, ())
+            .map_err(|e| core_types::Error::Platform(format!("zcosmic_toplevel_info bind: {e}")))?;
 
         let shared_state = Arc::new(Mutex::new(CosmicState {
             toplevels: HashMap::new(),

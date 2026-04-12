@@ -5,10 +5,10 @@
 //!
 //! ## Module layout
 //!
-//! - [`clone`]: Repository cloning (gix) and workspace.git orchestration.
-//! - [`inspect`]: Local repository queries — branch, remote URL, clean status.
-//! - [`remote`]: Network operations — probe, behind-check.
-//! - [`workspace`]: git2-based operations for init-around-existing and pull.
+//! - `clone`: Repository cloning (gix) and workspace.git orchestration.
+//! - `inspect`: Local repository queries — branch, remote URL, clean status.
+//! - `remote`: Network operations — probe, behind-check.
+//! - `workspace`: git2-based operations for init-around-existing and pull.
 
 mod clone;
 mod inspect;

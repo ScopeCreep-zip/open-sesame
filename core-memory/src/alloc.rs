@@ -598,8 +598,11 @@ impl ProtectedAlloc {
         self.user_data_len == 0
     }
 
+    /// Whether this allocation is backed by `memfd_secret` (true) or
+    /// `mmap` fallback (false). Used by `sesame status --doctor` to
+    /// report the memory protection backend.
     #[inline]
-    pub(crate) fn is_secret_mem(&self) -> bool {
+    pub fn is_secret_mem(&self) -> bool {
         self.is_secret_mem
     }
 
