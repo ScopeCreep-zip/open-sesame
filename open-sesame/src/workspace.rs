@@ -103,13 +103,141 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             workspace_update,
             no_workspace,
             force,
+            project,
+            include_forks,
+            include_archived,
         } => {
             let config = core_config::load_workspace_config().unwrap_or_default();
             let root = sesame_workspace::config::resolve_root(&config);
             let user = sesame_workspace::config::resolve_user(&config);
 
-            let conv = sesame_workspace::convention::parse_url(&url)
+            // For --project, accept org-only URLs (e.g. https://github.com/ScopeCreep-zip)
+            // by appending a placeholder repo component that parse_url requires.
+            let parse_url = if project {
+                let trimmed = url.trim_end_matches('/');
+                // Count path segments after the scheme. org-only has 2 (server/org).
+                let without_scheme = trimmed
+                    .strip_prefix("https://")
+                    .or_else(|| trimmed.strip_prefix("http://"))
+                    .unwrap_or(trimmed);
+                let segments = without_scheme.split('/').count();
+                if segments == 2 {
+                    format!("{trimmed}/_placeholder")
+                } else {
+                    url.clone()
+                }
+            } else {
+                url.clone()
+            };
+
+            let conv = sesame_workspace::convention::parse_url(&parse_url)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // --project: clone all repos in the org via forge API.
+            if project {
+                let forge =
+                    sesame_workspace::forge::forge_for_server(&conv.server).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "forge API not supported for server: {} (supported: github.com)",
+                            conv.server
+                        )
+                    })?;
+                let opts = sesame_workspace::forge::ListOptions {
+                    include_forks,
+                    include_archived,
+                };
+                let repos = forge
+                    .list_org_repos(&conv.org, &opts)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+                eprintln!(
+                    "Found {} repositories in {}/{}",
+                    repos.len(),
+                    conv.server,
+                    conv.org,
+                );
+
+                // Set up workspace.git first if available (reuse auto-discovery logic).
+                let org_dir = root.join(&user).join(&conv.server).join(&conv.org);
+                if !org_dir.join(".git").is_dir() {
+                    let ws_repo_name = &config.settings.workspace_repo;
+                    let ws_url =
+                        format!("https://{}/{}/{}.git", conv.server, conv.org, ws_repo_name,);
+                    if sesame_workspace::git::probe_remote(&ws_url) {
+                        eprintln!(
+                            "Setting up org workspace from {}/{}/{}.git...",
+                            conv.server, conv.org, ws_repo_name,
+                        );
+                        let ws_conv = sesame_workspace::convention::WorkspaceConvention {
+                            server: conv.server.clone(),
+                            org: conv.org.clone(),
+                            repo: None,
+                            is_workspace_git: true,
+                        };
+                        let ws_target =
+                            sesame_workspace::convention::canonical_path(&root, &user, &ws_conv);
+                        match sesame_workspace::git::clone_repo(&ws_url, &ws_target, None, force) {
+                            Ok(p) => eprintln!("  Workspace initialized: {}", p.display()),
+                            Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
+                        }
+                    }
+                }
+
+                // Filter out the workspace repo itself — it's managed separately.
+                let ws_repo_name = &config.settings.workspace_repo;
+                let repos: Vec<_> = repos
+                    .into_iter()
+                    .filter(|r| r.name != *ws_repo_name)
+                    .collect();
+
+                let mut success = 0usize;
+                let mut skipped = 0usize;
+                let mut failed = 0usize;
+
+                for repo_info in &repos {
+                    let repo_url = &repo_info.clone_url;
+                    let repo_conv = match sesame_workspace::convention::parse_url(repo_url) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("  Skipping {}: {e}", repo_info.name);
+                            failed += 1;
+                            continue;
+                        }
+                    };
+                    let repo_target =
+                        sesame_workspace::convention::canonical_path(&root, &user, &repo_conv);
+                    let repo_path = repo_target.path().to_path_buf();
+
+                    if repo_path.exists() && sesame_workspace::git::is_git_repo(&repo_path) {
+                        eprintln!("  {} (exists)", repo_info.name.dimmed());
+                        skipped += 1;
+                        continue;
+                    }
+
+                    match sesame_workspace::git::clone_repo(repo_url, &repo_target, depth, force) {
+                        Ok(_) => {
+                            eprintln!("  {} {}", "Cloned".green(), repo_info.name);
+                            success += 1;
+                        }
+                        Err(e) => {
+                            let hint = if e.to_string().contains("auth")
+                                || e.to_string().contains("401")
+                                || e.to_string().contains("403")
+                            {
+                                " (may be a private repo — check GITHUB_TOKEN)"
+                            } else {
+                                ""
+                            };
+                            eprintln!("  {} {}: {e}{hint}", "Failed".red(), repo_info.name,);
+                            failed += 1;
+                        }
+                    }
+                }
+
+                eprintln!("\n{success} cloned, {skipped} skipped (exist), {failed} failed",);
+                return Ok(());
+            }
+
             let target = sesame_workspace::convention::canonical_path(&root, &user, &conv);
 
             // Workspace.git auto-discovery.

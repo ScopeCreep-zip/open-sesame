@@ -76,6 +76,19 @@ pub(crate) enum Command {
         /// Skip workspace.git auto-discovery for this clone.
         #[arg(long)]
         no_workspace: bool,
+
+        /// Clone all repositories in the org from the forge API.
+        /// URL identifies the server and org (repo component is ignored).
+        #[arg(long)]
+        project: bool,
+
+        /// Include forked repositories when using --project.
+        #[arg(long, requires = "project")]
+        include_forks: bool,
+
+        /// Include archived repositories when using --project.
+        #[arg(long, requires = "project")]
+        include_archived: bool,
     },
 
     /// Unlock a vault with its password.
@@ -276,6 +289,19 @@ pub(crate) enum WorkspaceCmd {
         /// will print what would happen and refuse.
         #[arg(long)]
         force: bool,
+
+        /// Clone all repositories in the org from the forge API.
+        /// URL identifies the server and org (repo component is ignored).
+        #[arg(long)]
+        project: bool,
+
+        /// Include forked repositories when using --project.
+        #[arg(long, requires = "project")]
+        include_forks: bool,
+
+        /// Include archived repositories when using --project.
+        #[arg(long, requires = "project")]
+        include_archived: bool,
     },
 
     /// List all discovered workspaces.

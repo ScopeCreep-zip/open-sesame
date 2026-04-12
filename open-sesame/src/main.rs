@@ -141,6 +141,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             depth,
             profile,
             no_workspace,
+            project,
+            include_forks,
+            include_archived,
         } => {
             // Top-level clone delegates to workspace clone with sane defaults.
             workspace::cmd_workspace(WorkspaceCmd::Clone {
@@ -152,6 +155,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 workspace_update: false,
                 no_workspace,
                 force: false,
+                project,
+                include_forks,
+                include_archived,
             })
             .await
         }

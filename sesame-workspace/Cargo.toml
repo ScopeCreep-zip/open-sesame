@@ -15,6 +15,8 @@ thiserror.workspace = true
 tracing.workspace = true
 gix.workspace = true
 git2.workspace = true
+ureq.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

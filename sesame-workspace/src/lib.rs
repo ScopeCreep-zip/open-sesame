@@ -11,6 +11,7 @@
 pub mod config;
 pub mod convention;
 pub mod discover;
+pub mod forge;
 pub mod git;
 pub mod platform;
 
