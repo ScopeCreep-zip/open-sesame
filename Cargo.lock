@@ -748,7 +748,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-auth"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-types",
  "dirs",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -823,7 +823,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-types",
  "criterion",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "libc",
  "tracing",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1401,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "core-config",
@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-types",
  "proptest",
@@ -4430,7 +4430,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4483,9 +4483,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.111"
+version = "0.9.112"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
+checksum = "57d55af3b3e226502be1526dfdba67ab0e9c96fc293004e79576b2b9edb0dbdb"
 dependencies = [
  "cc",
  "libc",
@@ -4684,7 +4684,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "platform-linux"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -4713,7 +4713,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -4730,7 +4730,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-types",
  "proptest",
@@ -5405,9 +5405,9 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.28"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891d81b926048e76efe18581bf793546b4c0eaf8448d72be8de2bbee5fd166e1"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -5554,7 +5554,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.6.19"
+version = "1.7.0"
 dependencies = [
  "core-config",
  "core-types",
