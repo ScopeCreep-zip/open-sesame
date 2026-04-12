@@ -220,6 +220,9 @@ struct OverlayApp {
 
     // -- HiDPI --
     output_scale: f32,
+    /// Whether we've received at least one scale_factor_changed or surface_enter
+    /// with a valid scale. Used to defer pool creation until we know the real scale.
+    scale_known: bool,
 
     // -- Input region --
     /// Empty region used to make the surface click-through when hidden.
@@ -631,12 +634,38 @@ impl CompositorHandler for OverlayApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         new_factor: i32,
     ) {
         // This callback only provides integer scale. Fractional scaling
         // requires wp_fractional_scale_v1 which is deferred to a future release.
         self.output_scale = new_factor as f32;
+        self.scale_known = true;
+
+        // Notify the compositor immediately so it knows the scale of our
+        // next buffer before we render it. Without this, moving between
+        // monitors with different scales causes a frame at the wrong size.
+        surface.set_buffer_scale(new_factor);
+
+        // Create or resize the SHM pool for the new physical dimensions.
+        // Scale change from 1x→2x means 4x the pixel count.
+        // Also handles deferred creation when configure fired before scale was known.
+        let (lw, lh) = self.configured_size;
+        if lw > 0 && lh > 0 {
+            let phys_w = (lw as f32 * self.output_scale) as u32;
+            let phys_h = (lh as f32 * self.output_scale) as u32;
+            let buf_size = (phys_w * phys_h * 4) as usize;
+            if self.slot_pool.is_none() {
+                if let Ok(pool) = SlotPool::new(buf_size, &self.shm) {
+                    self.slot_pool = Some(pool);
+                }
+            } else if let Some(ref mut pool) = self.slot_pool
+                && let Err(e) = pool.resize(buf_size)
+            {
+                tracing::warn!("failed to resize slot pool on scale change: {e}");
+            }
+        }
+
         self.needs_redraw = true;
     }
 
@@ -666,9 +695,42 @@ impl CompositorHandler for OverlayApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        // Read the scale factor from the output we just entered. This handles
+        // multi-monitor setups where moving between displays with different
+        // scales should update rendering immediately.
+        if let Some(info) = self.output_state.info(output) {
+            let new_scale = info.scale_factor as f32;
+            let scale_changed = (new_scale - self.output_scale).abs() > f32::EPSILON;
+            if scale_changed || !self.scale_known {
+                self.output_scale = new_scale;
+                self.scale_known = true;
+                surface.set_buffer_scale(info.scale_factor);
+
+                // Create or resize pool now that we know the real scale.
+                let (lw, lh) = self.configured_size;
+                if lw > 0 && lh > 0 {
+                    let phys_w = (lw as f32 * new_scale) as u32;
+                    let phys_h = (lh as f32 * new_scale) as u32;
+                    let buf_size = (phys_w * phys_h * 4) as usize;
+                    if self.slot_pool.is_none() {
+                        if let Ok(pool) = SlotPool::new(buf_size, &self.shm) {
+                            self.slot_pool = Some(pool);
+                        }
+                    } else if let Some(ref mut pool) = self.slot_pool
+                        && let Err(e) = pool.resize(buf_size)
+                    {
+                        tracing::warn!("failed to resize slot pool on output enter: {e}");
+                    }
+                }
+
+                if scale_changed {
+                    self.needs_redraw = true;
+                }
+            }
+        }
     }
 
     fn surface_leave(
@@ -912,17 +974,21 @@ impl LayerShellHandler for OverlayApp {
         self.configured_size = (width, height);
 
         // Create or resize the slot pool (account for HiDPI buffer scaling).
-        let scale = self.output_scale;
-        let phys_w = (width as f32 * scale) as u32;
-        let phys_h = (height as f32 * scale) as u32;
-        let buf_size = (phys_w * phys_h * 4) as usize;
-        if self.slot_pool.is_none() {
-            if let Ok(pool) = SlotPool::new(buf_size, &self.shm) {
-                self.slot_pool = Some(pool);
-            }
-        } else if let Some(ref mut pool) = self.slot_pool {
-            // Ensure pool is large enough.
-            if let Err(e) = pool.resize(buf_size) {
+        // If scale isn't known yet (surface_enter and scale_factor_changed
+        // haven't fired), defer pool creation — it will be created on the
+        // first scale callback, avoiding an allocate-then-resize on HiDPI.
+        if self.scale_known || self.slot_pool.is_some() {
+            let scale = self.output_scale;
+            let phys_w = (width as f32 * scale) as u32;
+            let phys_h = (height as f32 * scale) as u32;
+            let buf_size = (phys_w * phys_h * 4) as usize;
+            if self.slot_pool.is_none() {
+                if let Ok(pool) = SlotPool::new(buf_size, &self.shm) {
+                    self.slot_pool = Some(pool);
+                }
+            } else if let Some(ref mut pool) = self.slot_pool
+                && let Err(e) = pool.resize(buf_size)
+            {
                 tracing::warn!("failed to resize slot pool: {e}");
             }
         }
@@ -1108,6 +1174,7 @@ fn run_sctk_overlay(
         needs_redraw: false,
         pending_sync: false,
         output_scale: 1.0,
+        scale_known: false,
         empty_input_region,
     };
 
