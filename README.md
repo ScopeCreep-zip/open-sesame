@@ -1055,20 +1055,20 @@ graph TB
         S["sesame"]
     end
 
-    subgraph Headless Daemons
+    subgraph "Headless Daemons"
         P["daemon-profile<br>IPC Bus Host"]
         SEC["daemon-secrets<br>Encrypted Vaults"]
         L["daemon-launcher<br>App Launcher"]
         SN["daemon-snippets<br>Text Expansion"]
     end
 
-    subgraph Desktop Daemons
+    subgraph "Desktop Daemons"
         WM["daemon-wm<br>Window Overlay"]
         CB["daemon-clipboard<br>Clipboard"]
         IN["daemon-input<br>Keyboard"]
     end
 
-    subgraph Core Libraries
+    subgraph "Core Libraries"
         IPC["core-ipc<br>Noise IK Transport"]
         CRYPTO["core-crypto<br>Argon2id, BLAKE3, AES-GCM"]
         MEM["core-memory<br>memfd_secret, Guard Pages"]
