@@ -1051,32 +1051,32 @@ Open Sesame is 21 Rust crates organized as seven daemons, eight core libraries, 
 
 ```mermaid
 graph TB
-    subgraph "CLI"
-        S[sesame]
+    subgraph CLI
+        S["sesame"]
     end
 
-    subgraph "Headless Daemons"
-        P[daemon-profile<br/>🔑 IPC Bus Host]
-        SEC[daemon-secrets<br/>🔐 Encrypted Vaults]
-        L[daemon-launcher<br/>🚀 App Launcher]
-        SN[daemon-snippets<br/>📝 Text Expansion]
+    subgraph Headless Daemons
+        P["daemon-profile<br>IPC Bus Host"]
+        SEC["daemon-secrets<br>Encrypted Vaults"]
+        L["daemon-launcher<br>App Launcher"]
+        SN["daemon-snippets<br>Text Expansion"]
     end
 
-    subgraph "Desktop Daemons"
-        WM[daemon-wm<br/>🪟 Window Overlay]
-        CB[daemon-clipboard<br/>📋 Clipboard]
-        IN[daemon-input<br/>⌨️ Keyboard]
+    subgraph Desktop Daemons
+        WM["daemon-wm<br>Window Overlay"]
+        CB["daemon-clipboard<br>Clipboard"]
+        IN["daemon-input<br>Keyboard"]
     end
 
-    subgraph "Core Libraries"
-        IPC[core-ipc<br/>Noise IK Transport]
-        CRYPTO[core-crypto<br/>Argon2id / BLAKE3 / AES-GCM]
-        MEM[core-memory<br/>memfd_secret / Guard Pages]
-        AUTH[core-auth<br/>Password + SSH Agent]
-        TYPES[core-types<br/>Protocol Schema]
+    subgraph Core Libraries
+        IPC["core-ipc<br>Noise IK Transport"]
+        CRYPTO["core-crypto<br>Argon2id, BLAKE3, AES-GCM"]
+        MEM["core-memory<br>memfd_secret, Guard Pages"]
+        AUTH["core-auth<br>Password + SSH Agent"]
+        TYPES["core-types<br>Protocol Schema"]
     end
 
-    S --> |ephemeral connection| P
+    S -->|"ephemeral connection"| P
     SEC --> P
     L --> P
     SN --> P
