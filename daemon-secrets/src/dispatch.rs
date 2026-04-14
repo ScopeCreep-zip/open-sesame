@@ -19,8 +19,6 @@ pub(crate) struct MessageContext<'a> {
     pub(crate) daemon_id: DaemonId,
     pub(crate) rate_limiter: &'a mut SecretRateLimiter,
     pub(crate) config: &'a core_config::Config,
-    pub(crate) socket_path: &'a Path,
-    pub(crate) server_pub: &'a [u8; 32],
 }
 
 /// Handle a single inbound IPC message. Returns false if the daemon should exit.
@@ -40,36 +38,6 @@ pub(crate) async fn handle_message(
         // Daemon announcements — verified identity comes from msg.verified_sender_name
         // stamped by the bus server.
         EventKind::DaemonStarted { .. } => None,
-
-        // Key rotation — reconnect with new keypair via shared handler.
-        EventKind::KeyRotationPending {
-            daemon_name,
-            new_pubkey,
-            grace_period_s,
-        } if daemon_name == "daemon-secrets" => {
-            tracing::info!(
-                grace_period_s,
-                "key rotation pending, will reconnect with new keypair"
-            );
-            match BusClient::handle_key_rotation(
-                "daemon-secrets",
-                ctx.daemon_id,
-                ctx.socket_path,
-                ctx.server_pub,
-                new_pubkey,
-                vec!["secrets".into(), "keylocker".into()],
-                env!("CARGO_PKG_VERSION"),
-            )
-            .await
-            {
-                Ok(new_client) => {
-                    *ctx.client = new_client;
-                    tracing::info!("reconnected with rotated keypair");
-                }
-                Err(e) => tracing::error!(error = %e, "key rotation reconnect failed"),
-            }
-            None
-        }
 
         // -- Unlock (per-profile) --
         EventKind::UnlockRequest { password, profile } => {

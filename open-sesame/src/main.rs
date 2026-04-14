@@ -63,8 +63,35 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             output,
             exit_code,
             quiet,
+            rotate_keys,
         } => {
-            if let Some(categories) = doctor {
+            if rotate_keys {
+                use owo_colors::OwoColorize;
+                let client = ipc::connect().await?;
+                match ipc::rpc(
+                    &client,
+                    core_types::EventKind::KeyRotationRequest,
+                    core_types::SecurityLevel::Internal,
+                )
+                .await?
+                {
+                    core_types::EventKind::KeyRotationRequestResponse { success: true, .. } => {
+                        println!(
+                            "{} Key rotation initiated. Phase 2 completes in 30 seconds.",
+                            "✓".green().bold()
+                        );
+                        Ok(())
+                    }
+                    core_types::EventKind::KeyRotationRequestResponse {
+                        success: false,
+                        error,
+                    } => {
+                        let reason = error.as_deref().unwrap_or("unknown");
+                        anyhow::bail!("key rotation failed: {reason}");
+                    }
+                    other => anyhow::bail!("unexpected response: {other:?}"),
+                }
+            } else if let Some(categories) = doctor {
                 doctor::cmd_doctor(
                     &categories,
                     output.as_deref().unwrap_or("text"),

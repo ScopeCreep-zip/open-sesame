@@ -845,6 +845,20 @@ default_ssh = true
 
 ## 🔧 Troubleshooting
 
+Run the built-in system health check:
+
+```bash
+sesame status --doctor
+```
+
+This checks all 7 daemons (running, memory, restarts, uptime), memory protection (memfd_secret, core dumps, swap), sandbox (seccomp, NoNewPrivs), and platform (kernel version, ptrace scope, Wayland session). Run specific categories with `sesame status --doctor=daemon` or `sesame status --doctor=memory,sandbox`.
+
+**When filing a bug report**, include the full doctor output:
+
+```bash
+sesame status --doctor --output json
+```
+
 <details>
 <summary><b>Daemons not running</b></summary>
 
@@ -1232,6 +1246,12 @@ cargo test --workspace
 
 ```bash
 cargo build --workspace
+```
+
+Verify system health after changes:
+
+```bash
+sesame status --doctor
 ```
 
 For larger contributions, open an issue first to discuss the approach.

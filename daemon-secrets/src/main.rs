@@ -126,20 +126,21 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to read bus server public key")?;
 
-    // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
-    // First attempt reads keypair; sandbox applied after successful read.
-    let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
+    // Connect with transparent key rotation support.
+    let mut client = BusClient::connect_daemon_with_keypair_retry(
         "daemon-secrets",
         daemon_id,
         &socket_path,
         &server_pub,
-        5,
-        Duration::from_millis(500),
+        vec!["secrets".into(), "keylocker".into()],
+        env!("CARGO_PKG_VERSION"),
+        core_ipc::RetryConfig {
+            max_attempts: 5,
+            backoff: Duration::from_millis(500),
+        },
     )
     .await
     .context("failed to connect to IPC bus")?;
-    // ZeroizingKeypair: private key zeroized on drop (no manual zeroize needed).
-    drop(_client_keypair);
 
     // Probe memfd_secret and initialize secure memory BEFORE sandbox.
     core_types::init_secure_memory();
@@ -206,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
                 if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
-                    tracing::info!(watchdog_count, "watchdog tick");
+                    tracing::debug!(watchdog_count, "watchdog tick");
                 }
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
@@ -236,8 +237,6 @@ async fn main() -> anyhow::Result<()> {
                     daemon_id,
                     rate_limiter: &mut rate_limiter,
                     config: &config,
-                    socket_path: &socket_path,
-                    server_pub: &server_pub,
                 };
                 match dispatch::handle_message(&msg, &mut ctx).await {
                     Ok(should_continue) => {

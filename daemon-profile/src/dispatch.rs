@@ -27,6 +27,7 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
     confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
     config_profile_names: &[TrustProfileName],
     install_ns: &uuid::Uuid,
+    rotation_done_tx: &mpsc::Sender<()>,
 ) -> Option<EventKind> {
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
     match &msg.payload {
@@ -91,19 +92,16 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
                             {
                                 tracing::error!(error = %e, daemon = daemon_name, "failed to write revocation keypair");
                             } else {
-                                // Revoke old key, re-register with incremented generation.
+                                // Revoke all keys for this daemon (handles dual-key
+                                // state during rotation) and re-register with
+                                // incremented generation.
                                 let mut reg = bus.registry_mut().await;
-                                let next_gen =
-                                    if let Some((old_key, _)) = reg.find_by_name(daemon_name) {
-                                        let old_key = *old_key;
-                                        let old_entry = reg.revoke(&old_key);
-                                        old_entry.map_or(0, |e| e.generation + 1)
-                                    } else {
-                                        0
-                                    };
+                                let next_gen = reg
+                                    .revoke_by_name(daemon_name)
+                                    .map_or(0, |id| id.generation + 1);
                                 reg.register_with_generation(
-                                    new_pubkey,
                                     daemon_name.into(),
+                                    new_pubkey,
                                     security_level,
                                     next_gen,
                                 );
@@ -406,6 +404,36 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
         EventKind::FederationSessionEstablished { .. } => None,
         EventKind::FederationSessionTerminated { .. } => None,
         EventKind::PostureEvaluated { .. } => None,
+
+        EventKind::KeyRotationRequest => {
+            tracing::info!(
+                audit = "key-management",
+                "on-demand key rotation requested via IPC"
+            );
+            match crate::key_rotation::rotate_keys_phase1(bus, daemon_id, audit).await {
+                Ok(()) => {
+                    // Schedule phase 2 via the same channel the timer uses.
+                    // The main event loop's rotation_done_rx arm runs phase 2.
+                    let tx = rotation_done_tx.clone();
+                    let grace = crate::KEY_ROTATION_GRACE;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(u64::from(grace))).await;
+                        let _ = tx.send(()).await;
+                    });
+                    Some(EventKind::KeyRotationRequestResponse {
+                        success: true,
+                        error: None,
+                    })
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "on-demand key rotation failed");
+                    Some(EventKind::KeyRotationRequestResponse {
+                        success: false,
+                        error: Some(e.to_string()),
+                    })
+                }
+            }
+        }
 
         _ => None,
     }

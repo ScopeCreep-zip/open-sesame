@@ -517,19 +517,21 @@ async fn handle_connection(
     // Registry lookup: cryptographic identity -> (name, clearance).
     let (security_clearance, verified_name) = {
         let reg = state.registry.read().await;
-        if let Some(entry) = reg.lookup(&client_pubkey) {
+        if let Some(identity) = reg.lookup(&client_pubkey)
+            && let Some(name) = reg.lookup_name(&client_pubkey).map(str::to_owned)
+        {
             tracing::info!(
                 audit = "connection-lifecycle",
                 event_type = "handshake-success",
                 conn_id,
-                daemon = %entry.name,
-                clearance = ?entry.security_level,
+                daemon = %name,
+                clearance = ?identity.security_level,
                 pubkey = %hex_encode(&client_pubkey),
                 peer_pid = peer_creds.pid,
                 peer_uid = peer_creds.uid,
                 "daemon authenticated via registry"
             );
-            (entry.security_level, Some(entry.name.clone()))
+            (identity.security_level, Some(name))
         } else {
             tracing::info!(
                 audit = "connection-lifecycle",

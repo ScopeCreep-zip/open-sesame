@@ -105,14 +105,18 @@ async fn main() -> anyhow::Result<()> {
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
 
-    // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
-    let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
+    // Connect with transparent key rotation support.
+    let mut client = BusClient::connect_daemon_with_keypair_retry(
         "daemon-launcher",
         daemon_id,
         &socket_path,
         &server_pub,
-        5,
-        std::time::Duration::from_millis(500),
+        vec!["launcher".into(), "fuzzy-search".into()],
+        env!("CARGO_PKG_VERSION"),
+        core_ipc::RetryConfig {
+            max_attempts: 5,
+            backoff: std::time::Duration::from_millis(500),
+        },
     )
     .await
     .context("failed to connect to IPC bus")?;
@@ -155,15 +159,15 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
-                tracing::info!(watchdog_count, loop_count, "watchdog tick");
+                tracing::debug!(watchdog_count, loop_count, "watchdog tick");
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
             }
             msg_opt = client.recv() => {
                 match msg_opt {
                     None => {
-                        tracing::error!("IPC client.recv() returned None — server disconnected, exiting");
-                        break;
+                        tracing::error!("IPC bus disconnected — exiting with non-zero code for systemd restart");
+                        std::process::exit(1);
                     }
                     Some(msg) => {
                         tracing::debug!(
@@ -227,24 +231,6 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     }
                                 }
-                            }
-
-                            // Key rotation — reconnect with new keypair.
-                            EventKind::KeyRotationPending { daemon_name, new_pubkey, grace_period_s }
-                                if daemon_name == "daemon-launcher" =>
-                            {
-                                tracing::info!(grace_period_s, "key rotation pending, will reconnect with new keypair");
-                                match BusClient::handle_key_rotation(
-                                    "daemon-launcher", daemon_id, &socket_path, &server_pub, new_pubkey,
-                                    vec!["launcher".into(), "fuzzy-search".into()], env!("CARGO_PKG_VERSION"),
-                                ).await {
-                                    Ok(new_client) => {
-                                        client = new_client;
-                                        tracing::info!("reconnected with rotated keypair");
-                                    }
-                                    Err(e) => tracing::error!(error = %e, "key rotation reconnect failed"),
-                                }
-                                None
                             }
 
                             // Ignore events not addressed to us.

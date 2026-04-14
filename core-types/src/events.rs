@@ -187,6 +187,14 @@ pub enum EventKind {
         daemon_id: DaemonId,
         reason: String,
     },
+    /// Request immediate key rotation. Sent by the CLI to daemon-profile.
+    /// daemon-profile triggers phase 1 upon receipt.
+    KeyRotationRequest,
+    /// Response to `KeyRotationRequest`.
+    KeyRotationRequestResponse {
+        success: bool,
+        error: Option<String>,
+    },
     /// Key rotation: daemon-profile announces a new pubkey for a daemon.
     /// Daemons must re-read their keypair and reconnect within the grace period.
     KeyRotationPending {
@@ -708,6 +716,8 @@ impl_event_debug! {
         QuerySubmitted { query, result_count, latency_ms },
         DaemonStarted { daemon_id, version, capabilities },
         DaemonStopped { daemon_id, reason },
+        KeyRotationRequest,
+        KeyRotationRequestResponse { success, error },
         KeyRotationPending { daemon_name, new_pubkey, grace_period_s },
         KeyRotationComplete { daemon_name },
         ConfigReloaded { daemon_id, changed_keys },

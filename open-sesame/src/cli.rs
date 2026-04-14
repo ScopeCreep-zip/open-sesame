@@ -71,6 +71,12 @@ pub(crate) enum Command {
         /// Suppress output, only set exit code. Implies --exit-code.
         #[arg(long, requires = "doctor")]
         quiet: bool,
+
+        /// Trigger immediate Noise IK key rotation across all daemons.
+        /// Phase 2 (finalize registry, remove old keys) runs automatically
+        /// after the 30-second grace period.
+        #[arg(long)]
+        rotate_keys: bool,
     },
 
     /// Clone a repository to its canonical workspace path.

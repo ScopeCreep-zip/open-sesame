@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context(format!("failed to write keypair for {daemon_name}"))?;
 
-        registry.register(pubkey, daemon_name.into(), security_level);
+        registry.register(daemon_name.into(), pubkey, security_level);
 
         tracing::info!(
             daemon = daemon_name,
@@ -468,7 +468,7 @@ async fn main() -> anyhow::Result<()> {
                 // Reconcile with daemon-secrets every 30s (every other tick).
                 watchdog_tick_count += 1;
                 if watchdog_tick_count <= 3 || watchdog_tick_count.is_multiple_of(20) {
-                    tracing::info!(watchdog_tick_count, "watchdog tick");
+                    tracing::debug!(watchdog_tick_count, "watchdog tick");
                 }
                 if watchdog_tick_count.is_multiple_of(2) {
                     dispatch::reconcile_secrets_state(
@@ -539,6 +539,7 @@ async fn main() -> anyhow::Result<()> {
                     &mut confirm_rx,
                     &config_profile_names,
                     &install_ns,
+                    &rotation_done_tx,
                 ).await {
                     let reply = Message::new(
                         &msg_ctx,

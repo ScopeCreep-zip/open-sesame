@@ -96,19 +96,21 @@ async fn main() -> anyhow::Result<()> {
     let daemon_id = DaemonId::new();
     let msg_ctx = core_ipc::MessageContext::new(daemon_id);
 
-    // Connect with keypair retry (daemon-profile may regenerate on crash-restart).
-    let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
+    // Connect with transparent key rotation support.
+    let mut client = BusClient::connect_daemon_with_keypair_retry(
         "daemon-wm",
         daemon_id,
         &socket_path,
         &server_pub,
-        5,
-        std::time::Duration::from_millis(500),
+        vec!["wm".into(), "window-switcher".into()],
+        env!("CARGO_PKG_VERSION"),
+        core_ipc::RetryConfig {
+            max_attempts: 5,
+            backoff: std::time::Duration::from_millis(500),
+        },
     )
     .await
     .context("failed to connect to IPC bus")?;
-    // ZeroizingKeypair: private key zeroized on drop (no manual zeroize needed).
-    drop(_client_keypair);
 
     // Probe memfd_secret and initialize secure memory BEFORE sandbox.
     core_types::init_secure_memory();
@@ -339,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
                 if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
-                    tracing::info!(watchdog_count, "watchdog tick");
+                    tracing::debug!(watchdog_count, "watchdog tick");
                 }
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
@@ -519,7 +521,11 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // IPC bus messages.
-            Some(msg) = client.recv() => {
+            msg_opt = client.recv() => {
+                let Some(msg) = msg_opt else {
+                    tracing::error!("IPC bus disconnected — exiting for systemd restart");
+                    std::process::exit(1);
+                };
                 // Skip self-published messages to prevent feedback loops.
                 if msg.sender == daemon_id {
                     continue;
@@ -606,24 +612,6 @@ async fn main() -> anyhow::Result<()> {
                             &mut ipc_keyboard_confirmed,
                             &mut password_buffer,
                         ).await;
-                        None
-                    }
-
-                    // Key rotation — reconnect with new keypair.
-                    EventKind::KeyRotationPending { daemon_name, new_pubkey, grace_period_s }
-                        if daemon_name == "daemon-wm" =>
-                    {
-                        tracing::info!(grace_period_s, "key rotation pending, will reconnect with new keypair");
-                        match BusClient::handle_key_rotation(
-                            "daemon-wm", daemon_id, &socket_path, &server_pub, new_pubkey,
-                            vec!["wm".into(), "window-switcher".into()], env!("CARGO_PKG_VERSION"),
-                        ).await {
-                            Ok(new_client) => {
-                                client = new_client;
-                                tracing::info!("reconnected with rotated keypair");
-                            }
-                            Err(e) => tracing::error!(error = %e, "key rotation reconnect failed"),
-                        }
                         None
                     }
 

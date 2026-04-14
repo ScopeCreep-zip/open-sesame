@@ -15,7 +15,7 @@ pub mod registry;
 mod server;
 mod transport;
 
-pub use client::BusClient;
+pub use client::{BusClient, RetryConfig};
 pub use framing::{decode_frame, encode_frame};
 pub use message::{Message, MessageContext, WIRE_VERSION};
 pub use noise::{NoiseTransport, ZeroizingKeypair, generate_keypair};

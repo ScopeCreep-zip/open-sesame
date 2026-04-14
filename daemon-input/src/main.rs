@@ -74,17 +74,20 @@ async fn main() -> anyhow::Result<()> {
     let mut grab_active = false;
     let mut grab_requester: Option<DaemonId> = None;
 
-    let (mut client, _client_keypair) = BusClient::connect_with_keypair_retry(
+    let mut client = BusClient::connect_daemon_with_keypair_retry(
         "daemon-input",
         daemon_id,
         &socket_path,
         &server_pub,
-        5,
-        std::time::Duration::from_millis(500),
+        vec!["input".into(), "remap".into()],
+        env!("CARGO_PKG_VERSION"),
+        core_ipc::RetryConfig {
+            max_attempts: 5,
+            backoff: std::time::Duration::from_millis(500),
+        },
     )
     .await
     .context("failed to connect to IPC bus")?;
-    drop(_client_keypair);
 
     core_types::init_secure_memory();
 
@@ -116,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
             _ = watchdog.tick() => {
                 watchdog_count += 1;
                 if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
-                    tracing::info!(watchdog_count, "watchdog tick");
+                    tracing::debug!(watchdog_count, "watchdog tick");
                 }
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
@@ -177,30 +180,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            Some(msg) = client.recv() => {
+            msg_opt = client.recv() => {
+                let Some(msg) = msg_opt else {
+                    tracing::error!("IPC bus disconnected — exiting for systemd restart");
+                    std::process::exit(1);
+                };
                 // Skip self-published messages to prevent feedback loops.
                 if msg.sender == daemon_id {
                     continue;
                 }
 
                 let response_event = match &msg.payload {
-                    EventKind::KeyRotationPending { daemon_name, new_pubkey, grace_period_s }
-                        if daemon_name == "daemon-input" =>
-                    {
-                        tracing::info!(grace_period_s, "key rotation pending");
-                        match BusClient::handle_key_rotation(
-                            "daemon-input", daemon_id, &socket_path, &server_pub, new_pubkey,
-                            vec!["input".into(), "remap".into()], env!("CARGO_PKG_VERSION"),
-                        ).await {
-                            Ok(new_client) => {
-                                client = new_client;
-                                tracing::info!("reconnected with rotated keypair");
-                            }
-                            Err(e) => tracing::error!(error = %e, "key rotation reconnect failed"),
-                        }
-                        None
-                    }
-
                     EventKind::InputGrabRequest { requester } => {
                         tracing::info!(%requester, "keyboard grab requested");
                         grab_active = true;
