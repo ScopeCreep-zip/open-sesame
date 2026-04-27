@@ -435,6 +435,17 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
             }
         }
 
+        // -- Network federation (M1/M2/M3 pre-work: no-op routing) --
+        EventKind::NetworkIdentityRequest
+        | EventKind::NetworkIdentityResponse { .. }
+        | EventKind::VaultLogEntryReceived { .. }
+        | EventKind::VaultReplicationPullRequest { .. }
+        | EventKind::VaultReplicationPullResponse { .. } => {
+            // Routed between daemon-network and daemon-secrets.
+            // daemon-profile does not act on these.
+            None
+        }
+
         _ => None,
     }
 }

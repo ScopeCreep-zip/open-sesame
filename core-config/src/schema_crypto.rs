@@ -22,6 +22,12 @@ pub struct CryptoConfigToml {
     pub noise_hash: String,
     /// Audit hash: "blake3" or "sha256".
     pub audit_hash: String,
+    /// Network transport KEM: "x-wing", "x25519", or "ml-kem-768".
+    pub network_kem: String,
+    /// Network transport AEAD: "chacha-poly" or "aes-gcm".
+    pub network_aead: String,
+    /// Network transport hash: "blake2b" or "sha256".
+    pub network_hash: String,
     /// Minimum crypto profile accepted from peers: "leading-edge", "governance-compatible", "custom".
     pub minimum_peer_profile: String,
 }
@@ -34,6 +40,9 @@ impl Default for CryptoConfigToml {
             noise_cipher: "chacha-poly".into(),
             noise_hash: "blake2s".into(),
             audit_hash: "blake3".into(),
+            network_kem: "x-wing".into(),
+            network_aead: "chacha-poly".into(),
+            network_hash: "blake2b".into(),
             minimum_peer_profile: "leading-edge".into(),
         }
     }
@@ -93,12 +102,43 @@ impl CryptoConfigToml {
                 )));
             }
         };
+        let network_kem = match self.network_kem.as_str() {
+            "x-wing" => core_types::NetworkKem::XWing,
+            "x25519" => core_types::NetworkKem::X25519,
+            "ml-kem-768" => core_types::NetworkKem::MlKem768,
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown network_kem: {other}"
+                )));
+            }
+        };
+        let network_aead = match self.network_aead.as_str() {
+            "chacha-poly" => core_types::NetworkAead::ChaChaPoly,
+            "aes-gcm" => core_types::NetworkAead::AesGcm,
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown network_aead: {other}"
+                )));
+            }
+        };
+        let network_hash = match self.network_hash.as_str() {
+            "blake2b" => core_types::NetworkHash::Blake2b,
+            "sha256" => core_types::NetworkHash::Sha256,
+            other => {
+                return Err(core_types::Error::Config(format!(
+                    "unknown network_hash: {other}"
+                )));
+            }
+        };
         Ok(core_types::CryptoConfig {
             kdf,
             hkdf,
             noise_cipher,
             noise_hash,
             audit_hash,
+            network_kem,
+            network_aead,
+            network_hash,
             minimum_peer_profile,
         })
     }

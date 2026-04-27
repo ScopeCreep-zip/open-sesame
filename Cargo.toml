@@ -23,6 +23,8 @@ members = [
     "sesame-workspace",
     "extension-host",
     "extension-sdk",
+    "daemon-network",
+    "daemon-discovery",
 ]
 exclude = ["xtask"]
 resolver = "2"
@@ -59,6 +61,8 @@ platform-windows = { path = "platform-windows" }
 sesame-workspace = { path = "sesame-workspace" }
 extension-host  = { path = "extension-host" }
 extension-sdk   = { path = "extension-sdk" }
+daemon-network  = { path = "daemon-network" }
+daemon-discovery = { path = "daemon-discovery" }
 
 # -- Serialization --
 serde           = { version = "1", features = ["derive"] }
@@ -86,7 +90,11 @@ zeroize         = { version = "1", features = ["derive"] }
 blake3          = "1.8"
 getrandom       = "0.2"
 governor        = { version = "0.10", default-features = false, features = ["std"] }
+socket2         = { version = "0.5", features = ["all"] }
+dashmap         = "6"
 snow            = "0.10"
+aws-lc-rs       = { version = "1", features = ["aws-lc-sys"] }
+blake2          = "0.10"
 pbkdf2          = "0.12"
 sha2            = "0.10"
 hmac            = "0.12"

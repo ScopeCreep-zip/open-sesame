@@ -6,6 +6,7 @@
   installShellFiles,
   makeWrapper,
   perl,
+  cmake,
   openssl,
   fontconfig,
   wayland,
@@ -81,6 +82,7 @@ rustPlatform.buildRustPackage {
     installShellFiles
     makeWrapper
     perl
+    cmake
   ];
 
   buildInputs = [

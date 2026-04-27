@@ -21,6 +21,9 @@ pbkdf2      = { workspace = true }
 sha2        = { workspace = true }
 hmac        = { workspace = true }
 hkdf        = { workspace = true }
+aws-lc-rs   = { workspace = true }
+blake2      = { workspace = true }
+uuid        = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }

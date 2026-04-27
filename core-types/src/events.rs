@@ -623,6 +623,37 @@ pub enum EventKind {
         received_factors: Vec<AuthFactorId>,
     },
 
+    // -- RPC: Network Identity (M1) --
+    /// Request the network transport identity keypair from daemon-secrets.
+    NetworkIdentityRequest,
+    /// Response with the network identity keypair.
+    NetworkIdentityResponse {
+        /// X25519 private key (32 bytes) in ProtectedAlloc-backed memory.
+        private_key: SensitiveBytes,
+        /// X25519 public key (32 bytes).
+        public_key: Vec<u8>,
+    },
+
+    // -- Vault Replication (M3) --
+    /// A replicated vault log entry received from a network peer.
+    VaultLogEntryReceived {
+        profile_id: Uuid,
+        entry_json: String,
+    },
+    /// Request vault log entries from daemon-secrets for replication serving.
+    VaultReplicationPullRequest {
+        profile_id: Uuid,
+        #[serde(default)]
+        since_watermark_json: Option<String>,
+        max_entries: u32,
+    },
+    /// Response with vault log entries for replication.
+    VaultReplicationPullResponse {
+        profile_id: Uuid,
+        entries_json: String,
+        has_more: bool,
+    },
+
     // Forward compatibility: unknown events deserialize to this variant.
     #[serde(other)]
     Unknown,
@@ -686,6 +717,7 @@ impl_event_debug! {
         UnlockRequest { password => REDACTED, profile },
         SshUnlockRequest { master_key => REDACTED, profile, ssh_fingerprint },
         FactorSubmit { factor_id, key_material => REDACTED, profile, audit_metadata },
+        NetworkIdentityResponse { private_key => REDACTED, public_key },
     }
     transparent {
         WindowFocused { window_id, app_id, workspace_id },
@@ -792,6 +824,10 @@ impl_event_debug! {
         VaultAuthQuery { profile },
         VaultAuthQueryResponse { profile, enrolled_factors, auth_policy, partial_in_progress, received_factors },
         AccessDenied { reason },
+        NetworkIdentityRequest,
+        VaultLogEntryReceived { profile_id, entry_json },
+        VaultReplicationPullRequest { profile_id, since_watermark_json, max_entries },
+        VaultReplicationPullResponse { profile_id, entries_json, has_more },
         Unknown,
     }
 }

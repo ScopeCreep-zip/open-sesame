@@ -1,0 +1,47 @@
+[package]
+name = "daemon-network"
+description = "Open Sesame network transport — Noise XX over UDP/TCP with TOFU identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "daemon-network"
+path = "src/main.rs"
+
+[dependencies]
+core-types.workspace = true
+core-crypto.workspace = true
+core-memory.workspace = true
+core-ipc.workspace = true
+core-config.workspace = true
+aws-lc-rs = { workspace = true }
+blake2 = { workspace = true }
+blake3.workspace = true
+zeroize = { workspace = true }
+tokio = { workspace = true }
+socket2 = { workspace = true }
+dashmap = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+governor = { workspace = true }
+snow = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux = { workspace = true }
+tracing-journald = { workspace = true }
+libc = { workspace = true }
+rustix = { workspace = true }
+
+[lints]
+workspace = true

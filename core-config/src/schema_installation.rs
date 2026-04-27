@@ -21,6 +21,21 @@ pub struct InstallationConfig {
     /// Optional machine binding for hardware attestation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_binding: Option<MachineBindingConfig>,
+    /// ISO 8601 timestamp of installation creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    /// Human-readable display name for this installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Hex-encoded X25519 public key for network transport identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_pubkey_hex: Option<String>,
+    /// Hex-encoded Ed25519 public key for vault log signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_pubkey_hex: Option<String>,
+    /// Whether the init ceremony completed successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceremony_completed: Option<bool>,
 }
 
 /// Organizational namespace configuration.

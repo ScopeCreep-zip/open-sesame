@@ -18,6 +18,19 @@ fn validate_secret_key(key: &str) -> core_types::Result<()> {
     core_types::validate_secret_key(key)
 }
 
+/// Vault-log hook point for M3 vault replication.
+///
+/// Called after every successful secret write or delete. M3 replaces
+/// this body with `VaultLogEntry` creation and local log persistence.
+/// The typed `VaultLogOp` discriminant avoids string-matching in M3.
+fn vault_log_hook(
+    _profile: &TrustProfileName,
+    _operation: core_types::VaultLogOp,
+    _key: &str,
+) {
+    // Intentionally empty — M3 implements vault log entry creation.
+}
+
 /// Emit a secret operation audit event on the IPC bus for persistent logging
 /// by daemon-profile. Fire-and-forget: audit event delivery failure must not
 /// block or fail secret operations.
@@ -369,6 +382,7 @@ pub(crate) async fn handle_secret_set(
         Ok(vault) => match vault.store().set(key, store_bytes).await {
             Ok(()) => {
                 vault.flush().await;
+                vault_log_hook(profile, core_types::VaultLogOp::Set, key);
                 (true, None)
             }
             Err(e) => {
@@ -418,6 +432,7 @@ pub(crate) async fn handle_secret_delete(
         Ok(vault) => match vault.store().delete(key).await {
             Ok(()) => {
                 vault.flush().await;
+                vault_log_hook(profile, core_types::VaultLogOp::Delete, key);
                 (true, None)
             }
             Err(e) => {

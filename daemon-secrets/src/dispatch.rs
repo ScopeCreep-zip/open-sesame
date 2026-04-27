@@ -161,6 +161,22 @@ pub(crate) async fn handle_message(
         // -- State reconciliation: daemon-profile queries authoritative state --
         EventKind::SecretsStateRequest => crud::handle_secrets_state_request(ctx),
 
+        // -- Network Identity (M1 pre-work: stub handler) --
+        EventKind::NetworkIdentityRequest => {
+            tracing::debug!("NetworkIdentityRequest received — not yet implemented (M1)");
+            None
+        }
+
+        // -- Vault Replication (M3 pre-work: stub handlers) --
+        EventKind::VaultLogEntryReceived { .. } => {
+            tracing::debug!("VaultLogEntryReceived — not yet implemented (M3)");
+            None
+        }
+        EventKind::VaultReplicationPullRequest { .. } => {
+            tracing::debug!("VaultReplicationPullRequest — not yet implemented (M3)");
+            None
+        }
+
         // -- Ignore other events --
         _ => None,
     };

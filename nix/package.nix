@@ -5,6 +5,7 @@
   pkg-config,
   installShellFiles,
   perl,
+  cmake,
   openssl,
   libseccomp,
 }:
@@ -50,6 +51,7 @@ let
     "daemon-secrets"
     "daemon-launcher"
     "daemon-snippets"
+    "daemon-network"
   ];
 
   expectedBinaries = [
@@ -58,6 +60,7 @@ let
     "daemon-secrets"
     "daemon-launcher"
     "daemon-snippets"
+    "daemon-network"
   ];
 in
 rustPlatform.buildRustPackage {
@@ -80,6 +83,7 @@ rustPlatform.buildRustPackage {
     pkg-config
     installShellFiles
     perl
+    cmake
   ];
 
   buildInputs = [
@@ -116,7 +120,7 @@ rustPlatform.buildRustPackage {
     # Headless systemd units
     install -Dm644 contrib/systemd/open-sesame-headless.target \
       $out/lib/systemd/user/open-sesame-headless.target
-    for svc in profile secrets launcher snippets; do
+    for svc in profile secrets launcher snippets network; do
       install -Dm644 "contrib/systemd/open-sesame-$svc.service" \
         "$out/lib/systemd/user/open-sesame-$svc.service"
     done

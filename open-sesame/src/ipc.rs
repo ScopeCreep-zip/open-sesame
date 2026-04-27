@@ -98,6 +98,8 @@ pub(crate) async fn connect() -> anyhow::Result<BusClient> {
                 }),
             namespace: install_config.namespace,
             machine_binding: None,
+            network_pubkey: None,
+            signing_pubkey: None,
         };
         client.set_installation(install_id);
     }

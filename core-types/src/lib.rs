@@ -12,6 +12,7 @@ pub mod denial;
 pub mod error;
 pub mod events;
 pub mod ids;
+pub mod network;
 pub mod oci;
 pub mod profile;
 pub mod rpc;
@@ -27,6 +28,7 @@ pub use denial::*;
 pub use error::*;
 pub use events::*;
 pub use ids::*;
+pub use network::*;
 pub use oci::*;
 pub use profile::*;
 pub use rpc::*;
@@ -563,6 +565,9 @@ mod tests {
         assert_eq!(cfg.noise_cipher, NoiseCipher::ChaChaPoly);
         assert_eq!(cfg.noise_hash, NoiseHash::Blake2s);
         assert_eq!(cfg.audit_hash, AuditHash::Blake3);
+        assert_eq!(cfg.network_kem, NetworkKem::XWing);
+        assert_eq!(cfg.network_aead, NetworkAead::ChaChaPoly);
+        assert_eq!(cfg.network_hash, NetworkHash::Blake2b);
         assert_eq!(cfg.minimum_peer_profile, CryptoProfile::LeadingEdge);
     }
 
@@ -655,6 +660,8 @@ mod tests {
                 binding_hash: [0xAB; 32],
                 binding_type: MachineBindingType::MachineId,
             }),
+            network_pubkey: None,
+            signing_pubkey: None,
         };
         let json = serde_json::to_string(&install).unwrap();
         let decoded: InstallationId = serde_json::from_str(&json).unwrap();
@@ -668,6 +675,8 @@ mod tests {
             org_ns: None,
             namespace: Uuid::from_u128(2),
             machine_binding: None,
+            network_pubkey: None,
+            signing_pubkey: None,
         };
         let bytes = postcard::to_allocvec(&install).unwrap();
         let decoded: InstallationId = postcard::from_bytes(&bytes).unwrap();
@@ -884,6 +893,8 @@ mod tests {
                 org_ns: None,
                 namespace: Uuid::from_u128(2),
                 machine_binding: None,
+                network_pubkey: None,
+                signing_pubkey: None,
             },
             attestations: vec![Attestation::UCred {
                 pid: 100,
@@ -947,6 +958,8 @@ mod tests {
                 org_ns: None,
                 namespace: Uuid::from_u128(2),
                 machine_binding: None,
+                network_pubkey: None,
+                signing_pubkey: None,
             },
         };
         let json = serde_json::to_string(&pr).unwrap();
@@ -1201,5 +1214,82 @@ mod tests {
             debug.contains("myprofile"),
             "profile name should be visible"
         );
+    }
+
+    // -- NetworkKem round-trip --
+
+    #[test]
+    fn network_kem_roundtrip_json() {
+        for k in [NetworkKem::X25519, NetworkKem::XWing, NetworkKem::MlKem768] {
+            let json = serde_json::to_string(&k).unwrap();
+            let decoded: NetworkKem = serde_json::from_str(&json).unwrap();
+            assert_eq!(k, decoded);
+        }
+    }
+
+    #[test]
+    fn network_kem_default_is_xwing() {
+        assert_eq!(NetworkKem::default(), NetworkKem::XWing);
+    }
+
+    // -- NetworkAead round-trip --
+
+    #[test]
+    fn network_aead_roundtrip_json() {
+        for a in [NetworkAead::ChaChaPoly, NetworkAead::AesGcm] {
+            let json = serde_json::to_string(&a).unwrap();
+            let decoded: NetworkAead = serde_json::from_str(&json).unwrap();
+            assert_eq!(a, decoded);
+        }
+    }
+
+    // -- NetworkHash round-trip --
+
+    #[test]
+    fn network_hash_roundtrip_json() {
+        for h in [NetworkHash::Blake2b, NetworkHash::Sha256] {
+            let json = serde_json::to_string(&h).unwrap();
+            let decoded: NetworkHash = serde_json::from_str(&json).unwrap();
+            assert_eq!(h, decoded);
+        }
+    }
+
+    // -- InstallationId with network keys --
+
+    #[test]
+    fn installation_id_with_network_keys_roundtrip() {
+        let install = InstallationId {
+            id: Uuid::from_u128(42),
+            org_ns: None,
+            namespace: Uuid::from_u128(123),
+            machine_binding: None,
+            network_pubkey: Some(vec![0xAA; 32]),
+            signing_pubkey: Some(vec![0xBB; 32]),
+        };
+        let json = serde_json::to_string(&install).unwrap();
+        let decoded: InstallationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(install, decoded);
+    }
+
+    #[test]
+    fn installation_id_missing_new_fields_deserializes() {
+        let json = r#"{"id":"00000000-0000-0000-0000-00000000002a","namespace":"00000000-0000-0000-0000-00000000007b"}"#;
+        let decoded: InstallationId = serde_json::from_str(json).unwrap();
+        assert!(decoded.network_pubkey.is_none());
+        assert!(decoded.signing_pubkey.is_none());
+        assert!(decoded.org_ns.is_none());
+        assert!(decoded.machine_binding.is_none());
+    }
+
+    // -- NetworkIdentityResponse debug redaction --
+
+    #[test]
+    fn network_identity_response_debug_redacts() {
+        let event = EventKind::NetworkIdentityResponse {
+            private_key: SensitiveBytes::from_slice(&[0xAA; 32]),
+            public_key: vec![0xBB; 32],
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("REDACTED"));
     }
 }

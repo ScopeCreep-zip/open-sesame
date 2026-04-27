@@ -305,6 +305,126 @@ pub fn apply_sandbox(
     Ok(status)
 }
 
+/// Build the seccomp allowed-syscall list for `daemon-network`.
+///
+/// Includes all base daemon syscalls plus network-specific syscalls
+/// (`bind`, `listen`, `accept4`, `sendto`, `recvfrom`, `setsockopt`,
+/// `getsockopt`, `connect`) required for the UDP/TCP transport.
+///
+/// Returned as a `SeccompProfile` ready for `apply_sandbox()`.
+#[must_use]
+pub fn network_daemon_seccomp_profile() -> SeccompProfile {
+    SeccompProfile {
+        daemon_name: "daemon-network".into(),
+        allowed_syscalls: vec![
+            // I/O basics
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "openat".into(),
+            "lseek".into(),
+            "pread64".into(),
+            "fstat".into(),
+            "stat".into(),
+            "newfstatat".into(),
+            "statx".into(),
+            "access".into(),
+            "unlink".into(),
+            "fcntl".into(),
+            "flock".into(),
+            "pwrite64".into(),
+            "ftruncate".into(),
+            "fallocate".into(),
+            "fsync".into(),
+            "fdatasync".into(),
+            "mkdir".into(),
+            "getdents64".into(),
+            "rename".into(),
+            // Memory
+            "mmap".into(),
+            "mprotect".into(),
+            "munmap".into(),
+            "mlock".into(),
+            "munlock".into(),
+            "madvise".into(),
+            "brk".into(),
+            // Process / threading
+            "futex".into(),
+            "clone3".into(),
+            "clone".into(),
+            "set_robust_list".into(),
+            "set_tid_address".into(),
+            "rseq".into(),
+            "sched_getaffinity".into(),
+            "prlimit64".into(),
+            "prctl".into(),
+            "getpid".into(),
+            "gettid".into(),
+            "getuid".into(),
+            "geteuid".into(),
+            "kill".into(),
+            // Epoll / event loop (tokio)
+            "epoll_wait".into(),
+            "epoll_ctl".into(),
+            "epoll_create1".into(),
+            "eventfd2".into(),
+            "poll".into(),
+            "ppoll".into(),
+            // Timers (tokio runtime)
+            "clock_gettime".into(),
+            "timer_create".into(),
+            "timer_settime".into(),
+            "timer_delete".into(),
+            // Networking — local IPC (Unix socket to daemon-profile bus)
+            "socket".into(),
+            "connect".into(),
+            "sendto".into(),
+            "recvfrom".into(),
+            "socketpair".into(),
+            "sendmsg".into(),
+            "recvmsg".into(),
+            "shutdown".into(),
+            "getsockopt".into(),
+            "getsockname".into(),
+            "getpeername".into(),
+            "setsockopt".into(),
+            // Networking — daemon-network specific (UDP/TCP transport)
+            "bind".into(),
+            "listen".into(),
+            "accept4".into(),
+            // I/O extras
+            "writev".into(),
+            "readv".into(),
+            "readlink".into(),
+            "readlinkat".into(),
+            "uname".into(),
+            "getcwd".into(),
+            // Timing
+            "nanosleep".into(),
+            "clock_nanosleep".into(),
+            // Signals
+            "sigaltstack".into(),
+            "rt_sigaction".into(),
+            "rt_sigprocmask".into(),
+            "rt_sigreturn".into(),
+            "tgkill".into(),
+            // Config hot-reload
+            "inotify_init1".into(),
+            "inotify_add_watch".into(),
+            "inotify_rm_watch".into(),
+            // Misc
+            "exit_group".into(),
+            "exit".into(),
+            "getrandom".into(),
+            "memfd_secret".into(),
+            "restart_syscall".into(),
+            "pipe2".into(),
+            "dup".into(),
+            "ioctl".into(),
+        ],
+    }
+}
+
 /// Apply the full sandbox stack with explicit Landlock scope control.
 ///
 /// Use `LandlockScope::SignalOnly` for daemons that need D-Bus (GTK4).

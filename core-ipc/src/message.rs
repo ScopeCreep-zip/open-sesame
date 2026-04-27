@@ -197,6 +197,8 @@ mod tests {
                 org_ns: None,
                 namespace: Uuid::from_u128(2),
                 machine_binding: None,
+                network_pubkey: None,
+                signing_pubkey: None,
             }),
             agent_id: Some(AgentId::from_uuid(Uuid::from_u128(3))),
             trust_snapshot: Some(TrustVector {
@@ -264,6 +266,8 @@ mod tests {
             org_ns: None,
             namespace: Uuid::from_u128(30),
             machine_binding: None,
+            network_pubkey: None,
+            signing_pubkey: None,
         };
         let req_id = Uuid::from_u128(40);
         let deleg_id = Uuid::from_u128(50);

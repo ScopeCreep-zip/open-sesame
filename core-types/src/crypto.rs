@@ -48,6 +48,54 @@ pub enum NoiseHash {
     Sha256,
 }
 
+/// Network transport AEAD algorithm selection.
+///
+/// Independent of local IPC Noise cipher (`NoiseCipher`). The network layer
+/// uses `aws-lc-rs` primitives; local IPC uses `snow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum NetworkAead {
+    /// ChaCha20-Poly1305. Leading-edge default for Noise XX.
+    #[default]
+    ChaChaPoly,
+    /// AES-256-GCM. NIST/FedRAMP-compatible.
+    AesGcm,
+}
+
+/// Network transport hash algorithm selection.
+///
+/// Independent of local IPC Noise hash (`NoiseHash`). Selects the hash
+/// function for the Noise XX handshake over the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum NetworkHash {
+    /// BLAKE2b-512. Leading-edge default for Noise XX.
+    #[default]
+    Blake2b,
+    /// SHA-256. NIST/FedRAMP-compatible.
+    Sha256,
+}
+
+/// Network transport KEM algorithm selection.
+///
+/// Selects the key encapsulation mechanism for the Noise XX handshake.
+/// Hybrid PQ is the recommended default for secrets managers to defend
+/// against harvest-now-decrypt-later attacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum NetworkKem {
+    /// X25519 only. Classical ECDH.
+    X25519,
+    /// X25519 + ML-KEM-768 hybrid (X-Wing construction). PQ-resistant default.
+    #[default]
+    XWing,
+    /// ML-KEM-768 only. Post-quantum, no classical fallback.
+    MlKem768,
+}
+
 /// Hash algorithm for audit log chain integrity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -85,6 +133,12 @@ pub struct CryptoConfig {
     pub noise_cipher: NoiseCipher,
     pub noise_hash: NoiseHash,
     pub audit_hash: AuditHash,
+    /// Network transport KEM. Hybrid PQ default for harvest-now-decrypt-later defence.
+    pub network_kem: NetworkKem,
+    /// Network transport AEAD. Independent of local IPC Noise cipher.
+    pub network_aead: NetworkAead,
+    /// Network transport hash. Independent of local IPC Noise hash.
+    pub network_hash: NetworkHash,
     /// Minimum crypto profile accepted from federation peers.
     pub minimum_peer_profile: CryptoProfile,
 }

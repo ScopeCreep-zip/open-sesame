@@ -351,6 +351,11 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
         namespace: install_ns,
         org: org_config,
         machine_binding: machine_binding.clone(),
+        created_at: None,
+        display_name: None,
+        network_pubkey_hex: None,
+        signing_pubkey_hex: None,
+        ceremony_completed: None,
     };
 
     core_config::write_installation(&install_config)
@@ -413,6 +418,8 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
                     org_ns: audit_org_ns,
                     namespace: install_ns,
                     machine_binding: audit_machine_binding,
+                    network_pubkey: None,
+                    signing_pubkey: None,
                 },
                 org: org.map(|s| s.to_string()),
                 machine_binding_present: machine_binding.is_some(),

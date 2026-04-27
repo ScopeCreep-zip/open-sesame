@@ -35,6 +35,7 @@ const KNOWN_DAEMONS: &[(&str, SecurityLevel)] = &[
     ("daemon-clipboard", SecurityLevel::Internal),
     ("daemon-input", SecurityLevel::Internal),
     ("daemon-snippets", SecurityLevel::Internal),
+    ("daemon-network", SecurityLevel::Internal),
 ];
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -345,6 +346,8 @@ async fn main() -> anyhow::Result<()> {
         org_ns: None,
         namespace: install_ns,
         machine_binding: None,
+        network_pubkey: None,
+        signing_pubkey: None,
     };
 
     let _default_agent = core_types::AgentIdentity {

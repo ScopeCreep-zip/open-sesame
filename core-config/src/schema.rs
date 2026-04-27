@@ -16,6 +16,8 @@ pub use crate::schema_installation::{InstallationConfig, MachineBindingConfig, O
 pub use crate::schema_peripheral::{AuditConfig, ClipboardConfig, InputConfig, LauncherConfig};
 pub use crate::schema_secrets::{AuthConfig, SecretsConfig};
 pub use crate::schema_wm::{LaunchProfile, WmConfig, WmKeyBinding};
+pub use crate::schema_network::NetworkConfig;
+pub use crate::schema_vault_sync::VaultSyncConfig;
 pub use crate::schema_workspace::{LocalSesameConfig, WorkspaceConfig, WorkspaceSettings};
 
 /// Top-level PDS configuration.

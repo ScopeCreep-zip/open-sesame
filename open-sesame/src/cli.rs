@@ -239,6 +239,26 @@ pub(crate) enum Command {
     /// Workspace management (directory-scoped project environments).
     #[command(subcommand, alias = "ws")]
     Workspace(WorkspaceCmd),
+
+    /// Network federation commands.
+    #[command(subcommand, alias = "net")]
+    Network(NetworkCmd),
+}
+
+#[derive(Subcommand)]
+pub(crate) enum NetworkCmd {
+    /// Show this installation's network identity (public key, installation ID).
+    Identity {
+        /// Output as JSON for bootstrap.json inclusion.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List known peers from the TOFU store.
+    Peers,
+    /// Show discovery subsystem state.
+    Discover,
+    /// Show daemon-network status.
+    Status,
 }
 
 /// Resolve the workspace root from `SESAME_WORKSPACE_ROOT` or fall back to `/workspace`.
