@@ -111,6 +111,9 @@ impl Default for RateLimitConfig {
 pub struct FloodConfig {
     pub cookie_challenge_threshold: f64,
     pub cookie_epoch_secs: u32,
+    /// Fraction of global handshake capacity at which Equi-X `PoW` activates.
+    /// 0.0 = always active, 1.0 = never active. Default 0.8 (80% saturation).
+    pub pow_challenge_threshold: f64,
 }
 
 impl Default for FloodConfig {
@@ -118,6 +121,7 @@ impl Default for FloodConfig {
         Self {
             cookie_challenge_threshold: 0.5,
             cookie_epoch_secs: 120,
+            pow_challenge_threshold: 0.8,
         }
     }
 }

@@ -95,6 +95,8 @@ dashmap         = "6"
 snow            = "0.10"
 aws-lc-rs       = { version = "1", features = ["aws-lc-sys"] }
 blake2          = "0.10"
+equix           = { version = "0.6", default-features = false }
+hashx           = { version = "0.7", default-features = false }
 pbkdf2          = "0.12"
 sha2            = "0.10"
 hmac            = "0.12"

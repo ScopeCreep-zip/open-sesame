@@ -259,6 +259,18 @@ pub(crate) enum NetworkCmd {
     Discover,
     /// Show daemon-network status.
     Status,
+    /// Dial a remote peer by address (initiates Noise XX handshake).
+    Dial {
+        /// Remote address in `host:port` format (e.g., `10.0.0.1:48627`).
+        addr: String,
+    },
+    /// Send a debug message to an established session.
+    Send {
+        /// Session ID (hex, from `sesame network peers`).
+        session_id: String,
+        /// Message text to send.
+        message: String,
+    },
 }
 
 /// Resolve the workspace root from `SESAME_WORKSPACE_ROOT` or fall back to `/workspace`.

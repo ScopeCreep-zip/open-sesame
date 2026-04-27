@@ -1,0 +1,139 @@
+//! Outbound data frame send path.
+//!
+//! Encrypts a plaintext payload through the peer's Noise transport,
+//! constructs a wire `Frame` with the session's sequence number, and
+//! transmits via UDP. Updates send metrics and per-peer counters.
+
+use crate::metrics::Metrics;
+use crate::session::table::PeerTable;
+use crate::transport::frame::{Frame, SessionId};
+use crate::transport::udp;
+use core_types::FrameType;
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+
+/// Send an encrypted `Data` frame to a peer identified by session ID.
+///
+/// The `payload` is the application-layer plaintext (prefixed with a 2-byte
+/// `NetworkMessageType` discriminant by the caller). It is encrypted through
+/// the peer's Noise transport, wrapped in a wire `Frame`, and sent via UDP.
+///
+/// # Errors
+///
+/// Returns an error string if the session is not found, encryption fails,
+/// or the UDP send fails.
+pub async fn send_data(
+    session_id: &SessionId,
+    payload: &[u8],
+    peer_table: &Arc<PeerTable>,
+    udp_socket: &Arc<UdpSocket>,
+    metrics: &Arc<Metrics>,
+) -> Result<(), String> {
+    // Look up the session and encrypt.
+    let (ciphertext, addr, seq) = {
+        let mut peer = peer_table
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+
+        let ciphertext = peer
+            .transport
+            .encrypt(payload)
+            .map_err(|e| format!("encrypt failed: {e}"))?;
+
+        let seq = peer.next_send_seq();
+
+        #[allow(clippy::cast_possible_truncation)]
+        peer.record_send(ciphertext.len() as u64);
+
+        (ciphertext, peer.remote_addr, seq)
+    };
+    // DashMap lock released here before async I/O.
+
+    // Construct the wire frame.
+    let frame = Frame::new(FrameType::Data as u8, *session_id, seq, ciphertext);
+
+    // Transmit via UDP.
+    udp::udp_send(udp_socket, &frame, &addr)
+        .await
+        .map_err(|e| format!("UDP send failed: {e}"))?;
+
+    Metrics::inc(&metrics.frames_sent_total);
+    Ok(())
+}
+
+/// Send an encrypted `KeepAlive` frame to a peer (empty body, AEAD-sealed).
+///
+/// # Errors
+///
+/// Returns an error string if the session is not found, encryption fails,
+/// or the UDP send fails.
+pub async fn send_keepalive(
+    session_id: &SessionId,
+    peer_table: &Arc<PeerTable>,
+    udp_socket: &Arc<UdpSocket>,
+    metrics: &Arc<Metrics>,
+) -> Result<(), String> {
+    let (ciphertext, addr, seq) = {
+        let mut peer = peer_table
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+
+        let ciphertext = peer
+            .transport
+            .encrypt(&[])
+            .map_err(|e| format!("encrypt keepalive failed: {e}"))?;
+
+        let seq = peer.next_send_seq();
+        peer.record_send(0);
+
+        (ciphertext, peer.remote_addr, seq)
+    };
+
+    let frame = Frame::new(FrameType::KeepAlive as u8, *session_id, seq, ciphertext);
+
+    udp::udp_send(udp_socket, &frame, &addr)
+        .await
+        .map_err(|e| format!("UDP send failed: {e}"))?;
+
+    Metrics::inc(&metrics.frames_sent_total);
+    Ok(())
+}
+
+/// Send a `Close` frame to a peer and remove the session from the table.
+///
+/// The close frame carries an empty encrypted body to prove session key
+/// possession (prevents spoofed close attacks).
+///
+/// # Errors
+///
+/// Returns an error string if the session is not found or the send fails.
+pub async fn send_close(
+    session_id: &SessionId,
+    peer_table: &Arc<PeerTable>,
+    udp_socket: &Arc<UdpSocket>,
+    metrics: &Arc<Metrics>,
+) -> Result<(), String> {
+    let (ciphertext, addr, seq) = {
+        let mut peer = peer_table
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+
+        let ciphertext = peer
+            .transport
+            .encrypt(&[])
+            .map_err(|e| format!("encrypt close failed: {e}"))?;
+
+        let seq = peer.next_send_seq();
+        (ciphertext, peer.remote_addr, seq)
+    };
+
+    let frame = Frame::new(FrameType::Close as u8, *session_id, seq, ciphertext);
+
+    udp::udp_send(udp_socket, &frame, &addr)
+        .await
+        .map_err(|e| format!("UDP send failed: {e}"))?;
+
+    Metrics::inc(&metrics.frames_sent_total);
+    peer_table.remove(session_id);
+    Ok(())
+}

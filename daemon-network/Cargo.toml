@@ -6,9 +6,21 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "daemon_network"
+path = "src/lib.rs"
+
 [[bin]]
 name = "daemon-network"
 path = "src/main.rs"
+
+[[test]]
+name = "two_peer"
+path = "tests/integration/two_peer.rs"
+
+[[test]]
+name = "flood"
+path = "tests/integration/flood.rs"
 
 [dependencies]
 core-types.workspace = true
@@ -36,12 +48,18 @@ governor = { workspace = true }
 snow = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
+hex = { workspace = true }
+equix = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }
 tracing-journald = { workspace = true }
 libc = { workspace = true }
 rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
 
 [lints]
 workspace = true
