@@ -71,7 +71,8 @@ impl TofuStore {
                 prev_hash           TEXT NOT NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_events_key ON tofu_events (public_key_hex);",
+            CREATE INDEX IF NOT EXISTS idx_events_key ON tofu_events (public_key_hex);
+            CREATE INDEX IF NOT EXISTS idx_peers_addr ON tofu_peers (last_known_addr);",
         )
         .map_err(TofuStoreError::Sqlite)?;
 
@@ -104,6 +105,47 @@ impl TofuStore {
 
         let peer = stmt
             .query_row(params![public_key_hex], |row| {
+                Ok(TofuPeer {
+                    public_key_hex: row.get(0)?,
+                    first_seen_at: row.get(1)?,
+                    last_seen_at: row.get(2)?,
+                    first_seen_addr: row.get(3)?,
+                    last_known_addr: row.get(4)?,
+                    trust_level: parse_trust_level(&row.get::<_, String>(5)?),
+                    display_name: row.get(6)?,
+                    installation_id: row.get(7)?,
+                    cached_psk: row.get(8)?,
+                    version: row.get(9)?,
+                })
+            })
+            .optional()
+            .map_err(TofuStoreError::Sqlite)?;
+
+        Ok(peer)
+    }
+
+    /// Reverse lookup: find a peer by their last known network address.
+    ///
+    /// Used for `IKpsk2` reconnection — when an inbound connection arrives
+    /// from a known address, look up the cached static key and PSK without
+    /// requiring the initiator to identify itself first.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TofuStoreError::Sqlite` if the query fails.
+    pub fn lookup_addr(&self, addr: &str) -> Result<Option<TofuPeer>, TofuStoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT public_key_hex, first_seen_at, last_seen_at, first_seen_addr,
+                        last_known_addr, trust_level, display_name, installation_id,
+                        cached_psk, version
+                 FROM tofu_peers WHERE last_known_addr = ?1",
+            )
+            .map_err(TofuStoreError::Sqlite)?;
+
+        let peer = stmt
+            .query_row(params![addr], |row| {
                 Ok(TofuPeer {
                     public_key_hex: row.get(0)?,
                     first_seen_at: row.get(1)?,
@@ -498,5 +540,30 @@ mod tests {
         let _store = TofuStore::open(&path).unwrap(); // Creates valid DB
         drop(_store);
         let _store2 = TofuStore::open(&path).unwrap(); // Re-opens, integrity passes
+    }
+
+    #[test]
+    fn lookup_addr_finds_peer() {
+        let (store, _dir) = temp_store();
+        store.pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
+        let peer = store.lookup_addr("10.0.0.1:48627").unwrap().unwrap();
+        assert_eq!(peer.public_key_hex, "aabbccdd");
+        assert_eq!(peer.trust_level, TofuTrustLevel::Tofu);
+    }
+
+    #[test]
+    fn lookup_addr_returns_none_for_unknown() {
+        let (store, _dir) = temp_store();
+        assert!(store.lookup_addr("99.99.99.99:1234").unwrap().is_none());
+    }
+
+    #[test]
+    fn lookup_addr_with_psk_for_ikpsk2() {
+        let (store, _dir) = temp_store();
+        store.pin("eeff0011", "10.0.0.5:48627", TofuTrustLevel::Tofu).unwrap();
+        store.store_psk("eeff0011", &[0xBB; 32]).unwrap();
+        let peer = store.lookup_addr("10.0.0.5:48627").unwrap().unwrap();
+        assert_eq!(peer.public_key_hex, "eeff0011");
+        assert_eq!(peer.cached_psk.unwrap(), vec![0xBB; 32]);
     }
 }

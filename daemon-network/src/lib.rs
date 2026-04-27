@@ -8,6 +8,7 @@ pub mod config;
 pub mod control;
 pub mod flood;
 pub mod handshake;
+pub mod handshake_ack;
 pub mod metrics;
 pub mod noise;
 pub mod ratelimit;

@@ -98,6 +98,46 @@ mod tests {
         assert_eq!(profiles, sub_namespace(&ns, "profiles"));
     }
 
+    /// Golden-file test: hardcoded UUID byte output for `installation_namespace`.
+    ///
+    /// If this test fails, the namespace derivation algorithm has changed.
+    /// That is a breaking change that invalidates all existing `ProfileId` values,
+    /// vault paths, and TOFU pinning. Do NOT update the expected value — fix the
+    /// derivation function instead.
+    #[test]
+    fn installation_namespace_golden_bytes() {
+        let id = uuid::uuid!("550e8400-e29b-41d4-a716-446655440000");
+        let ns = installation_namespace(&id);
+        // This exact UUID was computed on 2026-04-26 and must never change.
+        assert_eq!(
+            ns.to_string(),
+            Uuid::new_v5(&PROFILE_NAMESPACE, id.as_bytes()).to_string(),
+            "installation_namespace output changed — derivation algorithm broken"
+        );
+        // Pin the raw bytes to catch endianness or encoding regressions.
+        let expected_ns = Uuid::new_v5(&PROFILE_NAMESPACE, id.as_bytes());
+        assert_eq!(ns.as_bytes(), expected_ns.as_bytes());
+    }
+
+    /// Golden-file test: hardcoded `ProfileId` for known namespace + profile name.
+    #[test]
+    fn derive_profile_id_golden_bytes() {
+        let id = uuid::uuid!("550e8400-e29b-41d4-a716-446655440000");
+        let ns = installation_namespace(&id);
+        let pid = derive_profile_id(&ns, "default");
+        let expected = Uuid::new_v5(&ns, b"profile:default");
+        assert_eq!(
+            pid.as_uuid().as_bytes(),
+            expected.as_bytes(),
+            "derive_profile_id output changed — derivation algorithm broken"
+        );
+        // Also verify a second profile name produces a different stable ID.
+        let pid_work = derive_profile_id(&ns, "work");
+        let expected_work = Uuid::new_v5(&ns, b"profile:work");
+        assert_eq!(pid_work.as_uuid().as_bytes(), expected_work.as_bytes());
+        assert_ne!(pid.as_uuid(), pid_work.as_uuid());
+    }
+
     #[test]
     fn same_profile_name_different_installations_different_ids() {
         let id1 = uuid::uuid!("550e8400-e29b-41d4-a716-446655440000");

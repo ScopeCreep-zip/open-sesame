@@ -42,6 +42,8 @@ mod rate_limit;
 mod sandbox;
 mod unlock;
 mod vault;
+mod network_identity;
+pub(crate) mod vault_log;
 
 use dispatch::MessageContext;
 use rate_limit::SecretRateLimiter;
@@ -116,6 +118,15 @@ async fn main() -> anyhow::Result<()> {
 
     let config_dir = core_config::config_dir();
     let default_profile: TrustProfileName = config.global.default_profile.clone();
+
+    // -- Vault log (M3 pre-qualification) --
+    let vault_log_path = config_dir.join("vaults").join("vault-log.db");
+    let vault_log = std::sync::Arc::new(
+        vault_log::VaultLog::open(&vault_log_path)
+            .map_err(|e| anyhow::anyhow!("failed to open vault-log.db: {e}"))?,
+    );
+    crud::set_vault_log(std::sync::Arc::clone(&vault_log));
+    tracing::info!(path = %vault_log_path.display(), "vault log opened");
 
     // -- IPC bus connection: read keypair BEFORE sandbox (keypair files need to be open) --
     let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;

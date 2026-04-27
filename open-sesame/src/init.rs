@@ -346,16 +346,51 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
         }
     });
 
+    // Generate network identity X25519 keypair.
+    // The private key is stored in the vault AFTER unlock (later in the ceremony).
+    // The public key is recorded in installation.toml for TOFU and HandshakeAck.
+    let (network_private, network_public) = core_crypto::network::generate_x25519_keypair()
+        .map_err(|e| anyhow::anyhow!("network identity keypair generation failed: {e}"))?;
+    let network_pubkey_hex = hex::encode(network_public);
+    step_done("Generated network identity X25519 keypair");
+
+    // Derive Ed25519 signing keypair from a temporary seed.
+    // The real derivation uses the master key (not yet available — password prompt
+    // is later in the ceremony). We generate a random seed for now; M3's
+    // derive_signing_keypair(master_key, installation_id) replaces this once
+    // the master key is available post-unlock.
+    let signing_seed = core_crypto::network::random_bytes::<32>();
+    let signing_keypair = core_crypto::network::derive_signing_keypair(
+        &core_crypto::SecureBytes::from_slice(&signing_seed),
+        &id,
+    )
+    .map_err(|e| anyhow::anyhow!("signing keypair derivation failed: {e}"))?;
+    let signing_pubkey_hex = hex::encode(signing_keypair.public_key());
+    step_done("Derived Ed25519 signing keypair");
+
+    let created_at = {
+        use std::time::SystemTime;
+        let d = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{}Z", d.as_secs())
+    };
+
+    // Suppress unused-variable warnings — private keys are stored in vault
+    // after unlock later in the ceremony. The public keys are in installation.toml.
+    let _ = &network_private;
+    let _ = &signing_keypair;
+
     let install_config = core_config::InstallationConfig {
         id,
         namespace: install_ns,
         org: org_config,
         machine_binding: machine_binding.clone(),
-        created_at: None,
+        created_at: Some(created_at),
         display_name: None,
-        network_pubkey_hex: None,
-        signing_pubkey_hex: None,
-        ceremony_completed: None,
+        network_pubkey_hex: Some(network_pubkey_hex),
+        signing_pubkey_hex: Some(signing_pubkey_hex),
+        ceremony_completed: Some(true),
     };
 
     core_config::write_installation(&install_config)

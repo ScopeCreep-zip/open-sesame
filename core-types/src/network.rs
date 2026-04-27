@@ -86,6 +86,33 @@ pub enum FrameType {
 // M1: Fingerprint Display
 // ============================================================================
 
+// ============================================================================
+// M2: Signed `HandshakeAck`
+// ============================================================================
+
+/// Signed `HandshakeAck` payload exchanged after Noise XX handshake completion.
+///
+/// Cryptographically binds the `InstallationId` to the Noise static key via
+/// an Ed25519 signature over `canonical_json(payload) || noise_static_pubkey`.
+/// The receiver verifies: (a) `network_pubkey` matches the Noise static key
+/// from the handshake, and (b) the Ed25519 signature verifies against
+/// `signing_pubkey`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakeAck {
+    /// `InstallationId.id` UUID.
+    pub installation_id: String,
+    /// Human-readable name for this installation.
+    pub display_name: Option<String>,
+    /// X25519 public key used as the Noise static key (hex, 64 chars).
+    pub network_pubkey: String,
+    /// Ed25519 public key for signing and vault log (hex, 64 chars).
+    pub signing_pubkey: String,
+    /// Negotiated Noise protocol string (e.g., `"Noise_XX_25519_ChaChaPoly_BLAKE2s"`).
+    pub cipher_suite: String,
+    /// Ed25519 signature over `canonical_json(self without signature) || noise_static_pubkey_bytes`.
+    pub signature: String,
+}
+
 /// Encoding format for displaying public key fingerprints to users.
 ///
 /// Hex display is partial-preimage-vulnerable (Dechand et al. USENIX Security
@@ -441,6 +468,40 @@ mod tests {
     #[test]
     fn fingerprint_encoding_default_is_pgp_word_list() {
         assert_eq!(FingerprintEncoding::default(), FingerprintEncoding::PgpWordList);
+    }
+
+    // -- `HandshakeAck` --
+
+    #[test]
+    fn handshake_ack_roundtrip_json() {
+        let ack = HandshakeAck {
+            installation_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            display_name: Some("test-peer".into()),
+            network_pubkey: "aa".repeat(32),
+            signing_pubkey: "bb".repeat(32),
+            cipher_suite: "Noise_XX_25519_ChaChaPoly_BLAKE2s".into(),
+            signature: "cc".repeat(64),
+        };
+        let json = serde_json::to_string(&ack).unwrap();
+        let decoded: HandshakeAck = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.installation_id, ack.installation_id);
+        assert_eq!(decoded.cipher_suite, ack.cipher_suite);
+        assert_eq!(decoded.signature, ack.signature);
+        assert_eq!(decoded.display_name, ack.display_name);
+    }
+
+    #[test]
+    fn handshake_ack_cipher_suite_field_present() {
+        let ack = HandshakeAck {
+            installation_id: String::new(),
+            display_name: None,
+            network_pubkey: String::new(),
+            signing_pubkey: String::new(),
+            cipher_suite: "Noise_XX_XWing_ChaChaPoly_BLAKE2b".into(),
+            signature: String::new(),
+        };
+        let json = serde_json::to_string(&ack).unwrap();
+        assert!(json.contains("Noise_XX_XWing_ChaChaPoly_BLAKE2b"));
     }
 
     #[test]

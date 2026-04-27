@@ -18,17 +18,44 @@ fn validate_secret_key(key: &str) -> core_types::Result<()> {
     core_types::validate_secret_key(key)
 }
 
-/// Vault-log hook point for M3 vault replication.
+/// Global vault log handle, initialised from `main.rs` at startup.
 ///
-/// Called after every successful secret write or delete. M3 replaces
-/// this body with `VaultLogEntry` creation and local log persistence.
-/// The typed `VaultLogOp` discriminant avoids string-matching in M3.
+/// Uses `OnceLock` to avoid threading the `Arc<VaultLog>` through every
+/// CRUD function signature. The vault log is set once and read many times.
+static VAULT_LOG: std::sync::OnceLock<std::sync::Arc<crate::vault_log::VaultLog>> =
+    std::sync::OnceLock::new();
+
+/// Set the global vault log instance. Called once from `main.rs`.
+pub(crate) fn set_vault_log(log: std::sync::Arc<crate::vault_log::VaultLog>) {
+    let _ = VAULT_LOG.set(log);
+}
+
+/// Get a reference to the global vault log (for dispatch handlers).
+pub(crate) fn vault_log_ref() -> Option<&'static std::sync::Arc<crate::vault_log::VaultLog>> {
+    VAULT_LOG.get()
+}
+
+/// Vault-log hook: writes a log entry after every successful secret mutation.
+///
+/// If the vault log is not initialised (pre-M2 installations), the hook
+/// is a silent no-op.
 fn vault_log_hook(
-    _profile: &TrustProfileName,
-    _operation: core_types::VaultLogOp,
-    _key: &str,
+    profile: &TrustProfileName,
+    operation: core_types::VaultLogOp,
+    key: &str,
 ) {
-    // Intentionally empty — M3 implements vault log entry creation.
+    let Some(log) = VAULT_LOG.get() else {
+        return; // Vault log not yet initialised — silent no-op.
+    };
+
+    // Best-effort installation ID from installation.toml.
+    let install_id = core_config::load_installation()
+        .map(|c| c.id.to_string())
+        .unwrap_or_default();
+
+    if let Err(e) = log.write_local_entry(profile, operation, key, &install_id) {
+        tracing::warn!(error = %e, "vault log write failed (non-fatal)");
+    }
 }
 
 /// Emit a secret operation audit event on the IPC bus for persistent logging

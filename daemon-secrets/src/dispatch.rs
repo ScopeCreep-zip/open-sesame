@@ -161,19 +161,30 @@ pub(crate) async fn handle_message(
         // -- State reconciliation: daemon-profile queries authoritative state --
         EventKind::SecretsStateRequest => crud::handle_secrets_state_request(ctx),
 
-        // -- Network Identity (M1 pre-work: stub handler) --
+        // -- Network Identity --
         EventKind::NetworkIdentityRequest => {
-            tracing::debug!("NetworkIdentityRequest received — not yet implemented (M1)");
-            None
+            return match crate::network_identity::handle_network_identity_request(
+                ctx.vault_state,
+                ctx.default_profile,
+            )
+            .await
+            {
+                Some(event) => handle_post_dispatch(ctx, msg, event).await,
+                None => Ok(true),
+            };
         }
 
-        // -- Vault Replication (M3 pre-work: stub handlers) --
-        EventKind::VaultLogEntryReceived { .. } => {
-            tracing::debug!("VaultLogEntryReceived — not yet implemented (M3)");
+        // -- Vault Replication --
+        EventKind::VaultLogEntryReceived { entry_json, .. } => {
+            if let Some(log) = crate::crud::vault_log_ref()
+                && let Err(e) = log.insert_received_entry(entry_json)
+            {
+                tracing::warn!(error = %e, "failed to store received vault log entry");
+            }
             None
         }
         EventKind::VaultReplicationPullRequest { .. } => {
-            tracing::debug!("VaultReplicationPullRequest — not yet implemented (M3)");
+            tracing::debug!("`VaultReplicationPullRequest` — pull serving not yet implemented (M3)");
             None
         }
 
