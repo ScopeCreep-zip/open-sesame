@@ -20,10 +20,10 @@ pub async fn execute_commands(
         Arc<Box<dyn platform_linux::compositor::CompositorBackend>>,
     >,
     client: &mut BusClient,
-    config_state: &std::sync::Arc<std::sync::RwLock<core_config::Config>>,
+    config_state: &std::sync::RwLock<core_config::Config>,
     controller: &mut OverlayController,
-    windows: &Arc<Mutex<Vec<core_types::Window>>>,
-    wm_config: &Arc<Mutex<core_config::WmConfig>>,
+    windows: &Mutex<Vec<core_types::Window>>,
+    wm_config: &Mutex<core_config::WmConfig>,
     ipc_keyboard_confirmed: &mut bool,
     password_buffer: &mut SecureVec,
 ) {

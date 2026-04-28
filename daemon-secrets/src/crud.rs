@@ -18,6 +18,22 @@ fn validate_secret_key(key: &str) -> core_types::Result<()> {
     core_types::validate_secret_key(key)
 }
 
+/// Check whether a secret key access should be blocked by the system key
+/// ACL. System keys (underscore prefix) are only accessible from callers
+/// with `SecurityLevel::Internal` or higher.
+///
+/// Returns `true` if the access is **denied** (caller lacks clearance).
+fn is_system_key_denied(key: &str, security_level: SecurityLevel) -> bool {
+    key.starts_with('_') && security_level < SecurityLevel::Internal
+}
+
+/// Filter system keys from a key list for non-Internal callers.
+fn filter_system_keys(keys: &mut Vec<String>, security_level: SecurityLevel) {
+    if security_level < SecurityLevel::Internal {
+        keys.retain(|k| !k.starts_with('_'));
+    }
+}
+
 /// Global vault log handle, initialised from `main.rs` at startup.
 ///
 /// Uses `OnceLock` to avoid threading the `Arc<VaultLog>` through every
@@ -25,9 +41,18 @@ fn validate_secret_key(key: &str) -> core_types::Result<()> {
 static VAULT_LOG: std::sync::OnceLock<std::sync::Arc<crate::vault_log::VaultLog>> =
     std::sync::OnceLock::new();
 
+/// Cached installation ID to avoid re-reading installation.toml on every write.
+static INSTALL_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// Set the global vault log instance. Called once from `main.rs`.
 pub(crate) fn set_vault_log(log: std::sync::Arc<crate::vault_log::VaultLog>) {
     let _ = VAULT_LOG.set(log);
+    // Cache installation ID at the same time.
+    let _ = INSTALL_ID.get_or_init(|| {
+        core_config::load_installation()
+            .map(|c| c.id.to_string())
+            .unwrap_or_default()
+    });
 }
 
 /// Get a reference to the global vault log (for dispatch handlers).
@@ -48,12 +73,9 @@ fn vault_log_hook(
         return; // Vault log not yet initialised — silent no-op.
     };
 
-    // Best-effort installation ID from installation.toml.
-    let install_id = core_config::load_installation()
-        .map(|c| c.id.to_string())
-        .unwrap_or_default();
+    let install_id = INSTALL_ID.get().map_or("", |s| s.as_str());
 
-    if let Err(e) = log.write_local_entry(profile, operation, key, &install_id) {
+    if let Err(e) = log.write_local_entry(profile, operation, key, install_id) {
         tracing::warn!(error = %e, "vault log write failed (non-fatal)");
     }
 }
@@ -271,8 +293,7 @@ pub(crate) async fn handle_secret_get(
     profile: &TrustProfileName,
     key: &str,
 ) -> anyhow::Result<Option<EventKind>> {
-    // System keys (underscore prefix) are only accessible from Internal clearance daemons.
-    if key.starts_with('_') && msg.security_level < core_types::SecurityLevel::Internal {
+    if is_system_key_denied(key, msg.security_level) {
         return Ok(Some(EventKind::SecretGetResponse {
             key: key.to_string(),
             value: SensitiveBytes::from_slice(&[]),
@@ -378,7 +399,7 @@ pub(crate) async fn handle_secret_set(
     key: &str,
     value: &SensitiveBytes,
 ) -> anyhow::Result<Option<EventKind>> {
-    if key.starts_with('_') && msg.security_level < core_types::SecurityLevel::Internal {
+    if is_system_key_denied(key, msg.security_level) {
         return Ok(Some(EventKind::SecretSetResponse {
             success: false,
             denial: Some(SecretDenialReason::AccessDenied),
@@ -461,7 +482,7 @@ pub(crate) async fn handle_secret_delete(
     profile: &TrustProfileName,
     key: &str,
 ) -> anyhow::Result<Option<EventKind>> {
-    if key.starts_with('_') && msg.security_level < core_types::SecurityLevel::Internal {
+    if is_system_key_denied(key, msg.security_level) {
         return Ok(Some(EventKind::SecretDeleteResponse {
             success: false,
             denial: Some(SecretDenialReason::AccessDenied),
@@ -632,7 +653,11 @@ pub(crate) async fn handle_secret_list(
 
     // 6. VAULT ACCESS.
     let (keys, denial) = match state.vault_for(profile).await {
-        Ok(vault) => (vault.store().list_keys().await.unwrap_or_default(), None),
+        Ok(vault) => {
+            let mut all_keys = vault.store().list_keys().await.unwrap_or_default();
+            filter_system_keys(&mut all_keys, msg.security_level);
+            (all_keys, None)
+        }
         Err(e) => {
             tracing::error!(profile = %profile, error = %e, "vault access failed");
             (vec![], Some(SecretDenialReason::VaultError(e.to_string())))
@@ -734,4 +759,95 @@ pub(crate) fn handle_secrets_state_request(ctx: &mut MessageContext<'_>) -> Opti
         active_profiles,
         lock_state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ================================================================
+    // System key ACL: is_system_key_denied
+    // ================================================================
+
+    #[test]
+    fn system_key_denied_for_open_clearance() {
+        assert!(is_system_key_denied("_signing-seed", SecurityLevel::Open));
+        assert!(is_system_key_denied("_network-identity-private", SecurityLevel::Open));
+    }
+
+    #[test]
+    fn system_key_allowed_for_internal_clearance() {
+        assert!(!is_system_key_denied("_signing-seed", SecurityLevel::Internal));
+    }
+
+    #[test]
+    fn system_key_allowed_for_secrets_only_clearance() {
+        // SecretsOnly > Internal in the SecurityLevel ordering.
+        assert!(!is_system_key_denied("_signing-seed", SecurityLevel::SecretsOnly));
+    }
+
+    #[test]
+    fn non_system_key_allowed_for_all_clearance_levels() {
+        assert!(!is_system_key_denied("api-key", SecurityLevel::Open));
+        assert!(!is_system_key_denied("api-key", SecurityLevel::Internal));
+        assert!(!is_system_key_denied("github-token", SecurityLevel::SecretsOnly));
+    }
+
+    #[test]
+    fn empty_key_is_not_system_key() {
+        assert!(!is_system_key_denied("", SecurityLevel::Open));
+    }
+
+    #[test]
+    fn single_underscore_is_system_key() {
+        assert!(is_system_key_denied("_", SecurityLevel::Open));
+    }
+
+    // ================================================================
+    // System key ACL: filter_system_keys
+    // ================================================================
+
+    #[test]
+    fn filter_hides_system_keys_for_open_clearance() {
+        let mut keys = vec![
+            "api-key".into(),
+            "_signing-seed".into(),
+            "github-token".into(),
+            "_network-identity-private".into(),
+        ];
+        filter_system_keys(&mut keys, SecurityLevel::Open);
+        assert_eq!(keys, vec!["api-key", "github-token"]);
+    }
+
+    #[test]
+    fn filter_preserves_system_keys_for_internal_clearance() {
+        let mut keys = vec![
+            "api-key".into(),
+            "_signing-seed".into(),
+            "github-token".into(),
+        ];
+        filter_system_keys(&mut keys, SecurityLevel::Internal);
+        assert_eq!(keys, vec!["api-key", "_signing-seed", "github-token"]);
+    }
+
+    #[test]
+    fn filter_preserves_all_keys_for_secrets_only() {
+        let mut keys = vec!["_a".into(), "_b".into(), "c".into()];
+        filter_system_keys(&mut keys, SecurityLevel::SecretsOnly);
+        assert_eq!(keys, vec!["_a", "_b", "c"]);
+    }
+
+    #[test]
+    fn filter_empty_list_is_noop() {
+        let mut keys: Vec<String> = vec![];
+        filter_system_keys(&mut keys, SecurityLevel::Open);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn filter_all_system_keys_produces_empty() {
+        let mut keys = vec!["_a".into(), "_b".into()];
+        filter_system_keys(&mut keys, SecurityLevel::Open);
+        assert!(keys.is_empty());
+    }
 }

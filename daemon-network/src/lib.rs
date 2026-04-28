@@ -1,8 +1,14 @@
-//! daemon-network library interface for integration testing.
+//! daemon-network library crate.
 //!
-//! Re-exports internal modules so integration tests can import them.
-//! The binary entry point is in `main.rs`.
+//! All business logic lives here so integration tests can construct a
+//! `DaemonState` and call dispatch/lifecycle functions directly without
+//! running the full daemon process.
+//!
+//! The binary entry point (`main.rs`) handles process lifecycle: arg parsing,
+//! tracing init, systemd notify, config loading, bus connection, and the
+//! `tokio::select!` event loop.
 
+// -- Core subsystems --
 pub mod audit;
 pub mod config;
 pub mod control;
@@ -17,3 +23,8 @@ pub mod send;
 pub mod session;
 pub mod tofu;
 pub mod transport;
+
+// -- Assembled state and dispatch (testable) --
+pub mod state;
+pub mod dispatch;
+pub mod lifecycle;

@@ -26,25 +26,45 @@ pub enum HandshakeOutcome {
     },
 }
 
-/// Shared references needed by the handshake task.
-pub struct HandshakeContext<'a> {
-    pub local_keypair: &'a snow::Keypair,
-    pub tofu_store: &'a Arc<std::sync::Mutex<TofuStore>>,
-    pub peer_table: &'a Arc<PeerTable>,
-    pub bus_client: &'a Arc<tokio::sync::Mutex<core_ipc::BusClient>>,
-    pub metrics: &'a Arc<Metrics>,
-    pub audit: &'a Arc<AuditLog>,
+/// Owned handshake context. `Send + 'static` — safe to pass to `tokio::spawn`.
+///
+/// Constructed via [`HandshakeContext::from_state`] which clones the `Arc`s
+/// and copies the scalar fields. All handshake functions borrow from this.
+pub struct HandshakeContext {
+    pub local_keypair: Arc<snow::Keypair>,
+    pub tofu_store: Arc<std::sync::Mutex<TofuStore>>,
+    pub peer_table: Arc<PeerTable>,
+    pub bus_client: Arc<tokio::sync::Mutex<core_ipc::BusClient>>,
+    pub metrics: Arc<Metrics>,
+    pub audit: Arc<AuditLog>,
     pub signing_seed: Option<[u8; 32]>,
-    pub installation_id: &'a str,
-    pub network_pubkey: &'a [u8; 32],
+    pub installation_id: String,
+    pub network_pubkey: [u8; 32],
     pub signing_pubkey: Option<[u8; 32]>,
-    /// Shared UDP socket for sending `HandshakeInit` knock and `CookieResponse`
-    /// before TCP connect. The responder sees the same source address for
-    /// both the UDP knock and the subsequent TCP connection.
-    pub udp_socket: &'a Arc<tokio::net::UdpSocket>,
-    /// Channel for feeding post-handshake TCP frames back to the main event
-    /// loop. Spawned `tcp_read_loop` sends `TcpInbound::Frame` events here.
-    pub tcp_tx: &'a tokio::sync::mpsc::Sender<crate::transport::tcp::TcpInbound>,
+    pub udp_socket: Arc<tokio::net::UdpSocket>,
+    pub tcp_tx: tokio::sync::mpsc::Sender<crate::transport::tcp::TcpInbound>,
+}
+
+impl HandshakeContext {
+    /// Build from `DaemonState`. Clones `Arc`s (cheap atomic increment),
+    /// copies scalars, clones the installation ID string.
+    #[must_use]
+    pub fn from_state(state: &crate::state::DaemonState) -> Self {
+        Self {
+            local_keypair: Arc::clone(&state.local_keypair),
+            tofu_store: Arc::clone(&state.tofu_store),
+            peer_table: Arc::clone(&state.peer_table),
+            bus_client: Arc::clone(&state.bus_client),
+            metrics: Arc::clone(&state.metrics),
+            audit: Arc::clone(&state.audit),
+            signing_seed: state.signing_seed.as_deref().copied(),
+            installation_id: state.identity.id.clone(),
+            network_pubkey: state.identity.network_pubkey,
+            signing_pubkey: state.identity.signing_pubkey,
+            udp_socket: Arc::clone(&state.udp_socket),
+            tcp_tx: state.tcp_tx.clone(),
+        }
+    }
 }
 
 /// Run the responder-side handshake on an inbound TCP connection.
@@ -52,7 +72,7 @@ pub struct HandshakeContext<'a> {
 pub async fn handle_inbound_handshake(
     stream: TcpStream,
     peer_addr: SocketAddr,
-    ctx: &HandshakeContext<'_>,
+    ctx: &HandshakeContext,
 ) -> HandshakeOutcome {
     use tokio::io::AsyncReadExt;
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -80,7 +100,7 @@ pub async fn handle_inbound_handshake(
 
             if let Some(psk) = psk {
                 match state::ikpsk2_responder(
-                    &mut reader, &mut writer, ctx.local_keypair, &psk,
+                    &mut reader, &mut writer, &ctx.local_keypair, &psk,
                 ).await {
                     Ok(t) => {
                         ctx.audit.append("ikpsk2_responder_ok", &peer_addr.to_string());
@@ -104,7 +124,7 @@ pub async fn handle_inbound_handshake(
         _ => {
             // 0x01 or any other byte: XX handshake (default).
             match state::xx_responder(
-                &mut reader, &mut writer, ctx.local_keypair,
+                &mut reader, &mut writer, &ctx.local_keypair,
             ).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -129,7 +149,7 @@ pub async fn handle_inbound_handshake(
 
     let remote_key_hex = hex::encode(remote_static);
     let trust_level = match run_tofu_check(
-        &remote_key_hex, &peer_addr.to_string(), ctx.tofu_store, ctx.metrics, ctx.audit,
+        &remote_key_hex, &peer_addr.to_string(), &ctx.tofu_store, &ctx.metrics, &ctx.audit,
     ) {
         Ok(level) => level,
         Err(reason) => return HandshakeOutcome::Rejected { reason },
@@ -183,7 +203,7 @@ pub async fn handle_inbound_handshake(
     let remote_uuid = peer_install_id
         .and_then(|s| uuid::Uuid::parse_str(&s).ok())
         .unwrap_or_else(uuid::Uuid::nil);
-    emit_session_established(ctx.bus_client, &session_id, &remote_static, remote_uuid).await;
+    emit_session_established(&ctx.bus_client, &session_id, &remote_static, remote_uuid).await;
 
     Metrics::inc(&ctx.metrics.sessions_established_total);
     ctx.audit.append(
@@ -205,7 +225,7 @@ pub async fn handle_inbound_handshake(
 /// Falls back to XX for first contact or PSK mismatch.
 pub async fn dial_peer(
     addr: SocketAddr,
-    ctx: &HandshakeContext<'_>,
+    ctx: &HandshakeContext,
 ) -> HandshakeOutcome {
     // Step 0: UDP knock — prove source address ownership before TCP connect.
     // The responder sends a cookie or PoW challenge; we solve and respond.
@@ -242,7 +262,7 @@ pub async fn dial_peer(
 
     let remote_key_hex = hex::encode(remote_static);
     let trust_level = match run_tofu_check(
-        &remote_key_hex, &addr.to_string(), ctx.tofu_store, ctx.metrics, ctx.audit,
+        &remote_key_hex, &addr.to_string(), &ctx.tofu_store, &ctx.metrics, &ctx.audit,
     ) {
         Ok(level) => level,
         Err(reason) => return HandshakeOutcome::Rejected { reason },
@@ -270,7 +290,7 @@ pub async fn dial_peer(
     let remote_uuid = peer_install_id
         .and_then(|s| uuid::Uuid::parse_str(&s).ok())
         .unwrap_or_else(uuid::Uuid::nil);
-    emit_session_established(ctx.bus_client, &session_id, &remote_static, remote_uuid).await;
+    emit_session_established(&ctx.bus_client, &session_id, &remote_static, remote_uuid).await;
 
     Metrics::inc(&ctx.metrics.sessions_established_total);
     ctx.audit.append(
@@ -301,7 +321,7 @@ pub async fn dial_peer(
 /// `Err(reason)` if the knock times out or the `PoW` is unsolvable.
 async fn udp_knock_exchange(
     addr: SocketAddr,
-    ctx: &HandshakeContext<'_>,
+    ctx: &HandshakeContext,
 ) -> Result<(), String> {
     use crate::transport::frame::{Frame, WireSessionId, HEADER_SIZE};
     use crate::transport::udp;
@@ -313,7 +333,7 @@ async fn udp_knock_exchange(
         0,
         vec![],
     );
-    udp::udp_send(ctx.udp_socket, &knock, &addr)
+    udp::udp_send(&ctx.udp_socket, &knock, &addr)
         .await
         .map_err(|e| format!("UDP knock send: {e}"))?;
 
@@ -382,7 +402,7 @@ async fn udp_knock_exchange(
         0,
         response_body,
     );
-    udp::udp_send(ctx.udp_socket, &resp, &addr)
+    udp::udp_send(&ctx.udp_socket, &resp, &addr)
         .await
         .map_err(|e| format!("CookieResponse send: {e}"))?;
 
@@ -403,7 +423,7 @@ async fn udp_knock_exchange(
 async fn dial_handshake(
     stream: TcpStream,
     addr: SocketAddr,
-    ctx: &HandshakeContext<'_>,
+    ctx: &HandshakeContext,
 ) -> Result<
     (
         NoiseTransport,
@@ -444,7 +464,7 @@ async fn dial_handshake(
         match state::ikpsk2_initiator(
             &mut reader,
             &mut writer,
-            ctx.local_keypair,
+            &ctx.local_keypair,
             &remote_static,
             &psk,
         )
@@ -471,7 +491,7 @@ async fn dial_handshake(
                 w2.write_all(&[0x01]).await.map_err(|e3| {
                     HandshakeOutcome::Rejected { reason: format!("pattern byte: {e3}") }
                 })?;
-                let t = state::xx_initiator(&mut r2, &mut w2, ctx.local_keypair)
+                let t = state::xx_initiator(&mut r2, &mut w2, &ctx.local_keypair)
                     .await
                     .map_err(|e2| {
                         Metrics::inc(&ctx.metrics.handshake_failures_total);
@@ -492,7 +512,7 @@ async fn dial_handshake(
         Metrics::inc(&ctx.metrics.handshake_failures_total);
         HandshakeOutcome::Rejected { reason: format!("pattern byte write: {e}") }
     })?;
-    let t = state::xx_initiator(&mut reader, &mut writer, ctx.local_keypair)
+    let t = state::xx_initiator(&mut reader, &mut writer, &ctx.local_keypair)
         .await
         .map_err(|e| {
             Metrics::inc(&ctx.metrics.handshake_failures_total);
@@ -521,7 +541,7 @@ async fn exchange_handshake_ack<R, W>(
     reader: &mut R,
     writer: &mut W,
     remote_static: &[u8; 32],
-    ctx: &HandshakeContext<'_>,
+    ctx: &HandshakeContext,
     is_initiator: bool,
 ) -> Option<String>
 where
@@ -535,13 +555,13 @@ where
 
     // Derive signing key from seed (on demand, dropped after use).
     let seed_secure = core_crypto::SecureBytes::from_slice(&seed);
-    let install_uuid = uuid::Uuid::parse_str(ctx.installation_id).ok()?;
+    let install_uuid = uuid::Uuid::parse_str(&ctx.installation_id).ok()?;
     let signing_key = core_crypto::network::derive_signing_keypair(&seed_secure, &install_uuid).ok()?;
 
     let our_ack = handshake_ack::build_handshake_ack(
-        ctx.installation_id,
+        &ctx.installation_id,
         None,
-        ctx.network_pubkey,
+        &ctx.network_pubkey,
         &signing_pubkey,
         state::NOISE_XX,
         &signing_key,
@@ -610,7 +630,7 @@ where
 // ---------------------------------------------------------------------------
 
 async fn emit_session_established(
-    bus_client: &Arc<tokio::sync::Mutex<core_ipc::BusClient>>,
+    bus_client: &tokio::sync::Mutex<core_ipc::BusClient>,
     session_id: &WireSessionId,
     remote_static: &[u8; 32],
     remote_install_id: uuid::Uuid,
@@ -646,9 +666,9 @@ async fn emit_session_established(
 fn run_tofu_check(
     remote_key_hex: &str,
     addr: &str,
-    tofu_store: &Arc<std::sync::Mutex<TofuStore>>,
-    metrics: &Arc<Metrics>,
-    audit: &Arc<AuditLog>,
+    tofu_store: &std::sync::Mutex<TofuStore>,
+    metrics: &Metrics,
+    audit: &AuditLog,
 ) -> Result<TofuTrustLevel, String> {
     let store = tofu_store.lock().map_err(|e| format!("TOFU lock: {e}"))?;
 

@@ -15,6 +15,15 @@ use std::time::Instant;
 /// Per-source rate limit: max responses per second.
 const MAX_RESPONSES_PER_SEC: u32 = 10;
 
+/// An mDNS peer event — either discovery or goodbye.
+#[derive(Debug, Clone)]
+pub enum MdnsPeerEvent {
+    /// Peer announced with valid TTL.
+    Discovered(MdnsPeer),
+    /// Peer sent goodbye (TTL=0) — should be removed.
+    Goodbye { addr: SocketAddr },
+}
+
 /// Discovered peer from an mDNS announcement.
 #[derive(Debug, Clone)]
 pub struct MdnsPeer {
@@ -87,7 +96,7 @@ pub struct MdnsListenConfig {
 pub async fn mdns_listen_loop(
     socket: Arc<tokio::net::UdpSocket>,
     config: MdnsListenConfig,
-    peer_tx: tokio::sync::mpsc::Sender<MdnsPeer>,
+    peer_tx: tokio::sync::mpsc::Sender<MdnsPeerEvent>,
 ) {
     let MdnsListenConfig {
         our_pubkey,
@@ -152,9 +161,18 @@ pub async fn mdns_listen_loop(
 
         // Is this a response containing our service type records?
         if (packet.flags & 0x8000) != 0 {
-            // Parse peer info from response records.
-            if let Some(peer) = extract_peer(&packet, src) {
-                let _ = peer_tx.try_send(peer);
+            // Check for goodbye (any answer record with TTL=0 per RFC 6762 §10.1).
+            let is_goodbye = packet.answers.iter().any(|rr| rr.ttl == 0);
+            if is_goodbye {
+                // Extract the peer address for removal. Port from SRV if present,
+                // else default. Source IP from the UDP packet.
+                let port = packet.additional.iter()
+                    .find(|rr| rr.rtype == RecordType::SRV as u16 && rr.rdata.len() >= 6)
+                    .map_or(48627, |rr| u16::from_be_bytes([rr.rdata[4], rr.rdata[5]]));
+                let addr = SocketAddr::new(src.ip(), port);
+                let _ = peer_tx.try_send(MdnsPeerEvent::Goodbye { addr });
+            } else if let Some(peer) = extract_peer(&packet, src) {
+                let _ = peer_tx.try_send(MdnsPeerEvent::Discovered(peer));
             }
         }
     }

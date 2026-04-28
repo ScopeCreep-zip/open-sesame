@@ -139,6 +139,21 @@ impl DialQueue {
         self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
+    /// Remove a pending dial entry by address.
+    ///
+    /// Called on `PeerRemoved` to cancel pending dial attempts for a departed
+    /// peer. Returns `true` if an entry was found and removed.
+    pub fn remove(&self, addr: &SocketAddr) -> bool {
+        if self.dedup.remove(addr).is_none() {
+            return false;
+        }
+        let mut heap = self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = heap.len();
+        let entries: Vec<DialEntry> = heap.drain().filter(|e| e.addr != *addr).collect();
+        *heap = BinaryHeap::from(entries);
+        heap.len() < before
+    }
+
     /// Whether the queue is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -214,6 +229,25 @@ mod tests {
         // Won't be ready immediately due to back-off.
         assert!(q.pop_ready().is_none());
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn remove_by_address() {
+        let q = DialQueue::new(10);
+        q.push(entry("10.0.0.1:48627", DiscoverySource::Mdns));
+        q.push(entry("10.0.0.2:48627", DiscoverySource::Bootstrap));
+        assert_eq!(q.len(), 2);
+        assert!(q.remove(&"10.0.0.1:48627".parse().unwrap()));
+        assert_eq!(q.len(), 1);
+        // Removed address can be re-added (dedup cleared).
+        assert!(q.push(entry("10.0.0.1:48627", DiscoverySource::Mdns)));
+        assert_eq!(q.len(), 2);
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_false() {
+        let q = DialQueue::new(10);
+        assert!(!q.remove(&"10.0.0.1:48627".parse().unwrap()));
     }
 
     #[test]

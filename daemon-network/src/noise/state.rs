@@ -19,6 +19,14 @@
 use snow::Builder;
 
 /// Noise protocol parameter strings.
+///
+/// # Known gap: classical X25519 only
+///
+/// The M1 spec defaults to `NetworkKem::XWing` (X25519 + ML-KEM-768 hybrid).
+/// Snow does not support PQ patterns, so we use classical X25519. The
+/// `NetworkKem::XWing` enum in `core-types` is defined but not yet wired.
+/// When the transport migrates from snow to a direct aws-lc-rs state machine,
+/// PQ hybrid support should be implemented.
 pub const NOISE_XX: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 pub const NOISE_IKPSK2: &str = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";
 

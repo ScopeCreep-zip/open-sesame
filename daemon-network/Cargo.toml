@@ -26,6 +26,10 @@ path = "tests/integration/flood.rs"
 name = "discovery"
 path = "tests/integration/discovery.rs"
 
+[[test]]
+name = "lifecycle"
+path = "tests/integration/lifecycle.rs"
+
 [dependencies]
 core-types.workspace = true
 core-crypto.workspace = true
@@ -67,6 +71,7 @@ rustix = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
+core-ipc = { workspace = true }
 
 [lints]
 workspace = true

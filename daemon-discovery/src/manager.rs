@@ -92,6 +92,25 @@ impl DiscoveryManager {
         );
     }
 
+    /// Remove a departed peer from the dial queue and emit a removal event.
+    ///
+    /// Called when a discovery backend detects peer departure: mDNS goodbye
+    /// (TTL=0), SWIM `MemberDown`, DNS SRV target removal, or operator unpin.
+    /// Does NOT modify the TOFU store — removal is transport-layer, not
+    /// trust-layer. The peer remains pinned for future reconnection.
+    pub fn remove_peer(
+        &self,
+        addr: SocketAddr,
+        source: DiscoverySource,
+    ) {
+        self.queue.remove(&addr);
+        let _ = self.event_tx.try_send(DiscoveryEvent::PeerRemoved {
+            addr,
+            source,
+        });
+        tracing::info!(%addr, ?source, "peer removed from discovery");
+    }
+
     /// Current dial queue depth.
     #[must_use]
     pub fn queue_depth(&self) -> usize {
@@ -140,6 +159,32 @@ mod tests {
         }
 
         assert_eq!(mgr.queue_depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_peer_emits_event_and_clears_queue() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mgr = DiscoveryManager::new(100, tx);
+
+        let addr: SocketAddr = "10.0.0.1:48627".parse().unwrap();
+        mgr.add_peer(addr, DiscoverySource::Mdns, Some("aabb".into()));
+        assert_eq!(mgr.queue_depth(), 1);
+
+        // Drain the PeerDiscovered event.
+        let _ = rx.try_recv().unwrap();
+
+        // Remove the peer.
+        mgr.remove_peer(addr, DiscoverySource::Mdns);
+        assert_eq!(mgr.queue_depth(), 0);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            DiscoveryEvent::PeerRemoved { addr: a, source } => {
+                assert_eq!(a, addr);
+                assert_eq!(source, DiscoverySource::Mdns);
+            }
+            _ => panic!("expected PeerRemoved"),
+        }
     }
 
     #[tokio::test]

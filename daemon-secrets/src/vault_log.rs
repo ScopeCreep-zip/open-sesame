@@ -214,11 +214,13 @@ impl VaultLog {
         let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let (wall_secs, counter): (i64, i64) = if let Some(wm) = since_watermark_json {
-            let v: serde_json::Value = serde_json::from_str(wm).unwrap_or_default();
-            (
-                v["wall_secs"].as_i64().unwrap_or(0),
-                v["counter"].as_i64().unwrap_or(0),
-            )
+            let v: serde_json::Value = serde_json::from_str(wm)
+                .map_err(VaultLogError::Json)?;
+            let wall = v["wall_secs"].as_i64()
+                .ok_or(VaultLogError::InvalidWatermark("missing or non-integer wall_secs"))?;
+            let ctr = v["counter"].as_i64()
+                .ok_or(VaultLogError::InvalidWatermark("missing or non-integer counter"))?;
+            (wall, ctr)
         } else {
             (0, 0)
         };
@@ -400,6 +402,8 @@ pub enum VaultLogError {
     Json(#[from] serde_json::Error),
     #[error("invalid signature: {0}")]
     InvalidSignature(String),
+    #[error("invalid watermark: {0}")]
+    InvalidWatermark(&'static str),
 }
 
 impl std::fmt::Debug for VaultLog {
@@ -529,5 +533,53 @@ mod tests {
         let result4 = log.query_entries_since("personal", None, 100).unwrap();
         let entries4: Vec<serde_json::Value> = serde_json::from_str(&result4).unwrap();
         assert!(entries4.is_empty());
+    }
+
+    #[test]
+    fn query_entries_since_rejects_malformed_watermark() {
+        let (log, _dir) = temp_log();
+        // Malformed JSON.
+        let result = log.query_entries_since("work", Some("not-json"), 100);
+        assert!(result.is_err(), "malformed JSON watermark must error");
+
+        // Valid JSON but missing required fields.
+        let result = log.query_entries_since("work", Some(r#"{"foo":"bar"}"#), 100);
+        assert!(result.is_err(), "watermark without wall_secs must error");
+
+        // Valid JSON with wall_secs but missing counter.
+        let result = log.query_entries_since("work", Some(r#"{"wall_secs":1}"#), 100);
+        assert!(result.is_err(), "watermark without counter must error");
+    }
+
+    #[test]
+    fn validate_rejects_wrong_length_signature() {
+        // 32-byte signature (should be 64).
+        let entry = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "signature": hex::encode([0xAA; 32]),
+        }).to_string();
+        let result = VaultLog::validate_entry_structure(&entry);
+        assert!(result.is_err(), "32-byte signature must be rejected");
+    }
+
+    #[test]
+    fn validate_accepts_64_byte_signature() {
+        let entry = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "signature": hex::encode([0xAA; 64]),
+        }).to_string();
+        let result = VaultLog::validate_entry_structure(&entry);
+        assert!(result.is_ok(), "64-byte signature must be accepted");
+    }
+
+    #[test]
+    fn validate_accepts_empty_signature() {
+        // Empty signature is accepted (M3 deferred — local entries don't sign yet).
+        let entry = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "signature": "",
+        }).to_string();
+        let result = VaultLog::validate_entry_structure(&entry);
+        assert!(result.is_ok(), "empty signature must be accepted (M3 deferred)");
     }
 }

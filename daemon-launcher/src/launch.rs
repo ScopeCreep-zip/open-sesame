@@ -9,7 +9,6 @@ use anyhow::Context;
 use core_ipc::BusClient;
 use core_types::{EventKind, LaunchDenial, SecurityLevel, TrustProfileName};
 use std::collections::HashMap;
-use std::sync::Arc;
 use zeroize::Zeroize;
 
 /// Structured launch error — carries machine-readable denial for the WM.
@@ -71,7 +70,7 @@ pub(crate) async fn launch_entry(
     launch_args: &[String],
     cache: &HashMap<String, scanner::CachedEntry>,
     client: &BusClient,
-    config_state: &Arc<std::sync::RwLock<core_config::Config>>,
+    config_state: &std::sync::RwLock<core_config::Config>,
 ) -> Result<u32, LaunchError> {
     let cached =
         resolve_entry(entry_id, cache).ok_or(LaunchError::Denial(LaunchDenial::EntryNotFound))?;

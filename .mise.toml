@@ -792,6 +792,27 @@ description = "Run pre-commit hooks manually"
 run = "lefthook run pre-commit"
 
 # =============================================================================
+# STATS
+# =============================================================================
+
+[tasks.loc]
+alias = [ "sloc" ]
+description = "LOC summary (tokei)"
+run = "tokei -s=code"
+
+[tasks."loc:rust"]
+description = "Rust LOC per file sorted by code"
+run = "tokei -t=Rust -f -s=code"
+
+[tasks."loc:files"]
+description = "LOC per file for all languages"
+run = "tokei -f -s=code"
+
+[tasks."loc:compact"]
+description = "LOC summary without embedded languages"
+run = "tokei -C -s=code"
+
+# =============================================================================
 # HELP
 # =============================================================================
 
@@ -877,6 +898,12 @@ CI (GitHub Actions entry points):
   ci:release:rename-deb   Rename .deb with version (amd64)
   ci:release:rename-deb:arm64  Rename .deb with version (arm64)
   ci:release:apt-repo     Generate APT repository
+
+STATS:
+  loc              (sloc) LOC summary
+  loc:rust                Rust LOC per file sorted by code
+  loc:files               LOC per file for all languages
+  loc:compact             LOC summary without embedded languages
 
 OTHER:
   setup            (s)    Install tools + deps

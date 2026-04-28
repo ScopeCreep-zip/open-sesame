@@ -4,6 +4,9 @@
 //! the discovery subsystem and establish a session. Uses in-process Noise XX
 //! handshake over TCP loopback — no real mDNS multicast (requires root/caps).
 
+mod common;
+
+use common::generate_keypair;
 use daemon_network::noise::state::{self, xx_initiator, xx_responder};
 use daemon_network::session::state::PeerState;
 use daemon_network::session::table::PeerTable;
@@ -24,12 +27,8 @@ async fn dial_queue_drives_handshake() {
     let responder_addr = listener.local_addr().unwrap();
 
     // Responder keypair.
-    let responder_kp = snow::Builder::new(state::NOISE_XX.parse().unwrap())
-        .generate_keypair()
-        .unwrap();
-    let initiator_kp = snow::Builder::new(state::NOISE_XX.parse().unwrap())
-        .generate_keypair()
-        .unwrap();
+    let responder_kp = generate_keypair();
+    let initiator_kp = generate_keypair();
 
     // Discovery feeds the responder's address into the dial queue.
     let queue = Arc::new(DialQueue::new(10));
@@ -111,6 +110,60 @@ fn dial_queue_requeue_with_backoff() {
 
     // Should NOT be ready immediately (30s backoff for failure 1).
     assert!(queue.pop_ready().is_none());
+}
+
+#[test]
+fn peer_removed_clears_queue_entry() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let mgr = daemon_discovery::manager::DiscoveryManager::new(100, tx);
+
+    let addr: std::net::SocketAddr = "10.0.0.5:48627".parse().unwrap();
+    mgr.add_peer(addr, DiscoverySource::Mdns, Some("aabb".into()));
+    assert_eq!(mgr.queue_depth(), 1);
+
+    // Simulate peer departure.
+    mgr.remove_peer(addr, DiscoverySource::Mdns);
+    assert_eq!(mgr.queue_depth(), 0);
+
+    // Peer can be re-discovered after removal (dedup cleared).
+    mgr.add_peer(addr, DiscoverySource::Mdns, Some("aabb".into()));
+    assert_eq!(mgr.queue_depth(), 1);
+}
+
+#[tokio::test]
+async fn discovery_event_peer_removed_tears_down_session() {
+    // Verify that PeerRemoved removes a session from the peer table.
+    let kp_a = snow::Builder::new(state::NOISE_XX.parse().unwrap())
+        .generate_keypair()
+        .unwrap();
+    let kp_b = snow::Builder::new(state::NOISE_XX.parse().unwrap())
+        .generate_keypair()
+        .unwrap();
+
+    let (stream_a, stream_b) = tokio::io::duplex(65536);
+    let (mut ar, mut aw) = tokio::io::split(stream_a);
+    let (mut br, mut bw) = tokio::io::split(stream_b);
+
+    let (ra, _rb) = tokio::join!(
+        xx_initiator(&mut ar, &mut aw, &kp_a),
+        xx_responder(&mut br, &mut bw, &kp_b),
+    );
+    let transport = ra.unwrap();
+    let remote_static = transport.remote_static().unwrap();
+
+    let addr: std::net::SocketAddr = "10.0.0.99:48627".parse().unwrap();
+    let peer_table = PeerTable::new(256);
+    let sid = WireSessionId::random();
+    let peer_state = PeerState::new(sid, remote_static, addr, transport, TofuTrustLevel::Tofu);
+    assert!(peer_table.insert(peer_state));
+    assert_eq!(peer_table.len(), 1);
+
+    // Simulate PeerRemoved: look up by address, remove.
+    let found_sid = peer_table.lookup_addr(&addr);
+    assert!(found_sid.is_some());
+    peer_table.remove(&found_sid.unwrap());
+    assert_eq!(peer_table.len(), 0);
+    assert!(peer_table.lookup_addr(&addr).is_none());
 }
 
 #[test]
