@@ -495,7 +495,7 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<Option<InstallationKey
 
 async fn init_services() -> anyhow::Result<()> {
     // Check if already running.
-    let is_active = std::process::Command::new("systemctl")
+    let is_active = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args([
             "--user",
             "is-active",
@@ -523,12 +523,12 @@ async fn init_services() -> anyhow::Result<()> {
         .status();
 
     // daemon-reload to pick up any new/changed unit files.
-    let _ = std::process::Command::new("systemctl")
+    let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args(["--user", "daemon-reload"])
         .status();
 
     // Detect whether desktop units are installed before reset-failed / start.
-    let desktop_installed = std::process::Command::new("systemctl")
+    let desktop_installed = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args([
             "--user",
             "list-unit-files",
@@ -541,7 +541,7 @@ async fn init_services() -> anyhow::Result<()> {
         .unwrap_or(false);
 
     // Reset any failed units from prior crash-loops.
-    let _ = std::process::Command::new("systemctl")
+    let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args(["--user", "reset-failed", "open-sesame-headless.target"])
         .status();
     for unit in [
@@ -550,12 +550,12 @@ async fn init_services() -> anyhow::Result<()> {
         "open-sesame-launcher",
         "open-sesame-snippets",
     ] {
-        let _ = std::process::Command::new("systemctl")
+        let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
             .args(["--user", "reset-failed", unit])
             .status();
     }
     if desktop_installed {
-        let _ = std::process::Command::new("systemctl")
+        let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
             .args(["--user", "reset-failed", "open-sesame-desktop.target"])
             .status();
         for unit in [
@@ -563,14 +563,14 @@ async fn init_services() -> anyhow::Result<()> {
             "open-sesame-clipboard",
             "open-sesame-input",
         ] {
-            let _ = std::process::Command::new("systemctl")
+            let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
                 .args(["--user", "reset-failed", unit])
                 .status();
         }
     }
 
     // Start the headless target (always present).
-    let start = std::process::Command::new("systemctl")
+    let start = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args(["--user", "start", "open-sesame-headless.target"])
         .output()
         .context("failed to run systemctl")?;
@@ -586,7 +586,7 @@ async fn init_services() -> anyhow::Result<()> {
     step_done("Starting headless daemons");
 
     if desktop_installed {
-        let _ = std::process::Command::new("systemctl")
+        let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
             .args(["--user", "start", "open-sesame-desktop.target"])
             .status();
         step_done("Starting desktop daemons");
@@ -962,10 +962,10 @@ pub fn cmd_wipe() -> anyhow::Result<()> {
     println!();
 
     // Stop daemons — desktop first, then headless.
-    let _ = std::process::Command::new("systemctl")
+    let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args(["--user", "stop", "open-sesame-desktop.target"])
         .status();
-    let _ = std::process::Command::new("systemctl")
+    let _ = std::process::Command::new("systemctl").env_remove("LD_LIBRARY_PATH")
         .args(["--user", "stop", "open-sesame-headless.target"])
         .status();
     println!("  Stopping daemons ... {}", "done".green());

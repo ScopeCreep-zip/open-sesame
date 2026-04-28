@@ -123,6 +123,7 @@ pub fn checks() -> Vec<Check> {
 /// Read a property from a systemd user unit via `systemctl --user show`.
 fn systemctl_prop(unit: &str, prop: &str) -> Option<String> {
     let output = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .arg("--user")
         .arg("show")
         .arg(unit)
