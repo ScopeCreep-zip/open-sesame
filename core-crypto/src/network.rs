@@ -18,8 +18,6 @@
 
 use crate::SecureBytes;
 use aws_lc_rs::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
-use aws_lc_rs::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519};
-use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{self, Ed25519KeyPair, KeyPair};
 use blake2::digest::{Mac, consts::U64};
 use blake2::{Blake2b512, Blake2bMac, Digest};
@@ -63,48 +61,44 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
 ///
 /// Private key returned as `SecureBytes` (ProtectedAlloc-backed).
 /// Public key returned as a 32-byte array.
+///
+/// Uses `x25519-dalek` for raw key import support. The private key bytes
+/// can be persisted to the vault and reloaded on restart.
 pub fn generate_x25519_keypair() -> core_types::Result<(SecureBytes, [u8; 32])> {
-    let rng = SystemRandom::new();
-    let private = EphemeralPrivateKey::generate(&X25519, &rng)
-        .map_err(|e| core_types::Error::Crypto(format!("X25519 keygen failed: {e}")))?;
-    let public = private
-        .compute_public_key()
-        .map_err(|e| core_types::Error::Crypto(format!("X25519 public key failed: {e}")))?;
-
-    let mut pub_bytes = [0u8; 32];
-    pub_bytes.copy_from_slice(public.as_ref());
-
-    // EphemeralPrivateKey cannot be extracted — for persistent keys we need
-    // a different approach. Generate random bytes and use them as the seed.
-    let priv_bytes = random_bytes::<32>();
+    let mut priv_bytes = random_bytes::<32>();
+    let secret = x25519_dalek::StaticSecret::from(priv_bytes);
+    let public = x25519_dalek::PublicKey::from(&secret);
     let private_secure = SecureBytes::from_slice(&priv_bytes);
+    priv_bytes.zeroize();
+    Ok((private_secure, public.to_bytes()))
+}
 
-    Ok((private_secure, pub_bytes))
+/// Compute the X25519 public key from raw private key bytes.
+///
+/// Used when loading a persisted private key from the vault and needing
+/// the corresponding public key without re-generating.
+#[must_use]
+pub fn x25519_public_from_private(private_key: &[u8; 32]) -> [u8; 32] {
+    let secret = x25519_dalek::StaticSecret::from(*private_key);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    public.to_bytes()
 }
 
 /// Perform X25519 Diffie-Hellman key agreement.
 ///
 /// Returns the 32-byte shared secret in `SecureBytes`.
 pub fn x25519_dh(
-    _private_key: &SecureBytes,
+    private_key: &SecureBytes,
     peer_public: &[u8; 32],
 ) -> core_types::Result<SecureBytes> {
-    // aws-lc-rs EphemeralPrivateKey is consumed on agree and cannot be
-    // constructed from raw bytes. For this pre-work API surface, we generate
-    // a fresh ephemeral key to validate the type signatures and ECDH path.
-    // M1's Noise XX state machine will manage key lifecycle directly.
-    let rng = SystemRandom::new();
-    let private = EphemeralPrivateKey::generate(&X25519, &rng)
-        .map_err(|e| core_types::Error::Crypto(format!("X25519 keygen for DH failed: {e}")))?;
-
-    let peer_pk = UnparsedPublicKey::new(&X25519, peer_public);
-
-    agreement::agree_ephemeral(
-        private,
-        peer_pk,
-        core_types::Error::Crypto("X25519 DH agreement failed".into()),
-        |shared_secret| Ok(SecureBytes::from_slice(shared_secret)),
-    )
+    let secret_bytes: [u8; 32] = private_key
+        .as_bytes()
+        .try_into()
+        .map_err(|_| core_types::Error::Crypto("X25519 private key must be 32 bytes".into()))?;
+    let secret = x25519_dalek::StaticSecret::from(secret_bytes);
+    let peer_pk = x25519_dalek::PublicKey::from(*peer_public);
+    let shared = secret.diffie_hellman(&peer_pk);
+    Ok(SecureBytes::from_slice(shared.as_bytes()))
 }
 
 /// Seal plaintext with ChaCha20-Poly1305.
@@ -261,7 +255,11 @@ pub fn hkdf_blake2b(chaining_key: &[u8], input: &[u8], num_outputs: usize) -> Ve
     outputs
 }
 
-/// HKDF-SHA256 extract-and-expand via aws-lc-rs (governance-compatible).
+/// HKDF-SHA256 extract-and-expand via `hkdf`+`sha2` crates (governance-compatible).
+///
+/// Uses the RustCrypto HKDF implementation, NOT aws-lc-rs. The
+/// governance-compatible FIPS claim applies to the algorithm
+/// (NIST SP 800-56C), not the implementation library.
 ///
 /// Returns `num_outputs` independent 32-byte keys.
 pub fn hkdf_sha256(chaining_key: &[u8], input: &[u8], num_outputs: usize) -> Vec<SecureBytes> {
@@ -310,35 +308,20 @@ pub fn derive_signing_keypair(
 
 /// Derive an X25519 keypair deterministically from master key + purpose + installation ID.
 ///
-/// Used for vault replication re-encryption addressing. Returns the private
-/// key as `SecureBytes` and the public key as a 32-byte array.
+/// Uses BLAKE3 `derive_key` to produce a 32-byte seed, then constructs an
+/// X25519 keypair via `x25519-dalek`. The public key is `[seed] * G` on
+/// Curve25519 — a valid curve point, not a hash.
 pub fn derive_x25519_keypair(
     master_key: &SecureBytes,
     purpose: &str,
     installation_id: &uuid::Uuid,
 ) -> core_types::Result<(SecureBytes, [u8; 32])> {
-    let context = format!(
-        "opensesame:{}:v1:{}",
-        purpose, installation_id
-    );
+    let context = format!("opensesame:{}:v1:{}", purpose, installation_id);
     let seed = zeroize::Zeroizing::new(blake3::derive_key(&context, master_key.as_bytes()));
-
-    // Use the seed as the private key scalar. Compute the public key via
-    // Ed25519KeyPair (which uses the same curve25519 scalar multiplication).
-    // For X25519, we'd ideally use a dedicated API, but aws-lc-rs doesn't
-    // expose deterministic X25519 key generation from seed. We store the
-    // seed as the private key and derive the public key using BLAKE3 domain
-    // separation to produce a consistent keypair.
+    let secret = x25519_dalek::StaticSecret::from(*seed);
+    let public = x25519_dalek::PublicKey::from(&secret);
     let private = SecureBytes::from_slice(&*seed);
-
-    // Derive public key deterministically: hash the seed with a public-key
-    // domain separator. This is a placeholder — M1 will use the actual
-    // X25519 scalar basepoint multiplication when the Noise state machine
-    // is implemented.
-    let pub_context = format!("opensesame:{}:pubkey:v1:{}", purpose, installation_id);
-    let pub_bytes = blake3::derive_key(&pub_context, master_key.as_bytes());
-
-    Ok((private, pub_bytes))
+    Ok((private, public.to_bytes()))
 }
 
 /// Sign a message with an Ed25519 signing key.
@@ -373,6 +356,45 @@ mod tests {
         assert_eq!(private.len(), 32);
         assert_eq!(public.len(), 32);
         assert_ne!(public, [0u8; 32]);
+    }
+
+    #[test]
+    fn x25519_keypair_private_derives_public() {
+        let (private, public) = generate_x25519_keypair().unwrap();
+        let derived_public =
+            x25519_public_from_private(private.as_bytes().try_into().unwrap());
+        assert_eq!(public, derived_public);
+    }
+
+    #[test]
+    fn x25519_dh_shared_secret_agreement() {
+        let (priv_a, pub_a) = generate_x25519_keypair().unwrap();
+        let (priv_b, pub_b) = generate_x25519_keypair().unwrap();
+        let shared_ab = x25519_dh(&priv_a, &pub_b).unwrap();
+        let shared_ba = x25519_dh(&priv_b, &pub_a).unwrap();
+        assert_eq!(shared_ab.as_bytes(), shared_ba.as_bytes());
+    }
+
+    #[test]
+    fn derive_x25519_keypair_is_valid_curve_point() {
+        let master = SecureBytes::from_slice(&[0xAA; 32]);
+        let id = uuid::Uuid::from_u128(42);
+        let (private, public) = derive_x25519_keypair(&master, "test", &id).unwrap();
+        let derived = x25519_public_from_private(private.as_bytes().try_into().unwrap());
+        assert_eq!(public, derived);
+    }
+
+    #[test]
+    fn x25519_dh_with_derived_keypairs() {
+        let master_a = SecureBytes::from_slice(&[0xBB; 32]);
+        let master_b = SecureBytes::from_slice(&[0xCC; 32]);
+        let id_a = uuid::Uuid::from_u128(1);
+        let id_b = uuid::Uuid::from_u128(2);
+        let (priv_a, pub_a) = derive_x25519_keypair(&master_a, "repl", &id_a).unwrap();
+        let (priv_b, pub_b) = derive_x25519_keypair(&master_b, "repl", &id_b).unwrap();
+        let shared_ab = x25519_dh(&priv_a, &pub_b).unwrap();
+        let shared_ba = x25519_dh(&priv_b, &pub_a).unwrap();
+        assert_eq!(shared_ab.as_bytes(), shared_ba.as_bytes());
     }
 
     #[test]

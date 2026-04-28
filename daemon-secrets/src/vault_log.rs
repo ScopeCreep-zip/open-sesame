@@ -180,11 +180,76 @@ impl VaultLog {
         Ok(())
     }
 
+    /// Validate a vault log entry's structural integrity.
+    ///
+    /// Checks that the signature field is exactly 64 bytes (Ed25519).
+    /// Content verification (actual signature check) is deferred to M3.
+    pub fn validate_entry_structure(entry_json: &str) -> Result<(), VaultLogError> {
+        let v: serde_json::Value =
+            serde_json::from_str(entry_json).map_err(VaultLogError::Json)?;
+        if let Some(sig) = v["signature"].as_str()
+            && !sig.is_empty()
+        {
+            let sig_bytes = hex::decode(sig).unwrap_or_default();
+            if sig_bytes.len() != 64 {
+                return Err(VaultLogError::InvalidSignature(format!(
+                    "expected 64-byte Ed25519 signature, got {} bytes",
+                    sig_bytes.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Query log entries since a given HLC watermark for replication serving.
+    ///
+    /// Returns entries as a JSON array string. Used by the
+    /// `VaultReplicationPullRequest` handler in dispatch.rs.
+    pub fn query_entries_since(
+        &self,
+        profile_id: &str,
+        since_watermark_json: Option<&str>,
+        max_entries: u32,
+    ) -> Result<String, VaultLogError> {
+        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let (wall_secs, counter): (i64, i64) = if let Some(wm) = since_watermark_json {
+            let v: serde_json::Value = serde_json::from_str(wm).unwrap_or_default();
+            (
+                v["wall_secs"].as_i64().unwrap_or(0),
+                v["counter"].as_i64().unwrap_or(0),
+            )
+        } else {
+            (0, 0)
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT operation_json FROM vault_log
+             WHERE profile_id = ?1
+               AND (hlc_wall_secs > ?2 OR (hlc_wall_secs = ?2 AND hlc_counter > ?3))
+             ORDER BY hlc_wall_secs, hlc_counter, hlc_node_id
+             LIMIT ?4"
+        ).map_err(VaultLogError::Sqlite)?;
+
+        let entries: Vec<String> = stmt
+            .query_map(
+                params![profile_id, wall_secs, counter, max_entries],
+                |row| row.get(0),
+            )
+            .map_err(VaultLogError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(VaultLogError::Sqlite)?;
+
+        Ok(serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into()))
+    }
+
     /// Insert a received replication entry into the log (from a remote peer).
     ///
-    /// Signature verification is deferred to M3. The entry is stored with
+    /// Validates entry structure before insertion. The entry is stored with
     /// `locally_applied = 0` for later fold application.
     pub fn insert_received_entry(&self, entry_json: &str) -> Result<(), VaultLogError> {
+        Self::validate_entry_structure(entry_json)?;
+
         // Parse minimal fields from the JSON.
         let v: serde_json::Value =
             serde_json::from_str(entry_json).map_err(VaultLogError::Json)?;
@@ -330,6 +395,8 @@ pub enum VaultLogError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid signature: {0}")]
+    InvalidSignature(String),
 }
 
 impl std::fmt::Debug for VaultLog {

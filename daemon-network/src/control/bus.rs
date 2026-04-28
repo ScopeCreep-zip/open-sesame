@@ -97,3 +97,52 @@ pub async fn request_network_identity(
         }
     }
 }
+
+/// Request a secret from daemon-secrets via `SecretGet`.
+///
+/// Used to retrieve the signing seed (`_signing-seed`) stored during
+/// `sesame init`. Returns the raw secret bytes, or None if the vault
+/// is locked or the key does not exist.
+///
+/// # Panics
+///
+/// Panics if the hardcoded default profile name is invalid (cannot happen
+/// in practice — the constant is compile-time validated).
+pub async fn request_secret(
+    client: &mut BusClient,
+    key: &str,
+) -> Option<Vec<u8>> {
+    use core_types::{EventKind, TrustProfileName};
+
+    let profile = TrustProfileName::try_from(core_types::DEFAULT_PROFILE_NAME)
+        .expect("hardcoded valid profile name");
+
+    let response = match client
+        .request(
+            EventKind::SecretGet {
+                profile,
+                key: key.to_string(),
+            },
+            core_types::SecurityLevel::SecretsOnly,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+    {
+        Ok(msg) => msg,
+        Err(e) => {
+            tracing::debug!(key = key, error = %e, "SecretGet request failed");
+            return None;
+        }
+    };
+
+    match response.payload {
+        EventKind::SecretGetResponse { value, denial: None, .. } => {
+            Some(value.as_bytes().to_vec())
+        }
+        EventKind::SecretGetResponse { denial: Some(reason), .. } => {
+            tracing::debug!(key = key, ?reason, "secret access denied");
+            None
+        }
+        _ => None,
+    }
+}

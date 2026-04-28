@@ -95,8 +95,16 @@ dashmap         = "6"
 snow            = "0.10"
 aws-lc-rs       = { version = "1", features = ["aws-lc-sys"] }
 blake2          = "0.10"
+x25519-dalek    = { version = "2", features = ["static_secrets"] }
 equix           = { version = "0.6", default-features = false }
 hashx           = { version = "0.7", default-features = false }
+mainline        = { version = "6", features = ["async"] }
+# ed25519-dalek is NOT a workspace dep — mainline v6 re-exports it as
+# mainline::SigningKey. The pre-release v3 chain (rand_core 0.10-rc,
+# sha2 0.11-rc, getrandom 0.4-rc) conflicts with our stable crypto deps.
+# Access SigningKey only through mainline's re-export.
+foca            = { version = "1", features = ["std", "postcard-codec"] }
+hickory-resolver = { version = "0.25", features = ["tokio"] }
 pbkdf2          = "0.12"
 sha2            = "0.10"
 hmac            = "0.12"
@@ -120,7 +128,7 @@ dirs            = "6"
 
 # -- Logging --
 tracing             = "0.1"
-tracing-subscriber  = { version = "0.3.20", features = ["env-filter", "fmt", "json", "ansi"] }  # MANDATORY pin: CVE-2025-58160
+tracing-subscriber  = { version = "0.3.23", features = ["env-filter", "fmt", "json", "ansi"] }  # MANDATORY pin: CVE-2025-58160
 tracing-journald    = "0.3"
 
 # -- CLI --

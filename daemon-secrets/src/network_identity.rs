@@ -74,12 +74,11 @@ pub(crate) async fn handle_network_identity_request(
     }
 }
 
-/// Derive X25519 public key from private key bytes.
-///
-/// Uses BLAKE3 domain-separated derivation as a placeholder. The actual
-/// X25519 scalar basepoint multiplication requires `aws-lc-rs` deterministic
-/// key construction from seed (not yet exposed). When available, this will
-/// use real scalar multiplication for correct ECDH.
+/// Compute X25519 public key from private key bytes via scalar basepoint
+/// multiplication on Curve25519 (x25519-dalek `StaticSecret` → `PublicKey`).
 fn derive_public_from_private(private: &[u8]) -> [u8; 32] {
-    blake3::derive_key("opensesame:network-identity:pubkey:v1", private)
+    let key: [u8; 32] = private
+        .try_into()
+        .expect("X25519 private key must be 32 bytes");
+    core_crypto::network::x25519_public_from_private(&key)
 }

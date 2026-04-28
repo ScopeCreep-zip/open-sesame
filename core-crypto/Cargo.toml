@@ -24,6 +24,7 @@ hkdf        = { workspace = true }
 aws-lc-rs   = { workspace = true }
 blake2      = { workspace = true }
 uuid        = { workspace = true }
+x25519-dalek = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }

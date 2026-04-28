@@ -30,9 +30,9 @@ pub const MAX_TCP_BODY: usize = 65535;
 
 /// 12-byte session identifier. Random, assigned by initiator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SessionId(pub [u8; 12]);
+pub struct WireSessionId(pub [u8; 12]);
 
-impl SessionId {
+impl WireSessionId {
     /// Generate a random session ID.
     #[must_use]
     pub fn random() -> Self {
@@ -46,7 +46,7 @@ impl SessionId {
     }
 }
 
-impl std::fmt::Display for SessionId {
+impl std::fmt::Display for WireSessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for b in &self.0 {
             write!(f, "{b:02x}")?;
@@ -62,7 +62,7 @@ pub struct Frame {
     pub version: u8,
     pub frame_type: u8,
     pub body_len: u16,
-    pub session_id: SessionId,
+    pub session_id: WireSessionId,
     pub sequence: u32,
     pub body: Vec<u8>,
 }
@@ -99,7 +99,7 @@ impl Frame {
             version,
             frame_type,
             body_len,
-            session_id: SessionId(sid),
+            session_id: WireSessionId(sid),
             sequence,
             body,
         })
@@ -122,7 +122,7 @@ impl Frame {
     #[must_use]
     pub fn new(
         frame_type: u8,
-        session_id: SessionId,
+        session_id: WireSessionId,
         sequence: u32,
         body: Vec<u8>,
     ) -> Self {
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn frame_round_trip() {
-        let sid = SessionId([0xAA; 12]);
+        let sid = WireSessionId([0xAA; 12]);
         let frame = Frame::new(FrameType::Data as u8, sid, 42, vec![1, 2, 3, 4]);
         let bytes = frame.serialise();
         let parsed = Frame::parse(&bytes).unwrap();
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn frame_body_length_mismatch() {
-        let sid = SessionId([0; 12]);
+        let sid = WireSessionId([0; 12]);
         let frame = Frame::new(FrameType::KeepAlive as u8, sid, 0, vec![1, 2, 3]);
         let mut bytes = frame.serialise();
         bytes.truncate(HEADER_SIZE + 1); // Claim 3 bytes but only have 1
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn header_bytes_matches_serialise_prefix() {
-        let sid = SessionId([0xBB; 12]);
+        let sid = WireSessionId([0xBB; 12]);
         let frame = Frame::new(FrameType::Close as u8, sid, 99, vec![]);
         let serialised = frame.serialise();
         let header = frame.header_bytes();
@@ -276,7 +276,7 @@ mod tests {
             (0x12, FrameType::Close),
             (0x13, FrameType::RehandshakeRequest),
         ] {
-            let sid = SessionId([0; 12]);
+            let sid = WireSessionId([0; 12]);
             let frame = Frame::new(byte, sid, 0, vec![]);
             assert_eq!(frame.known_frame_type(), Some(expected));
         }
@@ -284,21 +284,21 @@ mod tests {
 
     #[test]
     fn unknown_frame_type() {
-        let sid = SessionId([0; 12]);
+        let sid = WireSessionId([0; 12]);
         let frame = Frame::new(0xFF, sid, 0, vec![]);
         assert!(frame.known_frame_type().is_none());
     }
 
     #[test]
     fn session_id_display() {
-        let sid = SessionId([0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01]);
+        let sid = WireSessionId([0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01]);
         let s = format!("{sid}");
         assert_eq!(s, "abcdef0123456789abcdef01");
     }
 
     #[test]
     fn empty_body_frame() {
-        let sid = SessionId::random();
+        let sid = WireSessionId::random();
         let frame = Frame::new(FrameType::KeepAlive as u8, sid, 0, vec![]);
         let bytes = frame.serialise();
         assert_eq!(bytes.len(), HEADER_SIZE);
@@ -308,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_frame_round_trip() {
-        let sid = SessionId([0xCC; 12]);
+        let sid = WireSessionId([0xCC; 12]);
         let frame = Frame::new(FrameType::Data as u8, sid, 7, vec![10, 20, 30]);
 
         let (client, server) = tokio::io::duplex(4096);

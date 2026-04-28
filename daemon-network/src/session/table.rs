@@ -1,11 +1,11 @@
 //! Concurrent peer session table with composite-score eviction.
 //!
-//! Primary index: `SessionId → PeerState` (`DashMap`).
-//! Secondary index: `SocketAddr → SessionId` (`DashMap`) for fast frame dispatch.
+//! Primary index: `WireSessionId → PeerState` (`DashMap`).
+//! Secondary index: `SocketAddr → WireSessionId` (`DashMap`) for fast frame dispatch.
 //! Address index updated atomically on session creation, path change, and eviction.
 
 use crate::session::state::PeerState;
-use crate::transport::frame::SessionId;
+use crate::transport::frame::WireSessionId;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,7 +15,7 @@ pub struct PeerTable {
     /// Primary: session ID → peer state.
     sessions: DashMap<[u8; 12], PeerState>,
     /// Secondary: socket address → session ID (for UDP frame dispatch).
-    addr_index: DashMap<SocketAddr, SessionId>,
+    addr_index: DashMap<SocketAddr, WireSessionId>,
     /// Maximum concurrent sessions.
     max_sessions: u32,
     /// Current session count (atomic for lock-free reads).
@@ -53,24 +53,24 @@ impl PeerTable {
 
     /// Look up a session by session ID.
     #[must_use]
-    pub fn get(&self, sid: &SessionId) -> Option<dashmap::mapref::one::Ref<'_, [u8; 12], PeerState>> {
+    pub fn get(&self, sid: &WireSessionId) -> Option<dashmap::mapref::one::Ref<'_, [u8; 12], PeerState>> {
         self.sessions.get(&sid.0)
     }
 
     /// Look up a mutable session by session ID.
     #[must_use]
-    pub fn get_mut(&self, sid: &SessionId) -> Option<dashmap::mapref::one::RefMut<'_, [u8; 12], PeerState>> {
+    pub fn get_mut(&self, sid: &WireSessionId) -> Option<dashmap::mapref::one::RefMut<'_, [u8; 12], PeerState>> {
         self.sessions.get_mut(&sid.0)
     }
 
     /// Look up session ID by socket address (for incoming UDP frames).
     #[must_use]
-    pub fn lookup_addr(&self, addr: &SocketAddr) -> Option<SessionId> {
+    pub fn lookup_addr(&self, addr: &SocketAddr) -> Option<WireSessionId> {
         self.addr_index.get(addr).map(|r| *r.value())
     }
 
     /// Update address index on path migration.
-    pub fn update_addr(&self, sid: &SessionId, old_addr: &SocketAddr, new_addr: SocketAddr) {
+    pub fn update_addr(&self, sid: &WireSessionId, old_addr: &SocketAddr, new_addr: SocketAddr) {
         self.addr_index.remove(old_addr);
         self.addr_index.insert(new_addr, *sid);
         if let Some(mut peer) = self.sessions.get_mut(&sid.0) {
@@ -79,11 +79,17 @@ impl PeerTable {
     }
 
     /// Remove a session by session ID.
-    pub fn remove(&self, sid: &SessionId) {
+    pub fn remove(&self, sid: &WireSessionId) {
         if let Some((_, state)) = self.sessions.remove(&sid.0) {
             self.addr_index.remove(&state.remote_addr);
             self.count.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+
+    /// Maximum configured session capacity.
+    #[must_use]
+    pub fn max_sessions(&self) -> u32 {
+        self.max_sessions
     }
 
     /// Current number of active sessions.
@@ -100,30 +106,30 @@ impl PeerTable {
 
     /// Collect all session IDs (snapshot).
     #[must_use]
-    pub fn session_ids(&self) -> Vec<SessionId> {
+    pub fn session_ids(&self) -> Vec<WireSessionId> {
         self.sessions
             .iter()
-            .map(|r| SessionId(*r.key()))
+            .map(|r| WireSessionId(*r.key()))
             .collect()
     }
 
     /// Find sessions idle longer than `secs`.
     #[must_use]
-    pub fn idle_sessions(&self, secs: u64) -> Vec<SessionId> {
+    pub fn idle_sessions(&self, secs: u64) -> Vec<WireSessionId> {
         self.sessions
             .iter()
             .filter(|r| r.value().idle_secs() > secs)
-            .map(|r| SessionId(*r.key()))
+            .map(|r| WireSessionId(*r.key()))
             .collect()
     }
 
     /// Find sessions that need rekeying (sequence exhaustion or age).
     #[must_use]
-    pub fn sessions_needing_rekey(&self, max_age_secs: u64) -> Vec<SessionId> {
+    pub fn sessions_needing_rekey(&self, max_age_secs: u64) -> Vec<WireSessionId> {
         self.sessions
             .iter()
             .filter(|r| r.value().needs_rekey() || r.value().age_secs() > max_age_secs)
-            .map(|r| SessionId(*r.key()))
+            .map(|r| WireSessionId(*r.key()))
             .collect()
     }
 
@@ -143,9 +149,9 @@ impl PeerTable {
         }
 
         if let Some(sid) = worst_sid {
-            self.remove(&SessionId(sid));
+            self.remove(&WireSessionId(sid));
             tracing::info!(
-                session = %SessionId(sid),
+                session = %WireSessionId(sid),
                 score = worst_score,
                 "evicted session (table full)"
             );
@@ -201,7 +207,7 @@ mod tests {
     #[test]
     fn get_missing_session() {
         let table = PeerTable::new(10);
-        let sid = SessionId::random();
+        let sid = WireSessionId::random();
         assert!(table.get(&sid).is_none());
     }
 }

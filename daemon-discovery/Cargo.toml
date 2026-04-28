@@ -17,9 +17,19 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+mainline = { workspace = true }
+hickory-resolver = { workspace = true }
+foca = { workspace = true }
+postcard = { workspace = true }
+rand = { version = "0.9", default-features = false, features = ["std", "small_rng"] }
+core-crypto = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio-test = { workspace = true }
 
 [lints]
 workspace = true

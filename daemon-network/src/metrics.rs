@@ -143,12 +143,22 @@ pub async fn serve_prometheus(metrics: std::sync::Arc<Metrics>, port: u16) {
             }
         };
 
-        let body = render_prometheus(&metrics);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
+        #[allow(clippy::items_after_statements)]
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(&mut stream);
+        let mut request_line = String::new();
+        let _ = reader.read_line(&mut request_line).await;
+
+        let response = if request_line.starts_with("GET /metrics") {
+            let body = render_prometheus(&metrics);
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        } else {
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        };
 
         let _ = stream.write_all(response.as_bytes()).await;
     }

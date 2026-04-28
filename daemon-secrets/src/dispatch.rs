@@ -183,9 +183,31 @@ pub(crate) async fn handle_message(
             }
             None
         }
-        EventKind::VaultReplicationPullRequest { .. } => {
-            tracing::debug!("`VaultReplicationPullRequest` — pull serving not yet implemented (M3)");
-            None
+        EventKind::VaultReplicationPullRequest {
+            profile_id,
+            since_watermark_json,
+            max_entries,
+        } => {
+            if let Some(log) = crate::crud::vault_log_ref() {
+                match log.query_entries_since(
+                    &profile_id.to_string(),
+                    since_watermark_json.as_deref(),
+                    *max_entries,
+                ) {
+                    Ok(entries_json) => Some(EventKind::VaultReplicationPullResponse {
+                        profile_id: *profile_id,
+                        entries_json,
+                        has_more: false,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "vault log query failed");
+                        None
+                    }
+                }
+            } else {
+                tracing::debug!("VaultReplicationPullRequest: no vault log available");
+                None
+            }
         }
 
         // -- Ignore other events --

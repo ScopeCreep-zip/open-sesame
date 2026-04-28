@@ -14,17 +14,22 @@ use std::path::Path;
 /// TOFU store wrapping a `SQLite` database.
 pub struct TofuStore {
     conn: Connection,
+    /// Installation ID for scoping the genesis hash chain.
+    installation_id: String,
 }
 
 impl TofuStore {
     /// Open or create the TOFU store at the given path.
+    ///
+    /// The `installation_id` scopes the genesis hash so two installations
+    /// on the same filesystem produce distinct event chains.
     ///
     /// Enforces WAL mode, creates tables if absent, runs integrity check.
     ///
     /// # Errors
     ///
     /// Returns an error if the database is corrupted or cannot be opened.
-    pub fn open(path: &Path) -> Result<Self, TofuStoreError> {
+    pub fn open(path: &Path, installation_id: &str) -> Result<Self, TofuStoreError> {
         // Enforce file permissions on creation.
         #[cfg(unix)]
         if !path.exists() {
@@ -84,7 +89,7 @@ impl TofuStore {
             return Err(TofuStoreError::Corrupted(integrity));
         }
 
-        Ok(Self { conn })
+        Ok(Self { conn, installation_id: installation_id.to_string() })
     }
 
     /// Look up a peer by public key hex.
@@ -203,9 +208,20 @@ impl TofuStore {
         public_key_hex: &str,
         addr: &str,
     ) -> Result<(), TofuStoreError> {
-        let now = now_iso8601();
-        let changed = self
+        // Read old address BEFORE updating to detect migrations.
+        let old_addr: Option<String> = self
             .conn
+            .query_row(
+                "SELECT last_known_addr FROM tofu_peers WHERE public_key_hex = ?1",
+                params![public_key_hex],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(TofuStoreError::Sqlite)?
+            .flatten();
+
+        let now = now_iso8601();
+        self.conn
             .execute(
                 "UPDATE tofu_peers SET last_seen_at = ?1, last_known_addr = ?2
                  WHERE public_key_hex = ?3",
@@ -213,13 +229,12 @@ impl TofuStore {
             )
             .map_err(TofuStoreError::Sqlite)?;
 
-        if changed > 0 {
-            // Check if address changed — log migration event.
-            if let Some(peer) = self.lookup_key(public_key_hex)?
-                && peer.last_known_addr.as_deref() != Some(addr)
-            {
-                self.append_event(public_key_hex, "addr_migrate", Some(addr), None)?;
-            }
+        // Log address migration if the address actually changed.
+        if let Some(ref old) = old_addr
+            && old != addr
+        {
+            let detail = format!("from={old}");
+            self.append_event(public_key_hex, "addr_migrate", Some(addr), Some(&detail))?;
         }
         Ok(())
     }
@@ -368,8 +383,9 @@ impl TofuStore {
                 |row| row.get(0),
             )
             .unwrap_or_else(|_| {
-                // Genesis entry — hash of the string "opensesame:tofu:genesis".
-                hex::encode(blake3::hash(b"opensesame:tofu:genesis").as_bytes())
+                // Genesis entry — scoped by installation ID.
+                let genesis = format!("opensesame:tofu:genesis:{}", self.installation_id);
+                hex::encode(blake3::hash(genesis.as_bytes()).as_bytes())
             });
 
         // Compute this entry's hash: BLAKE3(prev_hash || event_type || public_key_hex || timestamp).
@@ -453,7 +469,7 @@ mod tests {
     fn temp_store() -> (TofuStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-tofu.db");
-        let store = TofuStore::open(&path).unwrap();
+        let store = TofuStore::open(&path, "test-install").unwrap();
         (store, dir)
     }
 
@@ -537,9 +553,9 @@ mod tests {
     fn integrity_check_on_open() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("good.db");
-        let _store = TofuStore::open(&path).unwrap(); // Creates valid DB
+        let _store = TofuStore::open(&path, "test-install").unwrap(); // Creates valid DB
         drop(_store);
-        let _store2 = TofuStore::open(&path).unwrap(); // Re-opens, integrity passes
+        let _store2 = TofuStore::open(&path, "test-install").unwrap(); // Re-opens, integrity passes
     }
 
     #[test]

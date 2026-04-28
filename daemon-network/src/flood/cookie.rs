@@ -69,10 +69,11 @@ impl CookieChallenger {
 }
 
 fn compute_cookie(secret: &[u8], addr: &SocketAddr) -> [u8; 32] {
+    let key: &[u8; 32] = secret
+        .try_into()
+        .expect("cookie secret must be exactly 32 bytes");
     let addr_bytes = format!("{addr}");
-    let mut hasher = blake3::Hasher::new_keyed(
-        secret.try_into().unwrap_or(&[0u8; 32]),
-    );
+    let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(addr_bytes.as_bytes());
     *hasher.finalize().as_bytes()
 }

@@ -134,6 +134,24 @@ pub struct DiscoveryConfig {
     pub bootstrap_json_path: String,
     pub mdns: MdnsConfig,
     pub dns_srv: DnsSrvConfig,
+    pub bep44: Bep44Config,
+}
+
+/// BEP-44 Mainline DHT discovery configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bep44Config {
+    pub enabled: bool,
+    pub publish_interval_secs: u32,
+}
+
+impl Default for Bep44Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            publish_interval_secs: 3600,
+        }
+    }
 }
 
 /// mDNS (RFC 6762/6763) discovery configuration.

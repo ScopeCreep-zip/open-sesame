@@ -16,7 +16,7 @@ use daemon_network::session::table::PeerTable;
 use daemon_network::tofu::store::TofuStore;
 use daemon_network::tofu::fingerprint;
 use daemon_network::session::replay::{ReplayWindow, ReplayCheck};
-use daemon_network::transport::frame::{Frame, SessionId, HEADER_SIZE};
+use daemon_network::transport::frame::{Frame, WireSessionId, HEADER_SIZE};
 use core_types::TofuTrustLevel;
 use std::sync::Arc;
 
@@ -52,8 +52,8 @@ async fn xx_handshake_tofu_pin_data_round_trip() {
 
     // TOFU pinning: both sides pin the other's key.
     let dir = tempfile::tempdir().unwrap();
-    let store_a = TofuStore::open(&dir.path().join("tofu-a.db")).unwrap();
-    let store_b = TofuStore::open(&dir.path().join("tofu-b.db")).unwrap();
+    let store_a = TofuStore::open(&dir.path().join("tofu-a.db"), "install-a").unwrap();
+    let store_b = TofuStore::open(&dir.path().join("tofu-b.db"), "install-b").unwrap();
 
     let key_b_hex = hex::encode(a_sees_b);
     let key_a_hex = hex::encode(b_sees_a);
@@ -133,7 +133,7 @@ async fn ikpsk2_reconnection_after_xx() {
 #[tokio::test]
 async fn tofu_mismatch_detection() {
     let dir = tempfile::tempdir().unwrap();
-    let store = TofuStore::open(&dir.path().join("tofu.db")).unwrap();
+    let store = TofuStore::open(&dir.path().join("tofu.db"), "test-install").unwrap();
 
     // Pin key A.
     store.pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
@@ -163,7 +163,7 @@ fn fingerprint_encoding_round_trip() {
 
 #[test]
 fn frame_codec_round_trip() {
-    let sid = SessionId::random();
+    let sid = WireSessionId::random();
     let frame = Frame::new(core_types::FrameType::Data as u8, sid, 42, vec![1, 2, 3, 4]);
     let bytes = frame.serialise();
     let parsed = Frame::parse(&bytes).unwrap();
@@ -222,7 +222,7 @@ async fn udp_send_data_round_trip() {
     let remote_static_b = transport_a.remote_static().unwrap();
 
     // Create session on peer A's table pointing to B's address.
-    let sid = SessionId::random();
+    let sid = WireSessionId::random();
     let peer_table_a = Arc::new(PeerTable::new(256));
     let peer_state_a = PeerState::new(
         sid,

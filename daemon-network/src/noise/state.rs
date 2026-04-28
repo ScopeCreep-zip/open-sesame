@@ -318,6 +318,14 @@ pub fn derive_psk_from_handshake(handshake_hash: &[u8; 32]) -> [u8; 32] {
 ///
 /// Snow's `TransportState` does not expose the handshake hash, so we must
 /// capture it while the state machine is still in handshake phase.
+///
+/// The hash length depends on the cipher suite's hash function:
+/// - BLAKE2s (current): 32 bytes -- full copy into [u8; 32]
+/// - `BLAKE2b` (future): 64 bytes -- truncated to first 32 bytes
+///
+/// PSK derived from this hash is cipher-suite-dependent. Changing the
+/// hash function changes the PSK, invalidating cached PSKs. A cipher
+/// suite migration must clear all cached PSKs in the TOFU store.
 fn capture_handshake_hash(hs: &snow::HandshakeState) -> [u8; 32] {
     let hash = hs.get_handshake_hash();
     let mut out = [0u8; 32];

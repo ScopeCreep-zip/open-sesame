@@ -1,7 +1,7 @@
 //! Network federation CLI commands.
 //!
 //! Provides `sesame network identity`, `sesame network peers`,
-//! `sesame network discover`, `sesame network status`.
+//! `sesame network discover`, `sesame network status`, `sesame network dial`.
 
 use crate::cli::NetworkCmd;
 
@@ -9,13 +9,9 @@ pub(crate) async fn cmd_network(sub: NetworkCmd) -> anyhow::Result<()> {
     match sub {
         NetworkCmd::Identity { json } => cmd_identity(json).await,
         NetworkCmd::Peers => cmd_peers().await,
-        NetworkCmd::Discover => {
-            eprintln!("sesame network discover — not yet implemented (requires Milestone 2)");
-            Ok(())
-        }
+        NetworkCmd::Discover => cmd_discover().await,
         NetworkCmd::Status => cmd_status().await,
         NetworkCmd::Dial { addr } => cmd_dial(&addr).await,
-        NetworkCmd::Send { session_id, message } => cmd_send(&session_id, &message).await,
     }
 }
 
@@ -23,57 +19,95 @@ pub(crate) async fn cmd_network(sub: NetworkCmd) -> anyhow::Result<()> {
 ///
 /// Initiates a Noise XX handshake over TCP to the specified address.
 /// On success, the peer is TOFU-pinned and a session is established.
-/// This command is the manual equivalent of what M2's discovery subsystem
-/// automates — it validates the full dial→handshake→TOFU→session path.
 async fn cmd_dial(addr: &str) -> anyhow::Result<()> {
-    let remote: std::net::SocketAddr = addr
+    let _: std::net::SocketAddr = addr
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid address '{addr}': {e}"))?;
 
-    // The dial operation requires a running daemon-network with an established
-    // IPC bus connection. Send a dial request via the bus and wait for the
-    // outcome. For now, we perform the dial directly from the CLI process
-    // using the same primitives daemon-network uses.
-    //
-    // This is a temporary approach — the production path sends a dial command
-    // to daemon-network over the IPC bus. The direct approach works for
-    // testing and validates the handshake path end-to-end.
-    println!("Dialing {remote}...");
-    println!();
-    println!("Note: direct dial from CLI requires daemon-network to be running");
-    println!("and the IPC bus dial command to be implemented. For now, this");
-    println!("command validates the address format and reports readiness.");
-    println!();
-    println!("  Target:   {remote}");
-    println!("  Protocol: Noise XX (first contact) or IKpsk2 (reconnection)");
-    println!("  Status:   ready to dial (pending IPC bus integration)");
+    println!("Dialing {addr}...");
+
+    let client = crate::ipc::connect().await?;
+    let response = client
+        .request(
+            core_types::EventKind::NetworkDialRequest {
+                addr: addr.to_string(),
+            },
+            core_types::SecurityLevel::Internal,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+    match response {
+        Ok(msg) => match msg.payload {
+            core_types::EventKind::NetworkDialResponse {
+                success,
+                session_id,
+                error,
+            } => {
+                if success {
+                    println!("  Session:  {}", session_id.unwrap_or_default());
+                    println!("  Status:   established");
+                } else {
+                    println!("  Status:   failed");
+                    if let Some(e) = error {
+                        println!("  Error:    {e}");
+                    }
+                }
+            }
+            _ => println!("  Unexpected response from daemon-network"),
+        },
+        Err(e) => {
+            println!("  IPC request failed: {e}");
+            println!("  Is daemon-network running?");
+        }
+    }
 
     Ok(())
 }
 
-/// Send a debug message to an established session.
-///
-/// Exercises the full outbound send path: session lookup �� Noise encrypt →
-/// frame construction → UDP transmit. Useful for verifying data exchange
-/// with a peer after handshake.
-async fn cmd_send(session_id: &str, message: &str) -> anyhow::Result<()> {
-    println!("Sending to session {session_id}...");
-    println!();
-    println!("Note: direct send from CLI requires daemon-network to be running");
-    println!("and the IPC bus send command to be implemented. For now, this");
-    println!("command validates the session ID format and reports readiness.");
-    println!();
-    println!("  Session:  {session_id}");
-    println!("  Message:  {} bytes", message.len());
-    println!("  Status:   ready to send (pending IPC bus integration)");
+/// Show discovery subsystem state via IPC.
+async fn cmd_discover() -> anyhow::Result<()> {
+    let client = crate::ipc::connect().await?;
+    let response = client
+        .request(
+            core_types::EventKind::NetworkDiscoverRequest,
+            core_types::SecurityLevel::Internal,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+    match response {
+        Ok(msg) => match msg.payload {
+            core_types::EventKind::NetworkDiscoverResponse {
+                mdns_peers,
+                bep44_published,
+                dns_srv_domains,
+                dial_queue_depth,
+                swim_members,
+            } => {
+                println!("Open Sesame -- Discovery State");
+                println!("----------------------------------------------");
+                println!("  mDNS peers:       {mdns_peers}");
+                println!("  BEP-44 published: {bep44_published}");
+                println!("  DNS SRV domains:  {}", if dns_srv_domains.is_empty() { "(none)".into() } else { dns_srv_domains.join(", ") });
+                println!("  Dial queue:       {dial_queue_depth}");
+                println!("  SWIM members:     {swim_members}");
+            }
+            _ => println!("Unexpected response from daemon-network"),
+        },
+        Err(e) => {
+            println!("IPC request failed: {e}");
+            println!("Is daemon-network running?");
+        }
+    }
 
     Ok(())
 }
 
 /// Display this installation's network identity.
 ///
-/// Reads `installation.toml` for the network public key and displays it
-/// as PGP word list fingerprint (default) or JSON (for `bootstrap.json` inclusion).
+/// Reads installation.toml for the network public key and displays it
+/// as PGP word list fingerprint (default) or JSON (for bootstrap.json inclusion).
 async fn cmd_identity(json: bool) -> anyhow::Result<()> {
     let install = core_config::load_installation()
         .map_err(|e| anyhow::anyhow!("failed to load installation.toml: {e}"))?;
@@ -84,8 +118,6 @@ async fn cmd_identity(json: bool) -> anyhow::Result<()> {
     let ceremony = install.ceremony_completed.unwrap_or(false);
 
     if json {
-        // Output matches daemon-discovery/src/bootstrap.rs BootstrapPeer schema:
-        // public_key_hex, installation_id, display_name, addresses, trust_level.
         let out = serde_json::json!({
             "display_name": display_name,
             "installation_id": install.id.to_string(),
@@ -97,8 +129,8 @@ async fn cmd_identity(json: bool) -> anyhow::Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        println!("Open Sesame — Network Identity");
-        println!("──────────────────────────────────────────");
+        println!("Open Sesame -- Network Identity");
+        println!("----------------------------------------------");
         println!("  Installation ID:  {}", install.id);
         println!("  Display Name:     {display_name}");
         println!("  Network Pubkey:   {pubkey_hex}");
@@ -109,10 +141,8 @@ async fn cmd_identity(json: bool) -> anyhow::Result<()> {
             && let Ok(bytes) = hex::decode(pubkey_hex)
             && bytes.len() == 32
         {
-            // PGP word list fingerprint for speakable out-of-band verification.
             println!();
             println!("  Fingerprint (PGP words):");
-            // Display first 8 bytes (16 words) for brevity.
             let short = &bytes[..8.min(bytes.len())];
             let words: Vec<&str> = short
                 .iter()
@@ -146,8 +176,6 @@ async fn cmd_peers() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Read TOFU store directly via rusqlite — the open-sesame CLI crate does
-    // not depend on daemon-network to avoid pulling snow/aws-lc-rs into the CLI.
     let conn = rusqlite::Connection::open_with_flags(
         &tofu_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -170,14 +198,14 @@ async fn cmd_peers() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("Open Sesame — Known Peers ({} total)", peers.len());
-    println!("──────────────────────────────────────────");
+    println!("Open Sesame -- Known Peers ({} total)", peers.len());
+    println!("----------------------------------------------");
 
     for (key_hex, trust, addr, name) in &peers {
         let name = name.as_deref().unwrap_or("(unknown)");
         let addr = addr.as_deref().unwrap_or("(no address)");
         let key_short = if key_hex.len() >= 16 { &key_hex[..16] } else { key_hex };
-        println!("  {key_short}…  {trust:<12}  {addr:<24}  {name}");
+        println!("  {key_short}...  {trust:<12}  {addr:<24}  {name}");
     }
 
     let events: i64 = conn.query_row("SELECT COUNT(*) FROM tofu_events", [], |row| row.get(0))?;
@@ -187,20 +215,40 @@ async fn cmd_peers() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Display daemon-network status.
+/// Display daemon-network status via IPC, with TOFU store fallback.
 async fn cmd_status() -> anyhow::Result<()> {
-    // In the full implementation, this connects to daemon-network via IPC
-    // and queries session count, listen port, uptime. For now, check if
-    // the daemon appears to be running by looking for the TOFU store and
-    // reporting basic info.
+    println!("Open Sesame -- Network Status");
+    println!("----------------------------------------------");
+
+    if let Ok(client) = crate::ipc::connect().await
+        && let Ok(msg) = client
+            .request(
+                core_types::EventKind::NetworkStatusRequest,
+                core_types::SecurityLevel::Internal,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        && let core_types::EventKind::NetworkStatusResponse {
+            active_sessions,
+            tofu_peers,
+            dial_queue_depth,
+            listen_port,
+            enabled,
+        } = msg.payload
+    {
+        println!("  Enabled:      {enabled}");
+        println!("  Listen port:  {listen_port}");
+        println!("  Sessions:     {active_sessions}");
+        println!("  TOFU peers:   {tofu_peers}");
+        println!("  Dial queue:   {dial_queue_depth}");
+        return Ok(());
+    }
+
     let state_dir = dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("pds");
     let tofu_path = state_dir.join("network-tofu.db");
-
-    println!("Open Sesame — Network Status");
-    println!("──────────────────────────────────────────");
 
     if tofu_path.exists() {
         println!("  TOFU store:  {}", tofu_path.display());
@@ -218,18 +266,13 @@ async fn cmd_status() -> anyhow::Result<()> {
             println!("  Log events:  {event_count}");
         }
     } else {
-        println!("  TOFU store:  not found (daemon-network not yet started)");
+        println!("  daemon-network not running, no TOFU store found");
     }
-
-    println!();
-    println!("  Note: live session data requires IPC bus connection");
-    println!("  (pending full daemon-network integration)");
 
     Ok(())
 }
 
-// Inline PGP word list constants for CLI display.
-// PGP word list tables duplicated from daemon-network's fingerprint module.
+// PGP word list tables duplicated from daemon-network fingerprint module.
 // The CLI crate does not depend on daemon-network to avoid pulling snow,
 // aws-lc-rs, and other heavy crypto dependencies into the CLI binary.
 const PGP_EVEN: [&str; 256] = [

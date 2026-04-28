@@ -22,9 +22,15 @@ path = "tests/integration/two_peer.rs"
 name = "flood"
 path = "tests/integration/flood.rs"
 
+[[test]]
+name = "discovery"
+path = "tests/integration/discovery.rs"
+
 [dependencies]
 core-types.workspace = true
 core-crypto.workspace = true
+daemon-discovery.workspace = true
+mainline = { workspace = true }
 core-memory.workspace = true
 core-ipc.workspace = true
 core-config.workspace = true

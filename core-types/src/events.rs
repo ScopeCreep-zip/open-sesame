@@ -654,6 +654,56 @@ pub enum EventKind {
         has_more: bool,
     },
 
+    // -- RPC: Network Status (M2 CLI→daemon-network IPC) --
+    /// Request daemon-network's current status (sessions, discovery, TOFU).
+    NetworkStatusRequest,
+    /// Response with daemon-network status.
+    NetworkStatusResponse {
+        /// Number of active peer sessions.
+        active_sessions: u32,
+        /// Number of TOFU-pinned peers.
+        tofu_peers: u32,
+        /// Discovery dial queue depth.
+        dial_queue_depth: u32,
+        /// Listen port.
+        listen_port: u16,
+        /// Whether the daemon is enabled.
+        enabled: bool,
+    },
+
+    /// Request daemon-network to dial a remote peer.
+    NetworkDialRequest {
+        /// Target address in `host:port` format.
+        addr: String,
+    },
+    /// Response to a dial request.
+    NetworkDialResponse {
+        /// Whether the dial succeeded.
+        success: bool,
+        /// Session ID if established.
+        #[serde(default)]
+        session_id: Option<String>,
+        /// Error message if failed.
+        #[serde(default)]
+        error: Option<String>,
+    },
+
+    /// Request discovery subsystem state.
+    NetworkDiscoverRequest,
+    /// Response with discovery state.
+    NetworkDiscoverResponse {
+        /// mDNS peers discovered on LAN.
+        mdns_peers: u32,
+        /// BEP-44 records published.
+        bep44_published: bool,
+        /// DNS SRV domains configured.
+        dns_srv_domains: Vec<String>,
+        /// Dial queue depth.
+        dial_queue_depth: u32,
+        /// SWIM cluster members.
+        swim_members: u32,
+    },
+
     // Forward compatibility: unknown events deserialize to this variant.
     #[serde(other)]
     Unknown,
@@ -828,6 +878,12 @@ impl_event_debug! {
         VaultLogEntryReceived { profile_id, entry_json },
         VaultReplicationPullRequest { profile_id, since_watermark_json, max_entries },
         VaultReplicationPullResponse { profile_id, entries_json, has_more },
+        NetworkStatusRequest,
+        NetworkStatusResponse { active_sessions, tofu_peers, dial_queue_depth, listen_port, enabled },
+        NetworkDialRequest { addr },
+        NetworkDialResponse { success, session_id, error },
+        NetworkDiscoverRequest,
+        NetworkDiscoverResponse { mdns_peers, bep44_published, dns_srv_domains, dial_queue_depth, swim_members },
         Unknown,
     }
 }

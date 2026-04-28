@@ -240,7 +240,7 @@ pub async fn cmd_init(
 
     // Step 2: Installation Identity
     step_header(2, total_steps, "Installation Identity");
-    init_installation(org.as_deref())?;
+    let install_keys = init_installation(org.as_deref())?;
 
     // Step 3: Services
     step_header(3, total_steps, "Services");
@@ -252,10 +252,10 @@ pub async fn cmd_init(
         None => None,
     };
 
-    // Step 4: Vault initialization
+    // Step 4: Vault initialization (includes storing network + signing keys)
     let combine_mode = parse_auth_policy(&auth_policy)?;
     step_header(4, total_steps, "Vault");
-    init_vault(ssh_fingerprint.as_deref(), password, combine_mode).await?;
+    init_vault(ssh_fingerprint.as_deref(), password, combine_mode, install_keys).await?;
 
     // Step 5: Keybinding (conditional)
     if do_keybinding {
@@ -307,12 +307,19 @@ fn init_config() -> anyhow::Result<()> {
 
 // ── Step 2: Installation Identity ──────────────────────────────────────────
 
-fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
+/// Key material generated during installation identity setup.
+/// Returned to `cmd_init` for vault storage after unlock.
+struct InstallationKeys {
+    network_private: core_crypto::SecureBytes,
+    signing_seed: [u8; 32],
+}
+
+fn init_installation(org: Option<&str>) -> anyhow::Result<Option<InstallationKeys>> {
     let installation_path = core_config::installation_path();
 
     if installation_path.exists() {
         step_skip("Installation identity exists");
-        return Ok(());
+        return Ok(None);
     }
 
     let id = uuid::Uuid::new_v4();
@@ -354,11 +361,17 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
     let network_pubkey_hex = hex::encode(network_public);
     step_done("Generated network identity X25519 keypair");
 
-    // Derive Ed25519 signing keypair from a temporary seed.
-    // The real derivation uses the master key (not yet available — password prompt
-    // is later in the ceremony). We generate a random seed for now; M3's
-    // derive_signing_keypair(master_key, installation_id) replaces this once
-    // the master key is available post-unlock.
+    // Generate Ed25519 signing keypair from random seed.
+    // The seed (not the master key) is the source of truth. It is stored in the
+    // vault alongside the network private key during init_vault(). The signing
+    // keypair is reconstructed from the seed on every boot after vault unlock.
+    // This design ensures the signing key is stable across password changes
+    // (SQLCipher PRAGMA rekey re-encrypts pages, not entries — the seed survives).
+    //
+    // Source: aws-lc-rs Ed25519KeyPair::from_seed_unchecked accepts raw 32-byte seed.
+    //   /workspace/usrbinkat/github.com/aws/aws-lc-rs/aws-lc-rs/src/ed25519.rs:353
+    // Source: rusqlite bundled-sqlcipher PRAGMA rekey is page-level.
+    //   /workspace/usrbinkat/github.com/rusqlite/rusqlite/ (bundled-sqlcipher feature)
     let signing_seed = core_crypto::network::random_bytes::<32>();
     let signing_keypair = core_crypto::network::derive_signing_keypair(
         &core_crypto::SecureBytes::from_slice(&signing_seed),
@@ -366,7 +379,7 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("signing keypair derivation failed: {e}"))?;
     let signing_pubkey_hex = hex::encode(signing_keypair.public_key());
-    step_done("Derived Ed25519 signing keypair");
+    step_done("Generated Ed25519 signing keypair");
 
     let created_at = {
         use std::time::SystemTime;
@@ -375,11 +388,6 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
             .unwrap_or_default();
         format!("{}Z", d.as_secs())
     };
-
-    // Suppress unused-variable warnings — private keys are stored in vault
-    // after unlock later in the ceremony. The public keys are in installation.toml.
-    let _ = &network_private;
-    let _ = &signing_keypair;
 
     let install_config = core_config::InstallationConfig {
         id,
@@ -477,7 +485,10 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
         }
     );
 
-    Ok(())
+    Ok(Some(InstallationKeys {
+        network_private,
+        signing_seed,
+    }))
 }
 
 // ── Step 3: Services ────────────────────────────────────────────────────────
@@ -606,6 +617,7 @@ async fn init_vault(
     ssh_fingerprint: Option<&str>,
     use_password: bool,
     combine_mode: core_types::AuthCombineMode,
+    install_keys: Option<InstallationKeys>,
 ) -> anyhow::Result<()> {
     let config_dir = core_config::config_dir();
     let profile =
@@ -826,6 +838,41 @@ async fn init_vault(
                 step_skip("Secrets already unlocked");
             }
             other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    // Store network + signing key material in vault (if generated this run).
+    // The keys persist as vault entries — they survive password changes because
+    // SQLCipher PRAGMA rekey re-encrypts pages, not individual entries.
+    if let Some(keys) = install_keys {
+        // Store network private key.
+        let set_net = EventKind::SecretSet {
+            profile: profile.clone(),
+            key: "_network-identity-private".into(),
+            value: SensitiveBytes::from_slice(keys.network_private.as_bytes()),
+        };
+        match crate::ipc::rpc(&client, set_net, SecurityLevel::SecretsOnly).await? {
+            EventKind::SecretSetResponse { success: true, .. } => {
+                step_done("Network identity private key stored in vault");
+            }
+            other => {
+                tracing::warn!(response = ?other, "failed to store network private key");
+            }
+        }
+
+        // Store signing seed.
+        let set_sign = EventKind::SecretSet {
+            profile: profile.clone(),
+            key: "_signing-seed".into(),
+            value: SensitiveBytes::from_slice(&keys.signing_seed),
+        };
+        match crate::ipc::rpc(&client, set_sign, SecurityLevel::SecretsOnly).await? {
+            EventKind::SecretSetResponse { success: true, .. } => {
+                step_done("Ed25519 signing seed stored in vault");
+            }
+            other => {
+                tracing::warn!(response = ?other, "failed to store signing seed");
+            }
         }
     }
 

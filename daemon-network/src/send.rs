@@ -6,7 +6,7 @@
 
 use crate::metrics::Metrics;
 use crate::session::table::PeerTable;
-use crate::transport::frame::{Frame, SessionId};
+use crate::transport::frame::{Frame, WireSessionId};
 use crate::transport::udp;
 use core_types::FrameType;
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use tokio::net::UdpSocket;
 /// Returns an error string if the session is not found, encryption fails,
 /// or the UDP send fails.
 pub async fn send_data(
-    session_id: &SessionId,
+    session_id: &WireSessionId,
     payload: &[u8],
     peer_table: &Arc<PeerTable>,
     udp_socket: &Arc<UdpSocket>,
@@ -68,7 +68,7 @@ pub async fn send_data(
 /// Returns an error string if the session is not found, encryption fails,
 /// or the UDP send fails.
 pub async fn send_keepalive(
-    session_id: &SessionId,
+    session_id: &WireSessionId,
     peer_table: &Arc<PeerTable>,
     udp_socket: &Arc<UdpSocket>,
     metrics: &Arc<Metrics>,
@@ -108,7 +108,7 @@ pub async fn send_keepalive(
 ///
 /// Returns an error string if the session is not found or the send fails.
 pub async fn send_close(
-    session_id: &SessionId,
+    session_id: &WireSessionId,
     peer_table: &Arc<PeerTable>,
     udp_socket: &Arc<UdpSocket>,
     metrics: &Arc<Metrics>,
@@ -135,5 +135,47 @@ pub async fn send_close(
 
     Metrics::inc(&metrics.frames_sent_total);
     peer_table.remove(session_id);
+    Ok(())
+}
+
+/// Send a `RehandshakeRequest` frame to a peer.
+///
+/// Signals the peer that this side needs a fresh Noise XX handshake
+/// (sequence exhaustion or age-based rekey). The peer initiates a new
+/// TCP connection with XX. The current session remains active until
+/// replaced or until the idle timeout fires.
+///
+/// # Errors
+///
+/// Returns an error string if the session is not found or the send fails.
+pub async fn send_rehandshake_request(
+    session_id: &WireSessionId,
+    peer_table: &Arc<PeerTable>,
+    udp_socket: &Arc<UdpSocket>,
+    metrics: &Arc<Metrics>,
+) -> Result<(), String> {
+    let (ciphertext, addr, seq) = {
+        let mut peer = peer_table
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+
+        let ciphertext = peer
+            .transport
+            .encrypt(&[])
+            .map_err(|e| format!("encrypt rehandshake request failed: {e}"))?;
+
+        let seq = peer.next_send_seq();
+        peer.record_send(0);
+
+        (ciphertext, peer.remote_addr, seq)
+    };
+
+    let frame = Frame::new(FrameType::RehandshakeRequest as u8, *session_id, seq, ciphertext);
+
+    udp::udp_send(udp_socket, &frame, &addr)
+        .await
+        .map_err(|e| format!("UDP send failed: {e}"))?;
+
+    Metrics::inc(&metrics.frames_sent_total);
     Ok(())
 }

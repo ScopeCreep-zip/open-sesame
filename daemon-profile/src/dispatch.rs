@@ -440,8 +440,14 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
         | EventKind::NetworkIdentityResponse { .. }
         | EventKind::VaultLogEntryReceived { .. }
         | EventKind::VaultReplicationPullRequest { .. }
-        | EventKind::VaultReplicationPullResponse { .. } => {
-            // Routed between daemon-network and daemon-secrets.
+        | EventKind::VaultReplicationPullResponse { .. }
+        | EventKind::NetworkStatusRequest
+        | EventKind::NetworkStatusResponse { .. }
+        | EventKind::NetworkDialRequest { .. }
+        | EventKind::NetworkDialResponse { .. }
+        | EventKind::NetworkDiscoverRequest
+        | EventKind::NetworkDiscoverResponse { .. } => {
+            // Routed between CLI/daemon-network/daemon-secrets.
             // daemon-profile does not act on these.
             None
         }
