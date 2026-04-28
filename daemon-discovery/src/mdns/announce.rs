@@ -11,7 +11,7 @@
 
 use super::packet::{self, DnsPacket};
 use super::socket::{MDNS_MULTICAST_V4, MDNS_PORT};
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 /// Open Sesame mDNS service type.
 pub const SERVICE_TYPE: &str = "_opensesame._udp.local.";
@@ -72,10 +72,10 @@ pub fn build_goodbye(
 /// # Errors
 ///
 /// Returns `std::io::Error` if the send fails.
-pub fn send_multicast(socket: &UdpSocket, packet: &DnsPacket) -> std::io::Result<()> {
+pub async fn send_multicast(socket: &tokio::net::UdpSocket, packet: &DnsPacket) -> std::io::Result<()> {
     let bytes = packet.serialise();
     let dest = SocketAddrV4::new(MDNS_MULTICAST_V4, MDNS_PORT);
-    socket.send_to(&bytes, dest)?;
+    socket.send_to(&bytes, dest).await?;
     Ok(())
 }
 
@@ -86,7 +86,7 @@ pub fn send_multicast(socket: &UdpSocket, packet: &DnsPacket) -> std::io::Result
 ///
 /// Returns `std::io::Error` if any send fails.
 pub async fn initial_announce(
-    socket: &UdpSocket,
+    socket: &tokio::net::UdpSocket,
     pubkey: &[u8; 32],
     installation_id: &str,
     port: u16,
@@ -96,11 +96,11 @@ pub async fn initial_announce(
 ) -> std::io::Result<()> {
     let packet = build_announcement(pubkey, installation_id, port, local_ipv4, srv_ttl, ptr_ttl);
 
-    send_multicast(socket, &packet)?;
+    send_multicast(socket, &packet).await?;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    send_multicast(socket, &packet)?;
+    send_multicast(socket, &packet).await?;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    send_multicast(socket, &packet)?;
+    send_multicast(socket, &packet).await?;
 
     tracing::info!(
         instance = %instance_name(pubkey),

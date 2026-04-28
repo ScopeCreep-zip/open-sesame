@@ -8,7 +8,7 @@ use super::announce::{self, SERVICE_TYPE};
 use super::packet::{DnsPacket, RecordType};
 use super::socket;
 use dashmap::DashMap;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -85,7 +85,7 @@ pub struct MdnsListenConfig {
 }
 
 pub async fn mdns_listen_loop(
-    socket: Arc<UdpSocket>,
+    socket: Arc<tokio::net::UdpSocket>,
     config: MdnsListenConfig,
     peer_tx: tokio::sync::mpsc::Sender<MdnsPeer>,
 ) {
@@ -101,14 +101,8 @@ pub async fn mdns_listen_loop(
     let mut buf = vec![0u8; 1500];
 
     loop {
-        // Non-blocking recv on the multicast socket. The socket is set to
-        // non-blocking in mdns::socket::bind_mdns_v4, so WouldBlock is normal.
-        let (len, src) = match socket.recv_from(&mut buf) {
+        let (len, src) = match socket.recv_from(&mut buf).await {
             Ok(result) => result,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                continue;
-            }
             Err(e) => {
                 tracing::warn!(error = %e, "mDNS recv error");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -148,7 +142,7 @@ pub async fn mdns_listen_loop(
                     srv_ttl,
                     ptr_ttl,
                 );
-                if let Err(e) = announce::send_multicast(&socket, &response) {
+                if let Err(e) = announce::send_multicast(&socket, &response).await {
                     tracing::warn!(error = %e, "mDNS response send failed");
                 }
             } else {

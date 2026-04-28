@@ -49,31 +49,32 @@ pub async fn send_data(
         payload.chunks(MAX_NOISE_PLAINTEXT).collect()
     };
 
+    // Hold the lock for the entire multi-chunk send to prevent session
+    // removal between chunks causing a partial send.
+    let mut peer = peer_table
+        .get_mut(session_id)
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+
+    let addr = peer.remote_addr;
+    let mut frames = Vec::with_capacity(chunks.len());
+
     for chunk in &chunks {
-        let (ciphertext, addr, seq) = {
-            let mut peer = peer_table
-                .get_mut(session_id)
-                .ok_or_else(|| format!("session {session_id} not found"))?;
+        let ciphertext = peer
+            .transport
+            .encrypt(chunk)
+            .map_err(|e| format!("encrypt failed: {e}"))?;
+        let seq = peer.next_send_seq();
+        #[allow(clippy::cast_possible_truncation)]
+        peer.record_send(ciphertext.len() as u64);
+        frames.push(Frame::new(FrameType::Data as u8, *session_id, seq, ciphertext));
+    }
+    // Release DashMap lock before async I/O.
+    drop(peer);
 
-            let ciphertext = peer
-                .transport
-                .encrypt(chunk)
-                .map_err(|e| format!("encrypt failed: {e}"))?;
-
-            let seq = peer.next_send_seq();
-
-            #[allow(clippy::cast_possible_truncation)]
-            peer.record_send(ciphertext.len() as u64);
-
-            (ciphertext, peer.remote_addr, seq)
-        };
-
-        let frame = Frame::new(FrameType::Data as u8, *session_id, seq, ciphertext);
-
-        udp::udp_send(udp_socket, &frame, &addr)
+    for frame in &frames {
+        udp::udp_send(udp_socket, frame, &addr)
             .await
             .map_err(|e| format!("UDP send failed: {e}"))?;
-
         Metrics::inc(&metrics.frames_sent_total);
     }
     Ok(())

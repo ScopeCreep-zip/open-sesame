@@ -51,31 +51,38 @@ impl CookieChallenger {
     }
 
     /// Generate a cookie for a source address.
+    ///
+    /// Returns `None` if the internal secret is malformed (should never happen).
     #[must_use]
-    pub fn generate(&self, addr: &SocketAddr) -> [u8; 32] {
+    pub fn generate(&self, addr: &SocketAddr) -> Option<[u8; 32]> {
         compute_cookie(self.current_secret.as_bytes(), addr)
     }
 
     /// Verify a cookie from a source address (checks current and previous epoch).
     #[must_use]
     pub fn verify(&self, addr: &SocketAddr, cookie: &[u8; 32]) -> bool {
-        let current = compute_cookie(self.current_secret.as_bytes(), addr);
-        if constant_time_eq(&current, cookie) {
+        let current_match = compute_cookie(self.current_secret.as_bytes(), addr)
+            .is_some_and(|c| constant_time_eq(&c, cookie));
+        if current_match {
             return true;
         }
-        let previous = compute_cookie(self.previous_secret.as_bytes(), addr);
-        constant_time_eq(&previous, cookie)
+        compute_cookie(self.previous_secret.as_bytes(), addr)
+            .is_some_and(|p| constant_time_eq(&p, cookie))
     }
 }
 
-fn compute_cookie(secret: &[u8], addr: &SocketAddr) -> [u8; 32] {
-    let key: &[u8; 32] = secret
-        .try_into()
-        .expect("cookie secret must be exactly 32 bytes");
+fn compute_cookie(secret: &[u8], addr: &SocketAddr) -> Option<[u8; 32]> {
+    let Ok(key): Result<&[u8; 32], _> = secret.try_into() else {
+        tracing::error!(
+            len = secret.len(),
+            "cookie secret wrong length — refusing to generate cookie"
+        );
+        return None;
+    };
     let addr_bytes = format!("{addr}");
     let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(addr_bytes.as_bytes());
-    *hasher.finalize().as_bytes()
+    Some(*hasher.finalize().as_bytes())
 }
 
 fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
@@ -107,14 +114,14 @@ mod tests {
     fn generate_verify_round_trip() {
         let cc = CookieChallenger::new(120);
         let addr = test_addr();
-        let cookie = cc.generate(&addr);
+        let cookie = cc.generate(&addr).expect("generate must succeed");
         assert!(cc.verify(&addr, &cookie));
     }
 
     #[test]
     fn wrong_address_fails() {
         let cc = CookieChallenger::new(120);
-        let cookie = cc.generate(&test_addr());
+        let cookie = cc.generate(&test_addr()).expect("generate must succeed");
         let wrong: SocketAddr = "192.168.1.1:48627".parse().unwrap();
         assert!(!cc.verify(&wrong, &cookie));
     }
@@ -122,7 +129,7 @@ mod tests {
     #[test]
     fn tampered_cookie_fails() {
         let cc = CookieChallenger::new(120);
-        let mut cookie = cc.generate(&test_addr());
+        let mut cookie = cc.generate(&test_addr()).expect("generate must succeed");
         cookie[0] ^= 0xFF;
         assert!(!cc.verify(&test_addr(), &cookie));
     }
@@ -131,8 +138,8 @@ mod tests {
     fn deterministic_for_same_epoch() {
         let cc = CookieChallenger::new(120);
         let addr = test_addr();
-        let c1 = cc.generate(&addr);
-        let c2 = cc.generate(&addr);
+        let c1 = cc.generate(&addr).expect("generate must succeed");
+        let c2 = cc.generate(&addr).expect("generate must succeed");
         assert_eq!(c1, c2);
     }
 }

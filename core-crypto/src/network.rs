@@ -580,13 +580,11 @@ mod tests {
         // Destination: ECDH(dest_private, sender_eph_public) → same shared secret.
         let shared_dest = x25519_dh(&dest_private, &sender_eph_public).unwrap();
 
-        // The shared secrets won't match because generate_x25519_keypair and
-        // derive_x25519_keypair use different key generation paths (one is random,
-        // one is BLAKE3-derived). In the real M3 implementation, both sides use
-        // actual X25519 scalar basepoint multiplication. For this pre-qualification
-        // test, we verify the encryption/decryption path works with the SAME
-        // shared secret (proving the crypto primitives compose correctly).
-        let dec_keys = hkdf_blake2b(shared_sender.as_bytes(), b"opensesame:vault:replication:v1", 1);
+        assert_eq!(
+            shared_sender.as_bytes(), shared_dest.as_bytes(),
+            "ECDH shared secrets must match: DH(a,B) == DH(b,A)"
+        );
+        let dec_keys = hkdf_blake2b(shared_dest.as_bytes(), b"opensesame:vault:replication:v1", 1);
         let dec_key: [u8; 32] = dec_keys[0].as_bytes().try_into().unwrap();
         assert_eq!(enc_key, dec_key, "same shared secret must produce same key");
 

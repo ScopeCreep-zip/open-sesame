@@ -28,7 +28,10 @@ pub const MAX_UDP_BODY: usize = 1247;
 /// Maximum TCP body size (length-delimited, no MTU constraint).
 pub const MAX_TCP_BODY: usize = 65535;
 
-/// 12-byte session identifier. Random, assigned by initiator.
+/// 12-byte wire session identifier carried in every network frame header.
+///
+/// Distinct from [`core_types::SessionId`] which is a UUID-based logical
+/// identifier for IPC bus routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WireSessionId(pub [u8; 12]);
 

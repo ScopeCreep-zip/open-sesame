@@ -25,7 +25,7 @@ fn cookie_challenge_validates_correctly() {
     let addr: SocketAddr = "10.0.0.1:48627".parse().unwrap();
     let wrong_addr: SocketAddr = "10.0.0.2:48627".parse().unwrap();
 
-    let cookie = cc.generate(&addr);
+    let cookie = cc.generate(&addr).expect("generate must succeed");
 
     // Valid cookie from correct address.
     assert!(cc.verify(&addr, &cookie), "valid cookie should verify");
@@ -44,7 +44,7 @@ fn cookie_rotation_preserves_previous_epoch() {
     let mut cc = CookieChallenger::new(0); // 0-second epoch = rotates every call
     let addr: SocketAddr = "10.0.0.3:48627".parse().unwrap();
 
-    let cookie_before = cc.generate(&addr);
+    let cookie_before = cc.generate(&addr).expect("generate must succeed");
 
     // Force rotation.
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -57,7 +57,7 @@ fn cookie_rotation_preserves_previous_epoch() {
     );
 
     // New cookie should also verify.
-    let cookie_after = cc.generate(&addr);
+    let cookie_after = cc.generate(&addr).expect("generate must succeed");
     assert!(cc.verify(&addr, &cookie_after), "new cookie should verify");
 }
 

@@ -84,8 +84,6 @@ struct DaemonState {
     local_keypair: Arc<snow::Keypair>,
     bus_client: Arc<tokio::sync::Mutex<core_ipc::BusClient>>,
     discovery: Arc<daemon_discovery::manager::DiscoveryManager>,
-    #[allow(dead_code)]
-    discovery_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<daemon_discovery::manager::DiscoveryEvent>>,
     listen_port: u16,
     idle_timeout_secs: u64,
     rekey_interval_secs: u64,
@@ -96,7 +94,7 @@ struct DaemonState {
     /// `derive_signing_keypair(seed, installation_id)` at the moment of
     /// signing, then immediately dropped. Raw bytes are Copy + Send --
     /// no mutex, no lifetime entanglement, minimal memory exposure window.
-    signing_seed: Option<[u8; 32]>,
+    signing_seed: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// Channel sender for TCP inbound events (post-handshake frame loop).
     tcp_tx: tokio::sync::mpsc::Sender<transport::tcp::TcpInbound>,
 }
@@ -230,16 +228,16 @@ async fn setup(
     // - [u8; 32] is Copy + Send (Ed25519KeyPair from aws-lc-rs is neither)
     // - The keypair is derived on demand at signing time (~50us) then dropped
     // - Minimizes the memory exposure window for key material
-    let signing_seed: Option<[u8; 32]> = match control::bus::request_secret(
+    let signing_seed: Option<zeroize::Zeroizing<[u8; 32]>> = match control::bus::request_secret(
         &mut bus_client,
         "_signing-seed",
     ).await {
         Some(seed_bytes) if seed_bytes.len() == 32 => {
-            let mut seed = [0u8; 32];
+            let mut seed = zeroize::Zeroizing::new([0u8; 32]);
             seed.copy_from_slice(&seed_bytes);
 
             // Verify the seed produces the expected public key from installation.toml.
-            let seed_secure = core_crypto::SecureBytes::from_slice(&seed);
+            let seed_secure = core_crypto::SecureBytes::from_slice(&*seed);
             match core_crypto::network::derive_signing_keypair(&seed_secure, &install_config.id) {
                 Ok(key) => {
                     let derived_pub = key.public_key();
@@ -282,7 +280,7 @@ async fn setup(
     );
 
     // Discovery.
-    let (discovery_tx, discovery_rx) = tokio::sync::mpsc::channel(256);
+    let (discovery_tx, _discovery_rx) = tokio::sync::mpsc::channel(256);
     let discovery = Arc::new(daemon_discovery::manager::DiscoveryManager::new(1024, discovery_tx));
 
     let bootstrap_path = dirs::config_dir()
@@ -309,7 +307,6 @@ async fn setup(
         local_keypair,
         bus_client,
         discovery,
-        discovery_rx: tokio::sync::Mutex::new(discovery_rx),
         listen_port,
         idle_timeout_secs: u64::from(config.session.idle_timeout_secs),
         rekey_interval_secs: 120,
@@ -443,7 +440,11 @@ fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
             if pow_active {
                 // Tier 2: Equi-X PoW challenge.
                 let cookie_secret = state.cookie.lock().ok()
-                    .map_or([0u8; 32], |c| c.generate(&src));
+                    .and_then(|c| c.generate(&src));
+                let Some(cookie_secret) = cookie_secret else {
+                    Metrics::inc(&state.metrics.frames_dropped_total);
+                    return;
+                };
                 let epoch = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -452,6 +453,7 @@ fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                     &cookie_secret, epoch, &src.to_string(),
                 );
                 let mut body = vec![0x01u8]; // PoW type byte
+                body.extend_from_slice(&epoch.to_be_bytes()); // 8 bytes: epoch for verification
                 body.extend_from_slice(&seed);
                 let resp = transport::frame::Frame::new(
                     FrameType::CookieRequest as u8, frame.session_id, 0, body,
@@ -465,7 +467,10 @@ fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
             } else {
                 // Tier 1: BLAKE3 cookie challenge.
                 if let Ok(challenger) = state.cookie.lock() {
-                    let cookie = challenger.generate(&src);
+                    let Some(cookie) = challenger.generate(&src) else {
+                        Metrics::inc(&state.metrics.frames_dropped_total);
+                        return;
+                    };
                     let mut body = vec![0x00u8]; // Cookie type byte
                     body.extend_from_slice(&cookie);
                     let resp = transport::frame::Frame::new(
@@ -595,22 +600,32 @@ fn handle_cookie_response(
             }
         }
         0x01 => {
-            // PoW solution verification.
-            if payload.len() != 16 {
+            // PoW solution: [8-byte epoch][16-byte solution]
+            if payload.len() != 24 {
                 Metrics::inc(&state.metrics.frames_dropped_total);
                 return;
             }
-            // Regenerate the seed for this client to verify against.
-            let cookie_secret = state.cookie.lock().ok()
-                .map_or([0u8; 32], |c| c.generate(&src));
-            let epoch = std::time::SystemTime::now()
+            let epoch = u64::from_be_bytes(payload[..8].try_into().unwrap());
+            let solution_bytes = &payload[8..24];
+            // Reject epochs more than 300s old.
+            let now_epoch = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            if now_epoch.saturating_sub(epoch) > 300 {
+                Metrics::inc(&state.metrics.frames_dropped_total);
+                return;
+            }
+            let cookie_secret = state.cookie.lock().ok()
+                .and_then(|c| c.generate(&src));
+            let Some(cookie_secret) = cookie_secret else {
+                Metrics::inc(&state.metrics.frames_dropped_total);
+                return;
+            };
             let seed = flood::pow::PowChallenger::generate_seed(
                 &cookie_secret, epoch, &src.to_string(),
             );
-            let solution: equix::SolutionByteArray = payload.try_into().unwrap_or([0u8; 16]);
+            let solution: equix::SolutionByteArray = solution_bytes.try_into().unwrap_or([0u8; 16]);
             if flood::pow::PowChallenger::verify_solution(&seed, &solution) {
                 Metrics::inc(&state.metrics.cookie_challenges_total);
                 state.audit.append("pow_validated", &src.to_string());
@@ -649,7 +664,7 @@ fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) {
             let audit = Arc::clone(&state.audit);
             let udp_sock = Arc::clone(&state.udp_socket);
             let tcp_sender = state.tcp_tx.clone();
-            let signing_seed = state.signing_seed;
+            let signing_seed = state.signing_seed.as_deref().copied();
             let install_id = state.identity.id.clone();
             let net_pub = state.identity.network_pubkey;
             let sign_pub = state.identity.signing_pubkey;
@@ -867,7 +882,7 @@ fn build_handshake_ctx(state: &DaemonState) -> HandshakeContext<'_> {
         bus_client: &state.bus_client,
         metrics: &state.metrics,
         audit: &state.audit,
-        signing_seed: state.signing_seed,
+        signing_seed: state.signing_seed.as_deref().copied(),
         installation_id: &state.identity.id,
         network_pubkey: &state.identity.network_pubkey,
         signing_pubkey: state.identity.signing_pubkey,
@@ -884,6 +899,22 @@ fn build_handshake_ctx(state: &DaemonState) -> HandshakeContext<'_> {
 ///
 /// Each backend pushes discovered peers into the `DiscoveryManager` dial queue.
 /// The main event loop's `dial_tick` consumes the queue and initiates handshakes.
+#[allow(clippy::too_many_lines)]
+struct SwimTimerEntry {
+    deadline: tokio::time::Instant,
+    timer: foca::Timer<daemon_discovery::gossip::swim::PeerId>,
+}
+impl Eq for SwimTimerEntry {}
+impl PartialEq for SwimTimerEntry {
+    fn eq(&self, other: &Self) -> bool { self.deadline == other.deadline }
+}
+impl Ord for SwimTimerEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { other.deadline.cmp(&self.deadline) }
+}
+impl PartialOrd for SwimTimerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+
 #[allow(clippy::too_many_lines)]
 fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
     let disc = &config.discovery;
@@ -951,8 +982,8 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
 
     // BEP-44: publish presence to Mainline DHT.
     if disc.bep44.enabled {
-        if let Some(seed) = state.signing_seed {
-            let signing_key = mainline::SigningKey::from_bytes(&seed);
+        if let Some(seed) = state.signing_seed.as_deref() {
+            let signing_key = mainline::SigningKey::from_bytes(seed);
             let port = state.listen_port;
             let noise_pubkey_hex = hex::encode(state.local_keypair.public.as_slice());
             let signing_pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
@@ -993,10 +1024,12 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                         return;
                     }
                 };
+                let mut consecutive_failures: u32 = 0;
                 loop {
                     let pubkeys = tofu_resolve.lock().ok()
                         .and_then(|s| s.pinned_pubkeys().ok())
                         .unwrap_or_default();
+                    let mut any_success = false;
                     for key_hex in &pubkeys {
                         if let Ok(key_bytes) = hex::decode(key_hex)
                             && let Ok(pubkey) = <[u8; 32]>::try_from(key_bytes)
@@ -1004,6 +1037,7 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                                 &resolve_dht, &pubkey,
                             ).await
                         {
+                            any_success = true;
                             for addr_str in &peer.record.addrs {
                                 if let Ok(addr) = addr_str.parse() {
                                     mgr_resolve.add_peer(
@@ -1015,7 +1049,17 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                             }
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    if any_success || pubkeys.is_empty() {
+                        consecutive_failures = 0;
+                    } else {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                    }
+                    // Backoff: 300s, 600s, 1200s, cap at 1800s (30min).
+                    let delay = std::cmp::min(
+                        300 * 2u64.pow(consecutive_failures),
+                        1800,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 }
             });
         } else {
@@ -1080,21 +1124,17 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
         let mut swim = daemon_discovery::gossip::runtime::new_swim(identity, swim_config);
         let mut runtime = daemon_discovery::gossip::runtime::AccumulatingRuntime::new();
 
-        // Pending timers: foca schedules probes/suspect transitions via submit_after.
-        // We store (deadline, timer) and fire them when the deadline passes.
-        let mut pending_timers: Vec<(
-            tokio::time::Instant,
-            foca::Timer<daemon_discovery::gossip::swim::PeerId>,
-        )> = Vec::new();
+        let mut pending_timers: std::collections::BinaryHeap<SwimTimerEntry> =
+            std::collections::BinaryHeap::new();
 
         let mut buf = vec![0u8; 65535];
         loop {
-            // Next timer deadline or 30s default.
             let next_deadline = pending_timers
-                .iter()
-                .map(|(d, _)| *d)
-                .min()
-                .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+                .peek()
+                .map_or_else(
+                    || tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                    |e| e.deadline,
+                );
 
             tokio::select! {
                 result = gossip_socket.recv_from(&mut buf) => {
@@ -1103,28 +1143,21 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                     }
                 }
                 () = tokio::time::sleep_until(next_deadline) => {
-                    // Fire expired timers.
                     let now = tokio::time::Instant::now();
-                    let expired: Vec<usize> = pending_timers
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, (d, _))| *d <= now)
-                        .map(|(i, _)| i)
-                        .collect();
-                    for i in expired.into_iter().rev() {
-                        let (_, timer) = pending_timers.remove(i);
-                        let _ = swim.handle_timer(timer, &mut runtime);
+                    while let Some(entry) = pending_timers.peek() {
+                        if entry.deadline > now { break; }
+                        let entry = pending_timers.pop().unwrap();
+                        let _ = swim.handle_timer(entry.timer, &mut runtime);
                     }
                 }
             }
 
-            // Drain runtime after every interaction.
             while let Some((dest, data)) = runtime.to_send() {
                 let _ = gossip_socket.send_to(&data, dest.addr()).await;
             }
             while let Some((delay, timer)) = runtime.to_schedule() {
                 let deadline = tokio::time::Instant::now() + delay;
-                pending_timers.push((deadline, timer));
+                pending_timers.push(SwimTimerEntry { deadline, timer });
             }
             while let Some(notification) = runtime.to_notify() {
                 match notification {
@@ -1158,7 +1191,7 @@ fn run_dial_queue(state: &DaemonState) {
         let udp_sock = Arc::clone(&state.udp_socket);
         let tcp_sender = state.tcp_tx.clone();
         let discovery = Arc::clone(&state.discovery);
-        let signing_seed = state.signing_seed;
+        let signing_seed = state.signing_seed.as_deref().copied();
         let install_id = state.identity.id.clone();
         let net_pub = state.identity.network_pubkey;
         let sign_pub = state.identity.signing_pubkey;

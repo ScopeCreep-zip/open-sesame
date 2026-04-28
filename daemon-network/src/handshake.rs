@@ -358,15 +358,17 @@ async fn udp_knock_exchange(
             body
         }
         0x01 => {
-            // PoW challenge — solve EquiX.
-            if payload.len() != 32 {
-                return Err("PoW seed wrong size".into());
+            // PoW challenge: [8-byte epoch][32-byte seed]
+            if payload.len() != 40 {
+                return Err("PoW challenge wrong size (expected 40 bytes)".into());
             }
+            let epoch_bytes = &payload[..8];
             let mut seed = [0u8; 32];
-            seed.copy_from_slice(payload);
+            seed.copy_from_slice(&payload[8..40]);
             let solution = crate::flood::pow::PowChallenger::solve(&seed)
                 .ok_or("PoW unsolvable for this seed (~1.4% chance, retry)")?;
             let mut body = vec![0x01u8];
+            body.extend_from_slice(epoch_bytes); // echo epoch back for verification
             body.extend_from_slice(&solution);
             body
         }
@@ -563,7 +565,7 @@ where
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf).await.ok()?;
         let peer_len = u32::from_be_bytes(len_buf) as usize;
-        if peer_len > 65535 { return None; }
+        if peer_len > 4096 { return None; } // HandshakeAck JSON is ~500 bytes; 4KB is generous
         let mut peer_buf = vec![0u8; peer_len];
         reader.read_exact(&mut peer_buf).await.ok()?;
         peer_buf
@@ -572,7 +574,7 @@ where
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf).await.ok()?;
         let peer_len = u32::from_be_bytes(len_buf) as usize;
-        if peer_len > 65535 { return None; }
+        if peer_len > 4096 { return None; } // HandshakeAck JSON is ~500 bytes; 4KB is generous
         let mut peer_buf = vec![0u8; peer_len];
         reader.read_exact(&mut peer_buf).await.ok()?;
 

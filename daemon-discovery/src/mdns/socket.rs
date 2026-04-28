@@ -23,7 +23,7 @@ pub const MDNS_PORT: u16 = 5353;
 /// # Errors
 ///
 /// Returns `std::io::Error` if socket creation, bind, or multicast join fails.
-pub fn bind_mdns_socket() -> std::io::Result<std::net::UdpSocket> {
+pub fn bind_mdns_socket() -> std::io::Result<tokio::net::UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
 
@@ -39,7 +39,8 @@ pub fn bind_mdns_socket() -> std::io::Result<std::net::UdpSocket> {
 
     socket.join_multicast_v4(&MDNS_MULTICAST_V4, &Ipv4Addr::UNSPECIFIED)?;
 
-    Ok(socket.into())
+    let std_socket: std::net::UdpSocket = socket.into();
+    tokio::net::UdpSocket::from_std(std_socket)
 }
 
 /// Check if an address is link-local (amplification defence).

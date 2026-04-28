@@ -271,6 +271,14 @@ pub(crate) async fn handle_secret_get(
     profile: &TrustProfileName,
     key: &str,
 ) -> anyhow::Result<Option<EventKind>> {
+    // System keys (underscore prefix) are only accessible from Internal clearance daemons.
+    if key.starts_with('_') && msg.security_level < core_types::SecurityLevel::Internal {
+        return Ok(Some(EventKind::SecretGetResponse {
+            key: key.to_string(),
+            value: SensitiveBytes::from_slice(&[]),
+            denial: Some(SecretDenialReason::AccessDenied),
+        }));
+    }
     // Gates 1-5.5: lock, active profile, identity, rate limit, ACL, key validation.
     if let Err(early) = secret_gate_pipeline(msg, ctx, "get", profile, key, deny_get).await {
         return early;
@@ -370,6 +378,12 @@ pub(crate) async fn handle_secret_set(
     key: &str,
     value: &SensitiveBytes,
 ) -> anyhow::Result<Option<EventKind>> {
+    if key.starts_with('_') && msg.security_level < core_types::SecurityLevel::Internal {
+        return Ok(Some(EventKind::SecretSetResponse {
+            success: false,
+            denial: Some(SecretDenialReason::AccessDenied),
+        }));
+    }
     // Gates 1-5.5: lock, active profile, identity, rate limit, ACL, key validation.
     if let Err(early) = secret_gate_pipeline(msg, ctx, "set", profile, key, deny_set).await {
         return early;
@@ -447,6 +461,12 @@ pub(crate) async fn handle_secret_delete(
     profile: &TrustProfileName,
     key: &str,
 ) -> anyhow::Result<Option<EventKind>> {
+    if key.starts_with('_') && msg.security_level < core_types::SecurityLevel::Internal {
+        return Ok(Some(EventKind::SecretDeleteResponse {
+            success: false,
+            denial: Some(SecretDenialReason::AccessDenied),
+        }));
+    }
     // Gates 1-5.5: lock, active profile, identity, rate limit, ACL, key validation.
     if let Err(early) = secret_gate_pipeline(msg, ctx, "delete", profile, key, deny_delete).await {
         return early;

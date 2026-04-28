@@ -292,7 +292,10 @@ impl VaultLog {
                 ],
             )
             .map_err(VaultLogError::Sqlite)?;
-        } // conn lock released here
+            // Explicitly drop conn lock before self.receive() which acquires
+            // it via persist_hlc(). Removing this drop causes a deadlock.
+            drop(conn);
+        }
 
         // Update local HLC on receive (acquires conn internally).
         #[allow(clippy::cast_possible_truncation)]
@@ -500,5 +503,31 @@ mod tests {
         };
         let ts = log.receive(&remote).unwrap();
         assert!(ts > remote);
+    }
+
+    #[test]
+    fn query_entries_since_returns_matching() {
+        let (log, _dir) = temp_log();
+        let profile = core_types::TrustProfileName::try_from("work").unwrap();
+        log.write_local_entry(&profile, core_types::VaultLogOp::Set, "key-1", "install-1").unwrap();
+        log.write_local_entry(&profile, core_types::VaultLogOp::Set, "key-2", "install-1").unwrap();
+        log.write_local_entry(&profile, core_types::VaultLogOp::Delete, "key-1", "install-1").unwrap();
+
+        let result = log.query_entries_since("work", None, 100).unwrap();
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let wm = r#"{"wall_secs":0,"counter":0,"node_id":[0,0,0,0,0,0,0,0]}"#;
+        let result2 = log.query_entries_since("work", Some(wm), 100).unwrap();
+        let entries2: Vec<serde_json::Value> = serde_json::from_str(&result2).unwrap();
+        assert_eq!(entries2.len(), 3);
+
+        let result3 = log.query_entries_since("work", None, 2).unwrap();
+        let entries3: Vec<serde_json::Value> = serde_json::from_str(&result3).unwrap();
+        assert_eq!(entries3.len(), 2);
+
+        let result4 = log.query_entries_since("personal", None, 100).unwrap();
+        let entries4: Vec<serde_json::Value> = serde_json::from_str(&result4).unwrap();
+        assert!(entries4.is_empty());
     }
 }
