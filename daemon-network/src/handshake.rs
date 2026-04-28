@@ -38,6 +38,13 @@ pub struct HandshakeContext<'a> {
     pub installation_id: &'a str,
     pub network_pubkey: &'a [u8; 32],
     pub signing_pubkey: Option<[u8; 32]>,
+    /// Shared UDP socket for sending `HandshakeInit` knock and `CookieResponse`
+    /// before TCP connect. The responder sees the same source address for
+    /// both the UDP knock and the subsequent TCP connection.
+    pub udp_socket: &'a Arc<tokio::net::UdpSocket>,
+    /// Channel for feeding post-handshake TCP frames back to the main event
+    /// loop. Spawned `tcp_read_loop` sends `TcpInbound::Frame` events here.
+    pub tcp_tx: &'a tokio::sync::mpsc::Sender<crate::transport::tcp::TcpInbound>,
 }
 
 /// Run the responder-side handshake on an inbound TCP connection.
@@ -159,7 +166,20 @@ pub async fn handle_inbound_handshake(
         return HandshakeOutcome::Rejected { reason: "session table full".into() };
     }
 
-    // Step 6: IPC notification.
+    // Step 6: Spawn TCP read loop for post-handshake frame reception.
+    // The reader half survives the handshake — we pass it to tcp_read_loop
+    // which sends TcpInbound::Frame events back to the main event loop.
+    let tcp_tx = ctx.tcp_tx.clone();
+    tokio::spawn(async move {
+        crate::transport::tcp::tcp_read_loop(
+            reader,
+            peer_addr,
+            tcp_tx,
+            std::time::Duration::from_secs(300),
+        ).await;
+    });
+
+    // Step 7: IPC notification.
     let remote_uuid = peer_install_id
         .and_then(|s| uuid::Uuid::parse_str(&s).ok())
         .unwrap_or_else(uuid::Uuid::nil);
@@ -187,6 +207,15 @@ pub async fn dial_peer(
     addr: SocketAddr,
     ctx: &HandshakeContext<'_>,
 ) -> HandshakeOutcome {
+    // Step 0: UDP knock — prove source address ownership before TCP connect.
+    // The responder sends a cookie or PoW challenge; we solve and respond.
+    // Failure is non-fatal: if the responder doesn't support knocks (e.g.,
+    // direct TCP connect), we proceed anyway. The responder's TCP accept
+    // path has its own rate limiter as a fallback.
+    if let Err(e) = udp_knock_exchange(addr, ctx).await {
+        tracing::debug!(%addr, error = %e, "UDP knock failed, proceeding to TCP");
+    }
+
     let stream = match TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -255,6 +284,108 @@ pub async fn dial_peer(
     );
 
     HandshakeOutcome::Established { session_id, remote_key_hex, trust_level }
+}
+
+// ---------------------------------------------------------------------------
+// UDP knock exchange (cookie/PoW proof-of-address before TCP connect)
+// ---------------------------------------------------------------------------
+
+/// Send a UDP `HandshakeInit` knock and process the `CookieRequest` response.
+///
+/// The responder replies with a `CookieRequest` containing either a cookie
+/// (type 0x00) or a `PoW` challenge seed (type 0x01). This function solves
+/// the challenge and sends a `CookieResponse`, proving source address ownership
+/// before the TCP connection is established.
+///
+/// Returns `Ok(())` on success (cookie/PoW verified by responder),
+/// `Err(reason)` if the knock times out or the `PoW` is unsolvable.
+async fn udp_knock_exchange(
+    addr: SocketAddr,
+    ctx: &HandshakeContext<'_>,
+) -> Result<(), String> {
+    use crate::transport::frame::{Frame, WireSessionId, HEADER_SIZE};
+    use crate::transport::udp;
+
+    // Send HandshakeInit knock via UDP.
+    let knock = Frame::new(
+        core_types::FrameType::HandshakeInit as u8,
+        WireSessionId::zero(),
+        0,
+        vec![],
+    );
+    udp::udp_send(ctx.udp_socket, &knock, &addr)
+        .await
+        .map_err(|e| format!("UDP knock send: {e}"))?;
+
+    // Receive CookieRequest response (2s timeout).
+    let mut buf = vec![0u8; 1280];
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        ctx.udp_socket.recv_from(&mut buf),
+    )
+    .await
+    .map_err(|_| "UDP knock timeout — no CookieRequest received".to_string())?
+    .map_err(|e| format!("UDP recv: {e}"))?;
+
+    let (len, _src) = response;
+    if len < HEADER_SIZE {
+        return Err("CookieRequest too short".into());
+    }
+
+    let Some(frame) = Frame::parse(&buf[..len]) else {
+        return Err("CookieRequest parse failed".into());
+    };
+
+    if frame.frame_type != core_types::FrameType::CookieRequest as u8 {
+        return Err(format!("expected CookieRequest, got frame type {}", frame.frame_type));
+    }
+
+    if frame.body.is_empty() {
+        return Err("CookieRequest body empty".into());
+    }
+
+    let type_byte = frame.body[0];
+    let payload = &frame.body[1..];
+
+    let response_body = match type_byte {
+        0x00 => {
+            // Cookie echo — send it back.
+            if payload.len() != 32 {
+                return Err("cookie wrong size".into());
+            }
+            let mut body = vec![0x00u8];
+            body.extend_from_slice(payload);
+            body
+        }
+        0x01 => {
+            // PoW challenge — solve EquiX.
+            if payload.len() != 32 {
+                return Err("PoW seed wrong size".into());
+            }
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(payload);
+            let solution = crate::flood::pow::PowChallenger::solve(&seed)
+                .ok_or("PoW unsolvable for this seed (~1.4% chance, retry)")?;
+            let mut body = vec![0x01u8];
+            body.extend_from_slice(&solution);
+            body
+        }
+        other => return Err(format!("unknown CookieRequest type {other}")),
+    };
+
+    // Send CookieResponse.
+    let resp = Frame::new(
+        core_types::FrameType::CookieResponse as u8,
+        frame.session_id,
+        0,
+        response_body,
+    );
+    udp::udp_send(ctx.udp_socket, &resp, &addr)
+        .await
+        .map_err(|e| format!("CookieResponse send: {e}"))?;
+
+    ctx.audit.append("knock_completed", &addr.to_string());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

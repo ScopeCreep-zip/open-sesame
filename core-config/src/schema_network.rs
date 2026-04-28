@@ -25,6 +25,8 @@ pub struct TransportConfig {
     pub tcp_enabled: bool,
     pub max_tcp_frame_size: u32,
     pub max_tcp_connections_per_address: u32,
+    /// UDP port for SWIM gossip (separate from Noise transport).
+    pub gossip_port: u16,
 }
 
 impl Default for TransportConfig {
@@ -35,6 +37,7 @@ impl Default for TransportConfig {
             tcp_enabled: true,
             max_tcp_frame_size: 65535,
             max_tcp_connections_per_address: 4,
+            gossip_port: 48628,
         }
     }
 }

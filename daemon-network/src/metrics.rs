@@ -119,7 +119,7 @@ pub fn render_prometheus(m: &Metrics) -> String {
 /// Serves `/metrics` in text exposition format. Binds only to localhost
 /// to prevent external scraping without explicit proxy configuration.
 pub async fn serve_prometheus(metrics: std::sync::Arc<Metrics>, port: u16) {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     let addr = format!("127.0.0.1:{port}");
@@ -143,8 +143,6 @@ pub async fn serve_prometheus(metrics: std::sync::Arc<Metrics>, port: u16) {
             }
         };
 
-        #[allow(clippy::items_after_statements)]
-        use tokio::io::AsyncBufReadExt;
         let mut reader = tokio::io::BufReader::new(&mut stream);
         let mut request_line = String::new();
         let _ = reader.read_line(&mut request_line).await;

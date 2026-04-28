@@ -122,12 +122,14 @@ fn bootstrap_seeds_populate_dial_queue() {
         daemon_discovery::bootstrap::DialTarget {
             addr: "10.0.0.1:48627".parse().unwrap(),
             public_key_hex: Some("aabb".into()),
+            signing_pubkey_hex: None,
             display_name: Some("seed-1".into()),
             dial_on_start: true,
         },
         daemon_discovery::bootstrap::DialTarget {
             addr: "10.0.0.2:48627".parse().unwrap(),
             public_key_hex: None,
+            signing_pubkey_hex: None,
             display_name: None,
             dial_on_start: false,
         },

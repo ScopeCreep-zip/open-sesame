@@ -8,6 +8,7 @@
 //! Dechand et al. USENIX Security 2016 (partial-preimage vulnerability).
 
 /// PGP even-position words (byte value → word at even index).
+#[allow(dead_code)] // Used by CLI (sesame network peers) and tests; not called from daemon binary.
 const PGP_EVEN: [&str; 256] = [
     "aardvark", "absurd", "accrue", "acme", "adrift", "adult", "afflict", "ahead",
     "aimless", "algol", "allow", "alone", "ammo", "ancient", "apple", "artist",
@@ -44,6 +45,7 @@ const PGP_EVEN: [&str; 256] = [
 ];
 
 /// PGP odd-position words (byte value → word at odd index).
+#[allow(dead_code)] // Used by CLI (sesame network peers) and tests; not called from daemon binary.
 const PGP_ODD: [&str; 256] = [
     "adroitness", "adviser", "aftermath", "aggregate", "alkali", "almighty", "amulet", "amusement",
     "antenna", "applicant", "apollo", "armistice", "article", "asteroid", "atlantic", "atmosphere",
@@ -84,6 +86,7 @@ const PGP_ODD: [&str; 256] = [
 /// Each byte maps to a word: even-indexed bytes use `PGP_EVEN`, odd-indexed
 /// use `PGP_ODD`. Returns space-separated lowercase words.
 #[must_use]
+#[allow(dead_code)] // Used by CLI and tests.
 pub fn pgp_words(key: &[u8]) -> String {
     let mut words = Vec::with_capacity(key.len());
     for (i, &byte) in key.iter().enumerate() {
@@ -98,6 +101,7 @@ pub fn pgp_words(key: &[u8]) -> String {
 
 /// Encode a public key as a colon-separated hex fingerprint.
 #[must_use]
+#[allow(dead_code)] // Used by CLI and tests.
 pub fn hex_fingerprint(key: &[u8]) -> String {
     key.iter()
         .map(|b| format!("{b:02x}"))
@@ -111,6 +115,7 @@ pub fn hex_fingerprint(key: &[u8]) -> String {
 /// as a big-endian u32, then `% 1_000_000` for a 6-digit code. Canonical ordering
 /// ensures both sides produce the same code regardless of who is initiator.
 #[must_use]
+#[allow(dead_code)] // Used by CLI and tests.
 pub fn numeric_sas(key_a: &[u8; 32], key_b: &[u8; 32]) -> String {
     let (first, second) = if key_a <= key_b {
         (key_a, key_b)

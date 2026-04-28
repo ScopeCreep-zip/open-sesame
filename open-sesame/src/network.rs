@@ -8,7 +8,7 @@ use crate::cli::NetworkCmd;
 pub(crate) async fn cmd_network(sub: NetworkCmd) -> anyhow::Result<()> {
     match sub {
         NetworkCmd::Identity { json } => cmd_identity(json).await,
-        NetworkCmd::Peers => cmd_peers().await,
+        NetworkCmd::Peers { unpin } => cmd_peers(unpin.as_deref()).await,
         NetworkCmd::Discover => cmd_discover().await,
         NetworkCmd::Status => cmd_status().await,
         NetworkCmd::Dial { addr } => cmd_dial(&addr).await,
@@ -163,7 +163,39 @@ async fn cmd_identity(json: bool) -> anyhow::Result<()> {
 }
 
 /// List known peers from the TOFU store.
-async fn cmd_peers() -> anyhow::Result<()> {
+async fn cmd_peers(unpin_key: Option<&str>) -> anyhow::Result<()> {
+    // Handle --unpin via IPC to daemon-network.
+    if let Some(key_hex) = unpin_key {
+        let client = crate::ipc::connect().await?;
+        let response = client
+            .request(
+                core_types::EventKind::NetworkUnpinRequest {
+                    public_key_hex: key_hex.to_string(),
+                },
+                core_types::SecurityLevel::Internal,
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+
+        match response {
+            Ok(msg) => match msg.payload {
+                core_types::EventKind::NetworkUnpinResponse { success, error } => {
+                    if success {
+                        println!("Unpinned peer {key_hex}");
+                    } else {
+                        println!("Unpin failed: {}", error.unwrap_or_default());
+                    }
+                }
+                _ => println!("Unexpected response from daemon-network"),
+            },
+            Err(e) => {
+                println!("IPC request failed: {e}");
+                println!("Is daemon-network running?");
+            }
+        }
+        return Ok(());
+    }
+
     let state_dir = dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -231,6 +263,7 @@ async fn cmd_status() -> anyhow::Result<()> {
         && let core_types::EventKind::NetworkStatusResponse {
             active_sessions,
             tofu_peers,
+            tofu_events,
             dial_queue_depth,
             listen_port,
             enabled,
@@ -239,6 +272,7 @@ async fn cmd_status() -> anyhow::Result<()> {
         println!("  Enabled:      {enabled}");
         println!("  Listen port:  {listen_port}");
         println!("  Sessions:     {active_sessions}");
+        println!("  TOFU events:  {tofu_events}");
         println!("  TOFU peers:   {tofu_peers}");
         println!("  Dial queue:   {dial_queue_depth}");
         return Ok(());

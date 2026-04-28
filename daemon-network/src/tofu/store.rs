@@ -278,6 +278,29 @@ impl TofuStore {
         Ok(psk)
     }
 
+    /// List all pinned peer public key hex strings for BEP-44 resolution targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `SQLite` query fails.
+    pub fn pinned_pubkeys(&self) -> Result<Vec<String>, TofuStoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT public_key_hex FROM tofu_peers
+                 WHERE trust_level IN ('tofu', 'bootstrap', 'endorsed')"
+            )
+            .map_err(TofuStoreError::Sqlite)?;
+
+        let keys = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(TofuStoreError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TofuStoreError::Sqlite)?;
+
+        Ok(keys)
+    }
+
     /// Record a key mismatch event (fork evidence).
     ///
     /// # Errors
@@ -406,6 +429,7 @@ impl TofuStore {
 
 /// A peer record from the TOFU store.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read by CLI (sesame network peers) and integration tests.
 pub struct TofuPeer {
     pub public_key_hex: String,
     pub first_seen_at: String,

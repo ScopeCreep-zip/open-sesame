@@ -663,6 +663,8 @@ pub enum EventKind {
         active_sessions: u32,
         /// Number of TOFU-pinned peers.
         tofu_peers: u32,
+        /// Number of TOFU fork-evidence log events.
+        tofu_events: u32,
         /// Discovery dial queue depth.
         dial_queue_depth: u32,
         /// Listen port.
@@ -702,6 +704,17 @@ pub enum EventKind {
         dial_queue_depth: u32,
         /// SWIM cluster members.
         swim_members: u32,
+    },
+
+    /// Request to unpin a TOFU peer by public key hex.
+    NetworkUnpinRequest {
+        public_key_hex: String,
+    },
+    /// Response to unpin request.
+    NetworkUnpinResponse {
+        success: bool,
+        #[serde(default)]
+        error: Option<String>,
     },
 
     // Forward compatibility: unknown events deserialize to this variant.
@@ -879,11 +892,13 @@ impl_event_debug! {
         VaultReplicationPullRequest { profile_id, since_watermark_json, max_entries },
         VaultReplicationPullResponse { profile_id, entries_json, has_more },
         NetworkStatusRequest,
-        NetworkStatusResponse { active_sessions, tofu_peers, dial_queue_depth, listen_port, enabled },
+        NetworkStatusResponse { active_sessions, tofu_peers, tofu_events, dial_queue_depth, listen_port, enabled },
         NetworkDialRequest { addr },
         NetworkDialResponse { success, session_id, error },
         NetworkDiscoverRequest,
         NetworkDiscoverResponse { mdns_peers, bep44_published, dns_srv_domains, dial_queue_depth, swim_members },
+        NetworkUnpinRequest { public_key_hex },
+        NetworkUnpinResponse { success, error },
         Unknown,
     }
 }

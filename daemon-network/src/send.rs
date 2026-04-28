@@ -18,6 +18,17 @@ use tokio::net::UdpSocket;
 /// `NetworkMessageType` discriminant by the caller). It is encrypted through
 /// the peer's Noise transport, wrapped in a wire `Frame`, and sent via UDP.
 ///
+/// Header integrity: the frame header is NOT bound as AEAD associated data
+/// because snow's Noise transport uses the internal nonce counter (derived
+/// from the sequence number) for replay protection. Tampering with the
+/// header's sequence number field causes the receiver's replay window to
+/// reject the frame. This matches `WireGuard`'s approach — application-layer
+/// framing is separate from Noise's AEAD construction.
+///
+/// Payloads exceeding `MAX_NOISE_PLAINTEXT` (65519 bytes) are split into
+/// multiple Noise transport messages, each sent as a separate UDP frame
+/// with incrementing sequence numbers.
+///
 /// # Errors
 ///
 /// Returns an error string if the session is not found, encryption fails,
@@ -29,35 +40,42 @@ pub async fn send_data(
     udp_socket: &Arc<UdpSocket>,
     metrics: &Arc<Metrics>,
 ) -> Result<(), String> {
-    // Look up the session and encrypt.
-    let (ciphertext, addr, seq) = {
-        let mut peer = peer_table
-            .get_mut(session_id)
-            .ok_or_else(|| format!("session {session_id} not found"))?;
+    use crate::noise::state::MAX_NOISE_PLAINTEXT;
 
-        let ciphertext = peer
-            .transport
-            .encrypt(payload)
-            .map_err(|e| format!("encrypt failed: {e}"))?;
-
-        let seq = peer.next_send_seq();
-
-        #[allow(clippy::cast_possible_truncation)]
-        peer.record_send(ciphertext.len() as u64);
-
-        (ciphertext, peer.remote_addr, seq)
+    // Split payload into chunks that fit within a single Noise transport message.
+    let chunks: Vec<&[u8]> = if payload.len() <= MAX_NOISE_PLAINTEXT {
+        vec![payload]
+    } else {
+        payload.chunks(MAX_NOISE_PLAINTEXT).collect()
     };
-    // DashMap lock released here before async I/O.
 
-    // Construct the wire frame.
-    let frame = Frame::new(FrameType::Data as u8, *session_id, seq, ciphertext);
+    for chunk in &chunks {
+        let (ciphertext, addr, seq) = {
+            let mut peer = peer_table
+                .get_mut(session_id)
+                .ok_or_else(|| format!("session {session_id} not found"))?;
 
-    // Transmit via UDP.
-    udp::udp_send(udp_socket, &frame, &addr)
-        .await
-        .map_err(|e| format!("UDP send failed: {e}"))?;
+            let ciphertext = peer
+                .transport
+                .encrypt(chunk)
+                .map_err(|e| format!("encrypt failed: {e}"))?;
 
-    Metrics::inc(&metrics.frames_sent_total);
+            let seq = peer.next_send_seq();
+
+            #[allow(clippy::cast_possible_truncation)]
+            peer.record_send(ciphertext.len() as u64);
+
+            (ciphertext, peer.remote_addr, seq)
+        };
+
+        let frame = Frame::new(FrameType::Data as u8, *session_id, seq, ciphertext);
+
+        udp::udp_send(udp_socket, &frame, &addr)
+            .await
+            .map_err(|e| format!("UDP send failed: {e}"))?;
+
+        Metrics::inc(&metrics.frames_sent_total);
+    }
     Ok(())
 }
 

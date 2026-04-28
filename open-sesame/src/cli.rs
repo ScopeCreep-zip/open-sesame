@@ -254,7 +254,11 @@ pub(crate) enum NetworkCmd {
         json: bool,
     },
     /// List known peers from the TOFU store.
-    Peers,
+    Peers {
+        /// Unpin a peer by public key hex prefix (removes TOFU trust).
+        #[arg(long)]
+        unpin: Option<String>,
+    },
     /// Show discovery subsystem state.
     Discover,
     /// Show daemon-network status.

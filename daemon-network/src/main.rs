@@ -97,6 +97,8 @@ struct DaemonState {
     /// signing, then immediately dropped. Raw bytes are Copy + Send --
     /// no mutex, no lifetime entanglement, minimal memory exposure window.
     signing_seed: Option<[u8; 32]>,
+    /// Channel sender for TCP inbound events (post-handshake frame loop).
+    tcp_tx: tokio::sync::mpsc::Sender<transport::tcp::TcpInbound>,
 }
 
 #[tokio::main]
@@ -114,9 +116,9 @@ async fn main() -> anyhow::Result<()> {
         idle_loop().await;
     }
 
-    let state = setup(listen_port, &network_config).await?;
+    let (state, tcp_rx) = setup(listen_port, &network_config).await?;
     notify_ready();
-    run_event_loop(state, listen_port, &network_config).await
+    run_event_loop(state, tcp_rx, listen_port, &network_config).await
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
 async fn setup(
     listen_port: u16,
     config: &core_config::NetworkConfig,
-) -> anyhow::Result<DaemonState> {
+) -> anyhow::Result<(DaemonState, tokio::sync::mpsc::Receiver<transport::tcp::TcpInbound>)> {
     sandbox::apply_network_sandbox();
 
     // Load installation identity from installation.toml.
@@ -291,7 +293,11 @@ async fn setup(
         discovery.load_bootstrap(&targets);
     }
 
-    Ok(DaemonState {
+    // TCP inbound channel — shared between tcp_accept_loop and post-handshake
+    // tcp_read_loop tasks. Both send TcpInbound events to the main event loop.
+    let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
+
+    Ok((DaemonState {
         udp_socket,
         peer_table,
         tofu_store,
@@ -311,7 +317,8 @@ async fn setup(
         dns_srv_domains: config.discovery.dns_srv.domains.clone(),
         identity,
         signing_seed,
-    })
+        tcp_tx,
+    }, tcp_rx))
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +328,7 @@ async fn setup(
 #[allow(clippy::too_many_lines)]
 async fn run_event_loop(
     state: DaemonState,
+    mut tcp_rx: tokio::sync::mpsc::Receiver<transport::tcp::TcpInbound>,
     listen_port: u16,
     config: &core_config::NetworkConfig,
 ) -> anyhow::Result<()> {
@@ -331,13 +339,13 @@ async fn run_event_loop(
         transport::udp::udp_receive_loop(udp_recv_socket, udp_tx).await;
     });
 
-    // TCP accept task.
-    let (tcp_tx, mut tcp_rx) = tokio::sync::mpsc::channel(256);
+    // TCP accept task — uses the shared tcp_tx from DaemonState.
     if config.transport.tcp_enabled {
+        let tcp_tx_accept = state.tcp_tx.clone();
         let max_conn = config.transport.max_tcp_connections_per_address;
         let hs_timeout = config.session.handshake_timeout_secs;
         tokio::spawn(async move {
-            if let Err(e) = transport::tcp::tcp_accept_loop(listen_port, tcp_tx, max_conn, hs_timeout).await {
+            if let Err(e) = transport::tcp::tcp_accept_loop(listen_port, tcp_tx_accept, max_conn, hs_timeout).await {
                 tracing::error!(error = %e, "TCP accept loop failed");
             }
         });
@@ -639,6 +647,8 @@ fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) {
             let bus = Arc::clone(&state.bus_client);
             let metrics = Arc::clone(&state.metrics);
             let audit = Arc::clone(&state.audit);
+            let udp_sock = Arc::clone(&state.udp_socket);
+            let tcp_sender = state.tcp_tx.clone();
             let signing_seed = state.signing_seed;
             let install_id = state.identity.id.clone();
             let net_pub = state.identity.network_pubkey;
@@ -656,6 +666,8 @@ fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) {
                     installation_id: &install_id,
                     network_pubkey: &net_pub,
                     signing_pubkey: sign_pub,
+                    udp_socket: &udp_sock,
+                    tcp_tx: &tcp_sender,
                 };
 
                 let timeout = tokio::time::Duration::from_secs(10);
@@ -673,15 +685,28 @@ fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) {
                     }
                     Err(_) => {
                         Metrics::inc(&metrics.handshake_failures_total);
+                        let timeout_err = crate::noise::state::NoiseError::Timeout;
                         audit.append("handshake_timeout", &peer_addr.to_string());
-                        tracing::warn!(%peer_addr, "handshake timed out");
+                        tracing::warn!(%peer_addr, error = %timeout_err, "handshake timed out");
                     }
                 }
             });
         }
-        transport::tcp::TcpInbound::Frame { peer_addr, .. } => {
+        transport::tcp::TcpInbound::Frame { frame, peer_addr } => {
             Metrics::inc(&state.metrics.frames_received_total);
-            tracing::trace!(%peer_addr, "TCP frame");
+            // Route TCP frames the same as UDP Data frames.
+            let sid = WireSessionId(frame.session_id.0);
+            if let Some(mut peer) = state.peer_table.get_mut(&sid) {
+                if let Ok(plaintext) = peer.transport.decrypt(&frame.body) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    peer.record_productive_recv(plaintext.len() as u64);
+                    tracing::trace!(session = %sid, %peer_addr, len = plaintext.len(), "TCP data frame");
+                } else {
+                    peer.record_aead_failure();
+                    Metrics::inc(&state.metrics.aead_failures_total);
+                    tracing::warn!(session = %sid, %peer_addr, "TCP AEAD failure");
+                }
+            }
         }
     }
 }
@@ -690,6 +715,7 @@ fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) {
 // IPC message handling
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // IPC dispatch routes many EventKind variants.
 async fn handle_ipc_message(
     msg: core_ipc::Message<core_types::EventKind>,
     state: &DaemonState,
@@ -720,10 +746,17 @@ async fn handle_ipc_message(
                 }
             }
 
+            let event_count = state.tofu_store.lock()
+                .ok()
+                .and_then(|s| s.event_count().ok())
+                .unwrap_or(0);
+
             Some(EventKind::NetworkStatusResponse {
                 active_sessions: state.peer_table.len(),
                 #[allow(clippy::cast_possible_truncation)]
                 tofu_peers: tofu_count as u32,
+                #[allow(clippy::cast_possible_truncation)]
+                tofu_events: event_count as u32,
                 #[allow(clippy::cast_possible_truncation)]
                 dial_queue_depth: state.discovery.queue_depth() as u32,
                 listen_port: state.listen_port,
@@ -762,7 +795,7 @@ async fn handle_ipc_message(
         }
         EventKind::NetworkDiscoverRequest => {
             Some(EventKind::NetworkDiscoverResponse {
-                mdns_peers: 0, // mDNS peer count tracked in future via DiscoveryManager
+                mdns_peers: state.discovery.mdns_peer_count(),
                 bep44_published: state.bep44_enabled && state.signing_seed.is_some(),
                 dns_srv_domains: state.dns_srv_domains.clone(),
                 #[allow(clippy::cast_possible_truncation)]
@@ -792,6 +825,27 @@ async fn handle_ipc_message(
             }
             None
         }
+        EventKind::NetworkUnpinRequest { public_key_hex } => {
+            let result = state.tofu_store.lock()
+                .map_err(|e| format!("TOFU lock: {e}"))
+                .and_then(|store| {
+                    store.unpin(public_key_hex)
+                        .map_err(|e| format!("unpin failed: {e}"))
+                });
+            match result {
+                Ok(()) => {
+                    state.audit.append("peer_unpinned", public_key_hex);
+                    Some(EventKind::NetworkUnpinResponse {
+                        success: true,
+                        error: None,
+                    })
+                }
+                Err(e) => Some(EventKind::NetworkUnpinResponse {
+                    success: false,
+                    error: Some(e),
+                }),
+            }
+        }
         _ => None,
     };
 
@@ -817,6 +871,8 @@ fn build_handshake_ctx(state: &DaemonState) -> HandshakeContext<'_> {
         installation_id: &state.identity.id,
         network_pubkey: &state.identity.network_pubkey,
         signing_pubkey: state.identity.signing_pubkey,
+        udp_socket: &state.udp_socket,
+        tcp_tx: &state.tcp_tx,
     }
 }
 
@@ -926,6 +982,42 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                     Err(e) => tracing::warn!(error = %e, "BEP-44 publish failed"),
                 }
             });
+            // Periodic resolve loop: resolve known peers from TOFU store.
+            let tofu_resolve = Arc::clone(&state.tofu_store);
+            let mgr_resolve = Arc::clone(&state.discovery);
+            tokio::spawn(async move {
+                let resolve_dht = match mainline::Dht::builder().build() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "BEP-44 resolve DHT init failed");
+                        return;
+                    }
+                };
+                loop {
+                    let pubkeys = tofu_resolve.lock().ok()
+                        .and_then(|s| s.pinned_pubkeys().ok())
+                        .unwrap_or_default();
+                    for key_hex in &pubkeys {
+                        if let Ok(key_bytes) = hex::decode(key_hex)
+                            && let Ok(pubkey) = <[u8; 32]>::try_from(key_bytes)
+                            && let Some(peer) = daemon_discovery::bep44::resolve::resolve_presence(
+                                &resolve_dht, &pubkey,
+                            ).await
+                        {
+                            for addr_str in &peer.record.addrs {
+                                if let Ok(addr) = addr_str.parse() {
+                                    mgr_resolve.add_peer(
+                                        addr,
+                                        daemon_discovery::queue::DiscoverySource::Bep44,
+                                        Some(key_hex.clone()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                }
+            });
         } else {
             tracing::info!("BEP-44 skipped — signing seed not available");
         }
@@ -961,6 +1053,98 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
 
         tracing::info!(domains = ?disc.dns_srv.domains, "DNS SRV discovery started");
     }
+
+    // SWIM gossip: bind separate UDP port, create foca instance, drive event loop.
+    let gossip_port = config.transport.gossip_port;
+    let pubkey_prefix = hex::encode(&state.local_keypair.public[..8]);
+    let gossip_addr: std::net::SocketAddr = format!("[::]:{gossip_port}").parse().unwrap();
+
+    let mgr_swim = Arc::clone(&state.discovery);
+    tokio::spawn(async move {
+        use foca::Identity as _; // Bring addr() method into scope for PeerId.
+        let gossip_socket = match tokio::net::UdpSocket::bind(gossip_addr).await {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                tracing::warn!(port = gossip_port, error = %e, "SWIM gossip socket bind failed");
+                return;
+            }
+        };
+
+        let local_addr: std::net::SocketAddr = format!("0.0.0.0:{gossip_port}").parse().unwrap();
+        let identity = daemon_discovery::gossip::swim::PeerId {
+            addr: local_addr,
+            generation: 0,
+            key_prefix: pubkey_prefix,
+        };
+        let swim_config = daemon_discovery::gossip::swim::default_swim_config();
+        let mut swim = daemon_discovery::gossip::runtime::new_swim(identity, swim_config);
+        let mut runtime = daemon_discovery::gossip::runtime::AccumulatingRuntime::new();
+
+        // Pending timers: foca schedules probes/suspect transitions via submit_after.
+        // We store (deadline, timer) and fire them when the deadline passes.
+        let mut pending_timers: Vec<(
+            tokio::time::Instant,
+            foca::Timer<daemon_discovery::gossip::swim::PeerId>,
+        )> = Vec::new();
+
+        let mut buf = vec![0u8; 65535];
+        loop {
+            // Next timer deadline or 30s default.
+            let next_deadline = pending_timers
+                .iter()
+                .map(|(d, _)| *d)
+                .min()
+                .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+
+            tokio::select! {
+                result = gossip_socket.recv_from(&mut buf) => {
+                    if let Ok((len, _src)) = result {
+                        let _ = swim.handle_data(&buf[..len], &mut runtime);
+                    }
+                }
+                () = tokio::time::sleep_until(next_deadline) => {
+                    // Fire expired timers.
+                    let now = tokio::time::Instant::now();
+                    let expired: Vec<usize> = pending_timers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (d, _))| *d <= now)
+                        .map(|(i, _)| i)
+                        .collect();
+                    for i in expired.into_iter().rev() {
+                        let (_, timer) = pending_timers.remove(i);
+                        let _ = swim.handle_timer(timer, &mut runtime);
+                    }
+                }
+            }
+
+            // Drain runtime after every interaction.
+            while let Some((dest, data)) = runtime.to_send() {
+                let _ = gossip_socket.send_to(&data, dest.addr()).await;
+            }
+            while let Some((delay, timer)) = runtime.to_schedule() {
+                let deadline = tokio::time::Instant::now() + delay;
+                pending_timers.push((deadline, timer));
+            }
+            while let Some(notification) = runtime.to_notify() {
+                match notification {
+                    foca::OwnedNotification::MemberUp(peer) => {
+                        tracing::info!(peer = %peer, "SWIM member up");
+                        mgr_swim.add_peer(
+                            peer.addr,
+                            daemon_discovery::queue::DiscoverySource::Bootstrap,
+                            Some(peer.key_prefix.clone()),
+                        );
+                    }
+                    foca::OwnedNotification::MemberDown(peer) => {
+                        tracing::info!(peer = %peer, "SWIM member down");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    tracing::info!(port = gossip_port, "SWIM gossip started");
 }
 
 fn run_dial_queue(state: &DaemonState) {
@@ -971,6 +1155,8 @@ fn run_dial_queue(state: &DaemonState) {
         let bus = Arc::clone(&state.bus_client);
         let metrics = Arc::clone(&state.metrics);
         let audit = Arc::clone(&state.audit);
+        let udp_sock = Arc::clone(&state.udp_socket);
+        let tcp_sender = state.tcp_tx.clone();
         let discovery = Arc::clone(&state.discovery);
         let signing_seed = state.signing_seed;
         let install_id = state.identity.id.clone();
@@ -989,6 +1175,8 @@ fn run_dial_queue(state: &DaemonState) {
                 installation_id: &install_id,
                 network_pubkey: &net_pub,
                 signing_pubkey: sign_pub,
+                udp_socket: &udp_sock,
+                tcp_tx: &tcp_sender,
             };
             let result = handshake::dial_peer(entry.addr, &ctx).await;
             match result {

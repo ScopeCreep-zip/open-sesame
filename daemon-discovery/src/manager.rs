@@ -31,6 +31,8 @@ pub struct DiscoveryManager {
     pub queue: Arc<DialQueue>,
     /// Channel for discovery events.
     event_tx: tokio::sync::mpsc::Sender<DiscoveryEvent>,
+    /// Count of mDNS peers discovered (atomic for lock-free reads).
+    mdns_peer_count: std::sync::atomic::AtomicU32,
 }
 
 impl DiscoveryManager {
@@ -43,6 +45,7 @@ impl DiscoveryManager {
         Self {
             queue: Arc::new(DialQueue::new(max_queue_entries)),
             event_tx,
+            mdns_peer_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -62,6 +65,9 @@ impl DiscoveryManager {
         };
 
         if self.queue.push(entry) {
+            if source == DiscoverySource::Mdns {
+                self.mdns_peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let _ = self.event_tx.try_send(DiscoveryEvent::PeerDiscovered {
                 addr,
                 source,
@@ -90,6 +96,12 @@ impl DiscoveryManager {
     #[must_use]
     pub fn queue_depth(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Number of mDNS peers discovered.
+    #[must_use]
+    pub fn mdns_peer_count(&self) -> u32 {
+        self.mdns_peer_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -139,12 +151,14 @@ mod tests {
             crate::bootstrap::DialTarget {
                 addr: "10.0.0.1:48627".parse().unwrap(),
                 public_key_hex: Some("aa".into()),
+                signing_pubkey_hex: None,
                 display_name: Some("peer1".into()),
                 dial_on_start: true,
             },
             crate::bootstrap::DialTarget {
                 addr: "10.0.0.2:48627".parse().unwrap(),
                 public_key_hex: None,
+                signing_pubkey_hex: None,
                 display_name: None,
                 dial_on_start: false,
             },

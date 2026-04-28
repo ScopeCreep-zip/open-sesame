@@ -269,3 +269,119 @@ async fn udp_send_data_round_trip() {
         1
     );
 }
+
+#[tokio::test]
+async fn handshake_ack_wire_exchange() {
+    use daemon_network::handshake_ack;
+
+    // Two peers complete XX handshake then exchange HandshakeAck over TCP.
+    let kp_a = snow::Builder::new(state::NOISE_XX.parse().unwrap())
+        .generate_keypair()
+        .unwrap();
+    let kp_b = snow::Builder::new(state::NOISE_XX.parse().unwrap())
+        .generate_keypair()
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let kp_b_clone = snow::Keypair {
+        private: kp_b.private.clone(),
+        public: kp_b.public.clone(),
+    };
+
+    // Responder: accept → XX → ack exchange
+    let responder = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, mut writer) = tokio::io::split(stream);
+
+        // Read pattern discriminant byte.
+        use tokio::io::AsyncReadExt;
+        let mut pat = [0u8; 1];
+        reader.read_exact(&mut pat).await.unwrap();
+        assert_eq!(pat[0], 0x01); // XX
+
+        let mut transport = xx_responder(&mut reader, &mut writer, &kp_b_clone).await.unwrap();
+        let remote_static = transport.remote_static().unwrap();
+
+        // Build and sign our ack.
+        let master = core_crypto::SecureBytes::from_slice(&[0xBB; 32]);
+        let install_id = uuid::Uuid::from_u128(2);
+        let signing_key = core_crypto::network::derive_signing_keypair(&master, &install_id).unwrap();
+        let signing_pub = signing_key.public_key();
+        let net_pub: [u8; 32] = kp_b_clone.public[..32].try_into().unwrap();
+
+        let our_ack = handshake_ack::build_handshake_ack(
+            &install_id.to_string(), None, &net_pub, &signing_pub,
+            state::NOISE_XX, &signing_key,
+        );
+        let ack_json = serde_json::to_vec(&our_ack).unwrap();
+        let our_ct = transport.encrypt(&ack_json).unwrap();
+
+        // Responder reads first, then sends.
+        use tokio::io::AsyncWriteExt;
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).await.unwrap();
+        let peer_len = u32::from_be_bytes(len_buf) as usize;
+        let mut peer_buf = vec![0u8; peer_len];
+        reader.read_exact(&mut peer_buf).await.unwrap();
+
+        #[allow(clippy::cast_possible_truncation)]
+        let len = (our_ct.len() as u32).to_be_bytes();
+        writer.write_all(&len).await.unwrap();
+        writer.write_all(&our_ct).await.unwrap();
+        writer.flush().await.unwrap();
+
+        // Decrypt and verify peer's ack.
+        let peer_pt = transport.decrypt(&peer_buf).unwrap();
+        let peer_ack: core_types::HandshakeAck = serde_json::from_slice(&peer_pt).unwrap();
+        handshake_ack::verify_handshake_ack(&peer_ack, &remote_static).unwrap();
+
+        peer_ack.installation_id
+    });
+
+    // Initiator: connect → pattern byte → XX → ack exchange
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    writer.write_all(&[0x01]).await.unwrap(); // XX pattern
+
+    let mut transport = xx_initiator(&mut reader, &mut writer, &kp_a).await.unwrap();
+    let remote_static = transport.remote_static().unwrap();
+
+    let master = core_crypto::SecureBytes::from_slice(&[0xAA; 32]);
+    let install_id = uuid::Uuid::from_u128(1);
+    let signing_key = core_crypto::network::derive_signing_keypair(&master, &install_id).unwrap();
+    let signing_pub = signing_key.public_key();
+    let net_pub: [u8; 32] = kp_a.public[..32].try_into().unwrap();
+
+    let our_ack = handshake_ack::build_handshake_ack(
+        &install_id.to_string(), None, &net_pub, &signing_pub,
+        state::NOISE_XX, &signing_key,
+    );
+    let ack_json = serde_json::to_vec(&our_ack).unwrap();
+    let our_ct = transport.encrypt(&ack_json).unwrap();
+
+    // Initiator sends first, then reads.
+    #[allow(clippy::cast_possible_truncation)]
+    let len = (our_ct.len() as u32).to_be_bytes();
+    writer.write_all(&len).await.unwrap();
+    writer.write_all(&our_ct).await.unwrap();
+    writer.flush().await.unwrap();
+
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await.unwrap();
+    let peer_len = u32::from_be_bytes(len_buf) as usize;
+    let mut peer_buf = vec![0u8; peer_len];
+    reader.read_exact(&mut peer_buf).await.unwrap();
+
+    let peer_pt = transport.decrypt(&peer_buf).unwrap();
+    let peer_ack: core_types::HandshakeAck = serde_json::from_slice(&peer_pt).unwrap();
+    handshake_ack::verify_handshake_ack(&peer_ack, &remote_static).unwrap();
+
+    // Both sides received verified installation IDs.
+    let responder_install = responder.await.unwrap();
+    assert_eq!(responder_install, install_id.to_string());
+    assert_eq!(peer_ack.installation_id, uuid::Uuid::from_u128(2).to_string());
+}

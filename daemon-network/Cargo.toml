@@ -31,6 +31,7 @@ core-types.workspace = true
 core-crypto.workspace = true
 daemon-discovery.workspace = true
 mainline = { workspace = true }
+foca = { workspace = true }
 core-memory.workspace = true
 core-ipc.workspace = true
 core-config.workspace = true

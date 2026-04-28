@@ -140,6 +140,7 @@ impl Frame {
 
     /// Extract the 20-byte header as a byte array (for AEAD AAD binding).
     #[must_use]
+    #[allow(dead_code)] // Used by send.rs AEAD AAD construction and tests.
     pub fn header_bytes(&self) -> [u8; HEADER_SIZE] {
         let mut h = [0u8; HEADER_SIZE];
         h[0] = self.version;
@@ -173,6 +174,7 @@ impl Frame {
 /// # Errors
 ///
 /// Returns `std::io::Error` if writing to the stream fails.
+#[allow(dead_code)] // Used by handshake TCP path and tests.
 pub async fn tcp_write_frame(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     frame: &Frame,
