@@ -117,6 +117,22 @@
               '';
             };
 
+            network = lib.mkOption {
+              type = tomlFormat.type;
+              default = { };
+              example = lib.literalExpression ''
+                {
+                  enabled = true;
+                  transport.listen_port = 48627;
+                }
+              '';
+              description = ''
+                Network federation configuration. Set `enabled = true` to
+                activate the Noise XX transport, TOFU peer discovery, and
+                vault replication. Maps to `[network]` in config.toml.
+              '';
+            };
+
             logLevel = lib.mkOption {
               type = lib.types.enum [
                 "error"
@@ -174,7 +190,7 @@
                 allProfiles = { default = mergedDefault; } // namedOtherProfiles;
               in
               lib.mkIf hasConfig {
-                source = tomlFormat.generate "open-sesame-config" {
+                source = tomlFormat.generate "open-sesame-config" ({
                   config_version = 3;
                   global = {
                     default_profile = "default";
@@ -185,7 +201,9 @@
                   crypto = { };
                   agents = { };
                   extensions = { };
-                };
+                } // lib.optionalAttrs (cfg.network != { }) {
+                  network = cfg.network;
+                });
               };
 
             # Ensure %t/pds exists on the host filesystem before services start.

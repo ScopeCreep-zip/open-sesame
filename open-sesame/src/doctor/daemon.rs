@@ -155,34 +155,40 @@ pub fn checks() -> Vec<Check> {
             }
 
             // IPC-based live health: query daemon-network for session count,
-            // listen port, and dial queue depth.
+            // listen port, and dial queue depth. The entire IPC exchange is
+            // bounded by a hard 2-second wall-clock deadline — if the daemon
+            // is in idle mode (disabled in config) or not on the IPC bus, the
+            // doctor must never block.
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let ipc_result = std::thread::scope(|s| {
                     s.spawn(|| {
                         handle.block_on(async {
-                            let client = crate::ipc::connect().await.ok()?;
-                            let msg = tokio::time::timeout(
+                            // Single timeout wrapping BOTH connect and request.
+                            tokio::time::timeout(
                                 std::time::Duration::from_secs(2),
-                                client.request(
-                                    core_types::EventKind::NetworkStatusRequest,
-                                    core_types::SecurityLevel::Internal,
-                                    std::time::Duration::from_secs(2),
-                                ),
+                                async {
+                                    let client = crate::ipc::connect().await.ok()?;
+                                    let msg = client.request(
+                                        core_types::EventKind::NetworkStatusRequest,
+                                        core_types::SecurityLevel::Internal,
+                                        std::time::Duration::from_secs(1),
+                                    ).await.ok()?;
+                                    if let core_types::EventKind::NetworkStatusResponse {
+                                        active_sessions,
+                                        listen_port,
+                                        dial_queue_depth,
+                                        ..
+                                    } = msg.payload
+                                    {
+                                        Some((active_sessions, listen_port, dial_queue_depth))
+                                    } else {
+                                        None
+                                    }
+                                },
                             )
                             .await
-                            .ok()?
-                            .ok()?;
-                            if let core_types::EventKind::NetworkStatusResponse {
-                                active_sessions,
-                                listen_port,
-                                dial_queue_depth,
-                                ..
-                            } = msg.payload
-                            {
-                                Some((active_sessions, listen_port, dial_queue_depth))
-                            } else {
-                                None
-                            }
+                            .ok()
+                            .flatten()
                         })
                     })
                     .join()
@@ -190,28 +196,42 @@ pub fn checks() -> Vec<Check> {
                     .flatten()
                 });
 
-                if let Some((sessions, port, queue)) = ipc_result {
-                    results.push(Check {
-                        id: "daemon.network.sessions".into(),
-                        category: "daemon",
-                        status: Status::Pass,
-                        value: sessions.to_string(),
-                        description: String::new(),
-                    });
-                    results.push(Check {
-                        id: "daemon.network.listen_port".into(),
-                        category: "daemon",
-                        status: Status::Pass,
-                        value: port.to_string(),
-                        description: String::new(),
-                    });
-                    results.push(Check {
-                        id: "daemon.network.dial_queue".into(),
-                        category: "daemon",
-                        status: Status::Pass,
-                        value: queue.to_string(),
-                        description: String::new(),
-                    });
+                match ipc_result {
+                    Some((sessions, port, queue)) => {
+                        results.push(Check {
+                            id: "daemon.network.sessions".into(),
+                            category: "daemon",
+                            status: Status::Pass,
+                            value: sessions.to_string(),
+                            description: String::new(),
+                        });
+                        results.push(Check {
+                            id: "daemon.network.listen_port".into(),
+                            category: "daemon",
+                            status: Status::Pass,
+                            value: port.to_string(),
+                            description: String::new(),
+                        });
+                        results.push(Check {
+                            id: "daemon.network.dial_queue".into(),
+                            category: "daemon",
+                            status: Status::Pass,
+                            value: queue.to_string(),
+                            description: String::new(),
+                        });
+                    }
+                    None => {
+                        let sub_state = systemctl_prop(unit, "SubState")
+                            .unwrap_or_else(|| "unknown".into());
+                        let active_state = active.as_deref().unwrap_or("unknown");
+                        results.push(Check {
+                            id: "daemon.network.ipc".into(),
+                            category: "daemon",
+                            status: Status::Warn,
+                            value: format!("{active_state}/{sub_state}"),
+                            description: "not responding on IPC bus".into(),
+                        });
+                    }
                 }
             }
         }
