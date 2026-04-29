@@ -107,13 +107,18 @@ async fn main() -> anyhow::Result<()> {
     let config_dir = core_config::config_dir();
     let default_profile: TrustProfileName = config.global.default_profile.clone();
 
+    // -- Installation identity --
+    let install_config = core_config::load_installation()
+        .context("failed to load installation config — run `sesame init` first")?;
+    let installation_id = install_config.id.to_string();
+
     // -- Vault log (M3 pre-qualification) --
     let vault_log_path = config_dir.join("vaults").join("vault-log.db");
     let vault_log = std::sync::Arc::new(
         vault_log::VaultLog::open(&vault_log_path)
             .map_err(|e| anyhow::anyhow!("failed to open vault-log.db: {e}"))?,
     );
-    crud::set_vault_log(std::sync::Arc::clone(&vault_log))
+    crud::set_vault_log(std::sync::Arc::clone(&vault_log), &installation_id)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     tracing::info!(path = %vault_log_path.display(), "vault log opened");
 

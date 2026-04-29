@@ -116,24 +116,27 @@ pub fn with_network_private_key<R>(f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> 
 
 /// Set the global vault log instance. Called once from `main.rs`.
 ///
+/// Accepts the installation ID as a pre-validated parameter from the caller
+/// instead of re-reading `installation.toml` from disk. The caller (main.rs)
+/// loads the installation config once and passes the ID — no redundant disk
+/// reads, no divergence between what main.rs and the vault log think the
+/// installation ID is.
+///
 /// # Errors
 ///
-/// Returns an error if `core_config::load_installation()` fails or returns
-/// an empty installation ID. The vault log requires a stable installation ID
-/// for per-author hash chain semantics — running without one is a
-/// misconfiguration that must be loud, not silent.
+/// Returns an error if `installation_id` is not a valid non-nil UUID. The
+/// vault log requires a stable installation ID for per-author hash chain
+/// semantics — running without one is a misconfiguration that must be loud.
 pub fn set_vault_log(
     log: std::sync::Arc<crate::vault_log::VaultLog>,
+    installation_id: &str,
 ) -> Result<(), String> {
     // Validate FIRST, set INSTALL_ID only after success.
     // This prevents the OnceLock from being poisoned with an invalid value
     // if validation fails — the expect() in write_local_entry relies on
     // INSTALL_ID being a valid non-nil UUID when set.
-    let install = core_config::load_installation()
-        .map_err(|e| format!("failed to load installation config: {e}"))?;
-    let id_str = install.id.to_string();
-    let parsed = uuid::Uuid::parse_str(&id_str)
-        .map_err(|e| format!("installation ID '{id_str}' is not a valid UUID: {e}"))?;
+    let parsed = uuid::Uuid::parse_str(installation_id)
+        .map_err(|e| format!("installation ID '{installation_id}' is not a valid UUID: {e}"))?;
     if parsed.is_nil() {
         return Err(
             "installation ID is nil UUID — vault log requires a non-nil installation ID. \
@@ -142,7 +145,7 @@ pub fn set_vault_log(
         );
     }
     // Only NOW set the OnceLock — validation passed.
-    let _ = INSTALL_ID.set(id_str);
+    let _ = INSTALL_ID.set(installation_id.to_string());
     let _ = VAULT_LOG.set(log);
     Ok(())
 }

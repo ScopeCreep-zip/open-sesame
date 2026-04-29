@@ -436,6 +436,21 @@ impl VaultLog {
             )));
         }
 
+        // Set operations MUST have a non-empty value_hash. This prevents an
+        // attacker from crafting entries with empty value_hash that would bypass
+        // the receiver's BLAKE3 value-binding check (any value would "match"
+        // an empty expected hash if the receiver defaulted to accepting it).
+        // Compaction snapshots and deletes legitimately have empty value_hash.
+        let op_type = v["operation"]["op"].as_str().unwrap_or("");
+        if op_type == "set" {
+            let vh = v["operation"]["value_hash"].as_str().unwrap_or("");
+            if vh.is_empty() {
+                return Err(VaultLogError::RejectedEntry(
+                    "set operation missing value_hash — all set entries must include BLAKE3 value binding".into(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -670,6 +685,40 @@ impl VaultLog {
         Ok(())
     }
 
+    /// Defer an entry with exponential backoff computed from its current
+    /// `deferred_count`. Reads the count and updates in a single lock
+    /// acquisition — no TOCTOU between reading the count and computing
+    /// the backoff interval.
+    ///
+    /// Backoff schedule: 0→30s, 1-3→60s, 4-10→300s, 11+→3600s.
+    pub fn defer_entry_with_backoff(&self, entry_id: &str) -> Result<(), VaultLogError> {
+        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count: i64 = conn
+            .query_row(
+                "SELECT deferred_count FROM vault_log WHERE id = ?1",
+                params![entry_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let retry_secs: u64 = match count {
+            0 => 30,
+            1..=3 => 60,
+            4..=10 => 300,
+            _ => 3600,
+        };
+        let until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + retry_secs;
+        conn.execute(
+            "UPDATE vault_log SET deferred_until = ?1, deferred_count = deferred_count + 1 WHERE id = ?2",
+            params![until as i64, entry_id],
+        )
+        .map_err(VaultLogError::Sqlite)?;
+        Ok(())
+    }
+
     /// Read the deferred count for an entry.
     #[allow(dead_code)] // Available for future retry-budget logic if needed.
     pub fn deferred_count(&self, entry_id: &str) -> Result<u32, VaultLogError> {
@@ -825,36 +874,73 @@ impl VaultLog {
     /// Compact the vault log by removing applied entries older than the
     /// oldest peer watermark.
     ///
-    /// Safety: only deletes entries that ALL known peers have already
-    /// received (their watermarks are past the entry's HLC). If any peer
-    /// has a watermark behind an entry, that entry is kept.
+    /// # Transactional safety (C1-NEW)
     ///
-    /// Inserts a `CompactionSnapshot` marker entry at the compaction
+    /// The DELETE and snapshot INSERT are wrapped in a single SQLite
+    /// transaction. If signing fails (seed disappeared between the
+    /// pre-check and the transaction), ROLLBACK ensures no entries are
+    /// lost. The signing key is derived BEFORE the transaction begins —
+    /// once we hold the derived key, the seed's lifecycle cannot affect us.
+    ///
+    /// # Watermark semantics
+    ///
+    /// Only deletes entries that ALL active peers have already received
+    /// (their watermarks are past the entry's HLC). Stale peers (no sync
+    /// for 2x retention) are excluded from watermark calculation to prevent
+    /// orphaned records from blocking compaction indefinitely.
+    ///
+    /// Inserts a signed `CompactionSnapshot` marker at the compaction
     /// boundary for local audit. Snapshots have `profile_id = ""` so they
-    /// are NOT included in profile-scoped pull responses — peers discover
-    /// truncation organically when their watermark advances past compacted
-    /// entries.
+    /// are NOT included in profile-scoped pull responses.
     ///
     /// Returns the number of entries deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns `VaultLogError::Sqlite` if any query or delete fails.
     pub fn compact(&self, compaction_threshold: u64, retention_secs: i64) -> Result<u32, VaultLogError> {
-        // Refuse to compact if signing seed unavailable — compaction
-        // snapshot entries must be signed like all other entries.
-        if !crate::crud::signing_seed_is_set() {
-            return Err(VaultLogError::InvalidSignature(
-                "cannot compact without signing seed".into(),
-            ));
+        // Phase 0: Quick count check before expensive signing key derivation.
+        // Avoids wasting a tick + key derivation on the common no-op case.
+        {
+            let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM vault_log", [], |row| row.get(0))
+                .map_err(VaultLogError::Sqlite)?;
+            #[allow(clippy::cast_sign_loss)]
+            if (count as u64) < compaction_threshold {
+                return Ok(0);
+            }
         }
 
-        // Phase 1: count + DELETE under a single conn lock, then release.
-        // Combining count and DELETE in the same lock eliminates the TOCTOU
-        // race where entries could be inserted between count and DELETE.
-        let (deleted, min_watermark) = {
-            let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Phase 1: Pre-acquire signing material. The derived signing key is
+        // captured BEFORE any database mutation. If the seed disappears after
+        // this point (vault lock event), we already have the derived key and
+        // can complete the operation. If the seed is unavailable NOW, we fail
+        // before any DELETE — no data loss possible.
+        let install_id = crate::crud::INSTALL_ID.get().map_or("", |s| s.as_str());
+        let install_uuid = uuid::Uuid::parse_str(install_id)
+            .expect("installation_id validated as non-nil UUID at daemon startup (set_vault_log)");
+        let signing_key = crate::crud::with_signing_seed(|seed| {
+            let seed_secure = core_crypto::SecureBytes::from_slice(seed);
+            core_crypto::network::derive_signing_keypair(&seed_secure, &install_uuid)
+        })
+        .ok_or(VaultLogError::InvalidSignature(
+            "cannot compact without signing seed".into(),
+        ))?
+        .map_err(|e| VaultLogError::InvalidSignature(
+            format!("compaction signing key derivation failed: {e}"),
+        ))?;
 
+        // Phase 2: Tick the HLC for the snapshot timestamp. This acquires and
+        // releases conn internally via persist_hlc, so it MUST happen BEFORE
+        // we hold the conn lock for the transaction.
+        let ts = self.tick()?;
+
+        // Phase 3: Single conn lock wrapping a SQLite transaction for the
+        // entire recheck→watermark→DELETE→sign→INSERT sequence. ROLLBACK on
+        // any failure ensures entries are never deleted without a snapshot.
+        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(VaultLogError::Sqlite)?;
+
+        let result: Result<u32, VaultLogError> = (|| {
+            // Recheck count inside the transaction — entries may have been
+            // inserted between the phase 0 check and now.
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM vault_log", [], |row| row.get(0))
                 .map_err(VaultLogError::Sqlite)?;
@@ -863,15 +949,7 @@ impl VaultLog {
                 return Ok(0);
             }
 
-            // Determine watermark: if peers exist, use oldest peer watermark.
-            // If no peers, retain a 7-day rolling window for forensic / rejoin.
-            // Filter out stale peers whose last_sync_at is older than
-            // 2 * retention_secs. Orphaned watermarks from unpinned or
-            // unreachable peers would otherwise block compaction forever.
-            let stale_cutoff = {
-                let now_secs = wall_secs_now() as i64;
-                now_secs.saturating_sub(2 * retention_secs)
-            };
+            let stale_cutoff = now_epoch_secs().saturating_sub(2 * retention_secs);
             let active_peer_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pull_progress WHERE last_sync_at >= ?1",
@@ -883,18 +961,14 @@ impl VaultLog {
             let min_watermark: (i64, i64) = if active_peer_count > 0 {
                 conn.query_row(
                     "SELECT MIN(watermark_wall_secs), MIN(watermark_counter)
-                     FROM pull_progress
-                     WHERE last_sync_at >= ?1",
+                     FROM pull_progress WHERE last_sync_at >= ?1",
                     params![stale_cutoff],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .unwrap_or((0, 0))
             } else {
-                // No peers: retain a rolling window for forensic / rejoin scenarios.
-                // A peer that goes offline and rejoins within the retention window
-                // can still catch up without a full snapshot transfer.
-                let now_secs = wall_secs_now() as i64;
-                (now_secs.saturating_sub(retention_secs), i64::MAX)
+                // No active peers: retain a rolling window for forensic / rejoin.
+                (now_epoch_secs().saturating_sub(retention_secs), i64::MAX)
             };
 
             let deleted = conn
@@ -907,33 +981,25 @@ impl VaultLog {
                 )
                 .map_err(VaultLogError::Sqlite)?;
 
-            (deleted, min_watermark)
-            // conn lock released here
-        };
+            if deleted == 0 {
+                return Ok(0);
+            }
 
-        // Phase 2: tick (acquires conn internally via persist_hlc), then
-        // insert snapshot under a fresh conn lock. This avoids the deadlock
-        // where holding conn while calling tick() re-enters conn.lock().
-        if deleted > 0 {
-            let ts = self.tick()?;
+            // Sign and insert compaction snapshot using the pre-acquired key.
             let node_id_hex = hex::encode(ts.node_id);
             let snapshot_id = uuid::Uuid::now_v7();
             let now = now_epoch_secs();
-            let install_id = crate::crud::INSTALL_ID.get().map_or("", |s| s.as_str());
             let snapshot_json = serde_json::json!({
                 "op": "compaction_snapshot",
+                "key": "",
+                "value_hash": "",
                 "watermark_wall_secs": min_watermark.0,
                 "watermark_counter": min_watermark.1,
                 "entries_deleted": deleted,
             })
             .to_string();
 
-            let install_uuid = uuid::Uuid::parse_str(install_id)
-                .expect("installation_id validated as non-nil UUID at daemon startup (set_vault_log)");
-
-            let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-            // Chain to previous entry by this author (F-12: maintain hash chain
+            // Chain to previous entry by this author (maintain hash chain
             // continuity across compaction snapshots).
             let prev_hash: Option<String> = conn
                 .query_row(
@@ -949,34 +1015,20 @@ impl VaultLog {
                 .map(|prev_id| hex::encode(blake3::hash(prev_id.as_bytes()).as_bytes()));
 
             let snapshot_id_str = snapshot_id.to_string();
-            let (signing_pubkey_hex, signature_hex) = crate::crud::with_signing_seed(|seed| {
-                let seed_secure = core_crypto::SecureBytes::from_slice(seed);
-                match core_crypto::network::derive_signing_keypair(&seed_secure, &install_uuid) {
-                    Ok(signing_key) => {
-                        let pubkey = signing_key.public_key();
-                        let payload_bytes = canonical_sign_payload(
-                            &snapshot_id_str,
-                            ts.wall_secs,
-                            ts.counter,
-                            &node_id_hex,
-                            install_id,
-                            "",
-                            "compaction_snapshot",
-                            &snapshot_json,
-                            prev_hash.as_deref(),
-                            "", // No value_hash for compaction snapshots.
-                        );
-                        let sig = core_crypto::network::ed25519_sign(&signing_key, &payload_bytes);
-                        Ok((hex::encode(pubkey), hex::encode(sig)))
-                    }
-                    Err(e) => Err(VaultLogError::InvalidSignature(
-                        format!("compaction signing failed: {e}"),
-                    )),
-                }
-            })
-            .ok_or(VaultLogError::InvalidSignature(
-                "signing seed disappeared during compaction".into(),
-            ))??;
+            let pubkey = signing_key.public_key();
+            let payload_bytes = canonical_sign_payload(
+                &snapshot_id_str,
+                ts.wall_secs,
+                ts.counter,
+                &node_id_hex,
+                install_id,
+                "",
+                "compaction_snapshot",
+                &snapshot_json,
+                prev_hash.as_deref(),
+                "",
+            );
+            let sig = core_crypto::network::ed25519_sign(&signing_key, &payload_bytes);
 
             conn.execute(
                 "INSERT INTO vault_log
@@ -990,12 +1042,12 @@ impl VaultLog {
                     ts.counter as i64,
                     node_id_hex,
                     install_id,
-                    signing_pubkey_hex,
+                    hex::encode(pubkey),
                     "",
                     "compaction_snapshot",
                     snapshot_json,
                     prev_hash,
-                    signature_hex,
+                    hex::encode(sig),
                     now,
                 ],
             )
@@ -1007,10 +1059,18 @@ impl VaultLog {
                 watermark_counter = min_watermark.1,
                 "vault log compacted"
             );
+
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(deleted as u32)
+        })();
+
+        match &result {
+            Ok(0) => { conn.execute_batch("ROLLBACK").ok(); }
+            Ok(_) => { conn.execute_batch("COMMIT").map_err(VaultLogError::Sqlite)?; }
+            Err(_) => { conn.execute_batch("ROLLBACK").ok(); }
         }
 
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(deleted as u32)
+        result
     }
 
     /// Count of entries in the vault log. Used by tests and compaction threshold.

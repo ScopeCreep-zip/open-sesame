@@ -8,7 +8,55 @@ use crate::vault::VaultState;
 use anyhow::Context;
 use core_ipc::{BusClient, Message};
 use core_types::{DaemonId, EventKind, SecurityLevel, TrustProfileName};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Time-bounded cache of recently-seen replication envelope fingerprints.
+/// Prevents replay amplification within the 5-minute timestamp acceptance
+/// window. Without this, an attacker who captures a valid envelope can
+/// replay it repeatedly, forcing the receiver to perform ECDH + HKDF +
+/// ChaCha20 decryption on each replay before `INSERT OR IGNORE` dedup
+/// catches it at the database layer.
+///
+/// Key: `(batch_hash_hex, nonce_b64)` — uniquely identifies an envelope
+/// because each seal uses a fresh 12-byte random nonce.
+/// Value: wall-clock timestamp when first seen (for expiration).
+static SEEN_ENVELOPES: Mutex<Option<HashMap<(String, String), u64>>> = Mutex::new(None);
+
+/// How long to retain seen envelope fingerprints. Matches the timestamp
+/// acceptance window (300s) plus a 60s grace period for clock skew.
+const ENVELOPE_CACHE_TTL_SECS: u64 = 360;
+
+/// Maximum cache entries before forced eviction sweep.
+const ENVELOPE_CACHE_MAX_SIZE: usize = 10_000;
+
+/// Check if an envelope with this `(batch_hash, nonce)` pair has been seen
+/// before. Returns `true` if this is a replay (already seen). Inserts the
+/// pair on first encounter.
+fn is_envelope_replay(batch_hash_hex: &str, nonce_b64: &str) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut guard = SEEN_ENVELOPES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = guard.get_or_insert_with(HashMap::new);
+
+    let key = (batch_hash_hex.to_string(), nonce_b64.to_string());
+
+    if cache.contains_key(&key) {
+        return true;
+    }
+
+    // Periodic eviction: when the cache is full, sweep stale entries.
+    if cache.len() >= ENVELOPE_CACHE_MAX_SIZE {
+        cache.retain(|_, ts| now.saturating_sub(*ts) < ENVELOPE_CACHE_TTL_SECS);
+    }
+
+    cache.insert(key, now);
+    false
+}
 
 /// Grouped context for `handle_message` to avoid parameter explosion.
 pub struct MessageContext<'a> {
@@ -227,13 +275,18 @@ pub async fn handle_message(
             profile_name,
             last_hlc_json,
         } => {
-            // S-05: Only accept from daemon-network. An unauthenticated sender
-            // could advance pull_progress to trigger premature compaction,
-            // causing data loss for legitimate peers.
-            if msg.verified_sender_name.as_deref() != Some("daemon-network") {
+            // S-05: Only accept from daemon-network at Internal security level.
+            // An unauthenticated sender could advance pull_progress to trigger
+            // premature compaction, causing data loss for legitimate peers.
+            // Both checks are required: verified_sender_name confirms the Noise IK
+            // identity, security_level confirms the bus server's clearance grant.
+            if msg.verified_sender_name.as_deref() != Some("daemon-network")
+                || msg.security_level < SecurityLevel::Internal
+            {
                 tracing::warn!(
                     audit = "security",
                     sender = ?msg.verified_sender_name,
+                    security_level = ?msg.security_level,
                     "rejecting pull progress update from unauthorized sender"
                 );
                 return Ok(true);
@@ -386,10 +439,14 @@ async fn build_pull_response(
             && let Ok(vault) = ctx.vault_state.vault_for(&profile_name).await
             && let Ok(value) = vault.resolve(key).await
         {
+            // SAFETY (H1-NEW): The vault value is read ONCE into `value` via
+            // vault.resolve(). Both the hash comparison and the base64 encoding
+            // operate on the same in-memory snapshot (`val_bytes`). There is no
+            // TOCTOU — the value cannot change between the hash check and the
+            // encoding because they operate on the same borrowed slice. If the
+            // key is overwritten concurrently, the receiver independently
+            // verifies BLAKE3(received_value) == signed value_hash and rejects.
             let val_bytes = value.as_bytes();
-            // Verify value_hash: the signed entry binds a BLAKE3 hash of the
-            // value at write time. If the current value doesn't match, the key
-            // was overwritten since this entry was logged — omit the value.
             let current_hash = hex::encode(blake3::hash(val_bytes).as_bytes());
             let signed_hash = entry["operation"]["value_hash"].as_str().unwrap_or("");
             if current_hash != signed_hash {
@@ -479,21 +536,31 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
 
     let session_id = v["session_id"].as_str().ok_or_else(|| err("missing session_id"))?;
 
+    // Replay dedup: check the (batch_hash, nonce) fingerprint BEFORE the
+    // expensive ECDH/HKDF/ChaCha decryption. Each legitimate envelope has a
+    // fresh random 12-byte nonce, so the (hash, nonce) pair is unique. An
+    // attacker replaying a captured envelope will hit this cache and be
+    // rejected at near-zero cost instead of forcing a full AEAD cycle.
+    let batch_hash_hex = v["batch_hash"].as_str().ok_or_else(|| err("missing batch_hash"))?;
+    let nonce_b64 = v["nonce"].as_str().ok_or_else(|| err("missing nonce"))?;
+    if is_envelope_replay(batch_hash_hex, nonce_b64) {
+        return Err(err("duplicate envelope — replay rejected before decryption"));
+    }
+
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
 
     let eph_pubkey_bytes = b64.decode(
         v["ephemeral_pubkey"].as_str().ok_or_else(|| err("missing ephemeral_pubkey"))?
     ).map_err(|_| err("invalid base64 in ephemeral_pubkey"))?;
-    let nonce_bytes = b64.decode(
-        v["nonce"].as_str().ok_or_else(|| err("missing nonce"))?
-    ).map_err(|_| err("invalid base64 in nonce"))?;
+    // nonce_b64 and batch_hash_hex already extracted above for replay check.
+    let nonce_bytes = b64.decode(nonce_b64)
+        .map_err(|_| err("invalid base64 in nonce"))?;
     let ciphertext = b64.decode(
         v["ciphertext"].as_str().ok_or_else(|| err("missing ciphertext"))?
     ).map_err(|_| err("invalid base64 in ciphertext"))?;
-    let batch_hash = hex::decode(
-        v["batch_hash"].as_str().ok_or_else(|| err("missing batch_hash"))?
-    ).map_err(|_| err("invalid hex in batch_hash"))?;
+    let batch_hash = hex::decode(batch_hash_hex)
+        .map_err(|_| err("invalid hex in batch_hash"))?;
 
     let eph_pubkey: [u8; 32] = eph_pubkey_bytes.try_into()
         .map_err(|_| err("ephemeral_pubkey wrong length"))?;
@@ -542,15 +609,6 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
 ///
 /// Secret values are NEVER stored in vault_log.db (F-02 invariant). They travel
 /// in-memory from decryption to vault application.
-/// Compute exponential backoff retry interval from deferred_count.
-fn defer_backoff(log: &crate::vault_log::VaultLog, entry_id: &str) -> u64 {
-    match log.deferred_count(entry_id).unwrap_or(0) {
-        0 => 30,
-        1..=3 => 60,
-        4..=10 => 300,
-        _ => 3600,
-    }
-}
 
 async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) {
     use base64::Engine;
@@ -678,7 +736,7 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                                     received_hash,
                                     "value_hash mismatch — deferring for retry"
                                 );
-                                let _ = log.defer_entry(entry_id, defer_backoff(log, entry_id));
+                                let _ = log.defer_entry_with_backoff(entry_id);
                                 continue;
                             }
                             v
@@ -697,13 +755,24 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                     None => {
                         // No value in batch — sender couldn't read it (value_hash
                         // mismatch on their end, or vault locked). Defer.
-                        let _ = log.defer_entry(entry_id, defer_backoff(log, entry_id));
+                        let _ = log.defer_entry_with_backoff(entry_id);
                         tracing::debug!(entry = entry_id, key, "set entry missing value, deferred");
                         continue;
                     }
                 };
 
                 // Apply to vault if profile is active.
+                //
+                // TRUST MODEL (H3-NEW): Replicated entries bypass the local
+                // per-daemon ACL (check_secret_access). This is by design —
+                // the ACL system gates which LOCAL daemons can read which keys,
+                // not which REMOTE installations can write. The security boundary
+                // for replication is the TOFU pin check in daemon-network: only
+                // Pinned/Bootstrap/Endorsed peers can deliver entries. An
+                // Unpinned or Revoked peer's frames are dropped at the transport
+                // layer before reaching daemon-secrets. Additionally, every
+                // entry is Ed25519-signed and value-hash-bound, so a relay
+                // cannot inject or modify entries without detection.
                 match ctx.vault_state.vault_for(&profile).await {
                     Ok(vault) => {
                         match vault.store().set(key, &value_bytes).await {
@@ -719,7 +788,7 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                     }
                     Err(_) => {
                         // Profile not active — defer with retry.
-                        let _ = log.defer_entry(entry_id, defer_backoff(log, entry_id));
+                        let _ = log.defer_entry_with_backoff(entry_id);
                         tracing::debug!(entry = entry_id, profile = profile_id, "profile not active, deferred set");
                     }
                 }
@@ -739,7 +808,7 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                         }
                     }
                     Err(_) => {
-                        let _ = log.defer_entry(entry_id, defer_backoff(log, entry_id));
+                        let _ = log.defer_entry_with_backoff(entry_id);
                         tracing::debug!(entry = entry_id, profile = profile_id, "profile not active, deferred delete");
                     }
                 }
@@ -845,12 +914,12 @@ pub async fn apply_deferred_entries(ctx: &mut MessageContext<'_>) {
                             }
                             Err(e) => {
                                 tracing::warn!(entry = %entry.id, error = %e, "failed to apply deferred delete");
-                                let _ = log.defer_entry(&entry.id, defer_backoff(log, &entry.id));
+                                let _ = log.defer_entry_with_backoff(&entry.id);
                             }
                         }
                     }
                     Err(_) => {
-                        let _ = log.defer_entry(&entry.id, defer_backoff(log, &entry.id));
+                        let _ = log.defer_entry_with_backoff(&entry.id);
                     }
                 }
             }

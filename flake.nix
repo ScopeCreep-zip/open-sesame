@@ -357,6 +357,39 @@
               };
             };
 
+            # Network daemon — federation transport (UDP/TCP, Noise XX).
+            # Requires secrets daemon for network identity keypair retrieval.
+            # PrivateNetwork is NOT set — this daemon needs real network access.
+            systemd.user.services.open-sesame-network = {
+              Unit = {
+                Description = "Open Sesame network transport daemon";
+                Documentation = "https://github.com/scopecreep-zip/open-sesame";
+                Requires = [ "open-sesame-profile.service" "open-sesame-secrets.service" ];
+                After = [ "open-sesame-profile.service" "open-sesame-secrets.service" ];
+                PartOf = [ "open-sesame-headless.target" ];
+              };
+              Service = {
+                Type = "notify";
+                ExecStart = "${headlessPkg}/bin/daemon-network";
+                Restart = "on-failure";
+                RestartSec = 5;
+                TimeoutStopSec = 5;
+                WatchdogSec = 30;
+                NoNewPrivileges = true;
+                ProtectHome = "read-only";
+                ProtectSystem = "strict";
+                ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
+                LimitNOFILE = 4096;
+                LimitCORE = 0;
+                LimitMEMLOCK = "64M";
+                MemoryMax = "128M";
+                Environment = [ "RUST_LOG=${cfg.logLevel}" ];
+              };
+              Install = {
+                WantedBy = [ "open-sesame-headless.target" ];
+              };
+            };
+
             # === Desktop-only daemons (skipped in headless mode) ===
 
             # Window manager daemon — overlay window switcher.
