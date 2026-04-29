@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub struct VaultSyncConfig {
     pub log_db_path: String,
     pub compaction_threshold: u32,
+    /// Retention window for vault log entries in seconds. Entries older than
+    /// this are eligible for compaction in single-node mode. Values below 60
+    /// produce a warning. Zero is rejected (disables compaction safety).
+    pub compaction_retention_secs: u64,
     pub max_clock_skew_secs: u32,
     pub sync_interval_secs: u32,
     pub reachability_timeout_secs: u32,
@@ -23,6 +27,7 @@ impl Default for VaultSyncConfig {
         Self {
             log_db_path: String::new(),
             compaction_threshold: 10_000,
+            compaction_retention_secs: 604_800, // 7 days
             max_clock_skew_secs: 300,
             sync_interval_secs: 300,
             reachability_timeout_secs: 30,

@@ -42,9 +42,19 @@ async fn main() -> anyhow::Result<()> {
         idle_loop().await;
     }
 
-    let (state, tcp_rx) = setup(listen_port, &network_config).await?;
+    let default_profile = core_config::load_config(None)
+        .map(|c| c.global.default_profile.to_string())
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to load config for default_profile — cannot replicate without it");
+            anyhow::anyhow!("config load failed: {e}")
+        })?;
+    if default_profile.is_empty() {
+        return Err(anyhow::anyhow!("default_profile is empty in config — cannot replicate without a profile name"));
+    }
+
+    let (state, tcp_rx, repl_rx) = setup(listen_port, &network_config).await?;
     notify_ready();
-    run_event_loop(state, tcp_rx, listen_port, &network_config).await
+    run_event_loop(state, tcp_rx, repl_rx, listen_port, &network_config, &default_profile).await
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +65,11 @@ async fn main() -> anyhow::Result<()> {
 async fn setup(
     listen_port: u16,
     config: &core_config::NetworkConfig,
-) -> anyhow::Result<(DaemonState, tokio::sync::mpsc::Receiver<transport::tcp::TcpInbound>)> {
+) -> anyhow::Result<(
+    DaemonState,
+    tokio::sync::mpsc::Receiver<transport::tcp::TcpInbound>,
+    tokio::sync::mpsc::Receiver<(String, String)>,
+)> {
     daemon_network::sandbox::apply_network_sandbox();
 
     let install_config = core_config::load_installation()
@@ -204,6 +218,7 @@ async fn setup(
     };
 
     let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
+    let (repl_tx, repl_rx) = tokio::sync::mpsc::channel::<(String, String)>(4096);
 
     Ok((DaemonState {
         udp_socket,
@@ -228,7 +243,10 @@ async fn setup(
         tcp_tx,
         require_known_peers: config.tofu.require_known_peers,
         gossip_hmac_key,
-    }, tcp_rx))
+        replication_watermarks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        replication_rate_limiter: std::sync::Mutex::new(std::collections::HashMap::new()),
+        replication_inbound_tx: repl_tx,
+    }, tcp_rx, repl_rx))
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +257,10 @@ async fn setup(
 async fn run_event_loop(
     mut state: DaemonState,
     mut tcp_rx: tokio::sync::mpsc::Receiver<transport::tcp::TcpInbound>,
+    mut repl_rx: tokio::sync::mpsc::Receiver<(String, String)>,
     listen_port: u16,
     config: &core_config::NetworkConfig,
+    default_profile: &str,
 ) -> anyhow::Result<()> {
     let (udp_tx, mut udp_rx) = tokio::sync::mpsc::channel::<transport::udp::UdpInbound>(4096);
     let udp_recv_socket = Arc::clone(&state.udp_socket);
@@ -293,6 +313,7 @@ async fn run_event_loop(
     let mut maintenance_tick = tokio::time::interval(std::time::Duration::from_secs(10));
     let mut dial_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut keepalive_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut replication_tick = tokio::time::interval(std::time::Duration::from_secs(60));
 
     loop {
         tokio::select! {
@@ -313,6 +334,27 @@ async fn run_event_loop(
             }
             Some(ipc_msg) = ipc_rx.recv() => {
                 dispatch::ipc::handle_ipc_message(ipc_msg, &state).await;
+            }
+            Some((install_id, envelope_json)) = repl_rx.recv() => {
+                // Forward received replication data to daemon-secrets via IPC.
+                let peer_uuid = match uuid::Uuid::parse_str(&install_id) {
+                    Ok(u) if !u.is_nil() => u,
+                    _ => {
+                        tracing::warn!(install_id, "dropping replication entry: peer installation ID is invalid or nil");
+                        continue;
+                    }
+                };
+                let client = state.bus_client.lock().await;
+                let _ = client.publish(
+                    core_types::EventKind::VaultLogEntryReceived {
+                        peer_installation_id: peer_uuid,
+                        entry_json: envelope_json,
+                    },
+                    core_types::SecurityLevel::Internal,
+                ).await;
+            }
+            _ = replication_tick.tick() => {
+                lifecycle::run_replication_pull(&state, default_profile).await;
             }
             _ = maintenance_tick.tick() => {
                 lifecycle::run_maintenance(&state);

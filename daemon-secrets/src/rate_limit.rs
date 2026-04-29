@@ -8,20 +8,26 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 /// Sentinel key for unregistered clients (no `verified_sender_name`).
-pub(crate) const ANONYMOUS_RATE_KEY: &str = "__anonymous__";
+pub const ANONYMOUS_RATE_KEY: &str = "__anonymous__";
 
 /// Per-requester rate limiter for secret operations.
 ///
 /// Uses governor's in-memory GCRA algorithm.
 /// Unregistered clients (CLI relay, `None` verified name) share a single
 /// `__anonymous__` bucket to prevent bypass via new-connection-per-request.
-pub(crate) struct SecretRateLimiter {
+pub struct SecretRateLimiter {
     limiters: HashMap<String, governor::DefaultDirectRateLimiter>,
     quota: governor::Quota,
 }
 
+impl Default for SecretRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecretRateLimiter {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         // 10 requests/sec with burst of 20.
         let quota = governor::Quota::per_second(NonZeroU32::new(10).expect("nonzero"))
             .allow_burst(NonZeroU32::new(20).expect("nonzero"));
@@ -35,7 +41,7 @@ impl SecretRateLimiter {
     ///
     /// Uses `verified_sender_name` from the bus server's Noise IK registry
     /// lookup. Unregistered clients share a single anonymous bucket.
-    pub(crate) fn check(&mut self, verified_sender_name: Option<&str>) -> bool {
+    pub fn check(&mut self, verified_sender_name: Option<&str>) -> bool {
         let key = verified_sender_name.unwrap_or(ANONYMOUS_RATE_KEY);
         let limiter = self
             .limiters

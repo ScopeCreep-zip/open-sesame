@@ -16,7 +16,7 @@ use core_types::{DaemonId, TrustProfileName};
 /// - Daemon name present but key not in list: DENIED.
 /// - Daemon name absent from map: ALLOWED (backward compatible default).
 /// - Unregistered client when ACL policy exists: DENIED.
-pub(crate) fn check_secret_access(
+pub fn check_secret_access(
     config: &core_config::Config,
     profile: &TrustProfileName,
     daemon_name: Option<&str>,
@@ -73,7 +73,7 @@ pub(crate) fn check_secret_access(
 /// - Daemon name present with non-empty list: ALLOWED (has at least some access).
 /// - Daemon name present with empty list: DENIED (explicit no-access).
 /// - Unregistered client (no verified_sender_name) when policy exists: DENIED.
-pub(crate) fn check_secret_list_access(
+pub fn check_secret_list_access(
     config: &core_config::Config,
     profile: &TrustProfileName,
     daemon_name: Option<&str>,
@@ -131,7 +131,7 @@ pub(crate) fn check_secret_list_access(
 /// registry — NOT self-declared capabilities. Expected requesters:
 /// "daemon-secrets" (self), "daemon-launcher" (env injection), or `None`
 /// (CLI relay via daemon-profile with Open clearance).
-pub(crate) fn check_secret_requester(requester: DaemonId, verified_name: Option<&str>) {
+pub fn check_secret_requester(requester: DaemonId, verified_name: Option<&str>) {
     if let Some(name) = verified_name {
         match name {
             "daemon-secrets" | "daemon-launcher" => {} // Expected requesters.
@@ -150,7 +150,7 @@ pub(crate) fn check_secret_requester(requester: DaemonId, verified_name: Option<
 }
 
 /// Emit a structured audit log entry for every secret operation.
-pub(crate) fn audit_secret_access(
+pub fn audit_secret_access(
     event_type: &str,
     requester: DaemonId,
     profile: &str,

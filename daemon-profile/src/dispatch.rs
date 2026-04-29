@@ -441,6 +441,7 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
         | EventKind::VaultLogEntryReceived { .. }
         | EventKind::VaultReplicationPullRequest { .. }
         | EventKind::VaultReplicationPullResponse { .. }
+        | EventKind::ReplicationPullProgressUpdate { .. }
         | EventKind::NetworkStatusRequest
         | EventKind::NetworkStatusResponse { .. }
         | EventKind::NetworkDialRequest { .. }

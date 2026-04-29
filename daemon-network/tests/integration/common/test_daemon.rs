@@ -162,6 +162,12 @@ impl TestDaemon {
             tcp_tx,
             require_known_peers: false,
             gossip_hmac_key: None,
+            replication_watermarks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            replication_rate_limiter: std::sync::Mutex::new(std::collections::HashMap::new()),
+            replication_inbound_tx: {
+                let (tx, _rx) = tokio::sync::mpsc::channel(16);
+                tx
+            },
         };
 
         Self {

@@ -871,14 +871,17 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "aws-lc-rs",
+ "base64",
  "blake2",
  "blake3",
  "core-memory",
  "core-types",
+ "hex",
  "hkdf",
  "hmac",
  "pbkdf2",
  "proptest",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -1593,6 +1596,7 @@ version = "1.9.5"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
+ "base64",
  "blake2",
  "blake3",
  "clap",
@@ -1663,6 +1667,7 @@ name = "daemon-secrets"
 version = "1.9.5"
 dependencies = [
  "anyhow",
+ "base64",
  "blake3",
  "clap",
  "core-auth",

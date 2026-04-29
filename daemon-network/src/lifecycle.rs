@@ -76,6 +76,52 @@ pub fn run_keepalives(state: &DaemonState) {
     }
 }
 
+/// Pull vault replication entries from daemon-secrets for each active peer.
+///
+/// Sends a `VaultReplicationPullRequest` per active session with the
+/// default profile name and the peer's last-known watermark. The response
+/// (`VaultReplicationPullResponse`) is handled by the IPC dispatch handler
+/// which re-encrypts and forwards to the peer.
+pub async fn run_replication_pull(state: &DaemonState, default_profile: &str) {
+    let sids = state.peer_table.session_ids();
+    if sids.is_empty() {
+        return;
+    }
+
+    for sid in &sids {
+        let Some(peer) = state.peer_table.get(sid) else { continue };
+        let peer_key = peer.remote_key_hex();
+        drop(peer);
+
+        // Look up the peer's installation ID from the TOFU store for
+        // watermark scoping (which peer's progress are we tracking).
+        let install_id = state.tofu_store.lock().ok()
+            .and_then(|store| {
+                store.lookup_key(&peer_key).ok()
+                    .flatten()
+                    .and_then(|p| p.installation_id)
+            });
+        let Some(peer_install_id) = install_id else {
+            continue;
+        };
+
+        // Read cached watermark for this peer (if any).
+        let watermark = state.replication_watermarks.lock().ok()
+            .and_then(|wm| wm.get(&peer_install_id).cloned());
+
+        let event = core_types::EventKind::VaultReplicationPullRequest {
+            profile_name: default_profile.to_string(),
+            peer_id: peer_install_id.clone(),
+            since_watermark_json: watermark,
+            max_entries: 100,
+        };
+        let client = state.bus_client.lock().await;
+        if let Err(e) = client.publish(event, core_types::SecurityLevel::Internal).await {
+            tracing::debug!(error = %e, session = %sid, "replication pull request failed");
+        }
+    }
+}
+
 /// Consume ready entries from the discovery dial queue and initiate handshakes.
 pub fn run_dial_queue(state: &DaemonState) {
     while let Some(entry) = state.discovery.queue.pop_ready() {

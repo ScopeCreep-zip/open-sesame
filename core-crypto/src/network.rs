@@ -149,6 +149,40 @@ pub fn chacha20_open(
     Ok(result)
 }
 
+/// HKDF context for vault replication re-encryption key derivation.
+///
+/// **WIRE FORMAT CONSTANT** — changing this string breaks compatibility
+/// with all existing peers. Bump the replication protocol version before
+/// changing. Both sender (daemon-network) and receiver (daemon-secrets)
+/// import this constant, so compile-time divergence is impossible.
+pub const REPLICATION_HKDF_CONTEXT: &[u8] = b"opensesame:vault:replication:v1";
+
+/// Build the AAD for vault replication re-encrypted envelopes.
+///
+/// Both the sender (daemon-network) and receiver (daemon-secrets) MUST use
+/// this function to construct the AAD for ChaCha20-Poly1305 seal/open.
+/// Any divergence between sender and receiver AAD causes every envelope to
+/// fail AEAD tag verification.
+///
+/// Layout: `batch_hash || timestamp_secs (LE u64) || session_id_len (LE u32) || session_id`
+///
+/// The length prefix on session_id prevents canonicalization attacks where
+/// a short session_id + trailing bytes could collide with a longer one.
+#[must_use]
+pub fn replication_envelope_aad(
+    batch_hash: &[u8],
+    timestamp_secs: u64,
+    session_id: &str,
+) -> Vec<u8> {
+    let sid_bytes = session_id.as_bytes();
+    let mut aad = Vec::with_capacity(batch_hash.len() + 8 + 4 + sid_bytes.len());
+    aad.extend_from_slice(batch_hash);
+    aad.extend_from_slice(&timestamp_secs.to_le_bytes());
+    aad.extend_from_slice(&(sid_bytes.len() as u32).to_le_bytes());
+    aad.extend_from_slice(sid_bytes);
+    aad
+}
+
 /// Seal plaintext with AES-256-GCM (governance-compatible AEAD).
 pub fn aes256gcm_seal(
     key: &[u8; 32],

@@ -10,8 +10,11 @@ use crate::transport::udp::UdpInbound;
 use core_types::FrameType;
 use std::sync::Arc;
 
+/// Maximum size of a replication frame payload before UTF-8 conversion.
+const MAX_REPLICATION_FRAME: usize = 256 * 1024;
+
 /// Dispatch an inbound UDP frame to the appropriate handler.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
     let frame = &inbound.frame;
     let src = inbound.src_addr;
@@ -62,12 +65,67 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                             peer.record_productive_recv(plaintext.len() as u64);
 
                             // Step 4: Path migration (only after AEAD success).
-                            if peer.remote_addr != src {
+                            if peer.remote_addr == src {
+                                drop(peer);
+                            } else {
                                 tracing::info!(session = %sid, old = %peer.remote_addr, new = %src, "path migration");
                                 let old_addr = peer.remote_addr;
                                 drop(peer);
                                 state.peer_table.update_addr(&sid, &old_addr, src);
                                 state.audit.append("path_migration", &format!("{sid} {src}"));
+                            }
+
+                            // Step 5: Route application-layer messages.
+                            // VaultReplication: [0x01, 0x00] prefix → forward to daemon-secrets.
+                            if plaintext.len() > 2 && plaintext[0] == 0x01 && plaintext[1] == 0x00
+                                && plaintext.len() <= MAX_REPLICATION_FRAME
+                            {
+                                // M-08: reject non-UTF-8 instead of silent lossy replacement.
+                                let envelope = if let Ok(s) = std::str::from_utf8(&plaintext[2..]) {
+                                    s.to_string()
+                                } else {
+                                    tracing::warn!(session = %sid, "replication frame not valid UTF-8, dropping");
+                                    return;
+                                };
+                                // Look up peer for rate limiting (E-02) and pin check (M-07).
+                                let remote_key = state.peer_table.get(&resolved_sid)
+                                    .map(|p| p.remote_key_hex());
+                                let install_id = remote_key.and_then(|key_hex| {
+                                    state.tofu_store.lock().ok()
+                                        .and_then(|store| store.lookup_key(&key_hex).ok().flatten())
+                                        .and_then(|peer| {
+                                            // M-07: only forward from pinned peers.
+                                            if peer.trust_level == core_types::TofuTrustLevel::Unpinned
+                                                || peer.trust_level == core_types::TofuTrustLevel::Revoked
+                                            {
+                                                return None;
+                                            }
+                                            peer.installation_id
+                                        })
+                                });
+                                if let Some(iid) = install_id {
+                                    // Per-installation rate limit check.
+                                    let allowed = {
+                                        let mut limiters = state.replication_rate_limiter.lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        let limiter = limiters.entry(iid.clone()).or_insert_with(|| {
+                                            governor::RateLimiter::direct(
+                                                governor::Quota::per_second(std::num::NonZeroU32::new(10).unwrap())
+                                                    .allow_burst(std::num::NonZeroU32::new(50).unwrap()),
+                                            )
+                                        });
+                                        limiter.check().is_ok()
+                                    };
+                                    if allowed {
+                                        if state.replication_inbound_tx.try_send((iid, envelope)).is_err() {
+                                            Metrics::inc(&state.metrics.frames_dropped_total);
+                                            tracing::warn!(session = %sid, "replication inbound channel full, entry dropped");
+                                        }
+                                    } else {
+                                        Metrics::inc(&state.metrics.rate_limited_total);
+                                        tracing::debug!(session = %sid, "replication entry rate-limited");
+                                    }
+                                }
                             }
                         }
                         Err(e) => {

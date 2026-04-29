@@ -637,21 +637,46 @@ pub enum EventKind {
     // -- Vault Replication (M3) --
     /// A replicated vault log entry received from a network peer.
     VaultLogEntryReceived {
-        profile_id: Uuid,
+        /// The installation ID of the peer that delivered this entry.
+        /// NOT a profile ID — the field was renamed from the original
+        /// `profile_id` to prevent confused-deputy misuse.
+        peer_installation_id: Uuid,
         entry_json: String,
     },
     /// Request vault log entries from daemon-secrets for replication serving.
     VaultReplicationPullRequest {
-        profile_id: Uuid,
+        /// Trust profile name to replicate (e.g. "work", "personal").
+        profile_name: String,
+        /// Opaque peer identifier echoed back in the response so the caller
+        /// can key per-peer watermark caches without correlating by `msg_id`.
+        #[serde(default)]
+        peer_id: String,
         #[serde(default)]
         since_watermark_json: Option<String>,
         max_entries: u32,
     },
     /// Response with vault log entries for replication.
     VaultReplicationPullResponse {
-        profile_id: Uuid,
+        profile_name: String,
+        /// Echoed from the request — the peer this response is for.
+        #[serde(default)]
+        peer_id: String,
         entries_json: String,
         has_more: bool,
+        /// HLC of the last returned entry, for the caller to cache as the
+        /// next pull's watermark. `None` if no entries matched.
+        #[serde(default)]
+        last_hlc_json: Option<String>,
+    },
+
+    /// Update pull progress for a peer after processing a pull response.
+    /// Sent by daemon-network to daemon-secrets so the `pull_progress` table
+    /// reflects where we left off pulling from each peer.
+    ReplicationPullProgressUpdate {
+        peer_id: String,
+        profile_name: String,
+        /// HLC JSON `{"wall_secs":N,"counter":N}` of the last entry in the batch.
+        last_hlc_json: String,
     },
 
     // -- RPC: Network Status (M2 CLI→daemon-network IPC) --
@@ -896,9 +921,10 @@ impl_event_debug! {
         VaultAuthQueryResponse { profile, enrolled_factors, auth_policy, partial_in_progress, received_factors },
         AccessDenied { reason },
         NetworkIdentityRequest,
-        VaultLogEntryReceived { profile_id, entry_json },
-        VaultReplicationPullRequest { profile_id, since_watermark_json, max_entries },
-        VaultReplicationPullResponse { profile_id, entries_json, has_more },
+        VaultLogEntryReceived { peer_installation_id, entry_json },
+        VaultReplicationPullRequest { profile_name, peer_id, since_watermark_json, max_entries },
+        VaultReplicationPullResponse { profile_name, peer_id, entries_json, has_more, last_hlc_json },
+        ReplicationPullProgressUpdate { peer_id, profile_name, last_hlc_json },
         NetworkStatusRequest,
         NetworkStatusResponse { active_sessions, tofu_peers, tofu_events, dial_queue_depth, listen_port, enabled },
         NetworkDialRequest { addr },

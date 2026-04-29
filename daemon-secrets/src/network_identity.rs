@@ -17,7 +17,7 @@ const NETWORK_IDENTITY_KEY: &str = "_network-identity-private";
 /// doesn't exist, generates a new X25519 keypair, stores it, and returns it.
 ///
 /// Returns `None` if the vault is locked or the operation fails.
-pub(crate) async fn handle_network_identity_request(
+pub async fn handle_network_identity_request(
     vault_state: &mut crate::vault::VaultState,
     default_profile: &TrustProfileName,
 ) -> Option<EventKind> {

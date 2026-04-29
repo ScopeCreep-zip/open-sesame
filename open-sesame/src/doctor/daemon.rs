@@ -153,6 +153,67 @@ pub fn checks() -> Vec<Check> {
                     description: String::new(),
                 });
             }
+
+            // IPC-based live health: query daemon-network for session count,
+            // listen port, and dial queue depth.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let ipc_result = std::thread::scope(|s| {
+                    s.spawn(|| {
+                        handle.block_on(async {
+                            let client = crate::ipc::connect().await.ok()?;
+                            let msg = tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                client.request(
+                                    core_types::EventKind::NetworkStatusRequest,
+                                    core_types::SecurityLevel::Internal,
+                                    std::time::Duration::from_secs(2),
+                                ),
+                            )
+                            .await
+                            .ok()?
+                            .ok()?;
+                            if let core_types::EventKind::NetworkStatusResponse {
+                                active_sessions,
+                                listen_port,
+                                dial_queue_depth,
+                                ..
+                            } = msg.payload
+                            {
+                                Some((active_sessions, listen_port, dial_queue_depth))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .join()
+                    .ok()
+                    .flatten()
+                });
+
+                if let Some((sessions, port, queue)) = ipc_result {
+                    results.push(Check {
+                        id: "daemon.network.sessions".into(),
+                        category: "daemon",
+                        status: Status::Pass,
+                        value: sessions.to_string(),
+                        description: String::new(),
+                    });
+                    results.push(Check {
+                        id: "daemon.network.listen_port".into(),
+                        category: "daemon",
+                        status: Status::Pass,
+                        value: port.to_string(),
+                        description: String::new(),
+                    });
+                    results.push(Check {
+                        id: "daemon.network.dial_queue".into(),
+                        category: "daemon",
+                        status: Status::Pass,
+                        value: queue.to_string(),
+                        description: String::new(),
+                    });
+                }
+            }
         }
     }
 

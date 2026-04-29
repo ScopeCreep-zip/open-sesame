@@ -42,6 +42,9 @@ pub struct Config {
     /// Extension policy configuration.
     pub extensions: ExtensionsConfig,
 
+    /// Vault replication and sync configuration.
+    pub vault_sync: VaultSyncConfig,
+
     /// System policy overrides (read-only at runtime).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policy: Vec<PolicyOverride>,
@@ -56,6 +59,7 @@ impl Default for Config {
             crypto: CryptoConfigToml::default(),
             agents: AgentsConfig::default(),
             extensions: ExtensionsConfig::default(),
+            vault_sync: VaultSyncConfig::default(),
             policy: Vec::new(),
         }
     }

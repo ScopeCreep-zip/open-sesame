@@ -3,6 +3,7 @@
 use crate::handshake::{self, HandshakeContext};
 use crate::send;
 use crate::state::DaemonState;
+use base64::Engine as _;
 use std::sync::Arc;
 
 /// Handle an inbound IPC bus message.
@@ -95,18 +96,128 @@ pub async fn handle_ipc_message(
                 swim_members: 0,
             })
         }
-        EventKind::VaultReplicationPullResponse { entries_json, .. } => {
-            let payload = entries_json.as_bytes();
+        EventKind::VaultReplicationPullResponse { entries_json, peer_id, last_hlc_json, profile_name, .. } => {
+            // Cache the watermark from this response keyed by peer_id so
+            // the next pull for this peer doesn't re-fetch from epoch 0.
+            if let Some(hlc_json) = &last_hlc_json
+                && !peer_id.is_empty()
+            {
+                // Cache locally for next pull request.
+                if let Ok(mut wm_map) = state.replication_watermarks.lock() {
+                    wm_map.insert(peer_id.clone(), hlc_json.clone());
+                }
+                // Publish to daemon-secrets so pull_progress table is updated.
+                let client = state.bus_client.lock().await;
+                let _ = client.publish(
+                    EventKind::ReplicationPullProgressUpdate {
+                        peer_id: peer_id.clone(),
+                        profile_name: profile_name.clone(),
+                        last_hlc_json: hlc_json.clone(),
+                    },
+                    core_types::SecurityLevel::Internal,
+                ).await;
+            }
+            // Per-destination re-encryption: for each active session, look up
+            // the peer's X25519 public key, generate an ephemeral keypair,
+            // ECDH + HKDF-BLAKE2b + ChaCha20-Poly1305 seal the entries with
+            // the entry batch ID as AAD. Each peer gets a unique ciphertext
+            // that only they can decrypt with their private key.
             let sids = state.peer_table.session_ids();
             for sid in &sids {
+                let peer_pubkey = {
+                    let Some(peer) = state.peer_table.get(sid) else { continue };
+                    let key_hex = peer.remote_key_hex();
+                    state.tofu_store.lock().ok()
+                        .and_then(|store| store.get_network_pubkey(&key_hex).ok().flatten())
+                };
+                let Some(dest_pubkey) = peer_pubkey else {
+                    state.audit.append("replication_skip", &format!("{sid} no_network_pubkey"));
+                    tracing::debug!(session = %sid, "skipping replication — no network pubkey for peer");
+                    continue;
+                };
+
+                // Ephemeral ECDH per destination.
+                let (eph_private, eph_public) = match core_crypto::network::generate_x25519_keypair() {
+                    Ok(kp) => kp,
+                    Err(e) => {
+                        state.audit.append("replication_error", &format!("{sid} keygen_failed {e}"));
+                        tracing::warn!(error = %e, session = %sid, "ephemeral keypair generation failed");
+                        continue;
+                    }
+                };
+                let shared = match core_crypto::network::x25519_dh(&eph_private, &dest_pubkey) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        state.audit.append("replication_error", &format!("{sid} ecdh_failed {e}"));
+                        tracing::warn!(error = %e, session = %sid, "ECDH failed for replication re-encryption");
+                        continue;
+                    }
+                };
+
+                // Derive encryption key via HKDF-BLAKE2b.
+                let enc_keys = core_crypto::network::hkdf_blake2b(
+                    shared.as_bytes(),
+                    core_crypto::network::REPLICATION_HKDF_CONTEXT,
+                    1,
+                );
+                let enc_key: [u8; 32] = match enc_keys[0].as_bytes().try_into() {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+
+                // Seal: ChaCha20-Poly1305. AAD binds ciphertext to the batch
+                // hash, timestamp, and session ID to prevent replay and
+                // cross-session substitution attacks.
+                let nonce = core_crypto::network::random_bytes::<12>();
+                let plaintext = entries_json.as_bytes();
+                let batch_hash = blake3::hash(plaintext);
+                let timestamp_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let sid_str = sid.to_string();
+
+                let aad = core_crypto::network::replication_envelope_aad(
+                    batch_hash.as_bytes(),
+                    timestamp_secs,
+                    &sid_str,
+                );
+
+                let ciphertext = match core_crypto::network::chacha20_seal(
+                    &enc_key, &nonce, &aad, plaintext,
+                ) {
+                    Ok(ct) => ct,
+                    Err(e) => {
+                        state.audit.append("replication_error", &format!("{sid} seal_failed {e}"));
+                        tracing::warn!(error = %e, session = %sid, "re-encryption seal failed");
+                        continue;
+                    }
+                };
+
+                // Build a JSON envelope with base64-encoded fields so the
+                // IPC path (which uses String fields) can carry the binary
+                // payload without encoding issues.
+                let b64 = base64::engine::general_purpose::STANDARD;
+                let envelope = serde_json::json!({
+                    "reencrypted": true,
+                    "ephemeral_pubkey": b64.encode(eph_public),
+                    "nonce": b64.encode(nonce),
+                    "ciphertext": b64.encode(&ciphertext),
+                    "batch_hash": hex::encode(batch_hash.as_bytes()),
+                    "timestamp_secs": timestamp_secs,
+                    "session_id": sid_str,
+                });
+                let envelope_str = serde_json::to_string(&envelope).unwrap_or_default();
+
+                // Frame with NetworkMessageType::VaultReplication prefix.
+                let mut framed = vec![0x01, 0x00];
+                framed.extend_from_slice(envelope_str.as_bytes());
+
                 let table = Arc::clone(&state.peer_table);
                 let socket = Arc::clone(&state.udp_socket);
                 let metrics = Arc::clone(&state.metrics);
                 let sid = *sid;
-                let data = payload.to_vec();
                 tokio::spawn(async move {
-                    let mut framed = vec![0x01, 0x00];
-                    framed.extend_from_slice(&data);
                     let _ = send::send_data(&sid, &framed, &table, &socket, &metrics).await;
                 });
             }

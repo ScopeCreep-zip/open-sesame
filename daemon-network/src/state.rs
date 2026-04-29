@@ -77,4 +77,16 @@ pub struct DaemonState {
     /// `gossip_secret`). When `None`, SWIM gossip is disabled entirely —
     /// unauthenticated gossip is not permitted.
     pub gossip_hmac_key: Option<[u8; 32]>,
+    /// Per-peer replication watermark cache. Key: peer installation ID.
+    /// Value: HLC watermark JSON from the last `VaultReplicationPullResponse`.
+    /// Used to avoid re-fetching the entire log on each pull cycle.
+    pub replication_watermarks: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// Per-installation rate limiter for received replication entries (E-02).
+    /// Keyed on installation ID (not session ID) to prevent bypass via
+    /// multiple sessions from the same identity.
+    pub replication_rate_limiter: std::sync::Mutex<std::collections::HashMap<String, governor::DefaultDirectRateLimiter>>,
+    /// Channel for forwarding received replication data from sync UDP/TCP
+    /// handlers to the async event loop for IPC publishing. The sync handlers
+    /// can't call `bus_client.publish().await` directly.
+    pub replication_inbound_tx: tokio::sync::mpsc::Sender<(String, String)>, // (installation_id, envelope_json)
 }

@@ -65,6 +65,7 @@ clap = { workspace = true }
 dirs = { workspace = true }
 hex = { workspace = true }
 equix = { workspace = true }
+base64 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }

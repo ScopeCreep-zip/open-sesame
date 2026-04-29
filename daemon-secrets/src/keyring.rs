@@ -21,7 +21,7 @@ use crate::key_locker_linux;
 const KEYLOCKER_SERVICE: &str = "pds";
 
 /// Per-profile keyring account name.
-pub(crate) fn keylocker_account(profile: &TrustProfileName) -> String {
+pub fn keylocker_account(profile: &TrustProfileName) -> String {
     format!("vault-key-{profile}")
 }
 
@@ -29,7 +29,7 @@ pub(crate) fn keylocker_account(profile: &TrustProfileName) -> String {
 ///
 /// Wire format: `[12-byte random nonce][ciphertext + 16-byte GCM tag]`
 #[cfg(target_os = "linux")]
-pub(crate) async fn keyring_store_profile(
+pub async fn keyring_store_profile(
     master_key: &SecureBytes,
     password: &[u8],
     salt: &[u8],
@@ -86,7 +86,7 @@ pub(crate) async fn keyring_store_profile(
 
 /// Retrieve and unwrap a profile's master key from the platform keyring.
 #[cfg(target_os = "linux")]
-pub(crate) async fn keyring_retrieve_profile(
+pub async fn keyring_retrieve_profile(
     password: &[u8],
     salt: &[u8],
     profile: &TrustProfileName,
@@ -156,7 +156,7 @@ pub(crate) async fn keyring_retrieve_profile(
 
 /// Delete a specific profile's wrapped key from the platform keyring.
 #[cfg(target_os = "linux")]
-pub(crate) async fn keyring_delete_profile(profile: &TrustProfileName) {
+pub async fn keyring_delete_profile(profile: &TrustProfileName) {
     use core_secrets::KeyLocker;
 
     let bus = match platform_linux::dbus::SessionBus::connect().await {
@@ -176,7 +176,7 @@ pub(crate) async fn keyring_delete_profile(profile: &TrustProfileName) {
 
 /// Delete wrapped keys for all given profiles from the platform keyring (best-effort).
 #[cfg(target_os = "linux")]
-pub(crate) async fn keyring_delete_all(profiles: &[TrustProfileName]) {
+pub async fn keyring_delete_all(profiles: &[TrustProfileName]) {
     use core_secrets::KeyLocker;
 
     let bus = match platform_linux::dbus::SessionBus::connect().await {

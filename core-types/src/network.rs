@@ -161,10 +161,10 @@ pub enum VaultLogOp {
 /// are declared in sort-priority order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HlcTimestamp {
-    /// Coarse wall clock (Unix epoch seconds). `u32` covers until 2106.
-    pub wall_secs: u32,
+    /// Coarse wall clock (Unix epoch seconds). `u64` avoids Y2106 overflow.
+    pub wall_secs: u64,
     /// Per-wall-second logical counter for ordering within the same second.
-    pub counter: u32,
+    pub counter: u64,
     /// First 8 bytes of `InstallationId.id` UUID. Tiebreaker for identical
     /// `(wall_secs, counter)` pairs from different nodes.
     pub node_id: [u8; 8],
@@ -185,13 +185,13 @@ impl HlcTimestamp {
     ///
     /// Guarantees the returned timestamp is strictly greater than the
     /// previous value of `local`.
-    pub fn tick(local: &mut Self, wall_now: u32) -> Self {
+    pub fn tick(local: &mut Self, wall_now: u64) -> Self {
         if wall_now > local.wall_secs {
             local.wall_secs = wall_now;
             local.counter = 0;
         } else {
             local.counter = local.counter.saturating_add(1);
-            if local.counter == u32::MAX {
+            if local.counter == u64::MAX {
                 local.wall_secs = local.wall_secs.saturating_add(1);
                 local.counter = 0;
             }
@@ -203,7 +203,7 @@ impl HlcTimestamp {
     ///
     /// Guarantees the returned timestamp is strictly greater than both
     /// the previous `local` value and `recv_ts`.
-    pub fn receive(local: &mut Self, recv_ts: &Self, wall_now: u32) -> Self {
+    pub fn receive(local: &mut Self, recv_ts: &Self, wall_now: u64) -> Self {
         let max_wall = wall_now.max(local.wall_secs).max(recv_ts.wall_secs);
         if max_wall > local.wall_secs && max_wall > recv_ts.wall_secs {
             local.wall_secs = max_wall;

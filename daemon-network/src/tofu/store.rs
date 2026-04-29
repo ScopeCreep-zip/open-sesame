@@ -415,6 +415,24 @@ impl TofuStore {
         Ok(())
     }
 
+    /// Look up a peer's X25519 network public key by their TOFU public key hex.
+    ///
+    /// The network public key is the same as the TOFU `public_key_hex` — it's
+    /// the X25519 static key from the Noise handshake. This method returns it
+    /// as a 32-byte array for use in re-encryption ECDH.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TofuStoreError::Sqlite` if the query fails, or `None` if the
+    /// peer is not found or the key hex is invalid.
+    pub fn get_network_pubkey(&self, public_key_hex: &str) -> Result<Option<[u8; 32]>, TofuStoreError> {
+        let peer = self.lookup_key(public_key_hex)?;
+        Ok(peer.and_then(|p| {
+            let bytes = hex::decode(&p.public_key_hex).ok()?;
+            <[u8; 32]>::try_from(bytes).ok()
+        }))
+    }
+
     /// Expire TOFU pins whose `pin_expires_at` has passed.
     ///
     /// Sets expired peers to `Unpinned` and logs an event. Called from the
