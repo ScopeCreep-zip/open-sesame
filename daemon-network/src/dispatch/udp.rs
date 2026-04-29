@@ -39,7 +39,8 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                 return;
             };
             if let Some(mut peer) = state.peer_table.get_mut(&resolved_sid) {
-                match peer.replay_window.check_and_update(frame.sequence) {
+                // Step 1: Tentative replay check (read-only — no state mutation).
+                match peer.replay_window.check(frame.sequence) {
                     ReplayCheck::Accept => {}
                     ReplayCheck::Duplicate | ReplayCheck::TooOld => {
                         Metrics::inc(&state.metrics.replay_detected_total);
@@ -47,22 +48,31 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                     }
                 }
 
-                if peer.remote_addr != src {
-                    tracing::info!(session = %sid, old = %peer.remote_addr, new = %src, "path migration");
-                    let old_addr = peer.remote_addr;
-                    drop(peer);
-                    state.peer_table.update_addr(&sid, &old_addr, src);
-                    state.audit.append("path_migration", &format!("{sid} {src}"));
-                    return;
-                }
-
+                // Step 2: AEAD verification. This is the authentication gate —
+                // no session state is mutated until the frame body is proven
+                // authentic. An attacker who can observe the plaintext header
+                // (session ID, sequence number) cannot forge a frame that
+                // passes this check without the session's symmetric key.
                 if ft == FrameType::Data {
                     match peer.transport.decrypt(&frame.body) {
                         Ok(plaintext) => {
+                            // Step 3: Commit replay window (AEAD proved authenticity).
+                            peer.replay_window.accept(frame.sequence);
                             #[allow(clippy::cast_possible_truncation)]
                             peer.record_productive_recv(plaintext.len() as u64);
+
+                            // Step 4: Path migration (only after AEAD success).
+                            if peer.remote_addr != src {
+                                tracing::info!(session = %sid, old = %peer.remote_addr, new = %src, "path migration");
+                                let old_addr = peer.remote_addr;
+                                drop(peer);
+                                state.peer_table.update_addr(&sid, &old_addr, src);
+                                state.audit.append("path_migration", &format!("{sid} {src}"));
+                            }
                         }
                         Err(e) => {
+                            // AEAD failed — do NOT commit replay window or
+                            // update address. The frame is unauthenticated.
                             peer.record_aead_failure();
                             Metrics::inc(&state.metrics.aead_failures_total);
                             tracing::warn!(session = %sid, %src, error = %e, "AEAD failure");
@@ -70,28 +80,73 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                         }
                     }
                 } else {
-                    peer.record_recv(0);
+                    // KeepAlive: empty body, still AEAD-sealed.
+                    match peer.transport.decrypt(&frame.body) {
+                        Ok(_) => {
+                            peer.replay_window.accept(frame.sequence);
+                            peer.record_recv(0);
+                            if peer.remote_addr != src {
+                                tracing::info!(session = %sid, old = %peer.remote_addr, new = %src, "path migration");
+                                let old_addr = peer.remote_addr;
+                                drop(peer);
+                                state.peer_table.update_addr(&sid, &old_addr, src);
+                                state.audit.append("path_migration", &format!("{sid} {src}"));
+                            }
+                        }
+                        Err(e) => {
+                            peer.record_aead_failure();
+                            Metrics::inc(&state.metrics.aead_failures_total);
+                            tracing::warn!(session = %sid, %src, error = %e, "KeepAlive AEAD failure");
+                        }
+                    }
                 }
             } else {
                 Metrics::inc(&state.metrics.frames_dropped_total);
             }
         }
 
+        // Close and RehandshakeRequest must also be AEAD-verified before
+        // acting on them. Without AEAD, an attacker who observes the
+        // 12-byte session ID in the plaintext header can forge a Close
+        // frame and tear down any session.
         FrameType::Close => {
             let sid = WireSessionId(frame.session_id.0);
-            if state.peer_table.get(&sid).is_some() {
-                state.peer_table.remove(&sid);
-                Metrics::inc(&state.metrics.sessions_closed_total);
-                tracing::info!(session = %sid, %src, "session closed by peer");
-                state.audit.append("session_closed", &format!("{sid} {src}"));
+            if let Some(mut peer) = state.peer_table.get_mut(&sid) {
+                match peer.transport.decrypt(&frame.body) {
+                    Ok(_) => {
+                        drop(peer);
+                        state.peer_table.remove(&sid);
+                        Metrics::inc(&state.metrics.sessions_closed_total);
+                        tracing::info!(session = %sid, %src, "session closed by peer (AEAD verified)");
+                        state.audit.append("session_closed", &format!("{sid} {src}"));
+                    }
+                    Err(e) => {
+                        peer.record_aead_failure();
+                        Metrics::inc(&state.metrics.aead_failures_total);
+                        tracing::warn!(session = %sid, %src, error = %e, "spoofed Close frame rejected");
+                        state.audit.append("spoofed_close_rejected", &format!("{sid} {src}"));
+                    }
+                }
             }
         }
 
         FrameType::RehandshakeRequest => {
             let sid = WireSessionId(frame.session_id.0);
-            tracing::info!(session = %sid, "rehandshake requested by peer");
-            state.peer_table.remove(&sid);
-            state.audit.append("rehandshake_requested", &format!("{sid}"));
+            if let Some(mut peer) = state.peer_table.get_mut(&sid) {
+                match peer.transport.decrypt(&frame.body) {
+                    Ok(_) => {
+                        drop(peer);
+                        state.peer_table.remove(&sid);
+                        tracing::info!(session = %sid, "rehandshake requested (AEAD verified)");
+                        state.audit.append("rehandshake_requested", &format!("{sid}"));
+                    }
+                    Err(e) => {
+                        peer.record_aead_failure();
+                        Metrics::inc(&state.metrics.aead_failures_total);
+                        tracing::warn!(session = %sid, %src, error = %e, "spoofed RehandshakeRequest rejected");
+                    }
+                }
+            }
         }
 
         FrameType::CookieResponse => {

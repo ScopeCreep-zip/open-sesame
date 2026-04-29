@@ -106,6 +106,7 @@ mainline        = { version = "6", features = ["async"] }
 foca            = { version = "1", features = ["std", "postcard-codec"] }
 hickory-resolver = { version = "0.25", features = ["tokio"] }
 bs58             = "0.5"
+base64           = "0.22"
 pbkdf2          = "0.12"
 sha2            = "0.10"
 hmac            = "0.12"

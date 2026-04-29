@@ -30,11 +30,62 @@ impl ReplayWindow {
         Self { top: 0, window: 0 }
     }
 
+    /// Check a sequence number WITHOUT committing the window update.
+    ///
+    /// Returns `Accept` if the sequence number is fresh (not duplicate, not
+    /// too old). The caller must call [`accept`] after AEAD verification
+    /// succeeds to commit the window state. If AEAD fails, the window is
+    /// unchanged — an unauthenticated frame cannot poison the replay state.
+    #[must_use]
+    pub fn check(&self, seq: u32) -> ReplayCheck {
+        if seq == 0 && self.top == 0 && self.window == 0 {
+            return ReplayCheck::Accept;
+        }
+        if seq > self.top {
+            ReplayCheck::Accept
+        } else {
+            let offset = self.top - seq;
+            if offset >= 64 {
+                ReplayCheck::TooOld
+            } else if self.window & (1u64 << offset) != 0 {
+                ReplayCheck::Duplicate
+            } else {
+                ReplayCheck::Accept
+            }
+        }
+    }
+
+    /// Commit a sequence number to the window after AEAD verification.
+    ///
+    /// Must only be called after [`check`] returned `Accept` AND AEAD
+    /// verification succeeded. This is the only method that mutates the
+    /// replay window state.
+    pub fn accept(&mut self, seq: u32) {
+        if seq == 0 && self.top == 0 && self.window == 0 {
+            self.window = 1;
+            return;
+        }
+        if seq > self.top {
+            let advance = seq - self.top;
+            if advance >= 64 {
+                self.window = 1;
+            } else {
+                self.window <<= advance;
+                self.window |= 1;
+            }
+            self.top = seq;
+        } else {
+            let offset = self.top - seq;
+            if offset < 64 {
+                self.window |= 1u64 << offset;
+            }
+        }
+    }
+
     /// Check a sequence number and update the window if accepted.
     ///
-    /// Must be called BEFORE AEAD verification. If this returns `Accept`,
-    /// proceed to AEAD. If AEAD fails, the window state is already updated —
-    /// this is acceptable because the sequence number is consumed regardless.
+    /// Combined check+commit for callers that don't need the split
+    /// (e.g. unit tests, contexts where AEAD is guaranteed).
     pub fn check_and_update(&mut self, seq: u32) -> ReplayCheck {
         if seq == 0 && self.top == 0 && self.window == 0 {
             // First packet ever — accept sequence 0.

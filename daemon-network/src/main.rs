@@ -192,9 +192,16 @@ async fn setup(
         .unwrap_or_default()
         .join("pds")
         .join("bootstrap.json");
-    if let Ok(targets) = daemon_discovery::bootstrap::load_bootstrap(&bootstrap_path) {
-        discovery.load_bootstrap(&targets);
-    }
+    let gossip_hmac_key = match daemon_discovery::bootstrap::load_bootstrap(&bootstrap_path) {
+        Ok(result) => {
+            discovery.load_bootstrap(&result.targets);
+            result.gossip_hmac_key
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "bootstrap.json load failed");
+            None
+        }
+    };
 
     let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
 
@@ -215,10 +222,12 @@ async fn setup(
         idle_timeout_secs: u64::from(config.session.idle_timeout_secs),
         rekey_interval_secs: 120,
         bep44_enabled: config.discovery.bep44.enabled,
-        dns_srv_domains: config.discovery.dns_srv.domains.clone(),
+        dns_srv_domains: Arc::new(std::sync::RwLock::new(config.discovery.dns_srv.domains.clone())),
         identity,
         signing_seed,
         tcp_tx,
+        require_known_peers: config.tofu.require_known_peers,
+        gossip_hmac_key,
     }, tcp_rx))
 }
 
@@ -378,10 +387,31 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                     srv_ttl,
                     ptr_ttl,
                 };
+                let s_probe = Arc::clone(&socket);
                 tokio::spawn(async move {
                     daemon_discovery::mdns::listen::mdns_listen_loop(
                         socket, listen_config, peer_tx,
                     ).await;
+                });
+
+                // Active mDNS query probing: send PTR queries on startup and
+                // periodically (every ptr_ttl seconds) to discover peers that
+                // started before us or whose announcements we missed.
+                tokio::spawn(async move {
+                    // Initial probe — immediate.
+                    let query = daemon_discovery::mdns::packet::DnsPacket::query(
+                        daemon_discovery::mdns::announce::SERVICE_TYPE,
+                    );
+                    let _ = daemon_discovery::mdns::announce::send_multicast(&s_probe, &query).await;
+                    // Periodic probes.
+                    let interval = std::time::Duration::from_secs(u64::from(ptr_ttl));
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        let q = daemon_discovery::mdns::packet::DnsPacket::query(
+                            daemon_discovery::mdns::announce::SERVICE_TYPE,
+                        );
+                        let _ = daemon_discovery::mdns::announce::send_multicast(&s_probe, &q).await;
+                    }
                 });
 
                 tokio::spawn(async move {
@@ -395,10 +425,13 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                                 );
                             }
                             daemon_discovery::mdns::listen::MdnsPeerEvent::Goodbye { addr } => {
-                                mgr.remove_peer(
-                                    addr,
-                                    daemon_discovery::queue::DiscoverySource::Mdns,
-                                );
+                                // Only remove from the dial queue — do NOT tear
+                                // down active sessions. mDNS is unauthenticated
+                                // (multicast UDP, any LAN device can forge a
+                                // goodbye). Session teardown requires Noise-
+                                // authenticated Close frame or idle timeout.
+                                mgr.queue.remove(&addr);
+                                tracing::info!(%addr, "mDNS goodbye — removed from dial queue");
                             }
                         }
                     }
@@ -493,13 +526,18 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
     }
 
     if disc.dns_srv.enabled && !disc.dns_srv.domains.is_empty() {
-        let domains = disc.dns_srv.domains.clone();
+        let domains = Arc::clone(&state.dns_srv_domains);
         let interval = std::time::Duration::from_secs(u64::from(disc.dns_srv.min_refresh_secs));
         let mgr = Arc::clone(&state.discovery);
 
         tokio::spawn(async move {
             loop {
-                for domain in &domains {
+                // Read the current domain list (hot-reloadable via
+                // NetworkDiscoveryReloadRequest).
+                let current_domains = domains.read()
+                    .map(|d| d.clone())
+                    .unwrap_or_default();
+                for domain in &current_domains {
                     match daemon_discovery::dns_srv::resolve_srv(domain).await {
                         Ok(peers) => {
                             for peer in peers {
@@ -522,6 +560,17 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
         tracing::info!(domains = ?disc.dns_srv.domains, "DNS SRV discovery started");
     }
 
+    // SWIM gossip: only enabled when a shared gossip_secret is configured
+    // in bootstrap.json. Unauthenticated gossip is not permitted — an
+    // attacker on the network could inject MemberUp/MemberDown events to
+    // poison the membership list. Generate a key with `sesame network keygen`.
+    let Some(gossip_hmac_key) = state.gossip_hmac_key else {
+        tracing::info!(
+            "SWIM gossip disabled — no gossip_secret in bootstrap.json. \
+             Generate one with: sesame network keygen"
+        );
+        return;
+    };
     let gossip_port = config.transport.gossip_port;
     let pubkey_prefix = hex::encode(&state.local_keypair.public[..8]);
     let gossip_addr: std::net::SocketAddr = format!("[::]:{gossip_port}").parse().unwrap();
@@ -544,8 +593,19 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
             key_prefix: pubkey_prefix,
         };
         let swim_config = daemon_discovery::gossip::swim::default_swim_config();
-        let mut swim = daemon_discovery::gossip::runtime::new_swim(identity, swim_config);
+        let mut swim = daemon_discovery::gossip::runtime::new_swim(identity.clone(), swim_config);
         let mut runtime = daemon_discovery::gossip::runtime::AccumulatingRuntime::new();
+
+        // Seed SWIM with known peers from the dial queue so probing starts
+        // immediately instead of waiting for inbound gossip.
+        for entry in mgr_swim.queue.snapshot_addrs() {
+            let seed_id = daemon_discovery::gossip::swim::PeerId {
+                addr: entry,
+                generation: 0,
+                key_prefix: String::new(),
+            };
+            let _ = swim.announce(seed_id, &mut runtime);
+        }
 
         let mut pending_timers: std::collections::BinaryHeap<SwimTimerEntry> =
             std::collections::BinaryHeap::new();
@@ -562,7 +622,21 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
             tokio::select! {
                 result = gossip_socket.recv_from(&mut buf) => {
                     if let Ok((len, _src)) = result {
-                        let _ = swim.handle_data(&buf[..len], &mut runtime);
+                        // Verify HMAC-BLAKE3 tag (last 32 bytes).
+                        if len < 32 {
+                            continue; // Too short — no HMAC tag.
+                        }
+                        let payload_len = len - 32;
+                        let received_tag = &buf[payload_len..len];
+                        let expected_tag = blake3::keyed_hash(
+                            &gossip_hmac_key,
+                            &buf[..payload_len],
+                        );
+                        if received_tag != expected_tag.as_bytes() {
+                            tracing::trace!("SWIM gossip: dropped unauthenticated packet");
+                            continue;
+                        }
+                        let _ = swim.handle_data(&buf[..payload_len], &mut runtime);
                     }
                 }
                 () = tokio::time::sleep_until(next_deadline) => {
@@ -576,7 +650,12 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
             }
 
             while let Some((dest, data)) = runtime.to_send() {
-                let _ = gossip_socket.send_to(&data, dest.addr()).await;
+                // Append HMAC-BLAKE3 tag to outgoing gossip packets.
+                let tag = blake3::keyed_hash(&gossip_hmac_key, &data);
+                let mut tagged = Vec::with_capacity(data.len() + 32);
+                tagged.extend_from_slice(&data);
+                tagged.extend_from_slice(tag.as_bytes());
+                let _ = gossip_socket.send_to(&tagged, dest.addr()).await;
             }
             while let Some((delay, timer)) = runtime.to_schedule() {
                 let deadline = tokio::time::Instant::now() + delay;
@@ -594,10 +673,14 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                     }
                     foca::OwnedNotification::MemberDown(peer) => {
                         tracing::info!(peer = %peer, "SWIM member down");
-                        mgr_swim.remove_peer(
-                            peer.addr,
-                            daemon_discovery::queue::DiscoverySource::Bootstrap,
-                        );
+                        // Only remove from the dial queue — do NOT tear down
+                        // active sessions. SWIM gossip is unauthenticated (raw
+                        // UDP, no Noise encryption), so a spoofed MemberDown
+                        // must not be able to close an authenticated session.
+                        // Session teardown happens only through the Noise-
+                        // authenticated transport: Close frame, idle timeout,
+                        // or rekey sweep.
+                        mgr_swim.queue.remove(&peer.addr);
                     }
                     _ => {}
                 }

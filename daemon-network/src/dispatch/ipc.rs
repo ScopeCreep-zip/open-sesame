@@ -87,7 +87,9 @@ pub async fn handle_ipc_message(
             Some(EventKind::NetworkDiscoverResponse {
                 mdns_peers: state.discovery.mdns_peer_count(),
                 bep44_published: state.bep44_enabled && state.signing_seed.is_some(),
-                dns_srv_domains: state.dns_srv_domains.clone(),
+                dns_srv_domains: state.dns_srv_domains.read()
+                    .map(|d| d.clone())
+                    .unwrap_or_default(),
                 #[allow(clippy::cast_possible_truncation)]
                 dial_queue_depth: state.discovery.queue_depth() as u32,
                 swim_members: 0,
@@ -109,6 +111,34 @@ pub async fn handle_ipc_message(
                 });
             }
             None
+        }
+        EventKind::NetworkDiscoveryReloadRequest => {
+            // Reload bootstrap.json.
+            let bootstrap_path = dirs::config_dir()
+                .unwrap_or_default()
+                .join("pds")
+                .join("bootstrap.json");
+            let mut added: u32 = 0;
+            if let Ok(result) = daemon_discovery::bootstrap::load_bootstrap(&bootstrap_path) {
+                for target in &result.targets {
+                    if state.discovery.queue.push(daemon_discovery::queue::DialEntry {
+                        addr: target.addr,
+                        source: daemon_discovery::queue::DiscoverySource::Bootstrap,
+                        advisory_pubkey_hex: target.public_key_hex.clone(),
+                        next_dial_at: std::time::Instant::now(),
+                        consecutive_failures: 0,
+                    }) {
+                        added += 1;
+                    }
+                }
+            }
+            // Reload DNS SRV domains from network config.
+            let network_config = crate::config::load_network_config();
+            if let Ok(mut domains) = state.dns_srv_domains.write() {
+                *domains = network_config.discovery.dns_srv.domains;
+            }
+            state.audit.append("discovery_reload", &format!("added={added}"));
+            Some(EventKind::NetworkDiscoveryReloadResponse { added })
         }
         EventKind::NetworkUnpinRequest { public_key_hex } => {
             let result = state.tofu_store.lock()

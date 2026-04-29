@@ -131,8 +131,10 @@ fn peer_removed_clears_queue_entry() {
 }
 
 #[tokio::test]
-async fn discovery_event_peer_removed_tears_down_session() {
-    // Verify that PeerRemoved removes a session from the peer table.
+async fn peer_table_remove_by_address_lookup() {
+    // Verify that a session can be found by address and removed from the
+    // peer table. This is the mechanism used by authenticated removal paths
+    // (Close frame AEAD verification, operator unpin, idle timeout).
     let kp_a = snow::Builder::new(state::NOISE_XX.parse().unwrap())
         .generate_keypair()
         .unwrap();

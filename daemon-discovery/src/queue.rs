@@ -154,6 +154,15 @@ impl DialQueue {
         heap.len() < before
     }
 
+    /// Snapshot all addresses currently in the queue.
+    ///
+    /// Used to seed SWIM gossip with known peers at startup.
+    #[must_use]
+    pub fn snapshot_addrs(&self) -> Vec<SocketAddr> {
+        let heap = self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        heap.iter().map(|e| e.addr).collect()
+    }
+
     /// Whether the queue is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {

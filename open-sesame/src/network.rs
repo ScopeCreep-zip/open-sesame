@@ -10,6 +10,8 @@ pub(crate) async fn cmd_network(sub: NetworkCmd) -> anyhow::Result<()> {
         NetworkCmd::Identity { json } => cmd_identity(json).await,
         NetworkCmd::Peers { unpin } => cmd_peers(unpin.as_deref()).await,
         NetworkCmd::Discover => cmd_discover().await,
+        NetworkCmd::Keygen => cmd_keygen(),
+        NetworkCmd::Reload => cmd_reload().await,
         NetworkCmd::Status => cmd_status().await,
         NetworkCmd::Dial { addr } => cmd_dial(&addr).await,
     }
@@ -59,6 +61,46 @@ async fn cmd_dial(addr: &str) -> anyhow::Result<()> {
         Err(e) => {
             println!("  IPC request failed: {e}");
             println!("  Is daemon-network running?");
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate a random 32-byte gossip authentication key.
+///
+/// The key is printed as base64. Add it to every installation's
+/// `bootstrap.json` as the `gossip_secret` field to enable
+/// HMAC-BLAKE3 authenticated SWIM gossip.
+fn cmd_keygen() -> anyhow::Result<()> {
+    use base64::Engine;
+    let key = core_crypto::network::random_bytes::<32>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+    println!("{encoded}");
+    Ok(())
+}
+
+/// Reload bootstrap.json and DNS SRV configuration via IPC.
+async fn cmd_reload() -> anyhow::Result<()> {
+    let client = crate::ipc::connect().await?;
+    let response = client
+        .request(
+            core_types::EventKind::NetworkDiscoveryReloadRequest,
+            core_types::SecurityLevel::Internal,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+    match response {
+        Ok(msg) => match msg.payload {
+            core_types::EventKind::NetworkDiscoveryReloadResponse { added } => {
+                println!("Discovery reloaded: {added} new peers added to dial queue");
+            }
+            _ => println!("Unexpected response from daemon-network"),
+        },
+        Err(e) => {
+            println!("IPC request failed: {e}");
+            println!("Is daemon-network running?");
         }
     }
 

@@ -30,6 +30,10 @@ path = "tests/integration/discovery.rs"
 name = "lifecycle"
 path = "tests/integration/lifecycle.rs"
 
+[[test]]
+name = "noise_vectors"
+path = "tests/integration/noise_vectors.rs"
+
 [dependencies]
 core-types.workspace = true
 core-crypto.workspace = true

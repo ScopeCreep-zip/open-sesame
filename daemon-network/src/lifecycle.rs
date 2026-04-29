@@ -27,6 +27,15 @@ pub fn run_maintenance(state: &DaemonState) {
         std::sync::atomic::Ordering::Relaxed,
     );
 
+    // TOFU pin expiry: expire stale Tofu pins whose TTL has passed.
+    if let Ok(store) = state.tofu_store.lock() {
+        match store.expire_stale_pins() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(expired = n, "expired stale TOFU pins"),
+            Err(e) => tracing::warn!(error = %e, "TOFU pin expiry failed"),
+        }
+    }
+
     // Idle session cleanup: encrypt→remove→send (unconditional removal).
     let idle = state.peer_table.idle_sessions(state.idle_timeout_secs);
     for sid in &idle {

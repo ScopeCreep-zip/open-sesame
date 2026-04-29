@@ -3,6 +3,9 @@
 
 use crate::audit::AuditLog;
 use crate::handshake_ack;
+
+/// TOFU pin TTL for first-contact peers (24 hours).
+const TOFU_PIN_TTL_SECS: u64 = 86_400;
 use crate::metrics::Metrics;
 use crate::noise::state::{self, derive_psk_from_handshake, NoiseTransport};
 use crate::session::state::PeerState;
@@ -43,6 +46,8 @@ pub struct HandshakeContext {
     pub signing_pubkey: Option<[u8; 32]>,
     pub udp_socket: Arc<tokio::net::UdpSocket>,
     pub tcp_tx: tokio::sync::mpsc::Sender<crate::transport::tcp::TcpInbound>,
+    /// If true, reject first-contact TOFU pins from unknown peers.
+    pub require_known_peers: bool,
 }
 
 impl HandshakeContext {
@@ -63,6 +68,7 @@ impl HandshakeContext {
             signing_pubkey: state.identity.signing_pubkey,
             udp_socket: Arc::clone(&state.udp_socket),
             tcp_tx: state.tcp_tx.clone(),
+            require_known_peers: state.require_known_peers,
         }
     }
 }
@@ -150,6 +156,7 @@ pub async fn handle_inbound_handshake(
     let remote_key_hex = hex::encode(remote_static);
     let trust_level = match run_tofu_check(
         &remote_key_hex, &peer_addr.to_string(), &ctx.tofu_store, &ctx.metrics, &ctx.audit,
+        ctx.require_known_peers,
     ) {
         Ok(level) => level,
         Err(reason) => return HandshakeOutcome::Rejected { reason },
@@ -168,10 +175,14 @@ pub async fn handle_inbound_handshake(
         None
     });
 
-    // Step 4: PSK derivation and caching.
+    // Step 4: PSK derivation, caching, and installation identity write-back.
     let psk = derive_psk_from_handshake(&transport.handshake_hash());
     if let Ok(store) = ctx.tofu_store.lock() {
         let _ = store.store_psk(&remote_key_hex, &psk);
+        // Persist the peer's installation identity from the verified HandshakeAck.
+        if let Some(ref iid) = peer_install_id {
+            let _ = store.set_installation_identity(&remote_key_hex, iid, None);
+        }
     }
 
     // Step 5: Session creation.
@@ -187,8 +198,6 @@ pub async fn handle_inbound_handshake(
     }
 
     // Step 6: Spawn TCP read loop for post-handshake frame reception.
-    // The reader half survives the handshake — we pass it to tcp_read_loop
-    // which sends TcpInbound::Frame events back to the main event loop.
     let tcp_tx = ctx.tcp_tx.clone();
     tokio::spawn(async move {
         crate::transport::tcp::tcp_read_loop(
@@ -263,6 +272,7 @@ pub async fn dial_peer(
     let remote_key_hex = hex::encode(remote_static);
     let trust_level = match run_tofu_check(
         &remote_key_hex, &addr.to_string(), &ctx.tofu_store, &ctx.metrics, &ctx.audit,
+        ctx.require_known_peers,
     ) {
         Ok(level) => level,
         Err(reason) => return HandshakeOutcome::Rejected { reason },
@@ -273,10 +283,13 @@ pub async fn dial_peer(
         &mut transport, &mut reader, &mut writer, &remote_static, ctx, true,
     ).await;
 
-    // Cache PSK.
+    // Cache PSK and persist installation identity from verified HandshakeAck.
     let psk = derive_psk_from_handshake(&transport.handshake_hash());
     if let Ok(store) = ctx.tofu_store.lock() {
         let _ = store.store_psk(&remote_key_hex, &psk);
+        if let Some(ref iid) = peer_install_id {
+            let _ = store.set_installation_identity(&remote_key_hex, iid, None);
+        }
     }
 
     let session_id = WireSessionId::random();
@@ -669,6 +682,7 @@ fn run_tofu_check(
     tofu_store: &std::sync::Mutex<TofuStore>,
     metrics: &Metrics,
     audit: &AuditLog,
+    require_known_peers: bool,
 ) -> Result<TofuTrustLevel, String> {
     let store = tofu_store.lock().map_err(|e| format!("TOFU lock: {e}"))?;
 
@@ -682,9 +696,10 @@ fn run_tofu_check(
                 Err(format!("peer {remote_key_hex} is REVOKED"))
             }
             TofuTrustLevel::Unpinned => {
+
                 drop(store);
                 if let Ok(s) = tofu_store.lock() {
-                    let _ = s.pin(remote_key_hex, addr, TofuTrustLevel::Tofu);
+                    let _ = s.pin_with_ttl(remote_key_hex, addr, TofuTrustLevel::Tofu, Some(TOFU_PIN_TTL_SECS));
                 }
                 audit.append("tofu_re_pinned", &format!("{remote_key_hex} {addr}"));
                 Ok(TofuTrustLevel::Tofu)
@@ -697,7 +712,23 @@ fn run_tofu_check(
             }
         },
         Ok(None) => {
-            if let Err(e) = store.pin(remote_key_hex, addr, TofuTrustLevel::Tofu) {
+            // First contact with unknown peer.
+            if require_known_peers {
+                // Strict mode: reject unknown peers entirely. Only Bootstrap
+                // and Endorsed peers (pre-configured or coordinator-signed)
+                // are accepted. This prevents auto-pinning on untrusted networks.
+                audit.append("tofu_rejected_unknown", &format!("{remote_key_hex} {addr}"));
+                return Err(format!(
+                    "unknown peer {remote_key_hex} rejected (require_known_peers is enabled)"
+                ));
+            }
+            // Pin with a 24h TTL. The pin auto-expires to Unpinned if the
+            // peer isn't seen again within the window. This prevents
+            // transient peers (coffee shop WiFi, conference LAN) from
+            // persisting in the TOFU store indefinitely.
+            if let Err(e) = store.pin_with_ttl(
+                remote_key_hex, addr, TofuTrustLevel::Tofu, Some(TOFU_PIN_TTL_SECS),
+            ) {
                 tracing::warn!(error = %e, "TOFU pin failed");
             }
             audit.append("tofu_pinned", &format!("{remote_key_hex} {addr}"));

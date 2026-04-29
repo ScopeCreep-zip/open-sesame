@@ -449,13 +449,23 @@ async fn maintenance_cleans_idle_sessions() {
 }
 
 #[tokio::test]
-async fn discovery_peer_removed_tears_down_via_dispatch() {
-    // Insert a session, then dispatch a `PeerRemoved` event.
-    // The session must be removed from the table.
+async fn discovery_peer_removed_does_not_tear_down_session() {
+    // PeerRemoved from an unauthenticated discovery source (mDNS, SWIM)
+    // must NOT tear down an authenticated Noise session. It only removes
+    // the peer from the dial queue. Session teardown requires an AEAD-
+    // verified Close frame or idle timeout.
     let td = TestDaemon::new().await;
     let peer_addr: std::net::SocketAddr = "10.0.0.4:48627".parse().unwrap();
     let (_sid, _transport) = td.insert_session(peer_addr).await;
     assert_eq!(td.state.peer_table.len(), 1);
+
+    // Add the peer to the dial queue so we can verify removal.
+    td.state.discovery.add_peer(
+        peer_addr,
+        daemon_discovery::queue::DiscoverySource::Mdns,
+        None,
+    );
+    assert!(td.state.discovery.queue_depth() > 0);
 
     let event = daemon_discovery::manager::DiscoveryEvent::PeerRemoved {
         addr: peer_addr,
@@ -463,13 +473,17 @@ async fn discovery_peer_removed_tears_down_via_dispatch() {
     };
     dispatch::discovery::handle_discovery_event(event, &td.state);
 
-    // close_session removes synchronously — no yield needed.
+    // Session must still be alive — unauthenticated source cannot kill it.
     assert_eq!(
         td.state.peer_table.len(),
-        0,
-        "PeerRemoved must tear down session"
+        1,
+        "PeerRemoved must NOT tear down authenticated session"
     );
-    assert_eq!(td.metric(&td.state.metrics.sessions_closed_total), 1);
+    assert_eq!(
+        td.metric(&td.state.metrics.sessions_closed_total),
+        0,
+        "no session close on unauthenticated PeerRemoved"
+    );
 }
 
 // ============================================================================

@@ -25,6 +25,20 @@ pub struct BootstrapFile {
     /// Static peer entries.
     #[serde(default)]
     pub peers: Vec<BootstrapPeer>,
+    /// Shared secret for SWIM gossip authentication (base64-encoded, 32 bytes).
+    /// Generate with `sesame network keygen`. When present, all gossip packets
+    /// are HMAC-BLAKE3 authenticated. When absent, gossip only accepts packets
+    /// from addresses already in the TOFU store or bootstrap peer list.
+    #[serde(default)]
+    pub gossip_secret: Option<String>,
+}
+
+/// Result of loading a bootstrap file: peers + optional gossip HMAC key.
+pub struct BootstrapResult {
+    /// Dial targets parsed from the peer entries.
+    pub targets: Vec<DialTarget>,
+    /// Gossip HMAC key derived from `gossip_secret` (if present and valid).
+    pub gossip_hmac_key: Option<[u8; 32]>,
 }
 
 /// This installation's identity block (informational).
@@ -183,9 +197,9 @@ pub fn parse_did_peer_2(did: &str) -> Option<DidPeerKeys> {
 /// # Errors
 ///
 /// Returns an error if the file exists but contains invalid JSON.
-pub fn load_bootstrap(path: &Path) -> Result<Vec<DialTarget>, BootstrapError> {
+pub fn load_bootstrap(path: &Path) -> Result<BootstrapResult, BootstrapError> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(BootstrapResult { targets: Vec::new(), gossip_hmac_key: None });
     }
 
     let contents = std::fs::read_to_string(path).map_err(BootstrapError::Io)?;
@@ -231,14 +245,32 @@ pub fn load_bootstrap(path: &Path) -> Result<Vec<DialTarget>, BootstrapError> {
         }
     }
 
+    // Derive gossip HMAC key from the shared secret (if present).
+    let gossip_hmac_key = file.gossip_secret.as_deref().and_then(|secret| {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(secret.trim())
+            .ok()?;
+        if bytes.len() != 32 {
+            tracing::warn!(
+                len = bytes.len(),
+                "gossip_secret must be 32 bytes (base64-encoded), ignoring"
+            );
+            return None;
+        }
+        let key: [u8; 32] = bytes.try_into().ok()?;
+        Some(blake3::derive_key("opensesame:gossip:hmac:v1", &key))
+    });
+
     tracing::info!(
         path = %path.display(),
         peers = file.peers.len(),
         targets = targets.len(),
+        gossip_auth = gossip_hmac_key.is_some(),
         "bootstrap.json loaded"
     );
 
-    Ok(targets)
+    Ok(BootstrapResult { targets, gossip_hmac_key })
 }
 
 /// Errors from bootstrap.json loading.
@@ -277,7 +309,7 @@ mod tests {
         let path = dir.path().join("bootstrap.json");
         std::fs::write(&path, json).unwrap();
 
-        let targets = load_bootstrap(&path).unwrap();
+        let targets = load_bootstrap(&path).unwrap().targets;
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].addr.to_string(), "10.0.0.1:48627");
         assert_eq!(targets[0].public_key_hex.as_deref(), Some("aabbccdd"));
@@ -286,8 +318,9 @@ mod tests {
 
     #[test]
     fn missing_file_returns_empty() {
-        let targets = load_bootstrap(Path::new("/nonexistent/bootstrap.json")).unwrap();
-        assert!(targets.is_empty());
+        let result = load_bootstrap(Path::new("/nonexistent/bootstrap.json")).unwrap();
+        assert!(result.targets.is_empty());
+        assert!(result.gossip_hmac_key.is_none());
     }
 
     #[test]
@@ -315,7 +348,7 @@ mod tests {
         let path = dir.path().join("bootstrap.json");
         std::fs::write(&path, json).unwrap();
 
-        let targets = load_bootstrap(&path).unwrap();
+        let targets = load_bootstrap(&path).unwrap().targets;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].addr.to_string(), "10.0.0.1:48627");
     }
@@ -327,7 +360,7 @@ mod tests {
         let path = dir.path().join("bootstrap.json");
         std::fs::write(&path, json).unwrap();
 
-        let targets = load_bootstrap(&path).unwrap();
+        let targets = load_bootstrap(&path).unwrap().targets;
         assert!(targets.is_empty());
     }
 
@@ -410,7 +443,7 @@ mod tests {
         let path = dir.path().join("bootstrap.json");
         std::fs::write(&path, json).unwrap();
 
-        let targets = load_bootstrap(&path).unwrap();
+        let targets = load_bootstrap(&path).unwrap().targets;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].public_key_hex.as_deref(), Some(hex::encode(x25519).as_str()));
         assert_eq!(targets[0].signing_pubkey_hex.as_deref(), Some(hex::encode(ed25519).as_str()));

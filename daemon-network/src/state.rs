@@ -61,12 +61,20 @@ pub struct DaemonState {
     pub rekey_interval_secs: u64,
     /// Whether BEP-44 DHT publishing is enabled.
     pub bep44_enabled: bool,
-    /// DNS SRV domains for enterprise discovery.
-    pub dns_srv_domains: Vec<String>,
+    /// DNS SRV domains for enterprise discovery (hot-reloadable).
+    pub dns_srv_domains: Arc<std::sync::RwLock<Vec<String>>>,
     /// This installation's identity (ID, keys).
     pub identity: InstallationIdentity,
     /// Ed25519 signing seed (32 bytes, zeroized on drop).
     pub signing_seed: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// Channel sender for TCP inbound events (post-handshake frame loop).
     pub tcp_tx: tokio::sync::mpsc::Sender<TcpInbound>,
+    /// If true, reject first-contact TOFU pins from unknown peers.
+    /// Only `Bootstrap` and `Endorsed` peers (pre-configured or coordinator-
+    /// signed) are accepted. Prevents auto-pinning on untrusted networks.
+    pub require_known_peers: bool,
+    /// HMAC-BLAKE3 key for SWIM gossip authentication (from bootstrap.json
+    /// `gossip_secret`). When `None`, SWIM gossip is disabled entirely —
+    /// unauthenticated gossip is not permitted.
+    pub gossip_hmac_key: Option<[u8; 32]>,
 }

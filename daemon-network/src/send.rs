@@ -174,6 +174,14 @@ pub async fn send_rehandshake_request(
 ///
 /// The Close frame is AEAD-sealed with an empty body to prove session key
 /// possession (prevents spoofed close attacks).
+///
+/// # Why `Arc` parameters (unlike `send_keepalive`/`send_rehandshake_request`)
+///
+/// This function is synchronous — it encrypts and removes the session
+/// inline, then spawns a `tokio::spawn` for the UDP send. The spawned
+/// task needs `'static` ownership, so it `Arc::clone`s the socket and
+/// metrics. The other send functions are `async` and the caller `.await`s
+/// them, so they borrow directly with no spawn.
 pub fn close_session(
     session_id: &WireSessionId,
     peer_table: &Arc<PeerTable>,

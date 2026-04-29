@@ -1512,6 +1512,7 @@ dependencies = [
 name = "daemon-discovery"
 version = "1.9.5"
 dependencies = [
+ "base64",
  "blake3",
  "bs58",
  "core-config",
@@ -4914,6 +4915,7 @@ version = "1.9.5"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "base64",
  "blake3",
  "clap",
  "comfy-table",

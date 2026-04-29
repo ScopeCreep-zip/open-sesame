@@ -6,6 +6,7 @@ use super::{Check, Status};
 const DAEMONS: &[(&str, &str)] = &[
     ("profile", "open-sesame-profile.service"),
     ("secrets", "open-sesame-secrets.service"),
+    ("network", "open-sesame-network.service"),
     ("wm", "open-sesame-wm.service"),
     ("launcher", "open-sesame-launcher.service"),
     ("clipboard", "open-sesame-clipboard.service"),
@@ -17,6 +18,8 @@ pub fn checks() -> Vec<Check> {
     let mut results = Vec::new();
 
     for &(name, unit) in DAEMONS {
+        // Network daemon gets extra IPC-based checks after the standard ones.
+        let is_network = name == "network";
         let active = systemctl_prop(unit, "ActiveState");
         let pid = systemctl_prop(unit, "MainPID");
         let restarts = systemctl_prop(unit, "NRestarts");
@@ -115,6 +118,42 @@ pub fn checks() -> Vec<Check> {
             value: uptime.unwrap_or_else(|| "unknown".into()),
             description: String::new(),
         });
+
+        // Network daemon: additional checks from TOFU store.
+        if is_network && is_active {
+            let state_dir = dirs::state_dir()
+                .or_else(dirs::data_local_dir)
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("pds");
+            let tofu_path = state_dir.join("network-tofu.db");
+            if tofu_path.exists()
+                && let Ok(conn) = rusqlite::Connection::open_with_flags(
+                    &tofu_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+            {
+                let peer_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM tofu_peers", [], |row| row.get(0))
+                    .unwrap_or(0);
+                results.push(Check {
+                    id: "daemon.network.tofu_peers".into(),
+                    category: "daemon",
+                    status: Status::Pass,
+                    value: peer_count.to_string(),
+                    description: String::new(),
+                });
+                let event_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM tofu_events", [], |row| row.get(0))
+                    .unwrap_or(0);
+                results.push(Check {
+                    id: "daemon.network.tofu_events".into(),
+                    category: "daemon",
+                    status: Status::Pass,
+                    value: event_count.to_string(),
+                    description: String::new(),
+                });
+            }
+        }
     }
 
     results

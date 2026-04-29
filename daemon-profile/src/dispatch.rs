@@ -447,6 +447,8 @@ pub(crate) async fn handle_bus_message<W: std::io::Write>(
         | EventKind::NetworkDialResponse { .. }
         | EventKind::NetworkDiscoverRequest
         | EventKind::NetworkDiscoverResponse { .. }
+        | EventKind::NetworkDiscoveryReloadRequest
+        | EventKind::NetworkDiscoveryReloadResponse { .. }
         | EventKind::NetworkUnpinRequest { .. }
         | EventKind::NetworkUnpinResponse { .. } => {
             // Routed between CLI/daemon-network/daemon-secrets.

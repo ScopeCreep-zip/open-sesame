@@ -2,7 +2,6 @@
 //! teardown on `PeerRemoved`.
 
 use crate::handshake::{self, HandshakeContext};
-use crate::send;
 use crate::state::DaemonState;
 use std::sync::Arc;
 
@@ -54,22 +53,22 @@ pub fn handle_discovery_event(
         }
         daemon_discovery::manager::DiscoveryEvent::PeerRemoved { addr, source } => {
             state.audit.append("discovery_peer_removed", &format!("{addr} {source:?}"));
-            state.discovery.queue.remove(&addr);
 
-            if let Some(sid) = state.peer_table.lookup_addr(&addr) {
-                tracing::info!(%addr, session = %sid, ?source, "discovery: tearing down session for removed peer");
-                // close_session: encrypt→remove→best-effort send.
-                // The peer gets a Close frame (if reachable) and the
-                // session is unconditionally removed from the table.
-                send::close_session(
-                    &sid,
-                    &state.peer_table,
-                    &state.udp_socket,
-                    &state.metrics,
-                );
-            } else {
-                tracing::debug!(%addr, ?source, "discovery: peer removed, no active session");
-            }
+            // Remove from the dial queue only — do NOT tear down active
+            // sessions. All discovery backends are unauthenticated (mDNS
+            // multicast, SWIM raw UDP, DNS SRV). An attacker on the network
+            // can forge a PeerRemoved event by sending a spoofed mDNS goodbye
+            // or SWIM MemberDown. Tearing down an authenticated Noise session
+            // based on unauthenticated discovery input would allow a one-packet
+            // session kill from any LAN device.
+            //
+            // Active sessions are terminated only through:
+            // - Authenticated Close frame (AEAD-verified)
+            // - Idle timeout (maintenance sweep)
+            // - Rekey sweep (RehandshakeRequest)
+            // - Operator action (sesame network peers --unpin)
+            state.discovery.queue.remove(&addr);
+            tracing::info!(%addr, ?source, "discovery: peer removed from dial queue");
         }
     }
 }

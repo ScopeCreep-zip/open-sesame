@@ -706,6 +706,14 @@ pub enum EventKind {
         swim_members: u32,
     },
 
+    /// Request daemon-network to reload bootstrap.json and DNS SRV config.
+    NetworkDiscoveryReloadRequest,
+    /// Response to discovery reload request.
+    NetworkDiscoveryReloadResponse {
+        /// Number of new peers added to the dial queue.
+        added: u32,
+    },
+
     /// Request to unpin a TOFU peer by public key hex.
     NetworkUnpinRequest {
         public_key_hex: String,
@@ -897,6 +905,8 @@ impl_event_debug! {
         NetworkDialResponse { success, session_id, error },
         NetworkDiscoverRequest,
         NetworkDiscoverResponse { mdns_peers, bep44_published, dns_srv_domains, dial_queue_depth, swim_members },
+        NetworkDiscoveryReloadRequest,
+        NetworkDiscoveryReloadResponse { added },
         NetworkUnpinRequest { public_key_hex },
         NetworkUnpinResponse { success, error },
         Unknown,

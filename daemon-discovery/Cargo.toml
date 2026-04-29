@@ -27,6 +27,7 @@ rand = { version = "0.9", default-features = false, features = ["std", "small_rn
 core-crypto = { workspace = true }
 futures-util = { workspace = true }
 bs58 = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

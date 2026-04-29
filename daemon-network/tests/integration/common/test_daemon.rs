@@ -156,10 +156,12 @@ impl TestDaemon {
             idle_timeout_secs,
             rekey_interval_secs,
             bep44_enabled: false,
-            dns_srv_domains: Vec::new(),
+            dns_srv_domains: Arc::new(std::sync::RwLock::new(Vec::new())),
             identity,
             signing_seed: None,
             tcp_tx,
+            require_known_peers: false,
+            gossip_hmac_key: None,
         };
 
         Self {

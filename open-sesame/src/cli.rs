@@ -261,6 +261,10 @@ pub(crate) enum NetworkCmd {
     },
     /// Show discovery subsystem state.
     Discover,
+    /// Generate a gossip authentication key for bootstrap.json.
+    Keygen,
+    /// Reload bootstrap.json and DNS SRV configuration.
+    Reload,
     /// Show daemon-network status.
     Status,
     /// Dial a remote peer by address (initiates Noise XX handshake).
