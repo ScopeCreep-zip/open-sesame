@@ -20,35 +20,70 @@ pub fn config_dir() -> PathBuf {
 
 /// Resolve all config paths in loading order (lowest to highest priority).
 ///
-/// 1. System policy (`/etc/pds/policy.toml` on Linux)
-/// 2. User config (`~/.config/pds/config.toml`)
-/// 3. Drop-in fragments (`~/.config/pds/config.d/*.toml`, alphabetical)
-/// 4. Profile overrides (`~/.config/pds/profiles/{name}/config.toml`)
+/// POSIX/XDG precedence — later files override earlier:
+/// 1. System config (`/etc/pds/config.toml`)
+/// 2. System drop-ins (`/etc/pds/config.d/*.toml`, sorted)
+/// 3. System policy (`/etc/pds/policy.toml`)
+/// 4. User config (`~/.config/pds/config.toml`)
+/// 5. User drop-ins (`~/.config/pds/config.d/*.toml`, sorted)
+/// 6. Profile overrides (`~/.config/pds/profiles/{name}/config.toml`)
+///
+/// System files provide organization-wide defaults and policy enforcement.
+/// User files provide per-user customization. Drop-in fragments allow
+/// composable configuration from package managers, NixOS modules, and
+/// operator tooling without modifying the base config file.
 #[must_use]
 pub fn resolve_config_paths(profile_name: Option<&str>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    // System policy (Linux only for now)
+    // System-wide configuration (Linux only).
     #[cfg(target_os = "linux")]
     {
-        let system = PathBuf::from("/etc/pds/policy.toml");
-        if system.exists() {
-            paths.push(system);
+        let system_dir = PathBuf::from("/etc/pds");
+
+        // System base config.
+        let system_config = system_dir.join("config.toml");
+        if system_config.exists() {
+            paths.push(system_config);
+        }
+
+        // System drop-in fragments (sorted alphabetically).
+        collect_dropins(&system_dir.join("config.d"), &mut paths);
+
+        // System policy (loaded last in system tier — overrides system drop-ins).
+        let system_policy = system_dir.join("policy.toml");
+        if system_policy.exists() {
+            paths.push(system_policy);
         }
     }
 
     let base = config_dir();
 
-    // User config
+    // User config.
     let user_config = base.join("config.toml");
     if user_config.exists() {
         paths.push(user_config);
     }
 
-    // Drop-in fragments (sorted alphabetically)
-    let dropin_dir = base.join("config.d");
-    if dropin_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&dropin_dir)
+    // User drop-in fragments (sorted alphabetically).
+    collect_dropins(&base.join("config.d"), &mut paths);
+
+    // Profile overrides.
+    if let Some(name) = profile_name {
+        let profile_config = base.join("profiles").join(name).join("config.toml");
+        if profile_config.exists() {
+            paths.push(profile_config);
+        }
+    }
+
+    paths
+}
+
+/// Collect `*.toml` files from a drop-in directory, sorted alphabetically.
+/// Conventional naming: `NN-description.toml` (e.g. `50-network.toml`).
+fn collect_dropins(dir: &Path, paths: &mut Vec<PathBuf>) {
+    if dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(dir)
     {
         let mut fragments: Vec<PathBuf> = entries
             .filter_map(std::result::Result::ok)
@@ -58,16 +93,6 @@ pub fn resolve_config_paths(profile_name: Option<&str>) -> Vec<PathBuf> {
         fragments.sort();
         paths.extend(fragments);
     }
-
-    // Profile overrides
-    if let Some(name) = profile_name {
-        let profile_config = base.join("profiles").join(name).join("config.toml");
-        if profile_config.exists() {
-            paths.push(profile_config);
-        }
-    }
-
-    paths
 }
 
 /// Load configuration by merging all layers.
@@ -98,18 +123,22 @@ pub fn load_config(profile_name: Option<&str>) -> core_types::Result<Config> {
 }
 
 /// Deep merge `overlay` into `base`. Non-default overlay values override base.
+///
+/// Every top-level section is handled explicitly. If a new section is added to
+/// `Config` without updating this function, the overlay's value is silently
+/// ignored — add a merge clause here when adding new top-level config sections.
 fn merge_config(base: &mut Config, overlay: &Config) {
-    // Schema version: always take the higher
+    // Schema version: always take the higher.
     if overlay.config_version > base.config_version {
         base.config_version = overlay.config_version;
     }
 
-    // Global settings
+    // Global settings.
     if overlay.global.default_profile.as_ref() != GlobalConfigDefaults::DEFAULT_PROFILE {
         base.global.default_profile = overlay.global.default_profile.clone();
     }
 
-    // Profiles: overlay profiles merge into base by name
+    // Profiles: overlay profiles merge into base by name.
     for (name, profile) in &overlay.profiles {
         base.profiles
             .entry(name.clone())
@@ -117,7 +146,47 @@ fn merge_config(base: &mut Config, overlay: &Config) {
             .or_insert_with(|| profile.clone());
     }
 
-    // Policy: append (policies are additive)
+    // Network: if overlay has network.enabled = true, take the whole section.
+    // Individual sub-field merging is not worth the complexity — the network
+    // config is either provided as a complete unit or left at defaults.
+    if overlay.network.enabled {
+        base.network = overlay.network.clone();
+    }
+
+    // Vault sync: non-default compaction_threshold indicates an explicit override.
+    let default_vs = crate::schema::VaultSyncConfig::default();
+    if overlay.vault_sync.compaction_threshold != default_vs.compaction_threshold
+        || overlay.vault_sync.sync_interval_secs != default_vs.sync_interval_secs
+        || overlay.vault_sync.relay.enabled
+    {
+        base.vault_sync = overlay.vault_sync.clone();
+    }
+
+    // Crypto: take overlay if any algorithm differs from default.
+    let default_crypto = crate::schema::CryptoConfigToml::default();
+    if overlay.crypto.kdf != default_crypto.kdf
+        || overlay.crypto.noise_cipher != default_crypto.noise_cipher
+        || overlay.crypto.network_aead != default_crypto.network_aead
+    {
+        base.crypto = overlay.crypto.clone();
+    }
+
+    // Agents: take overlay if non-default.
+    if !overlay.agents.agents.is_empty()
+        || overlay.agents.default.agent_type != "human"
+    {
+        base.agents = overlay.agents.clone();
+    }
+
+    // Extensions: take overlay if any policy field is non-default.
+    if !overlay.extensions.policy.allowed_registries.is_empty()
+        || overlay.extensions.policy.require_signature
+        || !overlay.extensions.policy.trusted_signers.is_empty()
+    {
+        base.extensions = overlay.extensions.clone();
+    }
+
+    // Policy: append (policies are additive, not overriding).
     base.policy.extend(overlay.policy.iter().cloned());
 }
 

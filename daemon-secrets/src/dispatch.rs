@@ -609,7 +609,6 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
 ///
 /// Secret values are NEVER stored in vault_log.db (F-02 invariant). They travel
 /// in-memory from decryption to vault application.
-
 async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) {
     use base64::Engine;
     use core_secrets::SecretsStore as _;

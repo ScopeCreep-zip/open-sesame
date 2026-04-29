@@ -45,6 +45,9 @@ pub struct Config {
     /// Vault replication and sync configuration.
     pub vault_sync: VaultSyncConfig,
 
+    /// Network transport and discovery configuration.
+    pub network: NetworkConfig,
+
     /// System policy overrides (read-only at runtime).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policy: Vec<PolicyOverride>,
@@ -60,6 +63,7 @@ impl Default for Config {
             agents: AgentsConfig::default(),
             extensions: ExtensionsConfig::default(),
             vault_sync: VaultSyncConfig::default(),
+            network: NetworkConfig::default(),
             policy: Vec::new(),
         }
     }

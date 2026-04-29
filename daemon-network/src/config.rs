@@ -1,38 +1,12 @@
-//! Configuration loading for daemon-network.
+//! Configuration helpers for daemon-network.
+//!
+//! Network configuration lives in the `[network]` section of `config.toml`,
+//! loaded via `core_config::load_config()` like every other daemon. This
+//! module provides path resolution helpers for daemon-network-specific
+//! filesystem locations (TOFU store, audit log).
 
 use core_config::NetworkConfig;
 use std::path::PathBuf;
-
-/// Load the network configuration from `$CONFIG_DIR/pds/network.toml`.
-///
-/// Returns default config if the file does not exist.
-pub fn load_network_config() -> NetworkConfig {
-    let path = network_config_path();
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        toml::from_str(&contents).unwrap_or_else(|e| {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to parse network.toml, using defaults"
-            );
-            NetworkConfig::default()
-        })
-    } else {
-        tracing::info!(
-            path = %path.display(),
-            "network.toml not found, using defaults"
-        );
-        NetworkConfig::default()
-    }
-}
-
-/// Resolve the network config file path.
-fn network_config_path() -> PathBuf {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("pds");
-    config_dir.join("network.toml")
-}
 
 /// Resolve the TOFU database path from config or default.
 pub fn tofu_db_path(config: &NetworkConfig) -> PathBuf {

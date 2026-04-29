@@ -243,8 +243,10 @@ pub async fn handle_ipc_message(
                     }
                 }
             }
-            // Reload DNS SRV domains from network config.
-            let network_config = crate::config::load_network_config();
+            // Reload DNS SRV domains from config.toml [network] section.
+            let network_config = core_config::load_config(None)
+                .map(|c| c.network)
+                .unwrap_or_default();
             if let Ok(mut domains) = state.dns_srv_domains.write() {
                 *domains = network_config.discovery.dns_srv.domains;
             }

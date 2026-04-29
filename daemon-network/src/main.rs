@@ -33,7 +33,14 @@ async fn main() -> anyhow::Result<()> {
     core_types::init_secure_memory();
     init_tracing();
 
-    let network_config = config::load_network_config();
+    // Single config load — network settings come from [network] in config.toml,
+    // not a separate network.toml. config.toml is the single source of truth.
+    let full_config = core_config::load_config(None)
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to load config.toml");
+            anyhow::anyhow!("config load failed: {e}")
+        })?;
+    let network_config = full_config.network.clone();
     let listen_port = args.port.unwrap_or(network_config.transport.listen_port);
 
     if !network_config.enabled {
@@ -42,12 +49,7 @@ async fn main() -> anyhow::Result<()> {
         idle_loop().await;
     }
 
-    let default_profile = core_config::load_config(None)
-        .map(|c| c.global.default_profile.to_string())
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to load config for default_profile — cannot replicate without it");
-            anyhow::anyhow!("config load failed: {e}")
-        })?;
+    let default_profile = full_config.global.default_profile.to_string();
     if default_profile.is_empty() {
         return Err(anyhow::anyhow!("default_profile is empty in config — cannot replicate without a profile name"));
     }
