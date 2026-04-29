@@ -214,6 +214,7 @@
             systemd.user.tmpfiles.rules = [
               "d %t/pds 0700 - - -"
               "d %h/.config/pds 0700 - - -"
+              "d %h/.local/state/pds 0700 - - -"
               "d %h/.cache/open-sesame 0700 - - -"
             ] ++ lib.optionals (!isHeadless) [
               "d %h/.cache/fontconfig 0755 - - -"
@@ -396,7 +397,7 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
+                ReadWritePaths = [ "%t/pds" "%h/.config/pds" "%h/.local/state/pds" ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
                 LimitMEMLOCK = "64M";

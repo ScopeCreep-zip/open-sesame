@@ -20,6 +20,7 @@ LimitMEMLOCK=67108864
 MemoryMax=128M
 RuntimeDirectory=pds
 ConfigurationDirectory=pds
+StateDirectory=pds
 
 [Install]
 WantedBy=open-sesame-headless.target
