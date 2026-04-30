@@ -77,6 +77,7 @@ rustPlatform.buildRustPackage {
       "cosmic-client-toolkit-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
       "cosmic-protocols-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
       "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
+      "snow-0.10.0" = "sha256-ePbZaa07wy+hemsoKDKKJDMwUJq2YnTecr97N9dqwSQ=";
     };
   };
 
