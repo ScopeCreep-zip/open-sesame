@@ -255,7 +255,7 @@ debug = false
 # Fast release: near-release performance, 3-5x faster link than full release.
 # Use for integration testing, smoketesting, and home-manager dev iteration.
 # Nix package.nix should use this profile for development builds.
-[profile.release-dev]
+[profile.release_dev]
 inherits = "release"
 lto = false
 codegen-units = 16

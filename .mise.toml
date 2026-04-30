@@ -54,7 +54,7 @@ run = "cargo nextest run"
 
 [tasks."cargo:build"]
 hide = true
-run = "cargo build --profile release-dev"
+run = "cargo build --profile release_dev"
 
 [tasks."cargo:build:release"]
 hide = true
@@ -66,7 +66,7 @@ run = "cargo build"
 
 [tasks."cargo:build:debug-logging"]
 hide = true
-run = "cargo build --profile release-dev --features debug-logging"
+run = "cargo build --profile release_dev --features debug-logging"
 
 [tasks."cargo:build:amd64"]
 hide = true
@@ -136,7 +136,7 @@ mise run cargo:test
 
 [tasks.build]
 alias = [ "b" ]
-description = "Build release-dev binary (fast release, no LTO)"
+description = "Build release_dev binary (fast release, no LTO)"
 depends = [ "test", "cargo:build" ]
 
 [tasks."build:debug"]

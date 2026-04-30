@@ -94,8 +94,8 @@ rustPlatform.buildRustPackage {
     libseccomp
   ];
 
-  buildType = "release-dev";
-  checkType = "release-dev";
+  buildType = "release_dev";
+  checkType = "release_dev";
 
   # Build desktop crates with default features (desktop enabled).
   cargoBuildFlags =
@@ -116,7 +116,7 @@ rustPlatform.buildRustPackage {
     runHook preInstall
 
     mkdir -p $out/bin
-    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release-dev
+    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release_dev
     for bin in ${lib.concatStringsSep " " expectedBinaries}; do
       install -Dm755 "$releaseDir/$bin" "$out/bin/$bin"
     done
