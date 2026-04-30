@@ -65,6 +65,7 @@ impl TofuStore {
                 endorsement_json    TEXT,
                 pin_expires_at      TEXT,
                 pin_ttl_secs        INTEGER,
+                signing_pubkey_hex  TEXT,
                 version             INTEGER NOT NULL DEFAULT 1
             );
 
@@ -392,31 +393,74 @@ impl TofuStore {
     /// # Errors
     ///
     /// Returns `TofuStoreError::Sqlite` if the update fails.
+    /// Set or verify the installation identity for a peer.
+    ///
+    /// If the peer already has a stored `signing_pubkey_hex` and the new
+    /// value differs, this is a **signing key change** — potentially
+    /// indicating key compromise. The method returns an error with the
+    /// old and new keys for the caller to audit and reject.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TofuStoreError::Sqlite` on DB failure.
+    /// Returns `TofuStoreError::SigningKeyMismatch` if the peer's stored
+    /// signing pubkey differs from the provided one.
     pub fn set_installation_identity(
         &self,
         public_key_hex: &str,
         installation_id: &str,
         display_name: Option<&str>,
+        signing_pubkey_hex: Option<&str>,
     ) -> Result<(), TofuStoreError> {
-        // Cap display_name at 256 bytes to prevent memory amplification from
-        // a malicious peer sending a multi-KB name that gets cloned into the
-        // TOFU store, audit log, and IPC events.
+        // Cap display_name at 256 bytes to prevent memory amplification.
         let capped_name = display_name.map(|n| {
             if n.len() <= 256 {
                 return n;
             }
-            // Truncate at a char boundary to avoid splitting multi-byte UTF-8.
             let mut end = 256;
             while end > 0 && !n.is_char_boundary(end) {
                 end -= 1;
             }
             &n[..end]
         });
+
+        // Verify signing pubkey continuity: if we already have a stored
+        // signing pubkey for this peer, the new one MUST match. A change
+        // indicates either key rotation (which should go through an
+        // explicit rotation protocol) or compromise.
+        if let Some(new_signing_key) = signing_pubkey_hex {
+            let stored: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT signing_pubkey_hex FROM tofu_peers WHERE public_key_hex = ?1",
+                    params![public_key_hex],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            if let Some(ref old_key) = stored {
+                if !old_key.is_empty() && old_key != new_signing_key {
+                    return Err(TofuStoreError::SigningKeyMismatch {
+                        peer: public_key_hex.to_string(),
+                        stored: old_key.clone(),
+                        received: new_signing_key.to_string(),
+                    });
+                }
+            }
+        }
+
         self.conn
             .execute(
-                "UPDATE tofu_peers SET installation_id = ?1, display_name = ?2
-                 WHERE public_key_hex = ?3",
-                params![installation_id, capped_name, public_key_hex],
+                "UPDATE tofu_peers SET installation_id = ?1, display_name = ?2,
+                        signing_pubkey_hex = COALESCE(?3, signing_pubkey_hex)
+                 WHERE public_key_hex = ?4",
+                params![
+                    installation_id,
+                    capped_name,
+                    signing_pubkey_hex,
+                    public_key_hex
+                ],
             )
             .map_err(TofuStoreError::Sqlite)?;
         Ok(())
@@ -674,6 +718,12 @@ pub enum TofuStoreError {
     Io(#[from] std::io::Error),
     #[error("TOFU store corrupted: {0}")]
     Corrupted(String),
+    #[error("signing key mismatch for peer {peer}: stored={stored}, received={received}")]
+    SigningKeyMismatch {
+        peer: String,
+        stored: String,
+        received: String,
+    },
 }
 
 // rusqlite::OptionalExtension is needed for .optional() on query_row.
@@ -836,7 +886,12 @@ mod tests {
 
         // Write-back.
         store
-            .set_installation_identity("aabb", "550e8400-uuid", Some("peer-laptop"))
+            .set_installation_identity(
+                "aabb",
+                "550e8400-uuid",
+                Some("peer-laptop"),
+                Some("deadbeef01234567"),
+            )
             .unwrap();
 
         // After write-back.
@@ -850,8 +905,36 @@ mod tests {
         let (store, _dir) = temp_store();
         // No peer pinned — update affects zero rows, no error.
         store
-            .set_installation_identity("nonexistent", "uuid", None)
+            .set_installation_identity("nonexistent", "uuid", None, None)
             .unwrap();
+    }
+
+    #[test]
+    fn signing_key_mismatch_rejected() {
+        let (store, _dir) = temp_store();
+        store
+            .pin("ccdd", "10.0.0.2:48627", TofuTrustLevel::Tofu)
+            .unwrap();
+
+        // First write: stores signing key.
+        store
+            .set_installation_identity("ccdd", "uuid-1", None, Some("aabbccdd"))
+            .unwrap();
+
+        // Second write with same key: succeeds.
+        store
+            .set_installation_identity("ccdd", "uuid-1", None, Some("aabbccdd"))
+            .unwrap();
+
+        // Third write with different key: rejected.
+        let result =
+            store.set_installation_identity("ccdd", "uuid-1", None, Some("11223344"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("signing key mismatch"),
+            "expected signing key mismatch error, got: {err}"
+        );
     }
 
     #[test]

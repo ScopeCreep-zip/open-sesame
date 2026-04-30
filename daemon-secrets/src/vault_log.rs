@@ -753,12 +753,22 @@ impl VaultLog {
         Ok(())
     }
 
+    /// Maximum number of times an entry can be deferred before it is
+    /// tombstoned (marked applied without being applied). Prevents
+    /// permanently-unresolvable entries from occupying a vault log slot
+    /// indefinitely and retrying every hour forever.
+    const MAX_DEFERRAL_COUNT: i64 = 100;
+
     /// Defer an entry with exponential backoff computed from its current
     /// `deferred_count`. Reads the count and updates in a single lock
     /// acquisition — no TOCTOU between reading the count and computing
     /// the backoff interval.
     ///
     /// Backoff schedule: 0→30s, 1-3→60s, 4-10→300s, 11+→3600s.
+    ///
+    /// If `deferred_count` exceeds `MAX_DEFERRAL_COUNT`, the entry is
+    /// tombstoned: marked as `locally_applied = 1` without being applied
+    /// to the vault. An audit log entry is emitted via tracing.
     pub fn defer_entry_with_backoff(&self, entry_id: &str) -> Result<(), VaultLogError> {
         let conn = self
             .conn
@@ -771,6 +781,23 @@ impl VaultLog {
                 |row| row.get(0),
             )
             .unwrap_or(0);
+
+        // Tombstone: permanently-unresolvable entries are marked applied
+        // after exceeding the maximum deferral count.
+        if count >= Self::MAX_DEFERRAL_COUNT {
+            tracing::warn!(
+                entry = entry_id,
+                deferred_count = count,
+                "entry exceeded max deferral count, tombstoning"
+            );
+            conn.execute(
+                "UPDATE vault_log SET locally_applied = 1 WHERE id = ?1",
+                params![entry_id],
+            )
+            .map_err(VaultLogError::Sqlite)?;
+            return Ok(());
+        }
+
         let retry_secs: u64 = match count {
             0 => 30,
             1..=3 => 60,
@@ -988,6 +1015,15 @@ impl VaultLog {
         compaction_threshold: u64,
         retention_secs: i64,
     ) -> Result<u32, VaultLogError> {
+        // Reject retention_secs <= 0. Zero retention would compact all entries
+        // immediately, destroying the replication log. Negative values are
+        // nonsensical. The config schema documents this as rejected; enforce it.
+        if retention_secs <= 0 {
+            return Err(VaultLogError::InvalidWatermark(
+                "compaction_retention_secs must be > 0",
+            ));
+        }
+
         // Phase 0: Quick count check before expensive signing key derivation.
         // Avoids wasting a tick + key derivation on the common no-op case.
         {

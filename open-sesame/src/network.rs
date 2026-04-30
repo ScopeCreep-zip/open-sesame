@@ -108,45 +108,65 @@ async fn cmd_reload() -> anyhow::Result<()> {
 }
 
 /// Show discovery subsystem state via IPC.
+///
+/// Hard 5-second timeout wrapping both connect and request to prevent
+/// hanging when daemon-network is not responding on the IPC bus.
 async fn cmd_discover() -> anyhow::Result<()> {
-    let client = crate::ipc::connect().await?;
-    let response = client
-        .request(
-            core_types::EventKind::NetworkDiscoverRequest,
-            core_types::SecurityLevel::Internal,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-
-    match response {
-        Ok(msg) => match msg.payload {
-            core_types::EventKind::NetworkDiscoverResponse {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let client = crate::ipc::connect().await.ok()?;
+        let msg = client
+            .request(
+                core_types::EventKind::NetworkDiscoverRequest,
+                core_types::SecurityLevel::Internal,
+                std::time::Duration::from_secs(3),
+            )
+            .await
+            .ok()?;
+        if let core_types::EventKind::NetworkDiscoverResponse {
+            mdns_peers,
+            bep44_published,
+            dns_srv_domains,
+            dial_queue_depth,
+            swim_members,
+        } = msg.payload
+        {
+            Some((
                 mdns_peers,
                 bep44_published,
                 dns_srv_domains,
                 dial_queue_depth,
                 swim_members,
-            } => {
-                println!("Open Sesame -- Discovery State");
-                println!("----------------------------------------------");
-                println!("  mDNS peers:       {mdns_peers}");
-                println!("  BEP-44 published: {bep44_published}");
-                println!(
-                    "  DNS SRV domains:  {}",
-                    if dns_srv_domains.is_empty() {
-                        "(none)".into()
-                    } else {
-                        dns_srv_domains.join(", ")
-                    }
-                );
-                println!("  Dial queue:       {dial_queue_depth}");
-                println!("  SWIM members:     {swim_members}");
-            }
-            _ => println!("Unexpected response from daemon-network"),
-        },
-        Err(e) => {
-            println!("IPC request failed: {e}");
-            println!("Is daemon-network running?");
+            ))
+        } else {
+            None
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match result {
+        Some((mdns_peers, bep44_published, dns_srv_domains, dial_queue_depth, swim_members)) => {
+            println!("Open Sesame -- Discovery State");
+            println!("----------------------------------------------");
+            println!("  mDNS peers:       {mdns_peers}");
+            println!("  BEP-44 published: {bep44_published}");
+            println!(
+                "  DNS SRV domains:  {}",
+                if dns_srv_domains.is_empty() {
+                    "(none)".into()
+                } else {
+                    dns_srv_domains.join(", ")
+                }
+            );
+            println!("  Dial queue:       {dial_queue_depth}");
+            println!("  SWIM members:     {swim_members}");
+        }
+        None => {
+            println!("Open Sesame -- Discovery State");
+            println!("----------------------------------------------");
+            println!("  daemon-network not responding on IPC bus");
+            println!("  Check: systemctl --user status open-sesame-network.service");
         }
     }
 

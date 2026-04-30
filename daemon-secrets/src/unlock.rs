@@ -614,10 +614,13 @@ pub fn handle_vault_auth_query(
 ///
 /// # Thread safety
 ///
-/// The early-return check (`signing_seed_is_set()`) is TOCTOU-safe
-/// only because the IPC dispatch loop is single-threaded (`tokio::select!`
-/// in `main.rs`). If dispatch ever moves to multi-threaded, this function
-/// needs a `compare_exchange`-style pattern to atomically check-and-set.
+/// This function takes `&mut MessageContext`, which guarantees exclusive
+/// access at compile time — no concurrent call can hold another `&mut`
+/// reference. The `signing_seed_is_set()` early-return is safe because
+/// the exclusive borrow prevents concurrent mutation of the signing seed
+/// state from within the dispatch path. External mutation (vault lock
+/// clearing the seed) is sequenced through the same `&mut` borrow in
+/// `handle_lock_request`.
 async fn populate_signing_seed(ctx: &mut MessageContext<'_>) {
     // Skip if already populated (avoid redundant vault reads).
     if crate::crud::signing_seed_is_set() {

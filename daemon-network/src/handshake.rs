@@ -172,7 +172,8 @@ pub async fn handle_inbound_handshake(
     };
 
     // Step 3: HandshakeAck exchange over the TCP stream (5s timeout).
-    let peer_install_id = tokio::time::timeout(
+    // Returns (installation_id, signing_pubkey_hex) on success.
+    let peer_ack_info = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         exchange_handshake_ack(
             &mut transport,
@@ -191,11 +192,30 @@ pub async fn handle_inbound_handshake(
 
     // Step 4: PSK derivation, caching, and installation identity write-back.
     let psk = derive_psk_from_handshake(&transport.handshake_hash());
+    let (peer_install_id, peer_signing_pubkey) = match &peer_ack_info {
+        Some((iid, spk)) => (Some(iid.as_str()), Some(spk.as_str())),
+        None => (None, None),
+    };
     if let Ok(store) = ctx.tofu_store.lock() {
         let _ = store.store_psk(&remote_key_hex, &psk);
-        // Persist the peer's installation identity from the verified HandshakeAck.
-        if let Some(ref iid) = peer_install_id {
-            let _ = store.set_installation_identity(&remote_key_hex, iid, None);
+        if let Some(iid) = peer_install_id {
+            if let Err(e) = store.set_installation_identity(
+                &remote_key_hex,
+                iid,
+                None,
+                peer_signing_pubkey,
+            ) {
+                tracing::warn!(
+                    audit = "security",
+                    error = %e,
+                    peer = %&remote_key_hex[..16],
+                    "signing key mismatch on reconnection — possible compromise"
+                );
+                ctx.audit.append(
+                    "signing_key_mismatch",
+                    &format!("{} {}", &remote_key_hex[..16], e),
+                );
+            }
         }
     }
 
@@ -228,7 +248,7 @@ pub async fn handle_inbound_handshake(
 
     // Step 7: IPC notification.
     let remote_uuid = peer_install_id
-        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::nil);
     emit_session_established(&ctx.bus_client, &session_id, &remote_static, remote_uuid).await;
 
@@ -304,7 +324,7 @@ pub async fn dial_peer(addr: SocketAddr, ctx: &HandshakeContext) -> HandshakeOut
     };
 
     // HandshakeAck exchange over TCP. Initiator sends first.
-    let peer_install_id = exchange_handshake_ack(
+    let peer_ack_info = exchange_handshake_ack(
         &mut transport,
         &mut reader,
         &mut writer,
@@ -316,10 +336,30 @@ pub async fn dial_peer(addr: SocketAddr, ctx: &HandshakeContext) -> HandshakeOut
 
     // Cache PSK and persist installation identity from verified HandshakeAck.
     let psk = derive_psk_from_handshake(&transport.handshake_hash());
+    let (peer_install_id, peer_signing_pubkey) = match &peer_ack_info {
+        Some((iid, spk)) => (Some(iid.as_str()), Some(spk.as_str())),
+        None => (None, None),
+    };
     if let Ok(store) = ctx.tofu_store.lock() {
         let _ = store.store_psk(&remote_key_hex, &psk);
-        if let Some(ref iid) = peer_install_id {
-            let _ = store.set_installation_identity(&remote_key_hex, iid, None);
+        if let Some(iid) = peer_install_id {
+            if let Err(e) = store.set_installation_identity(
+                &remote_key_hex,
+                iid,
+                None,
+                peer_signing_pubkey,
+            ) {
+                tracing::warn!(
+                    audit = "security",
+                    error = %e,
+                    peer = %&remote_key_hex[..16],
+                    "signing key mismatch on reconnection — possible compromise"
+                );
+                ctx.audit.append(
+                    "signing_key_mismatch",
+                    &format!("{} {}", &remote_key_hex[..16], e),
+                );
+            }
         }
     }
 
@@ -334,7 +374,7 @@ pub async fn dial_peer(addr: SocketAddr, ctx: &HandshakeContext) -> HandshakeOut
     }
 
     let remote_uuid = peer_install_id
-        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::nil);
     emit_session_established(&ctx.bus_client, &session_id, &remote_static, remote_uuid).await;
 
@@ -589,8 +629,8 @@ async fn dial_handshake(
 /// Both sides encrypt/decrypt through the `NoiseTransport`. The TCP stream carries
 /// length-prefixed ciphertext: `[4-byte BE length][ciphertext bytes]`.
 ///
-/// Returns the peer's installation ID on success, `None` on any failure
-/// (signing seed unavailable, I/O error, verification failure).
+/// Returns `(installation_id, signing_pubkey_hex)` on success, `None` on
+/// any failure (signing seed unavailable, I/O error, verification failure).
 async fn exchange_handshake_ack<R, W>(
     transport: &mut NoiseTransport,
     reader: &mut R,
@@ -598,7 +638,7 @@ async fn exchange_handshake_ack<R, W>(
     remote_static: &[u8; 32],
     ctx: &HandshakeContext,
     is_initiator: bool,
-) -> Option<String>
+) -> Option<(String, String)>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -682,7 +722,7 @@ where
         peer_install = %peer_ack.installation_id,
         "HandshakeAck exchanged and verified"
     );
-    Some(peer_ack.installation_id)
+    Some((peer_ack.installation_id, peer_ack.signing_pubkey))
 }
 
 // ---------------------------------------------------------------------------
