@@ -571,7 +571,6 @@ description = "CI test job (hakari + fmt + clippy + nextest + build)"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 mise run cargo:hakari:check
 mise run cargo:fmt:check
 mise run cargo:clippy
@@ -584,7 +583,6 @@ description = "CI documentation job (rustdoc + man + completions + mdbook)"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 cargo doc --no-deps --all-features
 mise run docs:man
 mise run docs:completions
@@ -604,7 +602,6 @@ env.TARGET = "{{vars.arch_amd64}}"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
@@ -618,7 +615,6 @@ env.TARGET = "{{vars.arch_arm64}}"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
@@ -631,7 +627,6 @@ description = "CI generate all documentation for release"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 cargo xtask all
 """
 

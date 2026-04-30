@@ -8,9 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MISE_AUTO_INSTALL: "false"
-  CARGO_INCREMENTAL: "0"
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
   test:
@@ -28,18 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: mozilla-actions/sccache-action@v0.0.10
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: cachix/install-nix-action@v31
         with:
-          cache-all-crates: true
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: jdx/mise-action@v4
+      - uses: cachix/cachix-action@v17
         with:
-          install_args: "rust cargo:cargo-nextest"
-          cache: true
+          name: scopecreep-zip
+          authToken: ${{ secrets.SCOPE_CREEP_CACHIX_PRIVATE_KEY }}
 
       - name: Run tests (with raised mlock limit for ProtectedAlloc)
         run: |
           sudo prlimit --pid $$ --memlock=268435456:268435456
-          mise run ci:test
+          nix develop --accept-flake-config -c mise run ci:test

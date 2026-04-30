@@ -541,6 +541,7 @@
               cargo-cross
               cargo-hakari
               cargo-nextest
+              mise
 
               # Documentation
               mdbook

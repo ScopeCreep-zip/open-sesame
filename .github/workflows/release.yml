@@ -116,26 +116,21 @@ jobs:
         with:
           ref: ${{ needs.semantic-release.outputs.tag }}
 
-      - uses: mozilla-actions/sccache-action@v0.0.10
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: cachix/install-nix-action@v31
         with:
-          cache-all-crates: true
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: jdx/mise-action@v4
+      - uses: cachix/cachix-action@v17
         with:
-          install_args: "rust cargo:cargo-deb"
-          cache: true
+          name: scopecreep-zip
+          authToken: ${{ secrets.SCOPE_CREEP_CACHIX_PRIVATE_KEY }}
 
       - name: Build packages (with raised mlock limit for ProtectedAlloc)
-        env:
-          CARGO_INCREMENTAL: "0"
-          RUSTC_WRAPPER: "sccache"
         run: |
           sudo prlimit --pid $$ --memlock=268435456:268435456
-          mise run ${{ matrix.build_task }}
+          nix develop --accept-flake-config -c mise run ${{ matrix.build_task }}
 
-      - run: mise run ${{ matrix.rename_task }}
+      - run: nix develop --accept-flake-config -c mise run ${{ matrix.rename_task }}
 
       - uses: actions/upload-artifact@v5
         with:
@@ -222,14 +217,18 @@ jobs:
         with:
           ref: ${{ needs.semantic-release.outputs.tag }}
 
-      - uses: jdx/mise-action@v4
+      - uses: cachix/install-nix-action@v31
         with:
-          install_args: "rust"
-          cache: true
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: mise run ci:docs:all
+      - uses: cachix/cachix-action@v17
+        with:
+          name: scopecreep-zip
+          authToken: ${{ secrets.SCOPE_CREEP_CACHIX_PRIVATE_KEY }}
 
-      - run: mise run ci:docs:combine
+      - run: nix develop --accept-flake-config -c mise run ci:docs:all
+
+      - run: nix develop --accept-flake-config -c mise run ci:docs:combine
 
       - uses: actions/upload-artifact@v5
         with:
@@ -267,12 +266,11 @@ jobs:
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
 
-      - uses: jdx/mise-action@v4
+      - uses: cachix/install-nix-action@v31
         with:
-          install_args: "rust"
-          cache: true
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: mise run ci:release:apt-repo
+      - run: nix develop --accept-flake-config -c mise run ci:release:apt-repo
 
       - uses: actions/upload-pages-artifact@v4
         with:
