@@ -8,7 +8,16 @@ fn fuzzy_search_benchmark(c: &mut Criterion) {
     let items: Vec<MatchItem> = (0..500_000)
         .map(|i| MatchItem {
             id: format!("item-{i:06}"),
-            name: format!("item-{i:06}-{}", if i % 3 == 0 { "alpha" } else if i % 3 == 1 { "bravo" } else { "charlie" }),
+            name: format!(
+                "item-{i:06}-{}",
+                if i % 3 == 0 {
+                    "alpha"
+                } else if i % 3 == 1 {
+                    "bravo"
+                } else {
+                    "charlie"
+                }
+            ),
             extra: String::new(),
         })
         .collect();

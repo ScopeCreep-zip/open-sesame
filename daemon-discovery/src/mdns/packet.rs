@@ -92,7 +92,11 @@ impl DnsPacket {
             let qtype = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
             let qclass = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
             offset += 4;
-            questions.push(Question { name, qtype, qclass });
+            questions.push(Question {
+                name,
+                qtype,
+                qclass,
+            });
         }
 
         let mut answers = Vec::with_capacity(answer_count);
@@ -147,7 +151,12 @@ impl DnsPacket {
             buf.extend_from_slice(&q.qclass.to_be_bytes());
         }
 
-        for rr in self.answers.iter().chain(&self.authority).chain(&self.additional) {
+        for rr in self
+            .answers
+            .iter()
+            .chain(&self.authority)
+            .chain(&self.additional)
+        {
             write_rr(&mut buf, rr);
         }
 
@@ -338,7 +347,16 @@ fn read_rr(buf: &[u8], offset: usize) -> Option<(ResourceRecord, usize)> {
     let rdata = buf[off..off + rdlength].to_vec();
     off += rdlength;
 
-    Some((ResourceRecord { name, rtype, rclass, ttl, rdata }, off))
+    Some((
+        ResourceRecord {
+            name,
+            rtype,
+            rclass,
+            ttl,
+            rdata,
+        },
+        off,
+    ))
 }
 
 fn write_rr(buf: &mut Vec<u8>, rr: &ResourceRecord) {

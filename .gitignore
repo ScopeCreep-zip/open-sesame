@@ -6,6 +6,9 @@ xtask/target
 /docs/book
 /node_modules
 
+# Local environment overrides (.env.example is tracked)
+.env
+
 # Cache files
 .lycheecache
 

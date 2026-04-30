@@ -54,9 +54,7 @@ pub async fn connect_to_bus() -> core_types::Result<BusClient> {
 ///
 /// Returns `None` if daemon-secrets has not yet implemented the handler
 /// (the stub returns nothing / times out).
-pub async fn request_network_identity(
-    client: &mut BusClient,
-) -> Option<(Vec<u8>, [u8; 32])> {
+pub async fn request_network_identity(client: &mut BusClient) -> Option<(Vec<u8>, [u8; 32])> {
     use core_types::EventKind;
 
     let response = match client
@@ -108,10 +106,7 @@ pub async fn request_network_identity(
 ///
 /// Panics if the hardcoded default profile name is invalid (cannot happen
 /// in practice — the constant is compile-time validated).
-pub async fn request_secret(
-    client: &mut BusClient,
-    key: &str,
-) -> Option<Vec<u8>> {
+pub async fn request_secret(client: &mut BusClient, key: &str) -> Option<Vec<u8>> {
     use core_types::{EventKind, TrustProfileName};
 
     let profile = TrustProfileName::try_from(core_types::DEFAULT_PROFILE_NAME)
@@ -136,10 +131,15 @@ pub async fn request_secret(
     };
 
     match response.payload {
-        EventKind::SecretGetResponse { value, denial: None, .. } => {
-            Some(value.as_bytes().to_vec())
-        }
-        EventKind::SecretGetResponse { denial: Some(reason), .. } => {
+        EventKind::SecretGetResponse {
+            value,
+            denial: None,
+            ..
+        } => Some(value.as_bytes().to_vec()),
+        EventKind::SecretGetResponse {
+            denial: Some(reason),
+            ..
+        } => {
             tracing::debug!(key = key, ?reason, "secret access denied");
             None
         }

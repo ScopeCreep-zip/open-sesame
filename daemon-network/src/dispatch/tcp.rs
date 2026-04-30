@@ -13,7 +13,7 @@ const MAX_REPLICATION_FRAME: usize = 256 * 1024;
 ///
 /// `NewConnection`: spawn the Noise XX responder handshake task.
 /// `Frame`: forward to the appropriate session (post-handshake TCP transport).
-#[allow(clippy::missing_panics_doc)]
+#[allow(clippy::missing_panics_doc, clippy::too_many_lines)]
 pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) {
     match event {
         transport::tcp::TcpInbound::NewConnection { stream, peer_addr } => {
@@ -31,10 +31,15 @@ pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) 
                 let result = tokio::time::timeout(
                     timeout,
                     handshake::handle_inbound_handshake(stream, peer_addr, &ctx),
-                ).await;
+                )
+                .await;
 
                 match result {
-                    Ok(handshake::HandshakeOutcome::Established { session_id, remote_key_hex, .. }) => {
+                    Ok(handshake::HandshakeOutcome::Established {
+                        session_id,
+                        remote_key_hex,
+                        ..
+                    }) => {
                         tracing::info!(session = %session_id, %peer_addr, key = %&remote_key_hex[..16.min(remote_key_hex.len())], "handshake complete");
                     }
                     Ok(handshake::HandshakeOutcome::Rejected { reason }) => {
@@ -43,7 +48,8 @@ pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) 
                     Err(_) => {
                         Metrics::inc(&ctx.metrics.handshake_failures_total);
                         let timeout_err = crate::noise::state::NoiseError::Timeout;
-                        ctx.audit.append("handshake_timeout", &peer_addr.to_string());
+                        ctx.audit
+                            .append("handshake_timeout", &peer_addr.to_string());
                         tracing::warn!(%peer_addr, error = %timeout_err, "handshake timed out");
                     }
                 }
@@ -61,7 +67,9 @@ pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) 
                     drop(peer);
 
                     // Route VaultReplication messages to daemon-secrets.
-                    if plaintext.len() > 2 && plaintext[0] == 0x01 && plaintext[1] == 0x00
+                    if plaintext.len() > 2
+                        && plaintext[0] == 0x01
+                        && plaintext[1] == 0x00
                         && plaintext.len() <= MAX_REPLICATION_FRAME
                     {
                         // M-08: reject non-UTF-8 instead of silent lossy replacement.
@@ -71,7 +79,10 @@ pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) 
                             tracing::warn!(session = %sid, %peer_addr, "replication frame not valid UTF-8, dropping");
                             return;
                         };
-                        let install_id = state.tofu_store.lock().ok()
+                        let install_id = state
+                            .tofu_store
+                            .lock()
+                            .ok()
                             .and_then(|store| store.lookup_key(&remote_key).ok().flatten())
                             .and_then(|peer| {
                                 // M-07: only forward from pinned peers.
@@ -84,18 +95,26 @@ pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) 
                             });
                         if let Some(iid) = install_id {
                             let allowed = {
-                                let mut limiters = state.replication_rate_limiter.lock()
+                                let mut limiters = state
+                                    .replication_rate_limiter
+                                    .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 let limiter = limiters.entry(iid.clone()).or_insert_with(|| {
                                     governor::RateLimiter::direct(
-                                        governor::Quota::per_second(std::num::NonZeroU32::new(10).unwrap())
-                                            .allow_burst(std::num::NonZeroU32::new(50).unwrap()),
+                                        governor::Quota::per_second(
+                                            std::num::NonZeroU32::new(10).unwrap(),
+                                        )
+                                        .allow_burst(std::num::NonZeroU32::new(50).unwrap()),
                                     )
                                 });
                                 limiter.check().is_ok()
                             };
                             if allowed {
-                                if state.replication_inbound_tx.try_send((iid, envelope)).is_err() {
+                                if state
+                                    .replication_inbound_tx
+                                    .try_send((iid, envelope))
+                                    .is_err()
+                                {
                                     Metrics::inc(&state.metrics.frames_dropped_total);
                                     tracing::warn!(session = %sid, %peer_addr, "replication inbound channel full, entry dropped");
                                 }

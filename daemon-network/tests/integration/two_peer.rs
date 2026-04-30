@@ -8,19 +8,18 @@
 mod common;
 
 use common::generate_keypair;
+use core_types::TofuTrustLevel;
 use daemon_network::metrics::Metrics;
 use daemon_network::noise::state::{
-    self, derive_psk_from_handshake, xx_initiator, xx_responder,
-    ikpsk2_initiator, ikpsk2_responder,
+    self, derive_psk_from_handshake, ikpsk2_initiator, ikpsk2_responder, xx_initiator, xx_responder,
 };
 use daemon_network::send;
+use daemon_network::session::replay::{ReplayCheck, ReplayWindow};
 use daemon_network::session::state::PeerState;
 use daemon_network::session::table::PeerTable;
-use daemon_network::tofu::store::TofuStore;
 use daemon_network::tofu::fingerprint;
-use daemon_network::session::replay::{ReplayWindow, ReplayCheck};
-use daemon_network::transport::frame::{Frame, WireSessionId, HEADER_SIZE};
-use core_types::TofuTrustLevel;
+use daemon_network::tofu::store::TofuStore;
+use daemon_network::transport::frame::{Frame, HEADER_SIZE, WireSessionId};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -44,8 +43,16 @@ async fn xx_handshake_tofu_pin_data_round_trip() {
     // Verify remote static keys match.
     let a_sees_b = transport_a.remote_static().expect("no remote static on A");
     let b_sees_a = transport_b.remote_static().expect("no remote static on B");
-    assert_eq!(a_sees_b, kp_b.public.as_slice(), "A should see B's public key");
-    assert_eq!(b_sees_a, kp_a.public.as_slice(), "B should see A's public key");
+    assert_eq!(
+        a_sees_b,
+        kp_b.public.as_slice(),
+        "A should see B's public key"
+    );
+    assert_eq!(
+        b_sees_a,
+        kp_a.public.as_slice(),
+        "B should see A's public key"
+    );
 
     // TOFU pinning: both sides pin the other's key.
     let dir = tempfile::tempdir().unwrap();
@@ -55,8 +62,12 @@ async fn xx_handshake_tofu_pin_data_round_trip() {
     let key_b_hex = hex::encode(a_sees_b);
     let key_a_hex = hex::encode(b_sees_a);
 
-    store_a.pin(&key_b_hex, "127.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
-    store_b.pin(&key_a_hex, "127.0.0.1:48628", TofuTrustLevel::Tofu).unwrap();
+    store_a
+        .pin(&key_b_hex, "127.0.0.1:48627", TofuTrustLevel::Tofu)
+        .unwrap();
+    store_b
+        .pin(&key_a_hex, "127.0.0.1:48628", TofuTrustLevel::Tofu)
+        .unwrap();
 
     // Verify pins.
     let peer_b = store_a.lookup_key(&key_b_hex).unwrap().unwrap();
@@ -133,10 +144,14 @@ async fn tofu_mismatch_detection() {
     let store = TofuStore::open(&dir.path().join("tofu.db"), "test-install").unwrap();
 
     // Pin key A.
-    store.pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
+    store
+        .pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu)
+        .unwrap();
 
     // Record a mismatch when a different key presents from the same address.
-    store.record_mismatch("aabbccdd", "eeff0011", "10.0.0.1:48627").unwrap();
+    store
+        .record_mismatch("aabbccdd", "eeff0011", "10.0.0.1:48627")
+        .unwrap();
 
     // Fork-evidence log should have 2 entries: pin + mismatch.
     assert_eq!(store.event_count().unwrap(), 2);
@@ -262,7 +277,9 @@ async fn udp_send_data_round_trip() {
 
     // Verify metrics were updated.
     assert_eq!(
-        metrics_a.frames_sent_total.load(std::sync::atomic::Ordering::Relaxed),
+        metrics_a
+            .frames_sent_total
+            .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
 }
@@ -298,19 +315,26 @@ async fn handshake_ack_wire_exchange() {
         reader.read_exact(&mut pat).await.unwrap();
         assert_eq!(pat[0], 0x01); // XX
 
-        let mut transport = xx_responder(&mut reader, &mut writer, &kp_b_clone).await.unwrap();
+        let mut transport = xx_responder(&mut reader, &mut writer, &kp_b_clone)
+            .await
+            .unwrap();
         let remote_static = transport.remote_static().unwrap();
 
         // Build and sign our ack.
         let master = core_crypto::SecureBytes::from_slice(&[0xBB; 32]);
         let install_id = uuid::Uuid::from_u128(2);
-        let signing_key = core_crypto::network::derive_signing_keypair(&master, &install_id).unwrap();
+        let signing_key =
+            core_crypto::network::derive_signing_keypair(&master, &install_id).unwrap();
         let signing_pub = signing_key.public_key();
         let net_pub: [u8; 32] = kp_b_clone.public[..32].try_into().unwrap();
 
         let our_ack = handshake_ack::build_handshake_ack(
-            &install_id.to_string(), None, &net_pub, &signing_pub,
-            state::NOISE_XX, &signing_key,
+            &install_id.to_string(),
+            None,
+            &net_pub,
+            &signing_pub,
+            state::NOISE_XX,
+            &signing_key,
         );
         let ack_json = serde_json::to_vec(&our_ack).unwrap();
         let our_ct = transport.encrypt(&ack_json).unwrap();
@@ -354,8 +378,12 @@ async fn handshake_ack_wire_exchange() {
     let net_pub: [u8; 32] = kp_a.public[..32].try_into().unwrap();
 
     let our_ack = handshake_ack::build_handshake_ack(
-        &install_id.to_string(), None, &net_pub, &signing_pub,
-        state::NOISE_XX, &signing_key,
+        &install_id.to_string(),
+        None,
+        &net_pub,
+        &signing_pub,
+        state::NOISE_XX,
+        &signing_key,
     );
     let ack_json = serde_json::to_vec(&our_ack).unwrap();
     let our_ct = transport.encrypt(&ack_json).unwrap();
@@ -380,7 +408,10 @@ async fn handshake_ack_wire_exchange() {
     // Both sides received verified installation IDs.
     let responder_install = responder.await.unwrap();
     assert_eq!(responder_install, install_id.to_string());
-    assert_eq!(peer_ack.installation_id, uuid::Uuid::from_u128(2).to_string());
+    assert_eq!(
+        peer_ack.installation_id,
+        uuid::Uuid::from_u128(2).to_string()
+    );
 }
 
 #[tokio::test]
@@ -443,7 +474,13 @@ async fn send_data_sequential_frame_counter() {
 
     let sid = WireSessionId::random();
     let peer_table_a = Arc::new(PeerTable::new(256));
-    let peer_state_a = PeerState::new(sid, remote_static_b, addr_a, transport_a, TofuTrustLevel::Tofu);
+    let peer_state_a = PeerState::new(
+        sid,
+        remote_static_b,
+        addr_a,
+        transport_a,
+        TofuTrustLevel::Tofu,
+    );
     assert!(peer_table_a.insert(peer_state_a));
 
     let metrics_a = Arc::new(Metrics::new());
@@ -457,7 +494,9 @@ async fn send_data_sequential_frame_counter() {
         .expect("second send_data failed");
 
     assert_eq!(
-        metrics_a.frames_sent_total.load(std::sync::atomic::Ordering::Relaxed),
+        metrics_a
+            .frames_sent_total
+            .load(std::sync::atomic::Ordering::Relaxed),
         2,
         "two sends should produce exactly 2 frames"
     );
@@ -505,7 +544,8 @@ async fn xx_handshake_garbage_data() {
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         xx_responder(&mut sr, &mut sw, &kp),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(Err(_)) => {} // Handshake error — expected.
@@ -580,8 +620,12 @@ fn handshake_ack_wrong_signing_key_rejected() {
     let network_pub = [0xBB; 32];
 
     let ack = handshake_ack::build_handshake_ack(
-        "test-id", None, &network_pub, &signing_pub,
-        state::NOISE_XX, &signing_key,
+        "test-id",
+        None,
+        &network_pub,
+        &signing_pub,
+        state::NOISE_XX,
+        &signing_key,
     );
 
     // Verify with a DIFFERENT signing pubkey (attacker substitution).
@@ -608,8 +652,12 @@ fn tofu_event_chain_is_contiguous() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::open(&dir.path().join("tofu.db"), "chain-test").unwrap();
 
-    store.pin("aaaa", "10.0.0.1:1", TofuTrustLevel::Tofu).unwrap();
-    store.pin("bbbb", "10.0.0.2:2", TofuTrustLevel::Bootstrap).unwrap();
+    store
+        .pin("aaaa", "10.0.0.1:1", TofuTrustLevel::Tofu)
+        .unwrap();
+    store
+        .pin("bbbb", "10.0.0.2:2", TofuTrustLevel::Bootstrap)
+        .unwrap();
     store.unpin("aaaa").unwrap();
     store.record_mismatch("bbbb", "cccc", "10.0.0.2:2").unwrap();
 
@@ -623,8 +671,11 @@ fn tofu_event_chain_is_contiguous() {
     let conn = rusqlite::Connection::open_with_flags(
         &dir.path().join("tofu.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ).unwrap();
-    let mut stmt = conn.prepare("SELECT prev_hash FROM tofu_events ORDER BY id").unwrap();
+    )
+    .unwrap();
+    let mut stmt = conn
+        .prepare("SELECT prev_hash FROM tofu_events ORDER BY id")
+        .unwrap();
     let hashes: Vec<String> = stmt
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -647,7 +698,9 @@ fn tofu_touch_logs_address_migration() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::open(&dir.path().join("tofu.db"), "migrate-test").unwrap();
 
-    store.pin("aabb", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
+    store
+        .pin("aabb", "10.0.0.1:48627", TofuTrustLevel::Tofu)
+        .unwrap();
     assert_eq!(store.event_count().unwrap(), 1); // pin
 
     // Touch with same address — no migration event.
@@ -668,7 +721,9 @@ fn tofu_revoked_peer_cannot_be_repinned_without_unpin() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::open(&dir.path().join("tofu.db"), "revoke-test").unwrap();
 
-    store.pin("dead", "10.0.0.1:1", TofuTrustLevel::Revoked).unwrap();
+    store
+        .pin("dead", "10.0.0.1:1", TofuTrustLevel::Revoked)
+        .unwrap();
     let peer = store.lookup_key("dead").unwrap().unwrap();
     assert_eq!(peer.trust_level, TofuTrustLevel::Revoked);
 
@@ -676,7 +731,9 @@ fn tofu_revoked_peer_cannot_be_repinned_without_unpin() {
     // the handshake path checks trust_level BEFORE re-pinning.
     // This test documents that pin() is a raw store operation, not
     // a policy gate.
-    store.pin("dead", "10.0.0.1:1", TofuTrustLevel::Tofu).unwrap();
+    store
+        .pin("dead", "10.0.0.1:1", TofuTrustLevel::Tofu)
+        .unwrap();
     let peer = store.lookup_key("dead").unwrap().unwrap();
     assert_eq!(peer.trust_level, TofuTrustLevel::Tofu);
 }
@@ -777,7 +834,10 @@ fn frame_body_length_field_must_match_actual() {
     // Set body_len to 100 (but only 3 bytes of body follow).
     bytes[2] = 0;
     bytes[3] = 100;
-    assert!(Frame::parse(&bytes).is_none(), "mismatched body_len must reject");
+    assert!(
+        Frame::parse(&bytes).is_none(),
+        "mismatched body_len must reject"
+    );
 }
 
 // ============================================================================

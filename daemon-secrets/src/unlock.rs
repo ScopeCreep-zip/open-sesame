@@ -23,10 +23,7 @@ pub fn profile_salt_path(config_dir: &Path, profile: &TrustProfileName) -> PathB
 }
 
 /// Derive the master key from password + salt via Argon2id.
-pub fn derive_master_key(
-    password: &[u8],
-    salt: &[u8; 16],
-) -> core_types::Result<SecureBytes> {
+pub fn derive_master_key(password: &[u8], salt: &[u8; 16]) -> core_types::Result<SecureBytes> {
     core_crypto::derive_key_argon2(password, salt)
 }
 

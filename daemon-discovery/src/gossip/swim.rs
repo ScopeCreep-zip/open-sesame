@@ -46,7 +46,11 @@ impl Identity for PeerId {
 
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}[gen={}]", self.key_prefix, self.addr, self.generation)
+        write!(
+            f,
+            "{}@{}[gen={}]",
+            self.key_prefix, self.addr, self.generation
+        )
     }
 }
 

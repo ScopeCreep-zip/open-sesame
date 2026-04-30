@@ -84,7 +84,8 @@ pub struct DaemonState {
     /// Per-installation rate limiter for received replication entries (E-02).
     /// Keyed on installation ID (not session ID) to prevent bypass via
     /// multiple sessions from the same identity.
-    pub replication_rate_limiter: std::sync::Mutex<std::collections::HashMap<String, governor::DefaultDirectRateLimiter>>,
+    pub replication_rate_limiter:
+        std::sync::Mutex<std::collections::HashMap<String, governor::DefaultDirectRateLimiter>>,
     /// Channel for forwarding received replication data from sync UDP/TCP
     /// handlers to the async event loop for IPC publishing. The sync handlers
     /// can't call `bus_client.publish().await` directly.

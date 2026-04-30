@@ -116,12 +116,21 @@ jobs:
         with:
           ref: ${{ needs.semantic-release.outputs.tag }}
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+
       - uses: jdx/mise-action@v4
         with:
           install_args: "rust cargo:cargo-deb"
           cache: true
 
       - name: Build packages (with raised mlock limit for ProtectedAlloc)
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: "sccache"
         run: |
           sudo prlimit --pid $$ --memlock=268435456:268435456
           mise run ${{ matrix.build_task }}

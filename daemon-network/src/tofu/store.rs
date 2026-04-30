@@ -91,7 +91,10 @@ impl TofuStore {
             return Err(TofuStoreError::Corrupted(integrity));
         }
 
-        Ok(Self { conn, installation_id: installation_id.to_string() })
+        Ok(Self {
+            conn,
+            installation_id: installation_id.to_string(),
+        })
     }
 
     /// Look up a peer by public key hex.
@@ -225,7 +228,16 @@ impl TofuStore {
                  (public_key_hex, first_seen_at, last_seen_at, first_seen_addr,
                   last_known_addr, trust_level, pin_expires_at, pin_ttl_secs, version)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
-                params![public_key_hex, now, now, addr, addr, level_str, expires_at, ttl_val],
+                params![
+                    public_key_hex,
+                    now,
+                    now,
+                    addr,
+                    addr,
+                    level_str,
+                    expires_at,
+                    ttl_val
+                ],
             )
             .map_err(TofuStoreError::Sqlite)?;
 
@@ -245,11 +257,7 @@ impl TofuStore {
     /// # Errors
     ///
     /// Returns `TofuStoreError::Sqlite` if the update fails.
-    pub fn touch(
-        &self,
-        public_key_hex: &str,
-        addr: &str,
-    ) -> Result<(), TofuStoreError> {
+    pub fn touch(&self, public_key_hex: &str, addr: &str) -> Result<(), TofuStoreError> {
         // Read old address, current expiry, and original TTL BEFORE updating.
         let row: Option<(Option<String>, Option<String>, Option<i64>)> = self
             .conn
@@ -276,10 +284,7 @@ impl TofuStore {
         // is ISO 8601 and cannot be parsed as epoch seconds).
         let new_expires = match (&current_expires, pin_ttl) {
             (Some(expires_str), Some(ttl)) if ttl > 0 => {
-                let expires_secs: u64 = expires_str
-                    .trim_end_matches('Z')
-                    .parse()
-                    .unwrap_or(0);
+                let expires_secs: u64 = expires_str.trim_end_matches('Z').parse().unwrap_or(0);
                 #[allow(clippy::cast_sign_loss)]
                 let ttl_u64 = ttl as u64;
                 let remaining = expires_secs.saturating_sub(now_secs);
@@ -322,11 +327,7 @@ impl TofuStore {
     /// # Errors
     ///
     /// Returns `TofuStoreError::Sqlite` if the update fails.
-    pub fn store_psk(
-        &self,
-        public_key_hex: &str,
-        psk: &[u8],
-    ) -> Result<(), TofuStoreError> {
+    pub fn store_psk(&self, public_key_hex: &str, psk: &[u8]) -> Result<(), TofuStoreError> {
         self.conn
             .execute(
                 "UPDATE tofu_peers SET cached_psk = ?1 WHERE public_key_hex = ?2",
@@ -348,7 +349,9 @@ impl TofuStore {
             .map_err(TofuStoreError::Sqlite)?;
 
         let psk = stmt
-            .query_row(params![public_key_hex], |row| row.get::<_, Option<Vec<u8>>>(0))
+            .query_row(params![public_key_hex], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })
             .optional()
             .map_err(TofuStoreError::Sqlite)?
             .flatten();
@@ -366,7 +369,7 @@ impl TofuStore {
             .conn
             .prepare(
                 "SELECT public_key_hex FROM tofu_peers
-                 WHERE trust_level IN ('tofu', 'bootstrap', 'endorsed')"
+                 WHERE trust_level IN ('tofu', 'bootstrap', 'endorsed')",
             )
             .map_err(TofuStoreError::Sqlite)?;
 
@@ -399,10 +402,14 @@ impl TofuStore {
         // a malicious peer sending a multi-KB name that gets cloned into the
         // TOFU store, audit log, and IPC events.
         let capped_name = display_name.map(|n| {
-            if n.len() <= 256 { return n; }
+            if n.len() <= 256 {
+                return n;
+            }
             // Truncate at a char boundary to avoid splitting multi-byte UTF-8.
             let mut end = 256;
-            while end > 0 && !n.is_char_boundary(end) { end -= 1; }
+            while end > 0 && !n.is_char_boundary(end) {
+                end -= 1;
+            }
             &n[..end]
         });
         self.conn
@@ -425,7 +432,10 @@ impl TofuStore {
     ///
     /// Returns `TofuStoreError::Sqlite` if the query fails, or `None` if the
     /// peer is not found or the key hex is invalid.
-    pub fn get_network_pubkey(&self, public_key_hex: &str) -> Result<Option<[u8; 32]>, TofuStoreError> {
+    pub fn get_network_pubkey(
+        &self,
+        public_key_hex: &str,
+    ) -> Result<Option<[u8; 32]>, TofuStoreError> {
         let peer = self.lookup_key(public_key_hex)?;
         Ok(peer.and_then(|p| {
             let bytes = hex::decode(&p.public_key_hex).ok()?;
@@ -458,7 +468,7 @@ impl TofuStore {
                 "SELECT public_key_hex FROM tofu_peers
                  WHERE pin_expires_at IS NOT NULL
                    AND pin_expires_at <= ?1
-                   AND trust_level = 'tofu'"
+                   AND trust_level = 'tofu'",
             )
             .map_err(TofuStoreError::Sqlite)?;
 
@@ -683,7 +693,9 @@ mod tests {
     #[test]
     fn pin_and_lookup() {
         let (store, _dir) = temp_store();
-        store.pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu)
+            .unwrap();
         let peer = store.lookup_key("aabbccdd").unwrap().unwrap();
         assert_eq!(peer.public_key_hex, "aabbccdd");
         assert_eq!(peer.trust_level, TofuTrustLevel::Tofu);
@@ -699,7 +711,9 @@ mod tests {
     #[test]
     fn unpin_changes_trust_level() {
         let (store, _dir) = temp_store();
-        store.pin("aabb", "1.2.3.4:1234", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("aabb", "1.2.3.4:1234", TofuTrustLevel::Tofu)
+            .unwrap();
         store.unpin("aabb").unwrap();
         let peer = store.lookup_key("aabb").unwrap().unwrap();
         assert_eq!(peer.trust_level, TofuTrustLevel::Unpinned);
@@ -708,7 +722,9 @@ mod tests {
     #[test]
     fn psk_round_trip() {
         let (store, _dir) = temp_store();
-        store.pin("ccdd", "5.6.7.8:5678", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("ccdd", "5.6.7.8:5678", TofuTrustLevel::Tofu)
+            .unwrap();
         store.store_psk("ccdd", &[0xAA; 32]).unwrap();
         let psk = store.get_psk("ccdd").unwrap().unwrap();
         assert_eq!(psk, vec![0xAA; 32]);
@@ -717,7 +733,9 @@ mod tests {
     #[test]
     fn psk_none_when_not_set() {
         let (store, _dir) = temp_store();
-        store.pin("eeff", "9.0.1.2:9012", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("eeff", "9.0.1.2:9012", TofuTrustLevel::Tofu)
+            .unwrap();
         assert!(store.get_psk("eeff").unwrap().is_none());
     }
 
@@ -725,7 +743,9 @@ mod tests {
     fn event_log_grows() {
         let (store, _dir) = temp_store();
         assert_eq!(store.event_count().unwrap(), 0);
-        store.pin("1111", "1.1.1.1:1111", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("1111", "1.1.1.1:1111", TofuTrustLevel::Tofu)
+            .unwrap();
         assert_eq!(store.event_count().unwrap(), 1);
         store.unpin("1111").unwrap();
         assert_eq!(store.event_count().unwrap(), 2);
@@ -734,8 +754,12 @@ mod tests {
     #[test]
     fn mismatch_recorded() {
         let (store, _dir) = temp_store();
-        store.pin("aaaa", "2.2.2.2:2222", TofuTrustLevel::Tofu).unwrap();
-        store.record_mismatch("aaaa", "bbbb", "2.2.2.2:2222").unwrap();
+        store
+            .pin("aaaa", "2.2.2.2:2222", TofuTrustLevel::Tofu)
+            .unwrap();
+        store
+            .record_mismatch("aaaa", "bbbb", "2.2.2.2:2222")
+            .unwrap();
         assert_eq!(store.event_count().unwrap(), 2); // pin + mismatch
     }
 
@@ -743,7 +767,9 @@ mod tests {
     fn list_peers_returns_all() {
         let (store, _dir) = temp_store();
         store.pin("aa", "1.1.1.1:1", TofuTrustLevel::Tofu).unwrap();
-        store.pin("bb", "2.2.2.2:2", TofuTrustLevel::Bootstrap).unwrap();
+        store
+            .pin("bb", "2.2.2.2:2", TofuTrustLevel::Bootstrap)
+            .unwrap();
         let peers = store.list_peers().unwrap();
         assert_eq!(peers.len(), 2);
     }
@@ -751,7 +777,9 @@ mod tests {
     #[test]
     fn bootstrap_trust_level() {
         let (store, _dir) = temp_store();
-        store.pin("boot", "3.3.3.3:3", TofuTrustLevel::Bootstrap).unwrap();
+        store
+            .pin("boot", "3.3.3.3:3", TofuTrustLevel::Bootstrap)
+            .unwrap();
         let peer = store.lookup_key("boot").unwrap().unwrap();
         assert_eq!(peer.trust_level, TofuTrustLevel::Bootstrap);
     }
@@ -768,7 +796,9 @@ mod tests {
     #[test]
     fn lookup_addr_finds_peer() {
         let (store, _dir) = temp_store();
-        store.pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("aabbccdd", "10.0.0.1:48627", TofuTrustLevel::Tofu)
+            .unwrap();
         let peer = store.lookup_addr("10.0.0.1:48627").unwrap().unwrap();
         assert_eq!(peer.public_key_hex, "aabbccdd");
         assert_eq!(peer.trust_level, TofuTrustLevel::Tofu);
@@ -783,7 +813,9 @@ mod tests {
     #[test]
     fn lookup_addr_with_psk_for_ikpsk2() {
         let (store, _dir) = temp_store();
-        store.pin("eeff0011", "10.0.0.5:48627", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("eeff0011", "10.0.0.5:48627", TofuTrustLevel::Tofu)
+            .unwrap();
         store.store_psk("eeff0011", &[0xBB; 32]).unwrap();
         let peer = store.lookup_addr("10.0.0.5:48627").unwrap().unwrap();
         assert_eq!(peer.public_key_hex, "eeff0011");
@@ -793,7 +825,9 @@ mod tests {
     #[test]
     fn set_installation_identity_persists() {
         let (store, _dir) = temp_store();
-        store.pin("aabb", "10.0.0.1:48627", TofuTrustLevel::Tofu).unwrap();
+        store
+            .pin("aabb", "10.0.0.1:48627", TofuTrustLevel::Tofu)
+            .unwrap();
 
         // Before write-back: installation_id is None.
         let peer = store.lookup_key("aabb").unwrap().unwrap();
@@ -801,7 +835,9 @@ mod tests {
         assert!(peer.display_name.is_none());
 
         // Write-back.
-        store.set_installation_identity("aabb", "550e8400-uuid", Some("peer-laptop")).unwrap();
+        store
+            .set_installation_identity("aabb", "550e8400-uuid", Some("peer-laptop"))
+            .unwrap();
 
         // After write-back.
         let peer = store.lookup_key("aabb").unwrap().unwrap();
@@ -813,13 +849,17 @@ mod tests {
     fn set_installation_identity_no_op_for_missing_peer() {
         let (store, _dir) = temp_store();
         // No peer pinned — update affects zero rows, no error.
-        store.set_installation_identity("nonexistent", "uuid", None).unwrap();
+        store
+            .set_installation_identity("nonexistent", "uuid", None)
+            .unwrap();
     }
 
     #[test]
     fn pin_with_ttl_sets_expiry() {
         let (store, _dir) = temp_store();
-        store.pin_with_ttl("aabb", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(3600)).unwrap();
+        store
+            .pin_with_ttl("aabb", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(3600))
+            .unwrap();
         let peer = store.lookup_key("aabb").unwrap().unwrap();
         assert_eq!(peer.trust_level, TofuTrustLevel::Tofu);
         // pin_expires_at is set (we can't check the exact value since it's
@@ -827,34 +867,49 @@ mod tests {
         let conn = rusqlite::Connection::open_with_flags(
             &_dir.path().join("test-tofu.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
-        let expires: Option<String> = conn.query_row(
-            "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'aabb'",
-            [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let expires: Option<String> = conn
+            .query_row(
+                "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'aabb'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(expires.is_some(), "pin_with_ttl must set pin_expires_at");
     }
 
     #[test]
     fn pin_without_ttl_has_no_expiry() {
         let (store, _dir) = temp_store();
-        store.pin("ccdd", "10.0.0.2:2", TofuTrustLevel::Bootstrap).unwrap();
+        store
+            .pin("ccdd", "10.0.0.2:2", TofuTrustLevel::Bootstrap)
+            .unwrap();
         let conn = rusqlite::Connection::open_with_flags(
             &_dir.path().join("test-tofu.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
-        let expires: Option<String> = conn.query_row(
-            "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'ccdd'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert!(expires.is_none(), "pin() without TTL must have NULL pin_expires_at");
+        )
+        .unwrap();
+        let expires: Option<String> = conn
+            .query_row(
+                "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'ccdd'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            expires.is_none(),
+            "pin() without TTL must have NULL pin_expires_at"
+        );
     }
 
     #[test]
     fn expire_stale_pins_transitions_to_unpinned() {
         let (store, _dir) = temp_store();
         // Pin with a 0-second TTL (already expired).
-        store.pin_with_ttl("dead", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(0)).unwrap();
+        store
+            .pin_with_ttl("dead", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(0))
+            .unwrap();
         // Brief sleep to ensure wall clock passes the expiry.
         std::thread::sleep(std::time::Duration::from_millis(50));
         let expired = store.expire_stale_pins().unwrap();
@@ -867,7 +922,9 @@ mod tests {
     fn expire_stale_pins_ignores_bootstrap() {
         let (store, _dir) = temp_store();
         // Bootstrap pin with no TTL — must not expire.
-        store.pin("boot", "10.0.0.1:1", TofuTrustLevel::Bootstrap).unwrap();
+        store
+            .pin("boot", "10.0.0.1:1", TofuTrustLevel::Bootstrap)
+            .unwrap();
         let expired = store.expire_stale_pins().unwrap();
         assert_eq!(expired, 0);
         let peer = store.lookup_key("boot").unwrap().unwrap();
@@ -878,25 +935,34 @@ mod tests {
     fn touch_does_not_refresh_expiry_early_in_window() {
         let (store, _dir) = temp_store();
         // Pin with 100s TTL.
-        store.pin_with_ttl("peer", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(100)).unwrap();
+        store
+            .pin_with_ttl("peer", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(100))
+            .unwrap();
 
         // Read the initial expiry.
         let conn = rusqlite::Connection::open_with_flags(
             &_dir.path().join("test-tofu.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
-        let expires_before: String = conn.query_row(
-            "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
-            [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let expires_before: String = conn
+            .query_row(
+                "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         // Touch immediately (well within the first 75% of the window).
         store.touch("peer", "10.0.0.1:1").unwrap();
 
-        let expires_after: String = conn.query_row(
-            "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
-            [], |row| row.get(0),
-        ).unwrap();
+        let expires_after: String = conn
+            .query_row(
+                "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(
             expires_before, expires_after,
@@ -908,7 +974,9 @@ mod tests {
     fn touch_refreshes_expiry_near_end_of_window() {
         let (store, _dir) = temp_store();
         // Pin with 1s TTL — expires almost immediately.
-        store.pin_with_ttl("peer", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(1)).unwrap();
+        store
+            .pin_with_ttl("peer", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(1))
+            .unwrap();
 
         // Wait 1.1s so the pin is past expiry (well into the last 25%).
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -916,18 +984,25 @@ mod tests {
         let conn = rusqlite::Connection::open_with_flags(
             &_dir.path().join("test-tofu.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
-        let expires_before: String = conn.query_row(
-            "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
-            [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let expires_before: String = conn
+            .query_row(
+                "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         store.touch("peer", "10.0.0.1:1").unwrap();
 
-        let expires_after: String = conn.query_row(
-            "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
-            [], |row| row.get(0),
-        ).unwrap();
+        let expires_after: String = conn
+            .query_row(
+                "SELECT pin_expires_at FROM tofu_peers WHERE public_key_hex = 'peer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_ne!(
             expires_before, expires_after,
@@ -938,15 +1013,21 @@ mod tests {
     #[test]
     fn pin_ttl_secs_stored_in_db() {
         let (store, _dir) = temp_store();
-        store.pin_with_ttl("peer", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(86400)).unwrap();
+        store
+            .pin_with_ttl("peer", "10.0.0.1:1", TofuTrustLevel::Tofu, Some(86400))
+            .unwrap();
         let conn = rusqlite::Connection::open_with_flags(
             &_dir.path().join("test-tofu.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
-        let ttl: i64 = conn.query_row(
-            "SELECT pin_ttl_secs FROM tofu_peers WHERE public_key_hex = 'peer'",
-            [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let ttl: i64 = conn
+            .query_row(
+                "SELECT pin_ttl_secs FROM tofu_peers WHERE public_key_hex = 'peer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(ttl, 86400);
     }
 }

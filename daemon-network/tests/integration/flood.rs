@@ -3,9 +3,9 @@
 
 mod common;
 
-use daemon_network::ratelimit::bucket::TokenBucket;
 use daemon_network::flood::cookie::CookieChallenger;
 use daemon_network::flood::pow::PowChallenger;
+use daemon_network::ratelimit::bucket::TokenBucket;
 use std::net::SocketAddr;
 
 #[test]
@@ -34,7 +34,10 @@ fn cookie_challenge_validates_correctly() {
     assert!(cc.verify(&addr, &cookie), "valid cookie should verify");
 
     // Valid cookie from wrong address.
-    assert!(!cc.verify(&wrong_addr, &cookie), "wrong address should fail");
+    assert!(
+        !cc.verify(&wrong_addr, &cookie),
+        "wrong address should fail"
+    );
 
     // Tampered cookie.
     let mut tampered = cookie;
@@ -106,7 +109,10 @@ fn pow_epoch_staleness_rejects_old_epoch() {
     let seed_current = PowChallenger::generate_seed(&secret, current_epoch, "10.0.0.1:48627");
 
     // Seeds for different epochs must differ (so a stale solution can't verify against current).
-    assert_ne!(seed_stale, seed_current, "stale and current epoch seeds must differ");
+    assert_ne!(
+        seed_stale, seed_current,
+        "stale and current epoch seeds must differ"
+    );
 }
 
 #[test]
@@ -123,7 +129,10 @@ fn pow_epoch_future_rejected() {
 
     let seed_now = PowChallenger::generate_seed(&secret, now, "10.0.0.1:48627");
     let seed_future = PowChallenger::generate_seed(&secret, future_epoch, "10.0.0.1:48627");
-    assert_ne!(seed_now, seed_future, "future epoch seed must differ from current");
+    assert_ne!(
+        seed_now, seed_future,
+        "future epoch seed must differ from current"
+    );
 }
 
 // ============================================================================
@@ -141,7 +150,11 @@ fn cookie_challenge_payload_is_33_bytes() {
     // Wire format: type byte + cookie.
     let mut payload = vec![0x00u8];
     payload.extend_from_slice(&cookie);
-    assert_eq!(payload.len(), 33, "tier-1 challenge payload must be 33 bytes");
+    assert_eq!(
+        payload.len(),
+        33,
+        "tier-1 challenge payload must be 33 bytes"
+    );
 }
 
 #[test]
@@ -154,11 +167,18 @@ fn pow_challenge_payload_is_41_bytes() {
     let mut payload = vec![0x01u8];
     payload.extend_from_slice(&epoch.to_be_bytes());
     payload.extend_from_slice(&seed);
-    assert_eq!(payload.len(), 41, "tier-2 challenge payload must be 41 bytes");
+    assert_eq!(
+        payload.len(),
+        41,
+        "tier-2 challenge payload must be 41 bytes"
+    );
 
     // Verify epoch can be decoded back.
     let decoded_epoch = u64::from_be_bytes(payload[1..9].try_into().unwrap());
-    assert_eq!(decoded_epoch, epoch, "epoch must round-trip through wire format");
+    assert_eq!(
+        decoded_epoch, epoch,
+        "epoch must round-trip through wire format"
+    );
 }
 
 #[test]
@@ -171,12 +191,15 @@ fn pow_response_payload_is_25_bytes() {
             let mut response = vec![0x01u8];
             response.extend_from_slice(&epoch.to_be_bytes());
             response.extend_from_slice(&solution);
-            assert_eq!(response.len(), 25, "`PoW` response payload must be 25 bytes");
+            assert_eq!(
+                response.len(),
+                25,
+                "`PoW` response payload must be 25 bytes"
+            );
 
             // Verify the solution can be extracted and verified.
             let extracted_epoch = u64::from_be_bytes(response[1..9].try_into().unwrap());
-            let extracted_solution: equix::SolutionByteArray =
-                response[9..25].try_into().unwrap();
+            let extracted_solution: equix::SolutionByteArray = response[9..25].try_into().unwrap();
             assert_eq!(extracted_epoch, epoch);
             assert!(
                 PowChallenger::verify_solution(&seed, &extracted_solution),

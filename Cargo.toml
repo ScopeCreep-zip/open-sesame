@@ -237,6 +237,15 @@ opt-level = 3
 debug = false
 codegen-backend = "llvm"
 
+# Workspace crates that link C FFI static libraries must use LLVM — Cranelift
+# cannot resolve symbols from cmake-built C objects or handle panic unwinding
+# through FFI boundaries (libgit2, aws-lc-sys).
+[profile.dev.package.core-crypto]
+codegen-backend = "llvm"
+
+[profile.dev.package.sesame-workspace]
+codegen-backend = "llvm"
+
 # Build scripts and proc macros stay unoptimized — they run at compile time
 # and benefit from fast compilation, not fast execution.
 [profile.dev.build-override]

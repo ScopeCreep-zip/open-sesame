@@ -17,20 +17,16 @@
 //! break every replication envelope in production.
 
 use base64::Engine;
+use core_crypto::SecureBytes;
 use core_crypto::network::{
     chacha20_open, chacha20_seal, generate_x25519_keypair, hkdf_blake2b, random_bytes,
     replication_envelope_aad, x25519_dh,
 };
-use core_crypto::SecureBytes;
 
 use core_crypto::network::REPLICATION_HKDF_CONTEXT as HKDF_CONTEXT;
 
 /// Simulate daemon-network's sender side: seal and build JSON envelope.
-fn sender_seal(
-    dest_pubkey: &[u8; 32],
-    entries_json: &str,
-    session_id: &str,
-) -> (String, u64) {
+fn sender_seal(dest_pubkey: &[u8; 32], entries_json: &str, session_id: &str) -> (String, u64) {
     // Ephemeral ECDH per destination.
     let (eph_private, eph_public) = generate_x25519_keypair().unwrap();
     let shared = x25519_dh(&eph_private, dest_pubkey).unwrap();
@@ -68,12 +64,8 @@ fn sender_seal(
 }
 
 /// Simulate daemon-secrets' receiver side: parse envelope and open.
-fn receiver_open(
-    envelope_str: &str,
-    dest_private: &SecureBytes,
-) -> Result<String, &'static str> {
-    let v: serde_json::Value =
-        serde_json::from_str(envelope_str).map_err(|_| "not valid JSON")?;
+fn receiver_open(envelope_str: &str, dest_private: &SecureBytes) -> Result<String, &'static str> {
+    let v: serde_json::Value = serde_json::from_str(envelope_str).map_err(|_| "not valid JSON")?;
 
     if v["reencrypted"].as_bool() != Some(true) {
         return Err("missing reencrypted:true");
@@ -288,7 +280,10 @@ fn replication_envelope_aad_session_id_separation() {
 
     let aad_a = replication_envelope_aad(&hash, ts, "ab");
     let aad_b = replication_envelope_aad(&hash, ts, "a");
-    assert_ne!(aad_a, aad_b, "different session_ids must produce different AADs");
+    assert_ne!(
+        aad_a, aad_b,
+        "different session_ids must produce different AADs"
+    );
 
     // Specifically verify length prefix prevents canonicalization collision.
     let aad_short = replication_envelope_aad(&hash, ts, "x");

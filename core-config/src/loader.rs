@@ -172,9 +172,7 @@ fn merge_config(base: &mut Config, overlay: &Config) {
     }
 
     // Agents: take overlay if non-default.
-    if !overlay.agents.agents.is_empty()
-        || overlay.agents.default.agent_type != "human"
-    {
+    if !overlay.agents.agents.is_empty() || overlay.agents.default.agent_type != "human" {
         base.agents = overlay.agents.clone();
     }
 

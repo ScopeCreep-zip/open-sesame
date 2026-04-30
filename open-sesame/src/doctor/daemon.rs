@@ -138,11 +138,7 @@ pub async fn checks() -> Vec<Check> {
 /// runs directly on the caller's async runtime with no thread spawning and
 /// no `block_on`. If the IPC call times out or fails, a degraded check is
 /// emitted showing the systemd unit state.
-async fn collect_network_checks(
-    results: &mut Vec<Check>,
-    unit: &str,
-    active: &Option<String>,
-) {
+async fn collect_network_checks(results: &mut Vec<Check>, unit: &str, active: &Option<String>) {
     // TOFU store stats (sync filesystem I/O — fast, cannot hang).
     let state_dir = dirs::state_dir()
         .or_else(dirs::data_local_dir)
@@ -180,31 +176,28 @@ async fn collect_network_checks(
     // IPC health: session count, listen port, dial queue depth.
     // Hard 2-second timeout. Direct .await — no thread spawning, no block_on,
     // no deadlock possible on current_thread runtime.
-    let ipc_result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        async {
-            let client = crate::ipc::connect().await.ok()?;
-            let msg = client
-                .request(
-                    core_types::EventKind::NetworkStatusRequest,
-                    core_types::SecurityLevel::Internal,
-                    std::time::Duration::from_secs(1),
-                )
-                .await
-                .ok()?;
-            if let core_types::EventKind::NetworkStatusResponse {
-                active_sessions,
-                listen_port,
-                dial_queue_depth,
-                ..
-            } = msg.payload
-            {
-                Some((active_sessions, listen_port, dial_queue_depth))
-            } else {
-                None
-            }
-        },
-    )
+    let ipc_result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let client = crate::ipc::connect().await.ok()?;
+        let msg = client
+            .request(
+                core_types::EventKind::NetworkStatusRequest,
+                core_types::SecurityLevel::Internal,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .ok()?;
+        if let core_types::EventKind::NetworkStatusResponse {
+            active_sessions,
+            listen_port,
+            dial_queue_depth,
+            ..
+        } = msg.payload
+        {
+            Some((active_sessions, listen_port, dial_queue_depth))
+        } else {
+            None
+        }
+    })
     .await
     .ok()
     .flatten();
@@ -234,8 +227,7 @@ async fn collect_network_checks(
             });
         }
         None => {
-            let sub_state = systemctl_prop(unit, "SubState")
-                .unwrap_or_else(|| "unknown".into());
+            let sub_state = systemctl_prop(unit, "SubState").unwrap_or_else(|| "unknown".into());
             let active_state = active.as_deref().unwrap_or("unknown");
             results.push(Check {
                 id: "daemon.network.ipc".into(),

@@ -53,13 +53,19 @@ impl PeerTable {
 
     /// Look up a session by session ID.
     #[must_use]
-    pub fn get(&self, sid: &WireSessionId) -> Option<dashmap::mapref::one::Ref<'_, [u8; 12], PeerState>> {
+    pub fn get(
+        &self,
+        sid: &WireSessionId,
+    ) -> Option<dashmap::mapref::one::Ref<'_, [u8; 12], PeerState>> {
         self.sessions.get(&sid.0)
     }
 
     /// Look up a mutable session by session ID.
     #[must_use]
-    pub fn get_mut(&self, sid: &WireSessionId) -> Option<dashmap::mapref::one::RefMut<'_, [u8; 12], PeerState>> {
+    pub fn get_mut(
+        &self,
+        sid: &WireSessionId,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, [u8; 12], PeerState>> {
         self.sessions.get_mut(&sid.0)
     }
 

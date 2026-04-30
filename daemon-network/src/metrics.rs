@@ -71,12 +71,18 @@ impl Default for Metrics {
 
 fn prom_gauge(out: &mut String, name: &str, help: &str, val: u64) {
     use std::fmt::Write;
-    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {val}");
+    let _ = writeln!(
+        out,
+        "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {val}"
+    );
 }
 
 fn prom_counter(out: &mut String, name: &str, help: &str, val: u64) {
     use std::fmt::Write;
-    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {val}");
+    let _ = writeln!(
+        out,
+        "# HELP {name} {help}\n# TYPE {name} counter\n{name} {val}"
+    );
 }
 
 /// Render all metrics in Prometheus text exposition format.
@@ -84,32 +90,84 @@ fn prom_counter(out: &mut String, name: &str, help: &str, val: u64) {
 pub fn render_prometheus(m: &Metrics) -> String {
     let mut out = String::with_capacity(2048);
 
-    prom_gauge(&mut out, "opensesame_network_sessions_active",
-        "Active peer sessions", m.sessions_active.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_sessions_established_total",
-        "Total sessions established", m.sessions_established_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_sessions_rejected_full_total",
-        "Sessions rejected (table full)", m.sessions_rejected_full.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_frames_sent_total",
-        "Frames sent", m.frames_sent_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_frames_received_total",
-        "Frames received", m.frames_received_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_frames_dropped_total",
-        "Frames dropped", m.frames_dropped_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_aead_failures_total",
-        "AEAD decryption failures", m.aead_failures_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_replay_detected_total",
-        "Replay-detected frames", m.replay_detected_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_tofu_mismatches_total",
-        "TOFU key mismatch events", m.tofu_mismatches_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_cookie_challenges_total",
-        "Cookie challenges issued", m.cookie_challenges_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_rate_limited_total",
-        "Rate-limited frames", m.rate_limited_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_handshake_failures_total",
-        "Handshake failures", m.handshake_failures_total.load(Ordering::Relaxed));
-    prom_counter(&mut out, "opensesame_network_sessions_closed_total",
-        "Sessions closed", m.sessions_closed_total.load(Ordering::Relaxed));
+    prom_gauge(
+        &mut out,
+        "opensesame_network_sessions_active",
+        "Active peer sessions",
+        m.sessions_active.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_sessions_established_total",
+        "Total sessions established",
+        m.sessions_established_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_sessions_rejected_full_total",
+        "Sessions rejected (table full)",
+        m.sessions_rejected_full.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_frames_sent_total",
+        "Frames sent",
+        m.frames_sent_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_frames_received_total",
+        "Frames received",
+        m.frames_received_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_frames_dropped_total",
+        "Frames dropped",
+        m.frames_dropped_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_aead_failures_total",
+        "AEAD decryption failures",
+        m.aead_failures_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_replay_detected_total",
+        "Replay-detected frames",
+        m.replay_detected_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_tofu_mismatches_total",
+        "TOFU key mismatch events",
+        m.tofu_mismatches_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_cookie_challenges_total",
+        "Cookie challenges issued",
+        m.cookie_challenges_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_rate_limited_total",
+        "Rate-limited frames",
+        m.rate_limited_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_handshake_failures_total",
+        "Handshake failures",
+        m.handshake_failures_total.load(Ordering::Relaxed),
+    );
+    prom_counter(
+        &mut out,
+        "opensesame_network_sessions_closed_total",
+        "Sessions closed",
+        m.sessions_closed_total.load(Ordering::Relaxed),
+    );
 
     out
 }

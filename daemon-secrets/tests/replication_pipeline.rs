@@ -8,9 +8,9 @@
 //! - Rejected entries don't pollute state
 //! - Replay protection works
 
-use daemon_secrets::vault_log::VaultLog;
-use daemon_secrets::crud;
 use core_types::{TrustProfileName, VaultLogOp};
+use daemon_secrets::crud;
+use daemon_secrets::vault_log::VaultLog;
 
 /// Valid UUID for test installation ID.
 const TEST_INSTALL_ID: &str = "00000000-0000-0000-0000-000000000042";
@@ -37,8 +37,7 @@ fn profile(name: &str) -> TrustProfileName {
 /// Read the Nth entry from a VaultLog as wire-format JSON.
 fn read_wire_entry(log: &VaultLog, offset: usize) -> String {
     let result = log.query_entries_since("work", None, 100).unwrap();
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&result.entries_json).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
     serde_json::to_string(&entries[offset]).unwrap()
 }
 
@@ -54,7 +53,13 @@ fn positive_write_validate_insert_roundtrip() {
     let p = profile("work");
 
     sender
-        .write_local_entry(&p, VaultLogOp::Set, "api-key", TEST_INSTALL_ID, b"secret-value")
+        .write_local_entry(
+            &p,
+            VaultLogOp::Set,
+            "api-key",
+            TEST_INSTALL_ID,
+            b"secret-value",
+        )
         .unwrap();
 
     let wire = read_wire_entry(&sender, 0);
@@ -77,7 +82,13 @@ fn positive_set_then_delete_roundtrip() {
     let p = profile("work");
 
     sender
-        .write_local_entry(&p, VaultLogOp::Set, "temp-key", TEST_INSTALL_ID, b"temp-val")
+        .write_local_entry(
+            &p,
+            VaultLogOp::Set,
+            "temp-key",
+            TEST_INSTALL_ID,
+            b"temp-val",
+        )
         .unwrap();
     sender
         .write_local_entry(&p, VaultLogOp::Delete, "temp-key", TEST_INSTALL_ID, &[])
@@ -106,8 +117,7 @@ fn positive_query_returns_full_wire_entries() {
         .unwrap();
 
     let result = log.query_entries_since("work", None, 100).unwrap();
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&result.entries_json).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
 
     assert_eq!(entries.len(), 1);
     // Must have all signed fields.
@@ -136,8 +146,7 @@ fn positive_value_hash_matches_blake3() {
         .unwrap();
 
     let result = log.query_entries_since("work", None, 100).unwrap();
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&result.entries_json).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
 
     let signed_hash = entries[0]["operation"]["value_hash"].as_str().unwrap();
     let expected_hash = hex::encode(blake3::hash(value).as_bytes());
@@ -197,15 +206,17 @@ fn negative_schema_mismatch_refuses_to_start() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
-        conn.execute_batch(
-            "CREATE TABLE vault_log (id TEXT PRIMARY KEY);"
-        ).unwrap();
+        conn.execute_batch("CREATE TABLE vault_log (id TEXT PRIMARY KEY);")
+            .unwrap();
     }
 
     // Opening with current code must refuse — no silent data destruction.
     setup();
     let result = VaultLog::open(&path);
-    assert!(result.is_err(), "mismatched schema version must refuse to start");
+    assert!(
+        result.is_err(),
+        "mismatched schema version must refuse to start"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("schema version"),
@@ -267,8 +278,7 @@ fn negative_tampered_signature_rejected() {
         .write_local_entry(&p, VaultLogOp::Set, "k", TEST_INSTALL_ID, b"v")
         .unwrap();
 
-    let mut wire: serde_json::Value =
-        serde_json::from_str(&read_wire_entry(&sender, 0)).unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&read_wire_entry(&sender, 0)).unwrap();
 
     // Tamper the signature.
     let sig = wire["signature"].as_str().unwrap().to_string();
@@ -436,8 +446,7 @@ fn negative_delete_has_empty_value_hash() {
         .unwrap();
 
     let result = log.query_entries_since("work", None, 100).unwrap();
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&result.entries_json).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
 
     let hash = entries[0]["operation"]["value_hash"].as_str().unwrap();
     assert!(
@@ -457,8 +466,7 @@ fn negative_set_always_has_value_hash() {
         .unwrap();
 
     let result = log.query_entries_since("work", None, 100).unwrap();
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&result.entries_json).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
 
     let hash = entries[0]["operation"]["value_hash"].as_str().unwrap();
     assert!(
@@ -476,8 +484,7 @@ fn negative_set_always_has_value_hash() {
 fn negative_query_empty_profile_returns_no_hlc() {
     let (log, _dir) = temp_log();
     let result = log.query_entries_since("nonexistent", None, 100).unwrap();
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&result.entries_json).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
     assert!(entries.is_empty());
     assert!(result.last_hlc_json.is_none());
 }
@@ -512,7 +519,8 @@ fn negative_cleanup_removes_both_tables() {
 fn pull_progress_independent_from_hwm() {
     let (log, _dir) = temp_log();
 
-    log.update_pull_progress("relay-peer", "work", 200, 10).unwrap();
+    log.update_pull_progress("relay-peer", "work", 200, 10)
+        .unwrap();
 
     // HWM for the same ID should be unaffected.
     assert!(
@@ -561,7 +569,8 @@ fn deferred_entry_respects_timing() {
     // Now unapplied_entries should not return it (deferred_until in future).
     let unapplied_after = receiver.unapplied_entries(100).unwrap();
     assert_eq!(
-        unapplied_after.len(), 0,
+        unapplied_after.len(),
+        0,
         "deferred entry must not appear in unapplied_entries until deferral expires"
     );
 }
@@ -612,7 +621,13 @@ fn insert_normalizes_operation_json() {
     let (sender, _sd) = temp_log();
     let p = profile("work");
     sender
-        .write_local_entry(&p, VaultLogOp::Set, "norm-key", TEST_INSTALL_ID, b"norm-val")
+        .write_local_entry(
+            &p,
+            VaultLogOp::Set,
+            "norm-key",
+            TEST_INSTALL_ID,
+            b"norm-val",
+        )
         .unwrap();
 
     let wire = read_wire_entry(&sender, 0);
@@ -626,11 +641,23 @@ fn insert_normalizes_operation_json() {
     let op: serde_json::Value = serde_json::from_str(&unapplied[0].operation_json).unwrap();
 
     // Must have "op" and "key" at top level (normalized format).
-    assert!(op["op"].is_string(), "normalized operation_json must have 'op' field");
-    assert!(op["key"].is_string(), "normalized operation_json must have 'key' field");
+    assert!(
+        op["op"].is_string(),
+        "normalized operation_json must have 'op' field"
+    );
+    assert!(
+        op["key"].is_string(),
+        "normalized operation_json must have 'key' field"
+    );
     assert_eq!(op["key"].as_str().unwrap(), "norm-key");
 
     // Must NOT have wire-format fields like "signature" or "timestamp".
-    assert!(op["signature"].is_null(), "normalized operation_json must not contain wire-format fields");
-    assert!(op["timestamp"].is_null(), "normalized operation_json must not contain wire-format fields");
+    assert!(
+        op["signature"].is_null(),
+        "normalized operation_json must not contain wire-format fields"
+    );
+    assert!(
+        op["timestamp"].is_null(),
+        "normalized operation_json must not contain wire-format fields"
+    );
 }

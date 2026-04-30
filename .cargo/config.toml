@@ -1,9 +1,7 @@
 # Cargo configuration for Open Sesame
+#
+# Build acceleration env vars (mold linker, parallel frontend) are in
+# .env.example, loaded by .envrc (direnv) and .mise.toml.
 
 [alias]
 xtask = "run --manifest-path xtask/Cargo.toml --"
-
-# Mold linker is configured via CARGO_TARGET_*_LINKER and CARGO_TARGET_*_RUSTFLAGS
-# environment variables in the devShell (flake.nix shellHook) and in the Nix
-# package builder. This avoids breaking `cargo build` outside the devShell
-# where clang/mold may not be on PATH.

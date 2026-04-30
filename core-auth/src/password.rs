@@ -178,9 +178,7 @@ impl VaultAuthBackend for PasswordBackend {
         if path.exists() {
             // Overwrite with zeros before deletion.
             #[allow(clippy::cast_possible_truncation)]
-            let file_len = std::fs::metadata(&path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(64);
+            let file_len = std::fs::metadata(&path).map_or(64, |m| m.len() as usize);
             let mut zeros = vec![0u8; file_len];
             let _ = std::fs::write(&path, &zeros);
             zeros.zeroize();

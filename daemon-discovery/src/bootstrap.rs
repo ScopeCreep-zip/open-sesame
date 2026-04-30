@@ -199,12 +199,14 @@ pub fn parse_did_peer_2(did: &str) -> Option<DidPeerKeys> {
 /// Returns an error if the file exists but contains invalid JSON.
 pub fn load_bootstrap(path: &Path) -> Result<BootstrapResult, BootstrapError> {
     if !path.exists() {
-        return Ok(BootstrapResult { targets: Vec::new(), gossip_hmac_key: None });
+        return Ok(BootstrapResult {
+            targets: Vec::new(),
+            gossip_hmac_key: None,
+        });
     }
 
     let contents = std::fs::read_to_string(path).map_err(BootstrapError::Io)?;
-    let file: BootstrapFile =
-        serde_json::from_str(&contents).map_err(BootstrapError::Parse)?;
+    let file: BootstrapFile = serde_json::from_str(&contents).map_err(BootstrapError::Parse)?;
 
     if file.version != 2 {
         return Err(BootstrapError::UnsupportedVersion(file.version));
@@ -270,7 +272,10 @@ pub fn load_bootstrap(path: &Path) -> Result<BootstrapResult, BootstrapError> {
         "bootstrap.json loaded"
     );
 
-    Ok(BootstrapResult { targets, gossip_hmac_key })
+    Ok(BootstrapResult {
+        targets,
+        gossip_hmac_key,
+    })
 }
 
 /// Errors from bootstrap.json loading.
@@ -428,7 +433,8 @@ mod tests {
         let x25519 = [0xDD; 32];
         let did = build_test_did(&ed25519, &x25519);
 
-        let json = format!(r#"{{
+        let json = format!(
+            r#"{{
             "version": 2,
             "peers": [
                 {{
@@ -437,7 +443,8 @@ mod tests {
                     "dial_on_start": false
                 }}
             ]
-        }}"#);
+        }}"#
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bootstrap.json");
@@ -445,8 +452,14 @@ mod tests {
 
         let targets = load_bootstrap(&path).unwrap().targets;
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].public_key_hex.as_deref(), Some(hex::encode(x25519).as_str()));
-        assert_eq!(targets[0].signing_pubkey_hex.as_deref(), Some(hex::encode(ed25519).as_str()));
+        assert_eq!(
+            targets[0].public_key_hex.as_deref(),
+            Some(hex::encode(x25519).as_str())
+        );
+        assert_eq!(
+            targets[0].signing_pubkey_hex.as_deref(),
+            Some(hex::encode(ed25519).as_str())
+        );
         assert!(!targets[0].dial_on_start);
     }
 }

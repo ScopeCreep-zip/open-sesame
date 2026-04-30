@@ -39,7 +39,11 @@ fn canonical_sign_payload(
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(512);
     // Fixed field order (alphabetical by field name):
-    write_field(&mut buf, b"author_installation_id", author_installation_id.as_bytes());
+    write_field(
+        &mut buf,
+        b"author_installation_id",
+        author_installation_id.as_bytes(),
+    );
     write_field(&mut buf, b"hlc_counter", &hlc_counter.to_le_bytes());
     write_field(&mut buf, b"hlc_node_id", hlc_node_id.as_bytes());
     write_field(&mut buf, b"hlc_wall_secs", &hlc_wall_secs.to_le_bytes());
@@ -100,7 +104,11 @@ impl VaultLog {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
         if current_version != 0 && current_version != SCHEMA_VERSION {
-            let direction = if current_version > SCHEMA_VERSION { "newer" } else { "older" };
+            let direction = if current_version > SCHEMA_VERSION {
+                "newer"
+            } else {
+                "older"
+            };
             return Err(VaultLogError::InvalidSignature(format!(
                 "vault-log.db schema version {current_version} is {direction} than expected {SCHEMA_VERSION}. \
                  Back up and delete {} to recreate, or upgrade the daemon binary.",
@@ -183,13 +191,19 @@ impl VaultLog {
     #[must_use]
     #[allow(dead_code)] // Used by tests; called by M3 replication protocol
     pub fn current_hlc(&self) -> HlcTimestamp {
-        *self.hlc.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .hlc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Tick the local HLC for a new local event and persist.
     pub fn tick(&self) -> Result<HlcTimestamp, VaultLogError> {
         let wall_now = wall_secs_now();
-        let mut hlc = self.hlc.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hlc = self
+            .hlc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ts = HlcTimestamp::tick(&mut hlc, wall_now);
         self.persist_hlc(&ts)?;
         Ok(ts)
@@ -198,7 +212,10 @@ impl VaultLog {
     /// Update the local HLC on receiving a remote timestamp and persist.
     pub fn receive(&self, remote: &HlcTimestamp) -> Result<HlcTimestamp, VaultLogError> {
         let wall_now = wall_secs_now();
-        let mut hlc = self.hlc.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hlc = self
+            .hlc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ts = HlcTimestamp::receive(&mut hlc, remote, wall_now);
         self.persist_hlc(&ts)?;
         Ok(ts)
@@ -253,7 +270,10 @@ impl VaultLog {
         let now = now_epoch_secs();
         let node_id_hex = hex::encode(ts.node_id);
 
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Compute prev_by_author_hash: BLAKE3 of the previous entry's ID by
         // this author for this profile OR compaction snapshots (profile_id = "").
@@ -300,9 +320,9 @@ impl VaultLog {
                     let sig = core_crypto::network::ed25519_sign(&signing_key, &payload_bytes);
                     Ok((hex::encode(pubkey), hex::encode(sig)))
                 }
-                Err(e) => Err(VaultLogError::InvalidSignature(
-                    format!("signing keypair derivation failed: {e}"),
-                )),
+                Err(e) => Err(VaultLogError::InvalidSignature(format!(
+                    "signing keypair derivation failed: {e}"
+                ))),
             }
         })
         .ok_or(VaultLogError::InvalidSignature(
@@ -361,8 +381,7 @@ impl VaultLog {
             )));
         }
 
-        let v: serde_json::Value =
-            serde_json::from_str(entry_json).map_err(VaultLogError::Json)?;
+        let v: serde_json::Value = serde_json::from_str(entry_json).map_err(VaultLogError::Json)?;
 
         // Signature verification FIRST — all field-content decisions must
         // happen after the entry is proven authentic (S-02/H-02).
@@ -471,40 +490,72 @@ impl VaultLog {
         since_watermark_json: Option<&str>,
         max_entries: u32,
     ) -> Result<QueryResult, VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let (wall_secs, counter): (i64, i64) = if let Some(wm) = since_watermark_json {
-            let v: serde_json::Value = serde_json::from_str(wm)
-                .map_err(VaultLogError::Json)?;
-            let wall = v["wall_secs"].as_i64()
-                .ok_or(VaultLogError::InvalidWatermark("missing or non-integer wall_secs"))?;
-            let ctr = v["counter"].as_i64()
-                .ok_or(VaultLogError::InvalidWatermark("missing or non-integer counter"))?;
+            let v: serde_json::Value = serde_json::from_str(wm).map_err(VaultLogError::Json)?;
+            let wall = v["wall_secs"]
+                .as_i64()
+                .ok_or(VaultLogError::InvalidWatermark(
+                    "missing or non-integer wall_secs",
+                ))?;
+            let ctr = v["counter"]
+                .as_i64()
+                .ok_or(VaultLogError::InvalidWatermark(
+                    "missing or non-integer counter",
+                ))?;
             (wall, ctr)
         } else {
             (0, 0)
         };
 
-        let mut stmt = conn.prepare(
-            "SELECT id, hlc_wall_secs, hlc_counter, hlc_node_id,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, hlc_wall_secs, hlc_counter, hlc_node_id,
                     author_installation_id, author_signing_pubkey, profile_id,
                     operation_type, operation_json, prev_by_author_hash, signature
              FROM vault_log
              WHERE profile_id = ?1
                AND (hlc_wall_secs > ?2 OR (hlc_wall_secs = ?2 AND hlc_counter > ?3))
              ORDER BY hlc_wall_secs, hlc_counter, hlc_node_id
-             LIMIT ?4"
-        ).map_err(VaultLogError::Sqlite)?;
+             LIMIT ?4",
+            )
+            .map_err(VaultLogError::Sqlite)?;
 
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, i64, i64, String, String, String, String, String, String, Option<String>, String)> = stmt
+        let rows: Vec<(
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+        )> = stmt
             .query_map(
                 params![profile_id, wall_secs, counter, max_entries],
-                |row| Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
-                    row.get(8)?, row.get(9)?, row.get(10)?,
-                )),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
             )
             .map_err(VaultLogError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
@@ -512,10 +563,12 @@ impl VaultLog {
 
         let mut last_hlc: Option<(i64, i64)> = None;
         let mut entries = Vec::with_capacity(rows.len());
-        for (id, ws, ctr, node_id, author, signing_pk, prof, op_type, op_json, prev_hash, sig) in &rows {
+        for (id, ws, ctr, node_id, author, signing_pk, prof, op_type, op_json, prev_hash, sig) in
+            &rows
+        {
             last_hlc = Some((*ws, *ctr));
-            let operation: serde_json::Value = serde_json::from_str(op_json)
-                .unwrap_or(serde_json::Value::Null);
+            let operation: serde_json::Value =
+                serde_json::from_str(op_json).unwrap_or(serde_json::Value::Null);
             entries.push(serde_json::json!({
                 "id": id,
                 "timestamp": {
@@ -534,11 +587,13 @@ impl VaultLog {
         }
 
         let entries_json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into());
-        let last_hlc_json = last_hlc.map(|(ws, ctr)| {
-            serde_json::json!({"wall_secs": ws, "counter": ctr}).to_string()
-        });
+        let last_hlc_json = last_hlc
+            .map(|(ws, ctr)| serde_json::json!({"wall_secs": ws, "counter": ctr}).to_string());
 
-        Ok(QueryResult { entries_json, last_hlc_json })
+        Ok(QueryResult {
+            entries_json,
+            last_hlc_json,
+        })
     }
 
     /// Insert a received replication entry into the log (from a remote peer).
@@ -549,8 +604,7 @@ impl VaultLog {
         Self::validate_entry_structure(entry_json)?;
 
         // Parse minimal fields from the JSON.
-        let v: serde_json::Value =
-            serde_json::from_str(entry_json).map_err(VaultLogError::Json)?;
+        let v: serde_json::Value = serde_json::from_str(entry_json).map_err(VaultLogError::Json)?;
 
         let id = v["id"].as_str().unwrap_or_default();
         let wall_secs = v["timestamp"]["wall_secs"].as_u64().unwrap_or(0);
@@ -583,7 +637,10 @@ impl VaultLog {
         // Scope the conn lock so it's released before self.receive() which
         // also acquires conn internally via persist_hlc.
         {
-            let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let conn = self
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             conn.execute(
                 "INSERT OR IGNORE INTO vault_log
                  (id, hlc_wall_secs, hlc_counter, hlc_node_id, author_installation_id,
@@ -633,21 +690,29 @@ impl VaultLog {
     /// timestamp. The caller decrypts `ReEncryptedValue` payloads and
     /// applies operations to the local vault, then calls
     /// [`mark_applied`] for each entry ID.
-    pub fn unapplied_entries(&self, max_entries: u32) -> Result<Vec<UnappliedEntry>, VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub fn unapplied_entries(
+        &self,
+        max_entries: u32,
+    ) -> Result<Vec<UnappliedEntry>, VaultLogError> {
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let mut stmt = conn.prepare(
-            "SELECT id, profile_id, operation_type, operation_json,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, profile_id, operation_type, operation_json,
                     hlc_wall_secs, hlc_counter, author_installation_id
              FROM vault_log
              WHERE locally_applied = 0
                AND (deferred_until IS NULL OR deferred_until <= ?1)
              ORDER BY hlc_wall_secs, hlc_counter, hlc_node_id
-             LIMIT ?2"
-        ).map_err(VaultLogError::Sqlite)?;
+             LIMIT ?2",
+            )
+            .map_err(VaultLogError::Sqlite)?;
 
         let entries = stmt
             .query_map(params![now_epoch, max_entries], |row| {
@@ -671,7 +736,10 @@ impl VaultLog {
     /// Defer an entry for later retry. Sets `deferred_until` to `now + retry_secs`
     /// as an INTEGER epoch (seconds since Unix epoch) and increments `deferred_count`.
     pub fn defer_entry(&self, entry_id: &str, retry_secs: u64) -> Result<(), VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let until = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -692,7 +760,10 @@ impl VaultLog {
     ///
     /// Backoff schedule: 0→30s, 1-3→60s, 4-10→300s, 11+→3600s.
     pub fn defer_entry_with_backoff(&self, entry_id: &str) -> Result<(), VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count: i64 = conn
             .query_row(
                 "SELECT deferred_count FROM vault_log WHERE id = ?1",
@@ -722,7 +793,10 @@ impl VaultLog {
     /// Read the deferred count for an entry.
     #[allow(dead_code)] // Available for future retry-budget logic if needed.
     pub fn deferred_count(&self, entry_id: &str) -> Result<u32, VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count: i64 = conn
             .query_row(
                 "SELECT deferred_count FROM vault_log WHERE id = ?1",
@@ -746,7 +820,10 @@ impl VaultLog {
         wall_secs: i64,
         counter: i64,
     ) -> Result<(), VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.execute(
             "INSERT INTO entry_replay_hwm
              (author_installation_id, profile_id, hwm_wall_secs, hwm_counter)
@@ -783,7 +860,10 @@ impl VaultLog {
         wall_secs: i64,
         counter: i64,
     ) -> Result<(), VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = now_epoch_secs();
         conn.execute(
             "INSERT INTO pull_progress
@@ -821,7 +901,10 @@ impl VaultLog {
         entry_wall_secs: i64,
         entry_counter: i64,
     ) -> Result<bool, VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stored: Option<(i64, i64)> = conn
             .query_row(
                 "SELECT hwm_wall_secs, hwm_counter
@@ -845,7 +928,10 @@ impl VaultLog {
     /// unpinned from TOFU to prevent orphaned records from blocking compaction.
     #[allow(dead_code)] // Wired when NetworkUnpinRequest handler calls through to vault_log.
     pub fn cleanup_peer_state(&self, peer_install_id: &str) -> Result<(), VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.execute(
             "DELETE FROM pull_progress WHERE source_peer_id = ?1",
             params![peer_install_id],
@@ -862,7 +948,10 @@ impl VaultLog {
 
     /// Mark an entry as locally applied after successful fold.
     pub fn mark_applied(&self, entry_id: &str) -> Result<(), VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.execute(
             "UPDATE vault_log SET locally_applied = 1 WHERE id = ?1",
             params![entry_id],
@@ -894,11 +983,18 @@ impl VaultLog {
     /// are NOT included in profile-scoped pull responses.
     ///
     /// Returns the number of entries deleted.
-    pub fn compact(&self, compaction_threshold: u64, retention_secs: i64) -> Result<u32, VaultLogError> {
+    pub fn compact(
+        &self,
+        compaction_threshold: u64,
+        retention_secs: i64,
+    ) -> Result<u32, VaultLogError> {
         // Phase 0: Quick count check before expensive signing key derivation.
         // Avoids wasting a tick + key derivation on the common no-op case.
         {
-            let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let conn = self
+                .conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM vault_log", [], |row| row.get(0))
                 .map_err(VaultLogError::Sqlite)?;
@@ -923,9 +1019,11 @@ impl VaultLog {
         .ok_or(VaultLogError::InvalidSignature(
             "cannot compact without signing seed".into(),
         ))?
-        .map_err(|e| VaultLogError::InvalidSignature(
-            format!("compaction signing key derivation failed: {e}"),
-        ))?;
+        .map_err(|e| {
+            VaultLogError::InvalidSignature(format!(
+                "compaction signing key derivation failed: {e}"
+            ))
+        })?;
 
         // Phase 2: Tick the HLC for the snapshot timestamp. This acquires and
         // releases conn internally via persist_hlc, so it MUST happen BEFORE
@@ -935,8 +1033,12 @@ impl VaultLog {
         // Phase 3: Single conn lock wrapping a SQLite transaction for the
         // entire recheck→watermark→DELETE→sign→INSERT sequence. ROLLBACK on
         // any failure ensures entries are never deleted without a snapshot.
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        conn.execute_batch("BEGIN IMMEDIATE").map_err(VaultLogError::Sqlite)?;
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(VaultLogError::Sqlite)?;
 
         let result: Result<u32, VaultLogError> = (|| {
             // Recheck count inside the transaction — entries may have been
@@ -1065,9 +1167,16 @@ impl VaultLog {
         })();
 
         match &result {
-            Ok(0) => { conn.execute_batch("ROLLBACK").ok(); }
-            Ok(_) => { conn.execute_batch("COMMIT").map_err(VaultLogError::Sqlite)?; }
-            Err(_) => { conn.execute_batch("ROLLBACK").ok(); }
+            Ok(0) => {
+                conn.execute_batch("ROLLBACK").ok();
+            }
+            Ok(_) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(VaultLogError::Sqlite)?;
+            }
+            Err(_) => {
+                conn.execute_batch("ROLLBACK").ok();
+            }
         }
 
         result
@@ -1076,7 +1185,10 @@ impl VaultLog {
     /// Count of entries in the vault log. Used by tests and compaction threshold.
     #[allow(dead_code)]
     pub fn entry_count(&self) -> Result<u64, VaultLogError> {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM vault_log", [], |row| row.get(0))
             .map_err(VaultLogError::Sqlite)?;
@@ -1116,7 +1228,10 @@ impl VaultLog {
 
     fn persist_hlc(&self, ts: &HlcTimestamp) -> Result<(), VaultLogError> {
         let node_id_hex = hex::encode(ts.node_id);
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         conn.execute(
             "INSERT INTO hlc_state (id, wall_secs, counter, node_id)
              VALUES (1, ?1, ?2, ?3)
@@ -1261,12 +1376,24 @@ mod tests {
     fn write_local_entry_inserts() {
         let (log, _dir) = temp_log();
         let profile = TrustProfileName::try_from("work").unwrap();
-        log.write_local_entry(&profile, VaultLogOp::Set, "api-key", "00000000-0000-0000-0000-000000000042", b"test-value")
-            .unwrap();
+        log.write_local_entry(
+            &profile,
+            VaultLogOp::Set,
+            "api-key",
+            "00000000-0000-0000-0000-000000000042",
+            b"test-value",
+        )
+        .unwrap();
         assert_eq!(log.entry_count().unwrap(), 1);
 
-        log.write_local_entry(&profile, VaultLogOp::Delete, "api-key", "00000000-0000-0000-0000-000000000042", &[])
-            .unwrap();
+        log.write_local_entry(
+            &profile,
+            VaultLogOp::Delete,
+            "api-key",
+            "00000000-0000-0000-0000-000000000042",
+            &[],
+        )
+        .unwrap();
         assert_eq!(log.entry_count().unwrap(), 2);
     }
 
@@ -1286,16 +1413,44 @@ mod tests {
                  LIMIT 1 OFFSET ?1",
             )
             .unwrap();
-        let (id, wall_secs, counter, node_id, author, signing_pubkey, profile_id,
-         _op_type, operation_json, prev_hash, signature): (
-            String, i64, i64, String, String, String, String,
-            String, String, Option<String>, String,
+        let (
+            id,
+            wall_secs,
+            counter,
+            node_id,
+            author,
+            signing_pubkey,
+            profile_id,
+            _op_type,
+            operation_json,
+            prev_hash,
+            signature,
+        ): (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
         ) = stmt
             .query_row(params![offset as i64], |row| {
                 Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
-                    row.get(8)?, row.get(9)?, row.get(10)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
                 ))
             })
             .unwrap();
@@ -1326,7 +1481,13 @@ mod tests {
         let (sender_log, _sender_dir) = temp_log();
         let profile = TrustProfileName::try_from("work").unwrap();
         sender_log
-            .write_local_entry(&profile, VaultLogOp::Set, "k", "00000000-0000-0000-0000-000000000042", b"test-val")
+            .write_local_entry(
+                &profile,
+                VaultLogOp::Set,
+                "k",
+                "00000000-0000-0000-0000-000000000042",
+                b"test-val",
+            )
             .unwrap();
 
         // Read back as wire-format JSON (what a peer would receive).
@@ -1358,9 +1519,30 @@ mod tests {
     fn query_entries_since_returns_matching() {
         let (log, _dir) = temp_log();
         let profile = core_types::TrustProfileName::try_from("work").unwrap();
-        log.write_local_entry(&profile, core_types::VaultLogOp::Set, "key-1", "00000000-0000-0000-0000-000000000001", b"val-1").unwrap();
-        log.write_local_entry(&profile, core_types::VaultLogOp::Set, "key-2", "00000000-0000-0000-0000-000000000001", b"val-2").unwrap();
-        log.write_local_entry(&profile, core_types::VaultLogOp::Delete, "key-1", "00000000-0000-0000-0000-000000000001", &[]).unwrap();
+        log.write_local_entry(
+            &profile,
+            core_types::VaultLogOp::Set,
+            "key-1",
+            "00000000-0000-0000-0000-000000000001",
+            b"val-1",
+        )
+        .unwrap();
+        log.write_local_entry(
+            &profile,
+            core_types::VaultLogOp::Set,
+            "key-2",
+            "00000000-0000-0000-0000-000000000001",
+            b"val-2",
+        )
+        .unwrap();
+        log.write_local_entry(
+            &profile,
+            core_types::VaultLogOp::Delete,
+            "key-1",
+            "00000000-0000-0000-0000-000000000001",
+            &[],
+        )
+        .unwrap();
 
         let result = log.query_entries_since("work", None, 100).unwrap();
         let entries: Vec<serde_json::Value> = serde_json::from_str(&result.entries_json).unwrap();
@@ -1408,7 +1590,8 @@ mod tests {
         let entry = serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000001",
             "signature": hex::encode([0xAA; 32]),
-        }).to_string();
+        })
+        .to_string();
         let result = VaultLog::validate_entry_structure(&entry);
         assert!(result.is_err(), "32-byte signature must be rejected");
     }
@@ -1420,7 +1603,8 @@ mod tests {
             "id": "00000000-0000-0000-0000-000000000001",
             "signature": hex::encode([0xAA; 64]),
             "author_signing_pubkey": "",
-        }).to_string();
+        })
+        .to_string();
         let result = VaultLog::validate_entry_structure(&entry);
         assert!(result.is_err(), "signature without pubkey must be rejected");
     }
@@ -1432,11 +1616,20 @@ mod tests {
         // signer and verifier agree.
         let (log, _dir) = temp_log();
         let profile = TrustProfileName::try_from("work").unwrap();
-        log.write_local_entry(&profile, VaultLogOp::Set, "k", "00000000-0000-0000-0000-000000000042", b"test-val")
-            .unwrap();
+        log.write_local_entry(
+            &profile,
+            VaultLogOp::Set,
+            "k",
+            "00000000-0000-0000-0000-000000000042",
+            b"test-val",
+        )
+        .unwrap();
         let wire_entry = read_entry_as_wire_json(&log, 0);
         let result = VaultLog::validate_entry_structure(&wire_entry);
-        assert!(result.is_ok(), "valid Ed25519 signature must be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid Ed25519 signature must be accepted: {result:?}"
+        );
     }
 
     /// 8-byte node_id hex for tampered-signature test construction.
@@ -1449,17 +1642,24 @@ mod tests {
         // directly, which is acceptable for a negative test.
         let master = core_crypto::SecureBytes::from_slice(&[0xDD; 32]);
         let install_id = uuid::Uuid::from_u128(99);
-        let signing_key = core_crypto::network::derive_signing_keypair(&master, &install_id).unwrap();
+        let signing_key =
+            core_crypto::network::derive_signing_keypair(&master, &install_id).unwrap();
         let pubkey = signing_key.public_key();
 
         let test_value_hash = hex::encode(blake3::hash(b"test-val").as_bytes());
-        let operation_obj = serde_json::json!({"key": "k", "op": "set", "value_hash": test_value_hash});
+        let operation_obj =
+            serde_json::json!({"key": "k", "op": "set", "value_hash": test_value_hash});
         let operation_json_str = serde_json::to_string(&operation_obj).unwrap();
         let payload_bytes = canonical_sign_payload(
             "00000000-0000-0000-0000-000000000001",
-            1000, 0, TEST_NODE_ID,
-            &install_id.to_string(), "work", "set",
-            &operation_json_str, None,
+            1000,
+            0,
+            TEST_NODE_ID,
+            &install_id.to_string(),
+            "work",
+            "set",
+            &operation_json_str,
+            None,
             &test_value_hash,
         );
         let mut sig = core_crypto::network::ed25519_sign(&signing_key, &payload_bytes);
@@ -1474,7 +1674,8 @@ mod tests {
             "operation": operation_obj,
             "prev_by_author": null,
             "signature": hex::encode(sig),
-        }).to_string();
+        })
+        .to_string();
         let result = VaultLog::validate_entry_structure(&entry);
         assert!(result.is_err(), "tampered signature must be rejected");
     }
@@ -1484,7 +1685,8 @@ mod tests {
         let entry = serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000001",
             "signature": "",
-        }).to_string();
+        })
+        .to_string();
         let result = VaultLog::validate_entry_structure(&entry);
         assert!(result.is_err(), "unsigned entry must be rejected");
     }
@@ -1497,8 +1699,14 @@ mod tests {
     fn write_then_validate_roundtrip() {
         let (log, _dir) = temp_log();
         let profile = TrustProfileName::try_from("work").unwrap();
-        log.write_local_entry(&profile, VaultLogOp::Set, "roundtrip-key", "00000000-0000-0000-0000-000000000042", b"roundtrip-val")
-            .unwrap();
+        log.write_local_entry(
+            &profile,
+            VaultLogOp::Set,
+            "roundtrip-key",
+            "00000000-0000-0000-0000-000000000042",
+            b"roundtrip-val",
+        )
+        .unwrap();
 
         let wire_entry = read_entry_as_wire_json(&log, 0);
         let result = VaultLog::validate_entry_structure(&wire_entry);
@@ -1517,10 +1725,22 @@ mod tests {
 
         // Sender writes two entries.
         sender_log
-            .write_local_entry(&profile, VaultLogOp::Set, "secret-a", "00000000-0000-0000-0000-000000000042", b"val-a")
+            .write_local_entry(
+                &profile,
+                VaultLogOp::Set,
+                "secret-a",
+                "00000000-0000-0000-0000-000000000042",
+                b"val-a",
+            )
             .unwrap();
         sender_log
-            .write_local_entry(&profile, VaultLogOp::Delete, "secret-b", "00000000-0000-0000-0000-000000000042", &[])
+            .write_local_entry(
+                &profile,
+                VaultLogOp::Delete,
+                "secret-b",
+                "00000000-0000-0000-0000-000000000042",
+                &[],
+            )
             .unwrap();
         assert_eq!(sender_log.entry_count().unwrap(), 2);
 

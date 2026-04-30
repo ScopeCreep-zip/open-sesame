@@ -19,7 +19,7 @@
 mod common;
 
 use daemon_network::noise::state::{
-    derive_psk_from_handshake, xx_initiator, xx_responder, NOISE_XX,
+    NOISE_XX, derive_psk_from_handshake, xx_initiator, xx_responder,
 };
 
 // ============================================================================
@@ -31,7 +31,8 @@ const INIT_EPHEMERAL: &str = "893e28b9dc6ca8d611ab664754b8ceb7bac5117349a4439a6b
 const RESP_STATIC: &str = "4a3acbfdb163dec651dfa3194dece676d437029c62a408b4c5ea9114246e4893";
 const RESP_EPHEMERAL: &str = "bbdb4cdbd309f1a1f2e1456967fe288cadd6f712d65dc7b7793d5e63da6b375b";
 const PROLOGUE: &str = "4a6f686e2047616c74";
-const EXPECTED_HANDSHAKE_HASH: &str = "6c4c56cf71612f72d05ceb96c0155e6f4ea54a26b504c93de632a2db4a49d200";
+const EXPECTED_HANDSHAKE_HASH: &str =
+    "6c4c56cf71612f72d05ceb96c0155e6f4ea54a26b504c93de632a2db4a49d200";
 
 const MESSAGES: &[(&str, &str)] = &[
     (
@@ -73,16 +74,22 @@ fn cacophony_xx_vector() {
     let prologue = hex::decode(PROLOGUE).unwrap();
 
     let mut init = snow::Builder::new(NOISE_XX.parse().unwrap())
-        .local_private_key(&init_s).unwrap()
+        .local_private_key(&init_s)
+        .unwrap()
         .fixed_ephemeral_key_for_testing_only(&init_e)
-        .prologue(&prologue).unwrap()
-        .build_initiator().unwrap();
+        .prologue(&prologue)
+        .unwrap()
+        .build_initiator()
+        .unwrap();
 
     let mut resp = snow::Builder::new(NOISE_XX.parse().unwrap())
-        .local_private_key(&resp_s).unwrap()
+        .local_private_key(&resp_s)
+        .unwrap()
         .fixed_ephemeral_key_for_testing_only(&resp_e)
-        .prologue(&prologue).unwrap()
-        .build_responder().unwrap();
+        .prologue(&prologue)
+        .unwrap()
+        .build_responder()
+        .unwrap();
 
     let mut sendbuf = vec![0u8; 65535];
     let mut recvbuf = vec![0u8; 65535];
@@ -98,18 +105,22 @@ fn cacophony_xx_vector() {
             (&mut resp, &mut init)
         };
 
-        let len = send.write_message(&payload, &mut sendbuf)
+        let len = send
+            .write_message(&payload, &mut sendbuf)
             .unwrap_or_else(|e| panic!("write_message failed on msg {i}: {e}"));
         assert_eq!(
-            &sendbuf[..len], &expected_ct[..],
+            &sendbuf[..len],
+            &expected_ct[..],
             "msg {i} ciphertext mismatch\n  expected: {expected_ct_hex}\n  actual:   {}",
             hex::encode(&sendbuf[..len])
         );
 
-        let recv_len = recv.read_message(&sendbuf[..len], &mut recvbuf)
+        let recv_len = recv
+            .read_message(&sendbuf[..len], &mut recvbuf)
             .unwrap_or_else(|e| panic!("read_message failed on msg {i}: {e}"));
         assert_eq!(
-            &recvbuf[..recv_len], &payload[..],
+            &recvbuf[..recv_len],
+            &payload[..],
             "msg {i} plaintext mismatch"
         );
     }
@@ -118,7 +129,8 @@ fn cacophony_xx_vector() {
     let hh = init.get_handshake_hash();
     let expected_hh = hex::decode(EXPECTED_HANDSHAKE_HASH).unwrap();
     assert_eq!(
-        &hh[..expected_hh.len()], &expected_hh[..],
+        &hh[..expected_hh.len()],
+        &expected_hh[..],
         "handshake hash mismatch\n  expected: {EXPECTED_HANDSHAKE_HASH}\n  actual:   {}",
         hex::encode(&hh[..expected_hh.len()])
     );
@@ -138,18 +150,22 @@ fn cacophony_xx_vector() {
             (&mut resp_t, &mut init_t)
         };
 
-        let len = send.write_message(&payload, &mut sendbuf)
+        let len = send
+            .write_message(&payload, &mut sendbuf)
             .unwrap_or_else(|e| panic!("write_message failed on transport msg {msg_idx}: {e}"));
         assert_eq!(
-            &sendbuf[..len], &expected_ct[..],
+            &sendbuf[..len],
+            &expected_ct[..],
             "transport msg {msg_idx} ciphertext mismatch\n  expected: {expected_ct_hex}\n  actual:   {}",
             hex::encode(&sendbuf[..len])
         );
 
-        let recv_len = recv.read_message(&sendbuf[..len], &mut recvbuf)
+        let recv_len = recv
+            .read_message(&sendbuf[..len], &mut recvbuf)
             .unwrap_or_else(|e| panic!("read_message failed on transport msg {msg_idx}: {e}"));
         assert_eq!(
-            &recvbuf[..recv_len], &payload[..],
+            &recvbuf[..recv_len],
+            &payload[..],
             "transport msg {msg_idx} plaintext mismatch"
         );
     }
@@ -200,7 +216,10 @@ async fn wrapper_handshake_hash_agreement() {
     let hh_a = ta.handshake_hash();
     let hh_b = tb.handshake_hash();
 
-    assert_eq!(hh_a, hh_b, "both sides must produce identical handshake hash");
+    assert_eq!(
+        hh_a, hh_b,
+        "both sides must produce identical handshake hash"
+    );
     assert_ne!(hh_a, [0u8; 32], "handshake hash must not be zero");
 }
 

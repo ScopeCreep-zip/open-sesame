@@ -50,13 +50,10 @@ pub fn build_handshake_ack(
 ///
 /// Returns `Err(reason)` if the `network_pubkey` does not match the Noise
 /// static key, or if the Ed25519 signature verification fails.
-pub fn verify_handshake_ack(
-    ack: &HandshakeAck,
-    noise_static_key: &[u8; 32],
-) -> Result<(), String> {
+pub fn verify_handshake_ack(ack: &HandshakeAck, noise_static_key: &[u8; 32]) -> Result<(), String> {
     // Check 1: network_pubkey matches the Noise static key.
-    let claimed_key = hex::decode(&ack.network_pubkey)
-        .map_err(|e| format!("invalid network_pubkey hex: {e}"))?;
+    let claimed_key =
+        hex::decode(&ack.network_pubkey).map_err(|e| format!("invalid network_pubkey hex: {e}"))?;
     if claimed_key.as_slice() != noise_static_key {
         return Err("network_pubkey does not match Noise static key".into());
     }

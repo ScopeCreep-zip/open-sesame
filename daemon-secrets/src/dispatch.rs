@@ -40,7 +40,9 @@ fn is_envelope_replay(batch_hash_hex: &str, nonce_b64: &str) -> bool {
         .unwrap_or_default()
         .as_secs();
 
-    let mut guard = SEEN_ENVELOPES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = SEEN_ENVELOPES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cache = guard.get_or_insert_with(HashMap::new);
 
     let key = (batch_hash_hex.to_string(), nonce_b64.to_string());
@@ -408,7 +410,8 @@ async fn build_pull_response(
 
     let log = crate::crud::vault_log_ref()?;
 
-    let result = match log.query_entries_since(profile_name_str, since_watermark_json, max_entries) {
+    let result = match log.query_entries_since(profile_name_str, since_watermark_json, max_entries)
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "vault log query failed");
@@ -451,11 +454,17 @@ async fn build_pull_response(
             let signed_hash = entry["operation"]["value_hash"].as_str().unwrap_or("");
             if current_hash != signed_hash {
                 tracing::debug!(
-                    key, signed_hash, current_hash,
+                    key,
+                    signed_hash,
+                    current_hash,
                     "value_hash mismatch — key overwritten since entry was logged, omitting stale value"
                 );
             } else if val_bytes.len() > MAX_VALUE_BYTES {
-                tracing::warn!(key, len = val_bytes.len(), "secret value exceeds 64KB cap, omitting from replication");
+                tracing::warn!(
+                    key,
+                    len = val_bytes.len(),
+                    "secret value exceeds 64KB cap, omitting from replication"
+                );
             } else {
                 obj["value_b64"] = serde_json::Value::String(b64.encode(val_bytes));
             }
@@ -512,17 +521,21 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
         return Err(err("envelope too large — rejected before parsing"));
     }
 
-    let v: serde_json::Value = serde_json::from_str(entry_data)
-        .map_err(|_| err("entry is not valid JSON"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(entry_data).map_err(|_| err("entry is not valid JSON"))?;
 
     if v["reencrypted"].as_bool() != Some(true) {
-        return Err(err("entry missing reencrypted:true — plaintext entries rejected"));
+        return Err(err(
+            "entry missing reencrypted:true — plaintext entries rejected",
+        ));
     }
 
     // Replay protection: reject envelopes older than 5 minutes or from the future.
     const MAX_AGE_SECS: u64 = 300;
     const MAX_FUTURE_SECS: u64 = 60;
-    let ts = v["timestamp_secs"].as_u64().ok_or_else(|| err("missing timestamp_secs"))?;
+    let ts = v["timestamp_secs"]
+        .as_u64()
+        .ok_or_else(|| err("missing timestamp_secs"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -534,37 +547,53 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
         return Err(err("envelope from the future — clock skew or replay"));
     }
 
-    let session_id = v["session_id"].as_str().ok_or_else(|| err("missing session_id"))?;
+    let session_id = v["session_id"]
+        .as_str()
+        .ok_or_else(|| err("missing session_id"))?;
 
     // Replay dedup: check the (batch_hash, nonce) fingerprint BEFORE the
     // expensive ECDH/HKDF/ChaCha decryption. Each legitimate envelope has a
     // fresh random 12-byte nonce, so the (hash, nonce) pair is unique. An
     // attacker replaying a captured envelope will hit this cache and be
     // rejected at near-zero cost instead of forcing a full AEAD cycle.
-    let batch_hash_hex = v["batch_hash"].as_str().ok_or_else(|| err("missing batch_hash"))?;
+    let batch_hash_hex = v["batch_hash"]
+        .as_str()
+        .ok_or_else(|| err("missing batch_hash"))?;
     let nonce_b64 = v["nonce"].as_str().ok_or_else(|| err("missing nonce"))?;
     if is_envelope_replay(batch_hash_hex, nonce_b64) {
-        return Err(err("duplicate envelope — replay rejected before decryption"));
+        return Err(err(
+            "duplicate envelope — replay rejected before decryption",
+        ));
     }
 
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
 
-    let eph_pubkey_bytes = b64.decode(
-        v["ephemeral_pubkey"].as_str().ok_or_else(|| err("missing ephemeral_pubkey"))?
-    ).map_err(|_| err("invalid base64 in ephemeral_pubkey"))?;
+    let eph_pubkey_bytes = b64
+        .decode(
+            v["ephemeral_pubkey"]
+                .as_str()
+                .ok_or_else(|| err("missing ephemeral_pubkey"))?,
+        )
+        .map_err(|_| err("invalid base64 in ephemeral_pubkey"))?;
     // nonce_b64 and batch_hash_hex already extracted above for replay check.
-    let nonce_bytes = b64.decode(nonce_b64)
+    let nonce_bytes = b64
+        .decode(nonce_b64)
         .map_err(|_| err("invalid base64 in nonce"))?;
-    let ciphertext = b64.decode(
-        v["ciphertext"].as_str().ok_or_else(|| err("missing ciphertext"))?
-    ).map_err(|_| err("invalid base64 in ciphertext"))?;
-    let batch_hash = hex::decode(batch_hash_hex)
-        .map_err(|_| err("invalid hex in batch_hash"))?;
+    let ciphertext = b64
+        .decode(
+            v["ciphertext"]
+                .as_str()
+                .ok_or_else(|| err("missing ciphertext"))?,
+        )
+        .map_err(|_| err("invalid base64 in ciphertext"))?;
+    let batch_hash = hex::decode(batch_hash_hex).map_err(|_| err("invalid hex in batch_hash"))?;
 
-    let eph_pubkey: [u8; 32] = eph_pubkey_bytes.try_into()
+    let eph_pubkey: [u8; 32] = eph_pubkey_bytes
+        .try_into()
         .map_err(|_| err("ephemeral_pubkey wrong length"))?;
-    let nonce: [u8; 12] = nonce_bytes.try_into()
+    let nonce: [u8; 12] = nonce_bytes
+        .try_into()
         .map_err(|_| err("nonce wrong length"))?;
 
     // Derive decryption key inside the closure so the private key never
@@ -578,7 +607,9 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
             core_crypto::network::REPLICATION_HKDF_CONTEXT,
             1,
         );
-        dec_keys[0].as_bytes().try_into()
+        dec_keys[0]
+            .as_bytes()
+            .try_into()
             .map_err(|_| core_types::Error::Crypto("HKDF output wrong length".into()))
     })
     .ok_or_else(|| err("network private key not available — vault locked"))?
@@ -587,9 +618,8 @@ fn decrypt_reencrypted_entry(entry_data: &str) -> Result<String, ReencryptionErr
     // Reconstruct AAD using the same shared function as the sender.
     let aad = core_crypto::network::replication_envelope_aad(&batch_hash, ts, session_id);
 
-    let plaintext = core_crypto::network::chacha20_open(
-        &dec_key, &nonce, &aad, &ciphertext,
-    ).map_err(|_| err("AEAD decryption failed — wrong key or tampered ciphertext"))?;
+    let plaintext = core_crypto::network::chacha20_open(&dec_key, &nonce, &aad, &ciphertext)
+        .map_err(|_| err("AEAD decryption failed — wrong key or tampered ciphertext"))?;
 
     // L-02: bound decrypted plaintext size to prevent OOM from large batches.
     const MAX_PLAINTEXT_BYTES: usize = 1024 * 1024; // 1MB
@@ -666,7 +696,13 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
         match log.check_hwm(author, profile_id, wall_secs, counter) {
             Ok(true) => {}
             Ok(false) => {
-                tracing::debug!(author, profile_id, wall_secs, counter, "entry rejected by HWM — replay or stale");
+                tracing::debug!(
+                    author,
+                    profile_id,
+                    wall_secs,
+                    counter,
+                    "entry rejected by HWM — replay or stale"
+                );
                 continue;
             }
             Err(e) => {
@@ -680,15 +716,23 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
         let key = entry["operation"]["key"].as_str().unwrap_or("");
 
         // C-05: system keys and invalid keys rejected BEFORE insert.
-        if key.starts_with('_') || (!key.is_empty() && core_types::validate_secret_key(key).is_err()) {
-            tracing::debug!(key, "entry rejected pre-insert: system key or invalid key name");
+        if key.starts_with('_')
+            || (!key.is_empty() && core_types::validate_secret_key(key).is_err())
+        {
+            tracing::debug!(
+                key,
+                "entry rejected pre-insert: system key or invalid key name"
+            );
             continue;
         }
 
         let profile = match core_types::TrustProfileName::try_from(profile_id) {
             Ok(p) => p,
             Err(_) => {
-                tracing::debug!(profile_id, "entry rejected pre-insert: invalid profile name");
+                tracing::debug!(
+                    profile_id,
+                    "entry rejected pre-insert: invalid profile name"
+                );
                 continue;
             }
         };
@@ -714,12 +758,16 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                             // doesn't match, either the sender attached a stale value
                             // or the data was tampered. Reject.
                             let received_hash = hex::encode(blake3::hash(&v).as_bytes());
-                            let signed_hash = entry["operation"]["value_hash"].as_str().unwrap_or("");
+                            let signed_hash =
+                                entry["operation"]["value_hash"].as_str().unwrap_or("");
 
                             // H-06: set operations MUST have a value_hash.
                             // Empty value_hash on a set is invalid — reject.
                             if signed_hash.is_empty() {
-                                tracing::warn!(entry = entry_id, "set entry missing value_hash, rejecting");
+                                tracing::warn!(
+                                    entry = entry_id,
+                                    "set entry missing value_hash, rejecting"
+                                );
                                 let _ = log.mark_applied(entry_id);
                                 continue;
                             }
@@ -741,7 +789,11 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                             v
                         }
                         Ok(v) => {
-                            tracing::warn!(entry = entry_id, len = v.len(), "value exceeds 64KB cap");
+                            tracing::warn!(
+                                entry = entry_id,
+                                len = v.len(),
+                                "value exceeds 64KB cap"
+                            );
                             let _ = log.mark_applied(entry_id);
                             continue;
                         }
@@ -773,47 +825,63 @@ async fn process_received_batch(batch_json: &str, ctx: &mut MessageContext<'_>) 
                 // entry is Ed25519-signed and value-hash-bound, so a relay
                 // cannot inject or modify entries without detection.
                 match ctx.vault_state.vault_for(&profile).await {
-                    Ok(vault) => {
-                        match vault.store().set(key, &value_bytes).await {
-                            Ok(()) => {
-                                let _ = log.mark_applied(entry_id);
-                                let _ = log.update_replay_hwm(author, profile_id, wall_secs, counter);
-                                tracing::debug!(entry = entry_id, key, profile = profile_id, "applied set");
-                            }
-                            Err(e) => {
-                                tracing::warn!(entry = entry_id, error = %e, "failed to apply set");
-                            }
+                    Ok(vault) => match vault.store().set(key, &value_bytes).await {
+                        Ok(()) => {
+                            let _ = log.mark_applied(entry_id);
+                            let _ = log.update_replay_hwm(author, profile_id, wall_secs, counter);
+                            tracing::debug!(
+                                entry = entry_id,
+                                key,
+                                profile = profile_id,
+                                "applied set"
+                            );
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!(entry = entry_id, error = %e, "failed to apply set");
+                        }
+                    },
                     Err(_) => {
                         // Profile not active — defer with retry.
                         let _ = log.defer_entry_with_backoff(entry_id);
-                        tracing::debug!(entry = entry_id, profile = profile_id, "profile not active, deferred set");
+                        tracing::debug!(
+                            entry = entry_id,
+                            profile = profile_id,
+                            "profile not active, deferred set"
+                        );
                     }
                 }
             }
-            "delete" => {
-                match ctx.vault_state.vault_for(&profile).await {
-                    Ok(vault) => {
-                        match vault.store().delete(key).await {
-                            Ok(()) | Err(core_types::Error::NotFound(_)) => {
-                                let _ = log.mark_applied(entry_id);
-                                let _ = log.update_replay_hwm(author, profile_id, wall_secs, counter);
-                                tracing::debug!(entry = entry_id, key, profile = profile_id, "applied delete");
-                            }
-                            Err(e) => {
-                                tracing::warn!(entry = entry_id, error = %e, "failed to apply delete");
-                            }
-                        }
+            "delete" => match ctx.vault_state.vault_for(&profile).await {
+                Ok(vault) => match vault.store().delete(key).await {
+                    Ok(()) | Err(core_types::Error::NotFound(_)) => {
+                        let _ = log.mark_applied(entry_id);
+                        let _ = log.update_replay_hwm(author, profile_id, wall_secs, counter);
+                        tracing::debug!(
+                            entry = entry_id,
+                            key,
+                            profile = profile_id,
+                            "applied delete"
+                        );
                     }
-                    Err(_) => {
-                        let _ = log.defer_entry_with_backoff(entry_id);
-                        tracing::debug!(entry = entry_id, profile = profile_id, "profile not active, deferred delete");
+                    Err(e) => {
+                        tracing::warn!(entry = entry_id, error = %e, "failed to apply delete");
                     }
+                },
+                Err(_) => {
+                    let _ = log.defer_entry_with_backoff(entry_id);
+                    tracing::debug!(
+                        entry = entry_id,
+                        profile = profile_id,
+                        "profile not active, deferred delete"
+                    );
                 }
-            }
+            },
             other => {
-                tracing::debug!(entry = entry_id, op = other, "unsupported operation type, marking applied");
+                tracing::debug!(
+                    entry = entry_id,
+                    op = other,
+                    "unsupported operation type, marking applied"
+                );
                 let _ = log.mark_applied(entry_id);
             }
         }
@@ -897,31 +965,27 @@ pub async fn apply_deferred_entries(ctx: &mut MessageContext<'_>) {
                 );
                 // No mark_applied, no update_watermark. Just skip.
             }
-            "delete" => {
-                match ctx.vault_state.vault_for(&profile).await {
-                    Ok(vault) => {
-                        match vault.store().delete(key).await {
-                            Ok(()) | Err(core_types::Error::NotFound(_)) => {
-                                let _ = log.mark_applied(&entry.id);
-                                let _ = log.update_replay_hwm(
-                                    &entry.author_installation_id,
-                                    &entry.profile_id,
-                                    entry.hlc_wall_secs,
-                                    entry.hlc_counter,
-                                );
-                                tracing::debug!(entry = %entry.id, key, "deferred delete applied");
-                            }
-                            Err(e) => {
-                                tracing::warn!(entry = %entry.id, error = %e, "failed to apply deferred delete");
-                                let _ = log.defer_entry_with_backoff(&entry.id);
-                            }
-                        }
+            "delete" => match ctx.vault_state.vault_for(&profile).await {
+                Ok(vault) => match vault.store().delete(key).await {
+                    Ok(()) | Err(core_types::Error::NotFound(_)) => {
+                        let _ = log.mark_applied(&entry.id);
+                        let _ = log.update_replay_hwm(
+                            &entry.author_installation_id,
+                            &entry.profile_id,
+                            entry.hlc_wall_secs,
+                            entry.hlc_counter,
+                        );
+                        tracing::debug!(entry = %entry.id, key, "deferred delete applied");
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        tracing::warn!(entry = %entry.id, error = %e, "failed to apply deferred delete");
                         let _ = log.defer_entry_with_backoff(&entry.id);
                     }
+                },
+                Err(_) => {
+                    let _ = log.defer_entry_with_backoff(&entry.id);
                 }
-            }
+            },
             _ => {
                 let _ = log.mark_applied(&entry.id);
             }

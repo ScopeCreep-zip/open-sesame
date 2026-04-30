@@ -7,7 +7,7 @@ use crate::handshake_ack;
 /// TOFU pin TTL for first-contact peers (24 hours).
 const TOFU_PIN_TTL_SECS: u64 = 86_400;
 use crate::metrics::Metrics;
-use crate::noise::state::{self, derive_psk_from_handshake, NoiseTransport};
+use crate::noise::state::{self, NoiseTransport, derive_psk_from_handshake};
 use crate::session::state::PeerState;
 use crate::session::table::PeerTable;
 use crate::tofu::store::TofuStore;
@@ -96,7 +96,10 @@ pub async fn handle_inbound_handshake(
     let mut transport = match pattern_byte[0] {
         0x02 => {
             // IKpsk2 responder: peer is reconnecting with cached PSK.
-            let psk = ctx.tofu_store.lock().ok()
+            let psk = ctx
+                .tofu_store
+                .lock()
+                .ok()
                 .and_then(|store| {
                     // We don't know the peer's key yet — look up by address.
                     let peer = store.lookup_addr(&peer_addr.to_string()).ok()??;
@@ -105,16 +108,18 @@ pub async fn handle_inbound_handshake(
                 .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
 
             if let Some(psk) = psk {
-                match state::ikpsk2_responder(
-                    &mut reader, &mut writer, &ctx.local_keypair, &psk,
-                ).await {
+                match state::ikpsk2_responder(&mut reader, &mut writer, &ctx.local_keypair, &psk)
+                    .await
+                {
                     Ok(t) => {
-                        ctx.audit.append("ikpsk2_responder_ok", &peer_addr.to_string());
+                        ctx.audit
+                            .append("ikpsk2_responder_ok", &peer_addr.to_string());
                         t
                     }
                     Err(e) => {
                         Metrics::inc(&ctx.metrics.handshake_failures_total);
-                        ctx.audit.append("ikpsk2_responder_failed", &format!("{peer_addr} {e}"));
+                        ctx.audit
+                            .append("ikpsk2_responder_failed", &format!("{peer_addr} {e}"));
                         return HandshakeOutcome::Rejected {
                             reason: format!("IKpsk2 responder failed: {e}"),
                         };
@@ -129,13 +134,12 @@ pub async fn handle_inbound_handshake(
         }
         _ => {
             // 0x01 or any other byte: XX handshake (default).
-            match state::xx_responder(
-                &mut reader, &mut writer, &ctx.local_keypair,
-            ).await {
+            match state::xx_responder(&mut reader, &mut writer, &ctx.local_keypair).await {
                 Ok(t) => t,
                 Err(e) => {
                     Metrics::inc(&ctx.metrics.handshake_failures_total);
-                    ctx.audit.append("handshake_failed", &format!("{peer_addr} {e}"));
+                    ctx.audit
+                        .append("handshake_failed", &format!("{peer_addr} {e}"));
                     return HandshakeOutcome::Rejected {
                         reason: format!("Noise XX failed: {e}"),
                     };
@@ -147,7 +151,8 @@ pub async fn handle_inbound_handshake(
     // Step 2: TOFU check.
     let Some(remote_static) = transport.remote_static() else {
         Metrics::inc(&ctx.metrics.handshake_failures_total);
-        ctx.audit.append("handshake_failed", &format!("{peer_addr} no remote static"));
+        ctx.audit
+            .append("handshake_failed", &format!("{peer_addr} no remote static"));
         return HandshakeOutcome::Rejected {
             reason: "no remote static key after handshake".into(),
         };
@@ -155,7 +160,11 @@ pub async fn handle_inbound_handshake(
 
     let remote_key_hex = hex::encode(remote_static);
     let trust_level = match run_tofu_check(
-        &remote_key_hex, &peer_addr.to_string(), &ctx.tofu_store, &ctx.metrics, &ctx.audit,
+        &remote_key_hex,
+        &peer_addr.to_string(),
+        &ctx.tofu_store,
+        &ctx.metrics,
+        &ctx.audit,
         ctx.require_known_peers,
     ) {
         Ok(level) => level,
@@ -166,7 +175,12 @@ pub async fn handle_inbound_handshake(
     let peer_install_id = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         exchange_handshake_ack(
-            &mut transport, &mut reader, &mut writer, &remote_static, ctx, false,
+            &mut transport,
+            &mut reader,
+            &mut writer,
+            &remote_static,
+            ctx,
+            false,
         ),
     )
     .await
@@ -187,14 +201,17 @@ pub async fn handle_inbound_handshake(
 
     // Step 5: Session creation.
     let session_id = WireSessionId::random();
-    let peer_state = PeerState::new(
-        session_id, remote_static, peer_addr, transport, trust_level,
-    );
+    let peer_state = PeerState::new(session_id, remote_static, peer_addr, transport, trust_level);
 
     if !ctx.peer_table.insert(peer_state) {
         Metrics::inc(&ctx.metrics.sessions_rejected_full);
-        ctx.audit.append("session_rejected_full", &format!("{peer_addr} {remote_key_hex}"));
-        return HandshakeOutcome::Rejected { reason: "session table full".into() };
+        ctx.audit.append(
+            "session_rejected_full",
+            &format!("{peer_addr} {remote_key_hex}"),
+        );
+        return HandshakeOutcome::Rejected {
+            reason: "session table full".into(),
+        };
     }
 
     // Step 6: Spawn TCP read loop for post-handshake frame reception.
@@ -204,8 +221,9 @@ pub async fn handle_inbound_handshake(
             reader,
             peer_addr,
             tcp_tx,
-            std::time::Duration::from_secs(300),
-        ).await;
+            std::time::Duration::from_mins(5),
+        )
+        .await;
     });
 
     // Step 7: IPC notification.
@@ -225,17 +243,18 @@ pub async fn handle_inbound_handshake(
         "session established"
     );
 
-    HandshakeOutcome::Established { session_id, remote_key_hex, trust_level }
+    HandshakeOutcome::Established {
+        session_id,
+        remote_key_hex,
+        trust_level,
+    }
 }
 
 /// Run the initiator-side handshake to dial a remote peer.
 ///
 /// Attempts `IKpsk2` reconnection if the TOFU store has a cached PSK.
 /// Falls back to XX for first contact or PSK mismatch.
-pub async fn dial_peer(
-    addr: SocketAddr,
-    ctx: &HandshakeContext,
-) -> HandshakeOutcome {
+pub async fn dial_peer(addr: SocketAddr, ctx: &HandshakeContext) -> HandshakeOutcome {
     // Step 0: UDP knock — prove source address ownership before TCP connect.
     // The responder sends a cookie or PoW challenge; we solve and respond.
     // Failure is non-fatal: if the responder doesn't support knocks (e.g.,
@@ -266,12 +285,18 @@ pub async fn dial_peer(
 
     let Some(remote_static) = transport.remote_static() else {
         Metrics::inc(&ctx.metrics.handshake_failures_total);
-        return HandshakeOutcome::Rejected { reason: "no remote static key".into() };
+        return HandshakeOutcome::Rejected {
+            reason: "no remote static key".into(),
+        };
     };
 
     let remote_key_hex = hex::encode(remote_static);
     let trust_level = match run_tofu_check(
-        &remote_key_hex, &addr.to_string(), &ctx.tofu_store, &ctx.metrics, &ctx.audit,
+        &remote_key_hex,
+        &addr.to_string(),
+        &ctx.tofu_store,
+        &ctx.metrics,
+        &ctx.audit,
         ctx.require_known_peers,
     ) {
         Ok(level) => level,
@@ -280,8 +305,14 @@ pub async fn dial_peer(
 
     // HandshakeAck exchange over TCP. Initiator sends first.
     let peer_install_id = exchange_handshake_ack(
-        &mut transport, &mut reader, &mut writer, &remote_static, ctx, true,
-    ).await;
+        &mut transport,
+        &mut reader,
+        &mut writer,
+        &remote_static,
+        ctx,
+        true,
+    )
+    .await;
 
     // Cache PSK and persist installation identity from verified HandshakeAck.
     let psk = derive_psk_from_handshake(&transport.handshake_hash());
@@ -297,7 +328,9 @@ pub async fn dial_peer(
 
     if !ctx.peer_table.insert(peer_state) {
         Metrics::inc(&ctx.metrics.sessions_rejected_full);
-        return HandshakeOutcome::Rejected { reason: "session table full".into() };
+        return HandshakeOutcome::Rejected {
+            reason: "session table full".into(),
+        };
     }
 
     let remote_uuid = peer_install_id
@@ -316,7 +349,11 @@ pub async fn dial_peer(
         "outbound session established"
     );
 
-    HandshakeOutcome::Established { session_id, remote_key_hex, trust_level }
+    HandshakeOutcome::Established {
+        session_id,
+        remote_key_hex,
+        trust_level,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,11 +369,8 @@ pub async fn dial_peer(
 ///
 /// Returns `Ok(())` on success (cookie/PoW verified by responder),
 /// `Err(reason)` if the knock times out or the `PoW` is unsolvable.
-async fn udp_knock_exchange(
-    addr: SocketAddr,
-    ctx: &HandshakeContext,
-) -> Result<(), String> {
-    use crate::transport::frame::{Frame, WireSessionId, HEADER_SIZE};
+async fn udp_knock_exchange(addr: SocketAddr, ctx: &HandshakeContext) -> Result<(), String> {
+    use crate::transport::frame::{Frame, HEADER_SIZE, WireSessionId};
     use crate::transport::udp;
 
     // Send HandshakeInit knock via UDP.
@@ -370,7 +404,10 @@ async fn udp_knock_exchange(
     };
 
     if frame.frame_type != core_types::FrameType::CookieRequest as u8 {
-        return Err(format!("expected CookieRequest, got frame type {}", frame.frame_type));
+        return Err(format!(
+            "expected CookieRequest, got frame type {}",
+            frame.frame_type
+        ));
     }
 
     if frame.body.is_empty() {
@@ -472,7 +509,9 @@ async fn dial_handshake(
         // Send IKpsk2 pattern discriminant (0x02).
         writer.write_all(&[0x02]).await.map_err(|e| {
             Metrics::inc(&ctx.metrics.handshake_failures_total);
-            HandshakeOutcome::Rejected { reason: format!("pattern byte write: {e}") }
+            HandshakeOutcome::Rejected {
+                reason: format!("pattern byte write: {e}"),
+            }
         })?;
         match state::ikpsk2_initiator(
             &mut reader,
@@ -501,15 +540,16 @@ async fn dial_handshake(
                 })?;
                 let (mut r2, mut w2) = tokio::io::split(stream2);
                 // Send XX pattern discriminant (0x01) on the fresh connection.
-                w2.write_all(&[0x01]).await.map_err(|e3| {
-                    HandshakeOutcome::Rejected { reason: format!("pattern byte: {e3}") }
-                })?;
+                w2.write_all(&[0x01])
+                    .await
+                    .map_err(|e3| HandshakeOutcome::Rejected {
+                        reason: format!("pattern byte: {e3}"),
+                    })?;
                 let t = state::xx_initiator(&mut r2, &mut w2, &ctx.local_keypair)
                     .await
                     .map_err(|e2| {
                         Metrics::inc(&ctx.metrics.handshake_failures_total);
-                        ctx.audit
-                            .append("dial_xx_failed", &format!("{addr} {e2}"));
+                        ctx.audit.append("dial_xx_failed", &format!("{addr} {e2}"));
                         HandshakeOutcome::Rejected {
                             reason: format!("Noise XX fallback: {e2}"),
                         }
@@ -523,7 +563,9 @@ async fn dial_handshake(
     // Send XX pattern discriminant (0x01).
     writer.write_all(&[0x01]).await.map_err(|e| {
         Metrics::inc(&ctx.metrics.handshake_failures_total);
-        HandshakeOutcome::Rejected { reason: format!("pattern byte write: {e}") }
+        HandshakeOutcome::Rejected {
+            reason: format!("pattern byte write: {e}"),
+        }
     })?;
     let t = state::xx_initiator(&mut reader, &mut writer, &ctx.local_keypair)
         .await
@@ -569,7 +611,8 @@ where
     // Derive signing key from seed (on demand, dropped after use).
     let seed_secure = core_crypto::SecureBytes::from_slice(&seed);
     let install_uuid = uuid::Uuid::parse_str(&ctx.installation_id).ok()?;
-    let signing_key = core_crypto::network::derive_signing_keypair(&seed_secure, &install_uuid).ok()?;
+    let signing_key =
+        core_crypto::network::derive_signing_keypair(&seed_secure, &install_uuid).ok()?;
 
     let our_ack = handshake_ack::build_handshake_ack(
         &ctx.installation_id,
@@ -598,7 +641,9 @@ where
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf).await.ok()?;
         let peer_len = u32::from_be_bytes(len_buf) as usize;
-        if peer_len > 4096 { return None; } // HandshakeAck JSON is ~500 bytes; 4KB is generous
+        if peer_len > 4096 {
+            return None;
+        } // HandshakeAck JSON is ~500 bytes; 4KB is generous
         let mut peer_buf = vec![0u8; peer_len];
         reader.read_exact(&mut peer_buf).await.ok()?;
         peer_buf
@@ -607,7 +652,9 @@ where
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf).await.ok()?;
         let peer_len = u32::from_be_bytes(len_buf) as usize;
-        if peer_len > 4096 { return None; } // HandshakeAck JSON is ~500 bytes; 4KB is generous
+        if peer_len > 4096 {
+            return None;
+        } // HandshakeAck JSON is ~500 bytes; 4KB is generous
         let mut peer_buf = vec![0u8; peer_len];
         reader.read_exact(&mut peer_buf).await.ok()?;
 
@@ -690,16 +737,21 @@ fn run_tofu_check(
         Ok(Some(peer)) => match peer.trust_level {
             TofuTrustLevel::Revoked => {
                 Metrics::inc(&metrics.tofu_mismatches_total);
-                store.record_mismatch(remote_key_hex, remote_key_hex, addr)
+                store
+                    .record_mismatch(remote_key_hex, remote_key_hex, addr)
                     .unwrap_or_else(|e| tracing::warn!(error = %e, "mismatch record failed"));
                 audit.append("tofu_revoked_rejected", &format!("{remote_key_hex} {addr}"));
                 Err(format!("peer {remote_key_hex} is REVOKED"))
             }
             TofuTrustLevel::Unpinned => {
-
                 drop(store);
                 if let Ok(s) = tofu_store.lock() {
-                    let _ = s.pin_with_ttl(remote_key_hex, addr, TofuTrustLevel::Tofu, Some(TOFU_PIN_TTL_SECS));
+                    let _ = s.pin_with_ttl(
+                        remote_key_hex,
+                        addr,
+                        TofuTrustLevel::Tofu,
+                        Some(TOFU_PIN_TTL_SECS),
+                    );
                 }
                 audit.append("tofu_re_pinned", &format!("{remote_key_hex} {addr}"));
                 Ok(TofuTrustLevel::Tofu)
@@ -727,7 +779,10 @@ fn run_tofu_check(
             // transient peers (coffee shop WiFi, conference LAN) from
             // persisting in the TOFU store indefinitely.
             if let Err(e) = store.pin_with_ttl(
-                remote_key_hex, addr, TofuTrustLevel::Tofu, Some(TOFU_PIN_TTL_SECS),
+                remote_key_hex,
+                addr,
+                TofuTrustLevel::Tofu,
+                Some(TOFU_PIN_TTL_SECS),
             ) {
                 tracing::warn!(error = %e, "TOFU pin failed");
             }

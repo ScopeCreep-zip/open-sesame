@@ -8,17 +8,24 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, ... }:
+    { self, nixpkgs, rust-overlay, ... }:
     let
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
-      pkgsFor = system: nixpkgs.legacyPackages.${system};
+      pkgsFor = system: import nixpkgs {
+        inherit system;
+        overlays = [ rust-overlay.overlays.default ];
+      };
     in
     {
       packages = forAllSystems (system: {
@@ -511,16 +518,16 @@
         system:
         let
           pkgs = pkgsFor system;
+          # Read toolchain from rust-toolchain.toml — nightly with Cranelift.
+          # All components (rustfmt, clippy, rust-analyzer, rust-src,
+          # rustc-codegen-cranelift-preview) come from this single derivation.
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         in
         {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
-              # Rust toolchain
-              cargo
-              rustc
-              rust-analyzer
-              clippy
-              rustfmt
+              # Rust toolchain (nightly, pinned via rust-toolchain.toml)
+              rustToolchain
 
               # Build acceleration
               mold            # parallel linker (3-5x faster link than GNU ld)
@@ -531,7 +538,8 @@
               pkg-config
               patchelf
               cargo-deb
-              cargo-nextest   # parallel test execution (40-60% faster test suites)
+              cargo-cross
+              cargo-nextest
 
               # Documentation
               mdbook
@@ -608,16 +616,9 @@
               ]
             );
 
-            # Mold linker via env vars — only active inside nix develop.
-            # Does not pollute .cargo/config.toml which would break
-            # cargo outside the devShell.
-            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
-            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold -Z threads=8";
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "clang";
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold -Z threads=8";
-
             shellHook = ''
-              echo "open-sesame v2 devShell ready (mold linker, sccache available)"
+              echo "open-sesame v2 devShell ready"
+              echo "  rustc: $(rustc --version)"
               echo "  cargo check --workspace"
             '';
           };

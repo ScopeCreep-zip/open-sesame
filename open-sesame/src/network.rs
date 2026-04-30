@@ -131,7 +131,14 @@ async fn cmd_discover() -> anyhow::Result<()> {
                 println!("----------------------------------------------");
                 println!("  mDNS peers:       {mdns_peers}");
                 println!("  BEP-44 published: {bep44_published}");
-                println!("  DNS SRV domains:  {}", if dns_srv_domains.is_empty() { "(none)".into() } else { dns_srv_domains.join(", ") });
+                println!(
+                    "  DNS SRV domains:  {}",
+                    if dns_srv_domains.is_empty() {
+                        "(none)".into()
+                    } else {
+                        dns_srv_domains.join(", ")
+                    }
+                );
                 println!("  Dial queue:       {dial_queue_depth}");
                 println!("  SWIM members:     {swim_members}");
             }
@@ -177,7 +184,10 @@ async fn cmd_identity(json: bool) -> anyhow::Result<()> {
         println!("  Display Name:     {display_name}");
         println!("  Network Pubkey:   {pubkey_hex}");
         println!("  Signing Pubkey:   {signing_hex}");
-        println!("  Ceremony:         {}", if ceremony { "complete" } else { "incomplete" });
+        println!(
+            "  Ceremony:         {}",
+            if ceremony { "complete" } else { "incomplete" }
+        );
 
         if pubkey_hex != "(not set)"
             && let Ok(bytes) = hex::decode(pubkey_hex)
@@ -278,7 +288,11 @@ async fn cmd_peers(unpin_key: Option<&str>) -> anyhow::Result<()> {
     for (key_hex, trust, addr, name) in &peers {
         let name = name.as_deref().unwrap_or("(unknown)");
         let addr = addr.as_deref().unwrap_or("(no address)");
-        let key_short = if key_hex.len() >= 16 { &key_hex[..16] } else { key_hex };
+        let key_short = if key_hex.len() >= 16 {
+            &key_hex[..16]
+        } else {
+            key_hex
+        };
         println!("  {key_short}...  {trust:<12}  {addr:<24}  {name}");
     }
 

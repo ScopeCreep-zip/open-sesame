@@ -166,7 +166,9 @@ pub async fn mdns_listen_loop(
             if is_goodbye {
                 // Extract the peer address for removal. Port from SRV if present,
                 // else default. Source IP from the UDP packet.
-                let port = packet.additional.iter()
+                let port = packet
+                    .additional
+                    .iter()
                     .find(|rr| rr.rtype == RecordType::SRV as u16 && rr.rdata.len() >= 6)
                     .map_or(48627, |rr| u16::from_be_bytes([rr.rdata[4], rr.rdata[5]]));
                 let addr = SocketAddr::new(src.ip(), port);
@@ -180,11 +182,7 @@ pub async fn mdns_listen_loop(
 
 /// Extract peer information from an mDNS response packet.
 fn extract_peer(packet: &DnsPacket, source: SocketAddr) -> Option<MdnsPeer> {
-    let all_records: Vec<_> = packet
-        .answers
-        .iter()
-        .chain(&packet.additional)
-        .collect();
+    let all_records: Vec<_> = packet.answers.iter().chain(&packet.additional).collect();
 
     // Find TXT record with pubkey and iid.
     let mut pubkey_hex = None;

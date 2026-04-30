@@ -22,10 +22,7 @@ pub enum TcpInbound {
         peer_addr: SocketAddr,
     },
     /// A frame read from an established TCP connection.
-    Frame {
-        frame: Frame,
-        peer_addr: SocketAddr,
-    },
+    Frame { frame: Frame, peer_addr: SocketAddr },
 }
 
 /// Bind a TCP listener on the given port and accept connections.
@@ -61,10 +58,7 @@ pub async fn tcp_accept_loop(
 
         tracing::debug!(%peer_addr, "TCP connection accepted");
 
-        let inbound = TcpInbound::NewConnection {
-            stream,
-            peer_addr,
-        };
+        let inbound = TcpInbound::NewConnection { stream, peer_addr };
         if tx.try_send(inbound).is_err() {
             tracing::warn!(%peer_addr, "TCP dispatch channel full, dropping connection");
         }

@@ -81,7 +81,7 @@ impl ContextEngine {
             .collect();
 
         // Sort by priority descending (highest wins)
-        candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
         let winner = candidates.first()?;
 

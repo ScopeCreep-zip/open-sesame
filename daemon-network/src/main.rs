@@ -21,7 +21,10 @@ use clap::Parser;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "daemon-network", about = "Open Sesame network transport daemon")]
+#[command(
+    name = "daemon-network",
+    about = "Open Sesame network transport daemon"
+)]
 struct Args {
     #[arg(long)]
     port: Option<u16>,
@@ -35,11 +38,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Single config load — network settings come from [network] in config.toml,
     // not a separate network.toml. config.toml is the single source of truth.
-    let full_config = core_config::load_config(None)
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to load config.toml");
-            anyhow::anyhow!("config load failed: {e}")
-        })?;
+    let full_config = core_config::load_config(None).map_err(|e| {
+        tracing::error!(error = %e, "failed to load config.toml");
+        anyhow::anyhow!("config load failed: {e}")
+    })?;
     let network_config = full_config.network.clone();
     let listen_port = args.port.unwrap_or(network_config.transport.listen_port);
 
@@ -51,12 +53,22 @@ async fn main() -> anyhow::Result<()> {
 
     let default_profile = full_config.global.default_profile.to_string();
     if default_profile.is_empty() {
-        return Err(anyhow::anyhow!("default_profile is empty in config — cannot replicate without a profile name"));
+        return Err(anyhow::anyhow!(
+            "default_profile is empty in config — cannot replicate without a profile name"
+        ));
     }
 
     let (state, tcp_rx, repl_rx) = setup(listen_port, &network_config).await?;
     notify_ready();
-    run_event_loop(state, tcp_rx, repl_rx, listen_port, &network_config, &default_profile).await
+    run_event_loop(
+        state,
+        tcp_rx,
+        repl_rx,
+        listen_port,
+        &network_config,
+        &default_profile,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -104,15 +116,19 @@ async fn setup(
     ));
 
     let audit = Arc::new(
-        AuditLog::open(&config::audit_log_path())
-            .map_err(|e| anyhow::anyhow!("audit log: {e}"))?,
+        AuditLog::open(&config::audit_log_path()).map_err(|e| anyhow::anyhow!("audit log: {e}"))?,
     );
-    audit.append("daemon_started", &format!("port={listen_port} install={installation_id}"));
+    audit.append(
+        "daemon_started",
+        &format!("port={listen_port} install={installation_id}"),
+    );
 
     let metrics = Arc::new(Metrics::new());
     let peer_table = Arc::new(PeerTable::new(config.session.max_concurrent_sessions));
     let cookie = Arc::new(std::sync::Mutex::new(
-        daemon_network::flood::cookie::CookieChallenger::new(u64::from(config.flood.cookie_epoch_secs)),
+        daemon_network::flood::cookie::CookieChallenger::new(u64::from(
+            config.flood.cookie_epoch_secs,
+        )),
     ));
     let pow = Arc::new(std::sync::Mutex::new(flood::pow::PowChallenger::new()));
     let global_hs_limiter = Arc::new(TokenBucket::new(
@@ -127,10 +143,7 @@ async fn setup(
     let local_keypair = if let Some((vault_private, _vault_public)) =
         control::bus::request_network_identity(&mut bus_client).await
     {
-        let priv_array: &[u8; 32] = vault_private
-            .as_slice()
-            .try_into()
-            .unwrap_or(&[0u8; 32]);
+        let priv_array: &[u8; 32] = vault_private.as_slice().try_into().unwrap_or(&[0u8; 32]);
         let computed_pub = core_crypto::network::x25519_public_from_private(priv_array);
         if computed_pub != network_pubkey && network_pubkey != [0u8; 32] {
             tracing::warn!("vault private key does not match installation.toml network_pubkey_hex");
@@ -155,43 +168,47 @@ async fn setup(
         Arc::new(kp)
     };
 
-    let signing_seed: Option<zeroize::Zeroizing<[u8; 32]>> = match control::bus::request_secret(
-        &mut bus_client,
-        "_signing-seed",
-    ).await {
-        Some(seed_bytes) if seed_bytes.len() == 32 => {
-            let mut seed = zeroize::Zeroizing::new([0u8; 32]);
-            seed.copy_from_slice(&seed_bytes);
-            let seed_secure = core_crypto::SecureBytes::from_slice(&*seed);
-            match core_crypto::network::derive_signing_keypair(&seed_secure, &install_config.id) {
-                Ok(key) => {
-                    let derived_pub = key.public_key();
-                    if let Some(expected) = signing_pubkey
-                        && derived_pub != expected
-                    {
-                        tracing::warn!("signing seed produces different pubkey than installation.toml");
+    let signing_seed: Option<zeroize::Zeroizing<[u8; 32]>> =
+        match control::bus::request_secret(&mut bus_client, "_signing-seed").await {
+            Some(seed_bytes) if seed_bytes.len() == 32 => {
+                let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+                seed.copy_from_slice(&seed_bytes);
+                let seed_secure = core_crypto::SecureBytes::from_slice(&*seed);
+                match core_crypto::network::derive_signing_keypair(&seed_secure, &install_config.id)
+                {
+                    Ok(key) => {
+                        let derived_pub = key.public_key();
+                        if let Some(expected) = signing_pubkey
+                            && derived_pub != expected
+                        {
+                            tracing::warn!(
+                                "signing seed produces different pubkey than installation.toml"
+                            );
+                        }
+                        tracing::info!(
+                            pubkey = %hex::encode(&derived_pub[..16]),
+                            "signing seed loaded from vault"
+                        );
+                        Some(seed)
                     }
-                    tracing::info!(
-                        pubkey = %hex::encode(&derived_pub[..16]),
-                        "signing seed loaded from vault"
-                    );
-                    Some(seed)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "signing seed derivation failed");
-                    None
+                    Err(e) => {
+                        tracing::warn!(error = %e, "signing seed derivation failed");
+                        None
+                    }
                 }
             }
-        }
-        Some(seed_bytes) => {
-            tracing::warn!(len = seed_bytes.len(), "signing seed wrong length (expected 32)");
-            None
-        }
-        None => {
-            tracing::info!("signing seed not available -- vault locked or not yet initialized");
-            None
-        }
-    };
+            Some(seed_bytes) => {
+                tracing::warn!(
+                    len = seed_bytes.len(),
+                    "signing seed wrong length (expected 32)"
+                );
+                None
+            }
+            None => {
+                tracing::info!("signing seed not available -- vault locked or not yet initialized");
+                None
+            }
+        };
 
     let bus_client = Arc::new(tokio::sync::Mutex::new(bus_client));
 
@@ -202,7 +219,10 @@ async fn setup(
     );
 
     let (discovery_tx, discovery_rx) = tokio::sync::mpsc::channel(256);
-    let discovery = Arc::new(daemon_discovery::manager::DiscoveryManager::new(1024, discovery_tx));
+    let discovery = Arc::new(daemon_discovery::manager::DiscoveryManager::new(
+        1024,
+        discovery_tx,
+    ));
 
     let bootstrap_path = dirs::config_dir()
         .unwrap_or_default()
@@ -222,33 +242,39 @@ async fn setup(
     let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
     let (repl_tx, repl_rx) = tokio::sync::mpsc::channel::<(String, String)>(4096);
 
-    Ok((DaemonState {
-        udp_socket,
-        peer_table,
-        tofu_store,
-        cookie,
-        pow,
-        global_hs_limiter,
-        metrics,
-        audit,
-        local_keypair,
-        bus_client,
-        discovery,
-        discovery_rx,
-        listen_port,
-        idle_timeout_secs: u64::from(config.session.idle_timeout_secs),
-        rekey_interval_secs: 120,
-        bep44_enabled: config.discovery.bep44.enabled,
-        dns_srv_domains: Arc::new(std::sync::RwLock::new(config.discovery.dns_srv.domains.clone())),
-        identity,
-        signing_seed,
-        tcp_tx,
-        require_known_peers: config.tofu.require_known_peers,
-        gossip_hmac_key,
-        replication_watermarks: std::sync::Mutex::new(std::collections::HashMap::new()),
-        replication_rate_limiter: std::sync::Mutex::new(std::collections::HashMap::new()),
-        replication_inbound_tx: repl_tx,
-    }, tcp_rx, repl_rx))
+    Ok((
+        DaemonState {
+            udp_socket,
+            peer_table,
+            tofu_store,
+            cookie,
+            pow,
+            global_hs_limiter,
+            metrics,
+            audit,
+            local_keypair,
+            bus_client,
+            discovery,
+            discovery_rx,
+            listen_port,
+            idle_timeout_secs: u64::from(config.session.idle_timeout_secs),
+            rekey_interval_secs: 120,
+            bep44_enabled: config.discovery.bep44.enabled,
+            dns_srv_domains: Arc::new(std::sync::RwLock::new(
+                config.discovery.dns_srv.domains.clone(),
+            )),
+            identity,
+            signing_seed,
+            tcp_tx,
+            require_known_peers: config.tofu.require_known_peers,
+            gossip_hmac_key,
+            replication_watermarks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            replication_rate_limiter: std::sync::Mutex::new(std::collections::HashMap::new()),
+            replication_inbound_tx: repl_tx,
+        },
+        tcp_rx,
+        repl_rx,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +301,10 @@ async fn run_event_loop(
         let max_conn = config.transport.max_tcp_connections_per_address;
         let hs_timeout = config.session.handshake_timeout_secs;
         tokio::spawn(async move {
-            if let Err(e) = transport::tcp::tcp_accept_loop(listen_port, tcp_tx_accept, max_conn, hs_timeout).await {
+            if let Err(e) =
+                transport::tcp::tcp_accept_loop(listen_port, tcp_tx_accept, max_conn, hs_timeout)
+                    .await
+            {
                 tracing::error!(error = %e, "TCP accept loop failed");
             }
         });
@@ -296,7 +325,8 @@ async fn run_event_loop(
 
     spawn_discovery(&state, config);
 
-    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::channel::<core_ipc::Message<core_types::EventKind>>(64);
+    let (ipc_tx, mut ipc_rx) =
+        tokio::sync::mpsc::channel::<core_ipc::Message<core_types::EventKind>>(64);
     let ipc_bus = Arc::clone(&state.bus_client);
     tokio::spawn(async move {
         loop {
@@ -305,7 +335,11 @@ async fn run_event_loop(
                 client.recv().await
             };
             match msg {
-                Some(m) => { if ipc_tx.send(m).await.is_err() { break; } }
+                Some(m) => {
+                    if ipc_tx.send(m).await.is_err() {
+                        break;
+                    }
+                }
                 None => break,
             }
         }
@@ -314,8 +348,8 @@ async fn run_event_loop(
     let mut watchdog_tick = tokio::time::interval(std::time::Duration::from_secs(15));
     let mut maintenance_tick = tokio::time::interval(std::time::Duration::from_secs(10));
     let mut dial_tick = tokio::time::interval(std::time::Duration::from_secs(5));
-    let mut keepalive_tick = tokio::time::interval(std::time::Duration::from_secs(60));
-    let mut replication_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut keepalive_tick = tokio::time::interval(std::time::Duration::from_mins(1));
+    let mut replication_tick = tokio::time::interval(std::time::Duration::from_mins(1));
 
     loop {
         tokio::select! {
@@ -384,14 +418,20 @@ struct SwimTimerEntry {
 }
 impl Eq for SwimTimerEntry {}
 impl PartialEq for SwimTimerEntry {
-    fn eq(&self, other: &Self) -> bool { self.deadline == other.deadline }
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline == other.deadline
+    }
 }
 impl Ord for SwimTimerEntry {
     // Reversed for min-heap via std `BinaryHeap` (which is a max-heap).
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering { other.deadline.cmp(&self.deadline) }
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.deadline.cmp(&self.deadline)
+    }
 }
 impl PartialOrd for SwimTimerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -416,8 +456,16 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                 let id_announce = install_id.clone();
                 tokio::spawn(async move {
                     if let Err(e) = daemon_discovery::mdns::announce::initial_announce(
-                        &s_announce, &pubkey, &id_announce, port, None, srv_ttl, ptr_ttl,
-                    ).await {
+                        &s_announce,
+                        &pubkey,
+                        &id_announce,
+                        port,
+                        None,
+                        srv_ttl,
+                        ptr_ttl,
+                    )
+                    .await
+                    {
                         tracing::warn!(error = %e, "mDNS initial announce failed");
                     }
                 });
@@ -434,8 +482,11 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                 let s_probe = Arc::clone(&socket);
                 tokio::spawn(async move {
                     daemon_discovery::mdns::listen::mdns_listen_loop(
-                        socket, listen_config, peer_tx,
-                    ).await;
+                        socket,
+                        listen_config,
+                        peer_tx,
+                    )
+                    .await;
                 });
 
                 // Active mDNS query probing: send PTR queries on startup and
@@ -446,7 +497,8 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                     let query = daemon_discovery::mdns::packet::DnsPacket::query(
                         daemon_discovery::mdns::announce::SERVICE_TYPE,
                     );
-                    let _ = daemon_discovery::mdns::announce::send_multicast(&s_probe, &query).await;
+                    let _ =
+                        daemon_discovery::mdns::announce::send_multicast(&s_probe, &query).await;
                     // Periodic probes.
                     let interval = std::time::Duration::from_secs(u64::from(ptr_ttl));
                     loop {
@@ -454,7 +506,8 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                         let q = daemon_discovery::mdns::packet::DnsPacket::query(
                             daemon_discovery::mdns::announce::SERVICE_TYPE,
                         );
-                        let _ = daemon_discovery::mdns::announce::send_multicast(&s_probe, &q).await;
+                        let _ =
+                            daemon_discovery::mdns::announce::send_multicast(&s_probe, &q).await;
                     }
                 });
 
@@ -513,8 +566,13 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                     version: 1,
                 };
                 match daemon_discovery::bep44::publish::publish_presence(
-                    &dht, &signing_key, &record, 1,
-                ).await {
+                    &dht,
+                    &signing_key,
+                    &record,
+                    1,
+                )
+                .await
+                {
                     Ok(()) => tracing::info!("BEP-44 presence published to Mainline DHT"),
                     Err(e) => tracing::warn!(error = %e, "BEP-44 publish failed"),
                 }
@@ -532,7 +590,9 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                 };
                 let mut consecutive_failures: u32 = 0;
                 loop {
-                    let pubkeys = tofu_resolve.lock().ok()
+                    let pubkeys = tofu_resolve
+                        .lock()
+                        .ok()
                         .and_then(|s| s.pinned_pubkeys().ok())
                         .unwrap_or_default();
                     let mut any_success = false;
@@ -540,8 +600,10 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                         if let Ok(key_bytes) = hex::decode(key_hex)
                             && let Ok(pubkey) = <[u8; 32]>::try_from(key_bytes)
                             && let Some(peer) = daemon_discovery::bep44::resolve::resolve_presence(
-                                &resolve_dht, &pubkey,
-                            ).await
+                                &resolve_dht,
+                                &pubkey,
+                            )
+                            .await
                         {
                             any_success = true;
                             for addr_str in &peer.record.addrs {
@@ -578,9 +640,7 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
             loop {
                 // Read the current domain list (hot-reloadable via
                 // NetworkDiscoveryReloadRequest).
-                let current_domains = domains.read()
-                    .map(|d| d.clone())
-                    .unwrap_or_default();
+                let current_domains = domains.read().map(|d| d.clone()).unwrap_or_default();
                 for domain in &current_domains {
                     match daemon_discovery::dns_srv::resolve_srv(domain).await {
                         Ok(peers) => {
@@ -656,12 +716,10 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
 
         let mut buf = vec![0u8; 65535];
         loop {
-            let next_deadline = pending_timers
-                .peek()
-                .map_or_else(
-                    || tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-                    |e| e.deadline,
-                );
+            let next_deadline = pending_timers.peek().map_or_else(
+                || tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                |e| e.deadline,
+            );
 
             tokio::select! {
                 result = gossip_socket.recv_from(&mut buf) => {

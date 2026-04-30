@@ -30,9 +30,7 @@ pub struct DnsSrvPeer {
 ///
 /// Returns an error if DNS resolution fails entirely. Individual SRV
 /// targets that fail to resolve are silently skipped.
-pub async fn resolve_srv(
-    domain: &str,
-) -> Result<Vec<DnsSrvPeer>, DnsSrvError> {
+pub async fn resolve_srv(domain: &str) -> Result<Vec<DnsSrvPeer>, DnsSrvError> {
     let resolver: TokioResolver = TokioResolver::builder_tokio()
         .map_err(DnsSrvError::ResolverInit)?
         .build();

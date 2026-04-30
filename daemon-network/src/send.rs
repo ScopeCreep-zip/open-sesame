@@ -66,7 +66,12 @@ pub async fn send_data(
         let seq = peer.next_send_seq();
         #[allow(clippy::cast_possible_truncation)]
         peer.record_send(ciphertext.len() as u64);
-        frames.push(Frame::new(FrameType::Data as u8, *session_id, seq, ciphertext));
+        frames.push(Frame::new(
+            FrameType::Data as u8,
+            *session_id,
+            seq,
+            ciphertext,
+        ));
     }
     drop(peer);
 
@@ -109,7 +114,10 @@ fn encrypt_control_frame(
     let addr = peer.remote_addr;
     drop(peer);
 
-    Ok((Frame::new(frame_type as u8, *session_id, seq, ciphertext), addr))
+    Ok((
+        Frame::new(frame_type as u8, *session_id, seq, ciphertext),
+        addr,
+    ))
 }
 
 /// Send an encrypted control frame via UDP (best-effort).
@@ -157,7 +165,8 @@ pub async fn send_rehandshake_request(
     udp_socket: &UdpSocket,
     metrics: &Metrics,
 ) -> Result<(), String> {
-    let (frame, addr) = encrypt_control_frame(FrameType::RehandshakeRequest, session_id, peer_table)?;
+    let (frame, addr) =
+        encrypt_control_frame(FrameType::RehandshakeRequest, session_id, peer_table)?;
     send_control_frame(&frame, &addr, udp_socket, metrics).await
 }
 

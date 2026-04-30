@@ -21,7 +21,9 @@ pub fn handle_discovery_event(
                 return;
             }
             tracing::info!(%addr, ?source, key = ?advisory_pubkey_hex.as_deref().map(|k| &k[..16.min(k.len())]), "discovery: immediate dial");
-            state.audit.append("discovery_peer_found", &format!("{addr} {source:?}"));
+            state
+                .audit
+                .append("discovery_peer_found", &format!("{addr} {source:?}"));
 
             // Two-tier dial pattern: this spawns an immediate dial attempt.
             // On failure, the entry is requeued into the `DialQueue` with 30s
@@ -34,7 +36,11 @@ pub fn handle_discovery_event(
             tokio::spawn(async move {
                 let result = handshake::dial_peer(addr, &ctx).await;
                 match result {
-                    handshake::HandshakeOutcome::Established { session_id, remote_key_hex, trust_level } => {
+                    handshake::HandshakeOutcome::Established {
+                        session_id,
+                        remote_key_hex,
+                        trust_level,
+                    } => {
                         tracing::info!(%addr, session = %session_id, key = %&remote_key_hex[..16.min(remote_key_hex.len())], ?trust_level, "discovery dial succeeded");
                     }
                     handshake::HandshakeOutcome::Rejected { reason } => {
@@ -43,7 +49,8 @@ pub fn handle_discovery_event(
                             addr,
                             source,
                             advisory_pubkey_hex,
-                            next_dial_at: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                            next_dial_at: std::time::Instant::now()
+                                + std::time::Duration::from_secs(30),
                             consecutive_failures: 1,
                         };
                         discovery.queue.push(entry);
@@ -52,7 +59,9 @@ pub fn handle_discovery_event(
             });
         }
         daemon_discovery::manager::DiscoveryEvent::PeerRemoved { addr, source } => {
-            state.audit.append("discovery_peer_removed", &format!("{addr} {source:?}"));
+            state
+                .audit
+                .append("discovery_peer_removed", &format!("{addr} {source:?}"));
 
             // Remove from the dial queue only — do NOT tear down active
             // sessions. All discovery backends are unauthenticated (mDNS

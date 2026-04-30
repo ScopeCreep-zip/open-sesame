@@ -313,7 +313,9 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                     if confirm("Pull workspace update?") {
                                         match sesame_workspace::git::pull_ff_only(&org_dir) {
                                             Ok(()) => eprintln!("  Workspace updated."),
-                                            Err(e) => eprintln!("  Warning: workspace pull failed: {e}"),
+                                            Err(e) => {
+                                                eprintln!("  Warning: workspace pull failed: {e}")
+                                            }
                                         }
                                     }
                                 } else {

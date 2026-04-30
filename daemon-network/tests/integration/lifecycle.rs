@@ -8,6 +8,7 @@ mod common;
 
 use common::generate_keypair;
 use common::test_daemon::TestDaemon;
+use core_types::{FrameType, TofuTrustLevel};
 use daemon_network::dispatch;
 use daemon_network::lifecycle as daemon_lifecycle;
 use daemon_network::metrics::Metrics;
@@ -17,7 +18,6 @@ use daemon_network::session::state::PeerState;
 use daemon_network::session::table::PeerTable;
 use daemon_network::transport::frame::{Frame, WireSessionId};
 use daemon_network::transport::udp::UdpInbound;
-use core_types::{FrameType, TofuTrustLevel};
 use std::sync::Arc;
 
 // ============================================================================
@@ -53,8 +53,15 @@ async fn close_session_removes_from_table_unconditionally() {
     send::close_session(&sid, &table, &socket, &metrics);
 
     // Session must be removed from the table immediately (synchronous).
-    assert_eq!(table.len(), 0, "close_session must remove session from table");
-    assert!(table.get(&sid).is_none(), "session must not be findable after close");
+    assert_eq!(
+        table.len(),
+        0,
+        "close_session must remove session from table"
+    );
+    assert!(
+        table.get(&sid).is_none(),
+        "session must not be findable after close"
+    );
 }
 
 #[tokio::test]
@@ -80,7 +87,13 @@ async fn close_session_with_unreachable_peer_still_removes() {
 
     let sid = WireSessionId::random();
     let table = Arc::new(PeerTable::new(256));
-    let peer = PeerState::new(sid, remote, unreachable_addr, transport, TofuTrustLevel::Tofu);
+    let peer = PeerState::new(
+        sid,
+        remote,
+        unreachable_addr,
+        transport,
+        TofuTrustLevel::Tofu,
+    );
     assert!(table.insert(peer));
     assert_eq!(table.len(), 1);
 
@@ -88,7 +101,11 @@ async fn close_session_with_unreachable_peer_still_removes() {
     send::close_session(&sid, &table, &socket, &metrics);
 
     // Session removed regardless of send failure.
-    assert_eq!(table.len(), 0, "unreachable peer session must still be removed");
+    assert_eq!(
+        table.len(),
+        0,
+        "unreachable peer session must still be removed"
+    );
 }
 
 #[tokio::test]
@@ -131,7 +148,10 @@ async fn idle_sessions_detected_after_threshold() {
     table.insert(peer);
 
     // A freshly created session must NOT be idle at any reasonable threshold.
-    assert!(table.idle_sessions(10).is_empty(), "fresh session must not be idle");
+    assert!(
+        table.idle_sessions(10).is_empty(),
+        "fresh session must not be idle"
+    );
 
     // Wait real wall time so Instant::elapsed() advances past the threshold.
     // idle_sessions() uses strict `>`, and elapsed().as_secs() truncates,
@@ -139,7 +159,11 @@ async fn idle_sessions_detected_after_threshold() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let idle = table.idle_sessions(0);
-    assert_eq!(idle.len(), 1, "session must be idle after 1.1s with threshold=0");
+    assert_eq!(
+        idle.len(),
+        1,
+        "session must be idle after 1.1s with threshold=0"
+    );
     assert_eq!(idle[0], sid);
 }
 
@@ -170,7 +194,10 @@ async fn session_needs_rekey_detected_by_age() {
     table.insert(peer);
 
     // A freshly created session must NOT need rekey at any reasonable interval.
-    assert!(table.sessions_needing_rekey(120).is_empty(), "fresh session must not need rekey");
+    assert!(
+        table.sessions_needing_rekey(120).is_empty(),
+        "fresh session must not need rekey"
+    );
 
     // Wait real wall time so Instant::elapsed() advances past the threshold.
     // sessions_needing_rekey() uses strict `>`, and age_secs() truncates,
@@ -178,7 +205,11 @@ async fn session_needs_rekey_detected_by_age() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let rekey = table.sessions_needing_rekey(0);
-    assert_eq!(rekey.len(), 1, "session must need rekey after 1.1s with max_age=0");
+    assert_eq!(
+        rekey.len(),
+        1,
+        "session must need rekey after 1.1s with max_age=0"
+    );
     assert_eq!(rekey[0], sid);
 }
 
@@ -215,7 +246,9 @@ async fn send_keepalive_succeeds_on_active_session() {
     assert!(result.is_ok(), "keepalive must succeed on active session");
 
     assert_eq!(
-        metrics.frames_sent_total.load(std::sync::atomic::Ordering::Relaxed),
+        metrics
+            .frames_sent_total
+            .load(std::sync::atomic::Ordering::Relaxed),
         1,
         "keepalive must increment frames_sent_total"
     );
@@ -229,7 +262,10 @@ async fn send_keepalive_on_missing_session_returns_error() {
     let sid = WireSessionId::random();
 
     let result = send::send_keepalive(&sid, &table, &socket, &metrics).await;
-    assert!(result.is_err(), "keepalive on nonexistent session must error");
+    assert!(
+        result.is_err(),
+        "keepalive on nonexistent session must error"
+    );
 }
 
 // ============================================================================
@@ -262,10 +298,17 @@ async fn send_rehandshake_request_succeeds() {
 
     let metrics = Arc::new(Metrics::new());
     let result = send::send_rehandshake_request(&sid, &table, &socket, &metrics).await;
-    assert!(result.is_ok(), "`RehandshakeRequest` must succeed on active session");
+    assert!(
+        result.is_ok(),
+        "`RehandshakeRequest` must succeed on active session"
+    );
 
     // Session must still be in the table (not removed like close).
-    assert_eq!(table.len(), 1, "rehandshake request must NOT remove session");
+    assert_eq!(
+        table.len(),
+        1,
+        "rehandshake request must NOT remove session"
+    );
 }
 
 // ============================================================================
@@ -274,7 +317,7 @@ async fn send_rehandshake_request_succeeds() {
 
 #[tokio::test]
 async fn tcp_frame_max_body_round_trips() {
-    use daemon_network::transport::frame::{tcp_write_frame, tcp_read_frame};
+    use daemon_network::transport::frame::{tcp_read_frame, tcp_write_frame};
 
     let sid = WireSessionId::random();
     // Maximum TCP body size (65535 bytes).
@@ -315,7 +358,10 @@ fn mdns_goodbye_packet_round_trips_through_codec() {
     assert!(parsed.flags & 0x8000 != 0, "goodbye must be a response");
 
     // All answer records must have TTL=0.
-    assert!(!parsed.answers.is_empty(), "goodbye must have answer records");
+    assert!(
+        !parsed.answers.is_empty(),
+        "goodbye must have answer records"
+    );
     for rr in &parsed.answers {
         assert_eq!(rr.ttl, 0, "goodbye answer TTL must be 0");
     }
@@ -422,7 +468,11 @@ async fn dispatch_close_frame_removes_session() {
     };
     dispatch::udp::handle_udp_frame(&inbound, &td.state);
 
-    assert_eq!(td.state.peer_table.len(), 0, "Close frame must remove session");
+    assert_eq!(
+        td.state.peer_table.len(),
+        0,
+        "Close frame must remove session"
+    );
     assert_eq!(td.metric(&td.state.metrics.sessions_closed_total), 1);
 }
 
@@ -498,8 +548,16 @@ async fn dispatch_cookie_response_validates_correctly() {
     let client_addr = td.client_socket.local_addr().unwrap();
 
     // Step 1: trigger cookie challenge.
-    let knock = Frame::new(FrameType::HandshakeInit as u8, WireSessionId::zero(), 0, vec![]);
-    let inbound = UdpInbound { frame: knock, src_addr: client_addr };
+    let knock = Frame::new(
+        FrameType::HandshakeInit as u8,
+        WireSessionId::zero(),
+        0,
+        vec![],
+    );
+    let inbound = UdpInbound {
+        frame: knock,
+        src_addr: client_addr,
+    };
     dispatch::udp::handle_udp_frame(&inbound, &td.state);
 
     // Let the spawned UDP send complete.
@@ -518,12 +576,11 @@ async fn dispatch_cookie_response_validates_correctly() {
         0,
         cookie_req.body.clone(),
     );
-    let resp_inbound = UdpInbound { frame: response, src_addr: client_addr };
-    dispatch::udp::handle_cookie_response(
-        &resp_inbound.frame,
-        resp_inbound.src_addr,
-        &td.state,
-    );
+    let resp_inbound = UdpInbound {
+        frame: response,
+        src_addr: client_addr,
+    };
+    dispatch::udp::handle_cookie_response(&resp_inbound.frame, resp_inbound.src_addr, &td.state);
 
     assert!(
         td.metric(&td.state.metrics.cookie_challenges_total) >= 2,
@@ -548,7 +605,12 @@ async fn dispatch_pow_stale_epoch_rejected() {
     body.extend_from_slice(&stale_epoch.to_be_bytes());
     body.extend_from_slice(&[0xAA; 16]); // fake solution
 
-    let frame = Frame::new(FrameType::CookieResponse as u8, WireSessionId::zero(), 0, body);
+    let frame = Frame::new(
+        FrameType::CookieResponse as u8,
+        WireSessionId::zero(),
+        0,
+        body,
+    );
     let before_dropped = td.metric(&td.state.metrics.frames_dropped_total);
 
     dispatch::udp::handle_cookie_response(&frame, client_addr, &td.state);
@@ -568,13 +630,19 @@ async fn dispatch_pow_future_epoch_rejected() {
     let future_epoch: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() + 100; // 100s in the future
+        .as_secs()
+        + 100; // 100s in the future
 
     let mut body = vec![0x01u8];
     body.extend_from_slice(&future_epoch.to_be_bytes());
     body.extend_from_slice(&[0xBB; 16]);
 
-    let frame = Frame::new(FrameType::CookieResponse as u8, WireSessionId::zero(), 0, body);
+    let frame = Frame::new(
+        FrameType::CookieResponse as u8,
+        WireSessionId::zero(),
+        0,
+        body,
+    );
     let before_dropped = td.metric(&td.state.metrics.frames_dropped_total);
 
     dispatch::udp::handle_cookie_response(&frame, client_addr, &td.state);
@@ -610,10 +678,7 @@ async fn handshake_invalid_pattern_byte_rejected() {
     stream.write_all(&[0xFF]).await.unwrap();
     drop(stream);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        server,
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 
     match result {
         Ok(Ok(daemon_network::handshake::HandshakeOutcome::Rejected { .. })) => {}
@@ -648,10 +713,7 @@ async fn handshake_ikpsk2_no_cached_psk_rejected() {
     stream.flush().await.unwrap();
     drop(stream);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        server,
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 
     match result {
         Ok(Ok(daemon_network::handshake::HandshakeOutcome::Rejected { reason })) => {
@@ -676,11 +738,16 @@ async fn handshake_tofu_revoked_peer_rejected() {
 
     let peer_kp = common::generate_keypair();
     let peer_key_hex = hex::encode(&peer_kp.public);
-    td.state.tofu_store.lock().unwrap().pin(
-        &peer_key_hex,
-        "10.0.0.1:48627",
-        core_types::TofuTrustLevel::Revoked,
-    ).unwrap();
+    td.state
+        .tofu_store
+        .lock()
+        .unwrap()
+        .pin(
+            &peer_key_hex,
+            "10.0.0.1:48627",
+            core_types::TofuTrustLevel::Revoked,
+        )
+        .unwrap();
 
     let ctx = daemon_network::handshake::HandshakeContext::from_state(&td.state);
 
@@ -698,14 +765,10 @@ async fn handshake_tofu_revoked_peer_rejected() {
     writer.write_all(&[0x01]).await.unwrap(); // XX pattern
 
     // The initiator side may error if the responder rejects mid-handshake.
-    let _peer_result = daemon_network::noise::state::xx_initiator(
-        &mut reader, &mut writer, &peer_kp,
-    ).await;
+    let _peer_result =
+        daemon_network::noise::state::xx_initiator(&mut reader, &mut writer, &peer_kp).await;
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        server,
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 
     match result {
         Ok(Ok(daemon_network::handshake::HandshakeOutcome::Rejected { reason })) => {
@@ -736,17 +799,18 @@ async fn discovery_channel_backpressure() {
         let addr: std::net::SocketAddr = format!("10.0.{}.{}:48627", i / 256, i % 256)
             .parse()
             .unwrap();
-        td.state.discovery.add_peer(
-            addr,
-            daemon_discovery::queue::DiscoverySource::Mdns,
-            None,
-        );
+        td.state
+            .discovery
+            .add_peer(addr, daemon_discovery::queue::DiscoverySource::Mdns, None);
     }
 
     // The channel has 256 capacity. 300 events means some were dropped.
     // The queue itself has 1024 capacity so all 300 addresses are in the queue.
     // The important thing: no panic, no hang.
-    assert!(td.state.discovery.queue_depth() > 0, "queue must have entries");
+    assert!(
+        td.state.discovery.queue_depth() > 0,
+        "queue must have entries"
+    );
 }
 
 // ============================================================================
@@ -770,7 +834,8 @@ async fn handshake_responder_times_out_on_slow_peer() {
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             daemon_network::handshake::handle_inbound_handshake(stream, peer_addr, &ctx),
-        ).await
+        )
+        .await
     });
 
     // Connect but only send the pattern byte, then stall (don't send msg1).
@@ -812,19 +877,16 @@ async fn handshake_ack_exchange_times_out_on_slow_peer() {
     writer.write_all(&[0x01]).await.unwrap(); // XX pattern
 
     // Complete the XX handshake from the initiator side.
-    let _transport = daemon_network::noise::state::xx_initiator(
-        &mut reader, &mut writer, &peer_kp,
-    ).await.unwrap();
+    let _transport = daemon_network::noise::state::xx_initiator(&mut reader, &mut writer, &peer_kp)
+        .await
+        .unwrap();
 
     // Now the responder expects HandshakeAck exchange (5s timeout).
     // We hold the connection but send nothing. The responder times out
     // and still establishes the session (ack timeout is non-fatal, returns None
     // for peer_install_id but still creates the session).
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        server,
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), server).await;
 
     match result {
         Ok(Ok(daemon_network::handshake::HandshakeOutcome::Established { .. })) => {
@@ -870,7 +932,11 @@ async fn close_session_sends_frame_to_peer() {
     let sid = daemon_network::transport::frame::WireSessionId::random();
     let table = Arc::new(daemon_network::session::table::PeerTable::new(256));
     let peer = daemon_network::session::state::PeerState::new(
-        sid, remote, peer_addr, transport, core_types::TofuTrustLevel::Tofu,
+        sid,
+        remote,
+        peer_addr,
+        transport,
+        core_types::TofuTrustLevel::Tofu,
     );
     table.insert(peer);
 
@@ -889,7 +955,8 @@ async fn close_session_sends_frame_to_peer() {
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         peer_socket.recv_from(&mut buf),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(Ok((len, _src))) => {
@@ -932,9 +999,7 @@ async fn discovery_peer_discovered_dials_and_establishes() {
         use tokio::io::AsyncReadExt;
         let mut pat = [0u8; 1];
         reader.read_exact(&mut pat).await.unwrap();
-        daemon_network::noise::state::xx_responder(
-            &mut reader, &mut writer, &peer_kp_clone,
-        ).await
+        daemon_network::noise::state::xx_responder(&mut reader, &mut writer, &peer_kp_clone).await
     });
 
     // Dispatch PeerDiscovered — the handler spawns an immediate dial.
@@ -948,10 +1013,7 @@ async fn discovery_peer_discovered_dials_and_establishes() {
     );
 
     // Wait for the spawned dial to complete.
-    let resp_result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        responder,
-    ).await;
+    let resp_result = tokio::time::timeout(std::time::Duration::from_secs(5), responder).await;
 
     match resp_result {
         Ok(Ok(Ok(_transport))) => {

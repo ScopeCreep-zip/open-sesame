@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MISE_AUTO_INSTALL: "false"
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   test:
@@ -26,9 +28,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+
       - uses: jdx/mise-action@v4
         with:
-          install_args: "rust"
+          install_args: "rust cargo:cargo-nextest"
           cache: true
 
       - name: Run tests (with raised mlock limit for ProtectedAlloc)

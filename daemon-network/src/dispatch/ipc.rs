@@ -16,7 +16,9 @@ pub async fn handle_ipc_message(
 
     let response = match &msg.payload {
         EventKind::NetworkStatusRequest => {
-            let tofu_count = state.tofu_store.lock()
+            let tofu_count = state
+                .tofu_store
+                .lock()
                 .ok()
                 .and_then(|s| s.list_peers().ok())
                 .map_or(0, |p| p.len());
@@ -37,7 +39,9 @@ pub async fn handle_ipc_message(
                 }
             }
 
-            let event_count = state.tofu_store.lock()
+            let event_count = state
+                .tofu_store
+                .lock()
                 .ok()
                 .and_then(|s| s.event_count().ok())
                 .unwrap_or(0);
@@ -54,49 +58,57 @@ pub async fn handle_ipc_message(
                 enabled: true,
             })
         }
-        EventKind::NetworkDialRequest { addr } => {
-            match addr.parse::<std::net::SocketAddr>() {
-                Ok(target) => {
-                    let ctx = HandshakeContext::from_state(state);
-                    let result = handshake::dial_peer(target, &ctx).await;
-                    match result {
-                        handshake::HandshakeOutcome::Established { session_id, remote_key_hex, .. } => {
-                            tracing::info!(key = %&remote_key_hex[..16.min(remote_key_hex.len())], "dial established");
-                            Some(EventKind::NetworkDialResponse {
-                                success: true,
-                                session_id: Some(format!("{session_id}")),
-                                error: None,
-                            })
-                        }
-                        handshake::HandshakeOutcome::Rejected { reason } => {
-                            Some(EventKind::NetworkDialResponse {
-                                success: false,
-                                session_id: None,
-                                error: Some(reason),
-                            })
-                        }
+        EventKind::NetworkDialRequest { addr } => match addr.parse::<std::net::SocketAddr>() {
+            Ok(target) => {
+                let ctx = HandshakeContext::from_state(state);
+                let result = handshake::dial_peer(target, &ctx).await;
+                match result {
+                    handshake::HandshakeOutcome::Established {
+                        session_id,
+                        remote_key_hex,
+                        ..
+                    } => {
+                        tracing::info!(key = %&remote_key_hex[..16.min(remote_key_hex.len())], "dial established");
+                        Some(EventKind::NetworkDialResponse {
+                            success: true,
+                            session_id: Some(format!("{session_id}")),
+                            error: None,
+                        })
+                    }
+                    handshake::HandshakeOutcome::Rejected { reason } => {
+                        Some(EventKind::NetworkDialResponse {
+                            success: false,
+                            session_id: None,
+                            error: Some(reason),
+                        })
                     }
                 }
-                Err(e) => Some(EventKind::NetworkDialResponse {
-                    success: false,
-                    session_id: None,
-                    error: Some(format!("invalid address: {e}")),
-                }),
             }
-        }
-        EventKind::NetworkDiscoverRequest => {
-            Some(EventKind::NetworkDiscoverResponse {
-                mdns_peers: state.discovery.mdns_peer_count(),
-                bep44_published: state.bep44_enabled && state.signing_seed.is_some(),
-                dns_srv_domains: state.dns_srv_domains.read()
-                    .map(|d| d.clone())
-                    .unwrap_or_default(),
-                #[allow(clippy::cast_possible_truncation)]
-                dial_queue_depth: state.discovery.queue_depth() as u32,
-                swim_members: 0,
-            })
-        }
-        EventKind::VaultReplicationPullResponse { entries_json, peer_id, last_hlc_json, profile_name, .. } => {
+            Err(e) => Some(EventKind::NetworkDialResponse {
+                success: false,
+                session_id: None,
+                error: Some(format!("invalid address: {e}")),
+            }),
+        },
+        EventKind::NetworkDiscoverRequest => Some(EventKind::NetworkDiscoverResponse {
+            mdns_peers: state.discovery.mdns_peer_count(),
+            bep44_published: state.bep44_enabled && state.signing_seed.is_some(),
+            dns_srv_domains: state
+                .dns_srv_domains
+                .read()
+                .map(|d| d.clone())
+                .unwrap_or_default(),
+            #[allow(clippy::cast_possible_truncation)]
+            dial_queue_depth: state.discovery.queue_depth() as u32,
+            swim_members: 0,
+        }),
+        EventKind::VaultReplicationPullResponse {
+            entries_json,
+            peer_id,
+            last_hlc_json,
+            profile_name,
+            ..
+        } => {
             // Cache the watermark from this response keyed by peer_id so
             // the next pull for this peer doesn't re-fetch from epoch 0.
             if let Some(hlc_json) = &last_hlc_json
@@ -108,14 +120,16 @@ pub async fn handle_ipc_message(
                 }
                 // Publish to daemon-secrets so pull_progress table is updated.
                 let client = state.bus_client.lock().await;
-                let _ = client.publish(
-                    EventKind::ReplicationPullProgressUpdate {
-                        peer_id: peer_id.clone(),
-                        profile_name: profile_name.clone(),
-                        last_hlc_json: hlc_json.clone(),
-                    },
-                    core_types::SecurityLevel::Internal,
-                ).await;
+                let _ = client
+                    .publish(
+                        EventKind::ReplicationPullProgressUpdate {
+                            peer_id: peer_id.clone(),
+                            profile_name: profile_name.clone(),
+                            last_hlc_json: hlc_json.clone(),
+                        },
+                        core_types::SecurityLevel::Internal,
+                    )
+                    .await;
             }
             // Per-destination re-encryption: for each active session, look up
             // the peer's X25519 public key, generate an ephemeral keypair,
@@ -125,22 +139,32 @@ pub async fn handle_ipc_message(
             let sids = state.peer_table.session_ids();
             for sid in &sids {
                 let peer_pubkey = {
-                    let Some(peer) = state.peer_table.get(sid) else { continue };
+                    let Some(peer) = state.peer_table.get(sid) else {
+                        continue;
+                    };
                     let key_hex = peer.remote_key_hex();
-                    state.tofu_store.lock().ok()
+                    state
+                        .tofu_store
+                        .lock()
+                        .ok()
                         .and_then(|store| store.get_network_pubkey(&key_hex).ok().flatten())
                 };
                 let Some(dest_pubkey) = peer_pubkey else {
-                    state.audit.append("replication_skip", &format!("{sid} no_network_pubkey"));
+                    state
+                        .audit
+                        .append("replication_skip", &format!("{sid} no_network_pubkey"));
                     tracing::debug!(session = %sid, "skipping replication — no network pubkey for peer");
                     continue;
                 };
 
                 // Ephemeral ECDH per destination.
-                let (eph_private, eph_public) = match core_crypto::network::generate_x25519_keypair() {
+                let (eph_private, eph_public) = match core_crypto::network::generate_x25519_keypair(
+                ) {
                     Ok(kp) => kp,
                     Err(e) => {
-                        state.audit.append("replication_error", &format!("{sid} keygen_failed {e}"));
+                        state
+                            .audit
+                            .append("replication_error", &format!("{sid} keygen_failed {e}"));
                         tracing::warn!(error = %e, session = %sid, "ephemeral keypair generation failed");
                         continue;
                     }
@@ -148,7 +172,9 @@ pub async fn handle_ipc_message(
                 let shared = match core_crypto::network::x25519_dh(&eph_private, &dest_pubkey) {
                     Ok(s) => s,
                     Err(e) => {
-                        state.audit.append("replication_error", &format!("{sid} ecdh_failed {e}"));
+                        state
+                            .audit
+                            .append("replication_error", &format!("{sid} ecdh_failed {e}"));
                         tracing::warn!(error = %e, session = %sid, "ECDH failed for replication re-encryption");
                         continue;
                     }
@@ -183,16 +209,17 @@ pub async fn handle_ipc_message(
                     &sid_str,
                 );
 
-                let ciphertext = match core_crypto::network::chacha20_seal(
-                    &enc_key, &nonce, &aad, plaintext,
-                ) {
-                    Ok(ct) => ct,
-                    Err(e) => {
-                        state.audit.append("replication_error", &format!("{sid} seal_failed {e}"));
-                        tracing::warn!(error = %e, session = %sid, "re-encryption seal failed");
-                        continue;
-                    }
-                };
+                let ciphertext =
+                    match core_crypto::network::chacha20_seal(&enc_key, &nonce, &aad, plaintext) {
+                        Ok(ct) => ct,
+                        Err(e) => {
+                            state
+                                .audit
+                                .append("replication_error", &format!("{sid} seal_failed {e}"));
+                            tracing::warn!(error = %e, session = %sid, "re-encryption seal failed");
+                            continue;
+                        }
+                    };
 
                 // Build a JSON envelope with base64-encoded fields so the
                 // IPC path (which uses String fields) can carry the binary
@@ -232,13 +259,17 @@ pub async fn handle_ipc_message(
             let mut added: u32 = 0;
             if let Ok(result) = daemon_discovery::bootstrap::load_bootstrap(&bootstrap_path) {
                 for target in &result.targets {
-                    if state.discovery.queue.push(daemon_discovery::queue::DialEntry {
-                        addr: target.addr,
-                        source: daemon_discovery::queue::DiscoverySource::Bootstrap,
-                        advisory_pubkey_hex: target.public_key_hex.clone(),
-                        next_dial_at: std::time::Instant::now(),
-                        consecutive_failures: 0,
-                    }) {
+                    if state
+                        .discovery
+                        .queue
+                        .push(daemon_discovery::queue::DialEntry {
+                            addr: target.addr,
+                            source: daemon_discovery::queue::DiscoverySource::Bootstrap,
+                            advisory_pubkey_hex: target.public_key_hex.clone(),
+                            next_dial_at: std::time::Instant::now(),
+                            consecutive_failures: 0,
+                        })
+                    {
                         added += 1;
                     }
                 }
@@ -250,14 +281,19 @@ pub async fn handle_ipc_message(
             if let Ok(mut domains) = state.dns_srv_domains.write() {
                 *domains = network_config.discovery.dns_srv.domains;
             }
-            state.audit.append("discovery_reload", &format!("added={added}"));
+            state
+                .audit
+                .append("discovery_reload", &format!("added={added}"));
             Some(EventKind::NetworkDiscoveryReloadResponse { added })
         }
         EventKind::NetworkUnpinRequest { public_key_hex } => {
-            let result = state.tofu_store.lock()
+            let result = state
+                .tofu_store
+                .lock()
                 .map_err(|e| format!("TOFU lock: {e}"))
                 .and_then(|store| {
-                    store.unpin(public_key_hex)
+                    store
+                        .unpin(public_key_hex)
                         .map_err(|e| format!("unpin failed: {e}"))
                 });
             match result {
@@ -279,7 +315,10 @@ pub async fn handle_ipc_message(
 
     if let Some(event) = response {
         let client = state.bus_client.lock().await;
-        if let Err(e) = client.publish(event, core_types::SecurityLevel::Internal).await {
+        if let Err(e) = client
+            .publish(event, core_types::SecurityLevel::Internal)
+            .await
+        {
             tracing::warn!(error = %e, "IPC response failed");
         }
     }

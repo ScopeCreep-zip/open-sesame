@@ -136,8 +136,7 @@ impl PeerState {
     /// Whether the send sequence is approaching exhaustion (needs rekey).
     #[must_use]
     pub fn needs_rekey(&self) -> bool {
-        self.send_seq >= u32::MAX - 1024
-            || self.replay_window.top() >= u32::MAX - 1024
+        self.send_seq >= u32::MAX - 1024 || self.replay_window.top() >= u32::MAX - 1024
     }
 
     /// Whether this transport was created by the initiator (dialer) side.
@@ -158,7 +157,10 @@ impl std::fmt::Debug for PeerState {
         f.debug_struct("PeerState")
             .field("session_id", &self.session_id)
             .field("remote_addr", &self.remote_addr)
-            .field("remote_key", &format_args!("{}…", &self.remote_key_hex()[..16]))
+            .field(
+                "remote_key",
+                &format_args!("{}…", &self.remote_key_hex()[..16]),
+            )
             .field("initiator", &self.is_initiator())
             .field("tofu_trust_level", &self.tofu_trust_level)
             .field("age_secs", &self.age_secs())

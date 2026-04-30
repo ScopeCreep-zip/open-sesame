@@ -38,10 +38,7 @@ impl AuditLog {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         #[cfg(unix)]
         {
@@ -68,11 +65,17 @@ impl AuditLog {
             format!("{}Z", d.as_secs())
         };
 
-        let mut seq = self.seq.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut seq = self
+            .seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *seq += 1;
         let current_seq = *seq;
 
-        let mut prev = self.prev_hash.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut prev = self
+            .prev_hash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let chain_input = format!("{}{event}{detail}{now}", hex::encode(*prev));
         let this_hash = *blake3::hash(chain_input.as_bytes()).as_bytes();
 
@@ -85,7 +88,10 @@ impl AuditLog {
         };
 
         if let Ok(json) = serde_json::to_string(&entry) {
-            let mut writer = self.writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut writer = self
+                .writer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = writeln!(writer, "{json}");
             let _ = writer.flush();
         }

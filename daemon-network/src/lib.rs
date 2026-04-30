@@ -25,6 +25,6 @@ pub mod tofu;
 pub mod transport;
 
 // -- Assembled state and dispatch (testable) --
-pub mod state;
 pub mod dispatch;
 pub mod lifecycle;
+pub mod state;

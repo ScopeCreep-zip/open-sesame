@@ -60,26 +60,34 @@ static NETWORK_PRIVATE_KEY: std::sync::RwLock<Option<zeroize::Zeroizing<[u8; 32]
 /// Set the signing seed. Takes `Zeroizing` to avoid unzeroized boundary copies.
 /// Called after vault unlock delivers `_signing-seed`.
 pub fn set_signing_seed(seed: Option<zeroize::Zeroizing<[u8; 32]>>) {
-    let mut guard = SIGNING_SEED.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = SIGNING_SEED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = seed;
 }
 
 /// Clear the signing seed. Called on vault lock.
 /// Uses `into_inner` on poisoned locks — zeroization must not be blocked by poisoning.
 pub fn clear_signing_seed() {
-    let mut guard = SIGNING_SEED.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = SIGNING_SEED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = None;
 }
 
 /// Set the network identity private key. Takes `Zeroizing` to avoid boundary copies.
 pub fn set_network_private_key(key: Option<zeroize::Zeroizing<[u8; 32]>>) {
-    let mut guard = NETWORK_PRIVATE_KEY.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = NETWORK_PRIVATE_KEY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = key;
 }
 
 /// Clear the network private key. Called on vault lock.
 pub fn clear_network_private_key() {
-    let mut guard = NETWORK_PRIVATE_KEY.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = NETWORK_PRIVATE_KEY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = None;
 }
 
@@ -104,13 +112,17 @@ pub fn network_private_key_is_set() -> bool {
 /// Access the signing seed inside a closure. The seed never leaves the lock
 /// scope — no stack copies, no `Zeroize` burden on callers.
 pub fn with_signing_seed<R>(f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
-    let guard = SIGNING_SEED.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = SIGNING_SEED
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.as_deref().map(f)
 }
 
 /// Access the network private key inside a closure.
 pub fn with_network_private_key<R>(f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
-    let guard = NETWORK_PRIVATE_KEY.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = NETWORK_PRIVATE_KEY
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.as_deref().map(f)
 }
 
@@ -572,17 +584,25 @@ pub async fn handle_secret_set(
                         } else {
                             // M-02: wrong-length value invalidates the cache.
                             set_signing_seed(None);
-                            tracing::warn!(len = store_bytes.len(), "signing seed wrong length, cache invalidated");
+                            tracing::warn!(
+                                len = store_bytes.len(),
+                                "signing seed wrong length, cache invalidated"
+                            );
                         }
                     } else if key == "_network-identity-private" {
                         if store_bytes.len() == 32 {
                             let mut pk = zeroize::Zeroizing::new([0u8; 32]);
                             pk.copy_from_slice(store_bytes);
                             set_network_private_key(Some(pk));
-                            tracing::info!("network private key reactively cached after vault write");
+                            tracing::info!(
+                                "network private key reactively cached after vault write"
+                            );
                         } else {
                             set_network_private_key(None);
-                            tracing::warn!(len = store_bytes.len(), "network private key wrong length, cache invalidated");
+                            tracing::warn!(
+                                len = store_bytes.len(),
+                                "network private key wrong length, cache invalidated"
+                            );
                         }
                     }
                 }
@@ -914,25 +934,37 @@ mod tests {
     #[test]
     fn system_key_denied_for_open_clearance() {
         assert!(is_system_key_denied("_signing-seed", SecurityLevel::Open));
-        assert!(is_system_key_denied("_network-identity-private", SecurityLevel::Open));
+        assert!(is_system_key_denied(
+            "_network-identity-private",
+            SecurityLevel::Open
+        ));
     }
 
     #[test]
     fn system_key_allowed_for_internal_clearance() {
-        assert!(!is_system_key_denied("_signing-seed", SecurityLevel::Internal));
+        assert!(!is_system_key_denied(
+            "_signing-seed",
+            SecurityLevel::Internal
+        ));
     }
 
     #[test]
     fn system_key_allowed_for_secrets_only_clearance() {
         // SecretsOnly > Internal in the SecurityLevel ordering.
-        assert!(!is_system_key_denied("_signing-seed", SecurityLevel::SecretsOnly));
+        assert!(!is_system_key_denied(
+            "_signing-seed",
+            SecurityLevel::SecretsOnly
+        ));
     }
 
     #[test]
     fn non_system_key_allowed_for_all_clearance_levels() {
         assert!(!is_system_key_denied("api-key", SecurityLevel::Open));
         assert!(!is_system_key_denied("api-key", SecurityLevel::Internal));
-        assert!(!is_system_key_denied("github-token", SecurityLevel::SecretsOnly));
+        assert!(!is_system_key_denied(
+            "github-token",
+            SecurityLevel::SecretsOnly
+        ));
     }
 
     #[test]

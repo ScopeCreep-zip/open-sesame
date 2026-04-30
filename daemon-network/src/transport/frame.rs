@@ -123,12 +123,7 @@ impl Frame {
 
     /// Build a new frame.
     #[must_use]
-    pub fn new(
-        frame_type: u8,
-        session_id: WireSessionId,
-        sequence: u32,
-        body: Vec<u8>,
-    ) -> Self {
+    pub fn new(frame_type: u8, session_id: WireSessionId, sequence: u32, body: Vec<u8>) -> Self {
         #[allow(clippy::cast_possible_truncation)] // Body length validated by caller
         let body_len = body.len() as u16;
         Frame {
@@ -296,7 +291,9 @@ mod tests {
 
     #[test]
     fn session_id_display() {
-        let sid = WireSessionId([0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01]);
+        let sid = WireSessionId([
+            0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01,
+        ]);
         let s = format!("{sid}");
         assert_eq!(s, "abcdef0123456789abcdef01");
     }

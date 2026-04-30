@@ -65,13 +65,9 @@ impl TestDaemon {
         let dir = tempfile::tempdir().unwrap();
 
         // UDP sockets: daemon + client on ephemeral ports.
-        let daemon_socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap(),
-        );
+        let daemon_socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let daemon_addr = daemon_socket.local_addr().unwrap();
-        let client_socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap(),
-        );
+        let client_socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
         // In-process IPC bus.
         let sock_path = dir.path().join("bus.sock");
@@ -116,15 +112,14 @@ impl TestDaemon {
         ));
 
         // Audit log.
-        let audit = Arc::new(
-            AuditLog::open(&dir.path().join("audit.jsonl")).unwrap(),
-        );
+        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.jsonl")).unwrap());
 
         // Discovery.
         let (discovery_tx, discovery_rx) = tokio::sync::mpsc::channel(256);
-        let discovery = Arc::new(
-            daemon_discovery::manager::DiscoveryManager::new(1024, discovery_tx),
-        );
+        let discovery = Arc::new(daemon_discovery::manager::DiscoveryManager::new(
+            1024,
+            discovery_tx,
+        ));
 
         // TCP channel (not used in most tests, but required by `DaemonState`).
         let (tcp_tx, _tcp_rx) = tokio::sync::mpsc::channel(16);

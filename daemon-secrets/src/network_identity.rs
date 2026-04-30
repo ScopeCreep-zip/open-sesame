@@ -56,7 +56,11 @@ pub async fn handle_network_identity_request(
             };
 
             // Store private key in vault.
-            if let Err(e) = vault.store().set(NETWORK_IDENTITY_KEY, private.as_bytes()).await {
+            if let Err(e) = vault
+                .store()
+                .set(NETWORK_IDENTITY_KEY, private.as_bytes())
+                .await
+            {
                 tracing::error!(error = %e, "`NetworkIdentityRequest`: failed to store private key");
                 return None;
             }

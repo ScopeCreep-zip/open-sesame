@@ -128,7 +128,9 @@ where
 
     // msg1: -> e
     let mut buf = vec![0u8; 65535];
-    let len = handshake.write_message(&[], &mut buf).map_err(NoiseError::Snow)?;
+    let len = handshake
+        .write_message(&[], &mut buf)
+        .map_err(NoiseError::Snow)?;
     write_noise_msg(writer, &buf[..len]).await?;
 
     // msg2: <- e, ee, s, es
@@ -138,15 +140,15 @@ where
         .map_err(NoiseError::Snow)?;
 
     // msg3: -> s, se
-    let len = handshake.write_message(&[], &mut buf).map_err(NoiseError::Snow)?;
+    let len = handshake
+        .write_message(&[], &mut buf)
+        .map_err(NoiseError::Snow)?;
     write_noise_msg(writer, &buf[..len]).await?;
 
     // Capture handshake hash before transition (HandshakeState has it, TransportState doesn't).
     let hh = capture_handshake_hash(&handshake);
 
-    let transport = handshake
-        .into_transport_mode()
-        .map_err(NoiseError::Snow)?;
+    let transport = handshake.into_transport_mode().map_err(NoiseError::Snow)?;
 
     Ok(NoiseTransport {
         state: transport,
@@ -186,7 +188,9 @@ where
         .map_err(NoiseError::Snow)?;
 
     // msg2: -> e, ee, s, es
-    let len = handshake.write_message(&[], &mut buf).map_err(NoiseError::Snow)?;
+    let len = handshake
+        .write_message(&[], &mut buf)
+        .map_err(NoiseError::Snow)?;
     write_noise_msg(writer, &buf[..len]).await?;
 
     // msg3: <- s, se
@@ -196,9 +200,7 @@ where
         .map_err(NoiseError::Snow)?;
 
     let hh = capture_handshake_hash(&handshake);
-    let transport = handshake
-        .into_transport_mode()
-        .map_err(NoiseError::Snow)?;
+    let transport = handshake.into_transport_mode().map_err(NoiseError::Snow)?;
 
     Ok(NoiseTransport {
         state: transport,
@@ -225,20 +227,26 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let mut handshake = Builder::new(NOISE_IKPSK2.parse().map_err(|_| NoiseError::InvalidParams)?)
-        .local_private_key(&local_keypair.private)
-        .map_err(NoiseError::Snow)?
-        .remote_public_key(remote_static)
-        .map_err(NoiseError::Snow)?
-        .psk(2, psk)
-        .map_err(NoiseError::Snow)?
-        .build_initiator()
-        .map_err(NoiseError::Snow)?;
+    let mut handshake = Builder::new(
+        NOISE_IKPSK2
+            .parse()
+            .map_err(|_| NoiseError::InvalidParams)?,
+    )
+    .local_private_key(&local_keypair.private)
+    .map_err(NoiseError::Snow)?
+    .remote_public_key(remote_static)
+    .map_err(NoiseError::Snow)?
+    .psk(2, psk)
+    .map_err(NoiseError::Snow)?
+    .build_initiator()
+    .map_err(NoiseError::Snow)?;
 
     let mut buf = vec![0u8; 65535];
 
     // msg1: -> e, es, s, ss
-    let len = handshake.write_message(&[], &mut buf).map_err(NoiseError::Snow)?;
+    let len = handshake
+        .write_message(&[], &mut buf)
+        .map_err(NoiseError::Snow)?;
     write_noise_msg(writer, &buf[..len]).await?;
 
     // msg2: <- e, ee, se, psk
@@ -248,9 +256,7 @@ where
         .map_err(NoiseError::Snow)?;
 
     let hh = capture_handshake_hash(&handshake);
-    let transport = handshake
-        .into_transport_mode()
-        .map_err(NoiseError::Snow)?;
+    let transport = handshake.into_transport_mode().map_err(NoiseError::Snow)?;
 
     Ok(NoiseTransport {
         state: transport,
@@ -274,13 +280,17 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let mut handshake = Builder::new(NOISE_IKPSK2.parse().map_err(|_| NoiseError::InvalidParams)?)
-        .local_private_key(&local_keypair.private)
-        .map_err(NoiseError::Snow)?
-        .psk(2, psk)
-        .map_err(NoiseError::Snow)?
-        .build_responder()
-        .map_err(NoiseError::Snow)?;
+    let mut handshake = Builder::new(
+        NOISE_IKPSK2
+            .parse()
+            .map_err(|_| NoiseError::InvalidParams)?,
+    )
+    .local_private_key(&local_keypair.private)
+    .map_err(NoiseError::Snow)?
+    .psk(2, psk)
+    .map_err(NoiseError::Snow)?
+    .build_responder()
+    .map_err(NoiseError::Snow)?;
 
     let mut buf = vec![0u8; 65535];
 
@@ -291,13 +301,13 @@ where
         .map_err(NoiseError::Snow)?;
 
     // msg2: -> e, ee, se, psk
-    let len = handshake.write_message(&[], &mut buf).map_err(NoiseError::Snow)?;
+    let len = handshake
+        .write_message(&[], &mut buf)
+        .map_err(NoiseError::Snow)?;
     write_noise_msg(writer, &buf[..len]).await?;
 
     let hh = capture_handshake_hash(&handshake);
-    let transport = handshake
-        .into_transport_mode()
-        .map_err(NoiseError::Snow)?;
+    let transport = handshake.into_transport_mode().map_err(NoiseError::Snow)?;
 
     Ok(NoiseTransport {
         state: transport,
@@ -312,11 +322,7 @@ where
 /// Used for XX→IKpsk2 transition on reconnection.
 #[must_use]
 pub fn derive_psk_from_handshake(handshake_hash: &[u8; 32]) -> [u8; 32] {
-    let keys = core_crypto::network::hkdf_blake2b(
-        handshake_hash,
-        b"opensesame:psk:v1",
-        1,
-    );
+    let keys = core_crypto::network::hkdf_blake2b(handshake_hash, b"opensesame:psk:v1", 1);
     let mut psk = [0u8; 32];
     psk.copy_from_slice(keys[0].as_bytes());
     psk
@@ -486,6 +492,9 @@ mod tests {
     fn psk_derivation_different_hashes() {
         let h1 = [0xAA; 32];
         let h2 = [0xBB; 32];
-        assert_ne!(derive_psk_from_handshake(&h1), derive_psk_from_handshake(&h2));
+        assert_ne!(
+            derive_psk_from_handshake(&h1),
+            derive_psk_from_handshake(&h2)
+        );
     }
 }

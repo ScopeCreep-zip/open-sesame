@@ -38,10 +38,7 @@ pub struct UdpInbound {
 /// Frames shorter than the header, with unknown version, or exceeding
 /// `MAX_UDP_BODY` are silently dropped (no response to prevent information
 /// leakage about our state).
-pub async fn udp_receive_loop(
-    socket: Arc<UdpSocket>,
-    tx: tokio::sync::mpsc::Sender<UdpInbound>,
-) {
+pub async fn udp_receive_loop(socket: Arc<UdpSocket>, tx: tokio::sync::mpsc::Sender<UdpInbound>) {
     // 1280 bytes = IPv6 minimum MTU.
     let mut buf = vec![0u8; 1280];
 
@@ -81,11 +78,7 @@ pub async fn udp_receive_loop(
 /// # Errors
 ///
 /// Returns `std::io::Error` if the send fails.
-pub async fn udp_send(
-    socket: &UdpSocket,
-    frame: &Frame,
-    addr: &SocketAddr,
-) -> std::io::Result<()> {
+pub async fn udp_send(socket: &UdpSocket, frame: &Frame, addr: &SocketAddr) -> std::io::Result<()> {
     let bytes = frame.serialise();
     socket.send_to(&bytes, addr).await?;
     Ok(())

@@ -72,7 +72,10 @@ pub fn build_goodbye(
 /// # Errors
 ///
 /// Returns `std::io::Error` if the send fails.
-pub async fn send_multicast(socket: &tokio::net::UdpSocket, packet: &DnsPacket) -> std::io::Result<()> {
+pub async fn send_multicast(
+    socket: &tokio::net::UdpSocket,
+    packet: &DnsPacket,
+) -> std::io::Result<()> {
     let bytes = packet.serialise();
     let dest = SocketAddrV4::new(MDNS_MULTICAST_V4, MDNS_PORT);
     socket.send_to(&bytes, dest).await?;

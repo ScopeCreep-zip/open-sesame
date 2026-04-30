@@ -5,10 +5,8 @@
 # Local dev tools provided by nix flake devshell (flake.nix devShells.default).
 # CI-only tools below: GitHub Actions runners install these via mise-action.
 # Local dev: `direnv allow` loads the devshell with all deps including cargo-deb.
+# All tool dependencies provided by nix (flake.nix devShell).
 [tools]
-node = "22"
-"cargo:cargo-deb" = "latest"
-"cargo:cross" = "latest"
 
 # npm packages installed via `mise run setup:npm` for proper dependency resolution
 # "npm:@commitlint/cli" = "latest"                 # Commit message linter
@@ -32,7 +30,7 @@ arch_arm64 = "aarch64-unknown-linux-gnu"
 apt_deps = "pkg-config libgtk-4-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libgraphene-1.0-dev libgdk-pixbuf-2.0-dev libwayland-dev libxkbcommon-dev libseccomp-dev libfontconfig1-dev gettext meson ninja-build libgirepository1.0-dev gobject-introspection"
 
 [env]
-RUST_BACKTRACE = "1"
+_.file = [".env.example", ".env"]
 
 # =============================================================================
 # ATOMIC CARGO OPERATIONS (internal building blocks)
@@ -52,9 +50,13 @@ run = "cargo clippy -- -D warnings"
 
 [tasks."cargo:test"]
 hide = true
-run = "cargo test"
+run = "cargo nextest run"
 
 [tasks."cargo:build"]
+hide = true
+run = "cargo build --profile release-dev"
+
+[tasks."cargo:build:release"]
 hide = true
 run = "cargo build --release"
 
@@ -64,7 +66,7 @@ run = "cargo build"
 
 [tasks."cargo:build:debug-logging"]
 hide = true
-run = "cargo build --release --features debug-logging"
+run = "cargo build --profile release-dev --features debug-logging"
 
 [tasks."cargo:build:amd64"]
 hide = true
@@ -110,12 +112,23 @@ depends = [ "cargo:fmt" ]
 [tasks.lint]
 alias = [ "l" ]
 description = "Lint code (clippy)"
-depends = [ "cargo:fmt", "cargo:clippy" ]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run cargo:fmt
+mise run cargo:clippy
+"""
 
 [tasks.test]
 alias = [ "t" ]
 description = "Run all quality gates + tests"
-depends = [ "cargo:fmt", "cargo:clippy", "cargo:test" ]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run cargo:fmt
+mise run cargo:clippy
+mise run cargo:test
+"""
 
 # =============================================================================
 # BUILD (all gated by quality checks)
@@ -123,7 +136,7 @@ depends = [ "cargo:fmt", "cargo:clippy", "cargo:test" ]
 
 [tasks.build]
 alias = [ "b" ]
-description = "Build release binary"
+description = "Build release-dev binary (fast release, no LTO)"
 depends = [ "test", "cargo:build" ]
 
 [tasks."build:debug"]
@@ -146,12 +159,12 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 mise run test
-mise run cargo:build
+mise run cargo:build:release
 mise run docs:man
 mise run docs:completions
 
 # Strip nix store paths from release binaries so .deb works on stock Debian/Ubuntu.
-BINS=(sesame daemon-profile daemon-secrets daemon-wm daemon-launcher daemon-clipboard daemon-input daemon-snippets)
+BINS=(sesame daemon-profile daemon-secrets daemon-network daemon-wm daemon-launcher daemon-clipboard daemon-input daemon-snippets)
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  INTERP="/lib64/ld-linux-x86-64.so.2" ;;
@@ -539,15 +552,15 @@ description = "CI install APT repository tools"
 run = "sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils"
 
 [tasks."ci:test"]
-description = "CI test job (fmt + clippy + test + build)"
+description = "CI test job (fmt + clippy + nextest + build)"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
 mise run cargo:fmt:check
 mise run cargo:clippy
-mise run cargo:test
-mise run cargo:build:debug
+cargo nextest run --workspace
+cargo build
 """
 
 [tasks."ci:docs"]
@@ -834,9 +847,9 @@ QUALITY GATES:
   test             (t)    Format + clippy + test
 
 BUILD (all run quality gates first):
-  build            (b)    Release binary
-  build:debug      (bd)   Debug binary
-  build:deb        (bde)  Both .deb packages (headless + desktop)
+  build            (b)    Release-dev binary (fast release, no LTO)
+  build:debug      (bd)   Debug binary (Cranelift, fastest compile)
+  build:deb        (bde)  Both .deb packages (full release, LTO)
   build:deb:debug         .deb with debug logging
   build:all        (ba)   All packages
 

@@ -16,10 +16,7 @@ use mainline::MutableItem;
 /// derived from `SHA-1(pubkey)`.
 ///
 /// Returns `None` if the record is not found or cannot be parsed.
-pub async fn resolve_presence(
-    dht: &Dht,
-    target_pubkey: &[u8; 32],
-) -> Option<ResolvedPeer> {
+pub async fn resolve_presence(dht: &Dht, target_pubkey: &[u8; 32]) -> Option<ResolvedPeer> {
     // v6 API: get_mutable(pubkey, salt, more_recent_than) returns GetStream<MutableItem>.
     // GetStream implements Stream<Item = MutableItem>.
     // Dht::as_async() consumes self; Dht implements Clone.

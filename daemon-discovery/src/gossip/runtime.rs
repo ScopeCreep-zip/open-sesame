@@ -19,7 +19,8 @@ use crate::gossip::swim::PeerId;
 ///
 /// Uses `rand::rngs::SmallRng` for SWIM's random member selection —
 /// not cryptographic, just needs uniform distribution for probe targets.
-pub type SwimInstance = foca::Foca<PeerId, foca::PostcardCodec, rand::rngs::SmallRng, foca::NoCustomBroadcast>;
+pub type SwimInstance =
+    foca::Foca<PeerId, foca::PostcardCodec, rand::rngs::SmallRng, foca::NoCustomBroadcast>;
 
 /// Create a new SWIM instance with the given identity and config.
 #[must_use]

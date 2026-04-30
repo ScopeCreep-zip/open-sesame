@@ -44,10 +44,10 @@ impl DialEntry {
         match self.consecutive_failures {
             0 => Duration::from_secs(0),
             1 => Duration::from_secs(30),
-            2 => Duration::from_secs(60),
-            3 => Duration::from_secs(120),
-            4 => Duration::from_secs(300),
-            _ => Duration::from_secs(900), // 15 min cap
+            2 => Duration::from_mins(1),
+            3 => Duration::from_mins(2),
+            4 => Duration::from_mins(5),
+            _ => Duration::from_mins(15),
         }
     }
 }
@@ -98,7 +98,10 @@ impl DialQueue {
         if self.dedup.contains(&entry.addr) {
             return false;
         }
-        let mut heap = self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut heap = self
+            .heap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if heap.len() >= self.max_entries {
             return false;
         }
@@ -114,7 +117,10 @@ impl DialQueue {
     /// Cannot panic — `heap.pop()` is only called after `heap.peek()` confirms non-empty.
     #[must_use]
     pub fn pop_ready(&self) -> Option<DialEntry> {
-        let mut heap = self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut heap = self
+            .heap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = heap.peek()
             && entry.next_dial_at <= Instant::now()
         {
@@ -136,7 +142,10 @@ impl DialQueue {
     /// Current queue depth.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.heap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Remove a pending dial entry by address.
@@ -147,7 +156,10 @@ impl DialQueue {
         if self.dedup.remove(addr).is_none() {
             return false;
         }
-        let mut heap = self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut heap = self
+            .heap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = heap.len();
         let entries: Vec<DialEntry> = heap.drain().filter(|e| e.addr != *addr).collect();
         *heap = BinaryHeap::from(entries);
@@ -159,7 +171,10 @@ impl DialQueue {
     /// Used to seed SWIM gossip with known peers at startup.
     #[must_use]
     pub fn snapshot_addrs(&self) -> Vec<SocketAddr> {
-        let heap = self.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let heap = self
+            .heap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         heap.iter().map(|e| e.addr).collect()
     }
 

@@ -15,9 +15,6 @@ pub fn generate_keypair() -> snow::Keypair {
 
 /// Create a temporary TOFU store.
 pub fn temp_tofu(dir: &std::path::Path, name: &str) -> daemon_network::tofu::store::TofuStore {
-    daemon_network::tofu::store::TofuStore::open(
-        &dir.join(format!("{name}-tofu.db")),
-        name,
-    )
-    .unwrap()
+    daemon_network::tofu::store::TofuStore::open(&dir.join(format!("{name}-tofu.db")), name)
+        .unwrap()
 }

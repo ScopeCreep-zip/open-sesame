@@ -45,7 +45,9 @@ pub fn run_maintenance(state: &DaemonState) {
     }
 
     // Rekey sweep: notify peer, session stays active until replaced.
-    let rekey = state.peer_table.sessions_needing_rekey(state.rekey_interval_secs);
+    let rekey = state
+        .peer_table
+        .sessions_needing_rekey(state.rekey_interval_secs);
     for sid in &rekey {
         tracing::info!(session = %sid, "sending RehandshakeRequest");
         let sid_copy = *sid;
@@ -89,24 +91,30 @@ pub async fn run_replication_pull(state: &DaemonState, default_profile: &str) {
     }
 
     for sid in &sids {
-        let Some(peer) = state.peer_table.get(sid) else { continue };
+        let Some(peer) = state.peer_table.get(sid) else {
+            continue;
+        };
         let peer_key = peer.remote_key_hex();
         drop(peer);
 
         // Look up the peer's installation ID from the TOFU store for
         // watermark scoping (which peer's progress are we tracking).
-        let install_id = state.tofu_store.lock().ok()
-            .and_then(|store| {
-                store.lookup_key(&peer_key).ok()
-                    .flatten()
-                    .and_then(|p| p.installation_id)
-            });
+        let install_id = state.tofu_store.lock().ok().and_then(|store| {
+            store
+                .lookup_key(&peer_key)
+                .ok()
+                .flatten()
+                .and_then(|p| p.installation_id)
+        });
         let Some(peer_install_id) = install_id else {
             continue;
         };
 
         // Read cached watermark for this peer (if any).
-        let watermark = state.replication_watermarks.lock().ok()
+        let watermark = state
+            .replication_watermarks
+            .lock()
+            .ok()
             .and_then(|wm| wm.get(&peer_install_id).cloned());
 
         let event = core_types::EventKind::VaultReplicationPullRequest {
@@ -116,7 +124,10 @@ pub async fn run_replication_pull(state: &DaemonState, default_profile: &str) {
             max_entries: 100,
         };
         let client = state.bus_client.lock().await;
-        if let Err(e) = client.publish(event, core_types::SecurityLevel::Internal).await {
+        if let Err(e) = client
+            .publish(event, core_types::SecurityLevel::Internal)
+            .await
+        {
             tracing::debug!(error = %e, session = %sid, "replication pull request failed");
         }
     }
@@ -130,7 +141,11 @@ pub fn run_dial_queue(state: &DaemonState) {
         tokio::spawn(async move {
             let result = handshake::dial_peer(entry.addr, &ctx).await;
             match result {
-                handshake::HandshakeOutcome::Established { session_id, remote_key_hex, trust_level } => {
+                handshake::HandshakeOutcome::Established {
+                    session_id,
+                    remote_key_hex,
+                    trust_level,
+                } => {
                     tracing::info!(addr = %entry.addr, session = %session_id, key = %&remote_key_hex[..16.min(remote_key_hex.len())], ?trust_level, "dial succeeded");
                 }
                 handshake::HandshakeOutcome::Rejected { reason } => {

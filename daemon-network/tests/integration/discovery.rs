@@ -7,13 +7,13 @@
 mod common;
 
 use common::generate_keypair;
+use core_types::TofuTrustLevel;
+use daemon_discovery::queue::{DialEntry, DialQueue, DiscoverySource};
 use daemon_network::noise::state::{self, xx_initiator, xx_responder};
 use daemon_network::session::state::PeerState;
 use daemon_network::session::table::PeerTable;
 use daemon_network::tofu::store::TofuStore;
 use daemon_network::transport::frame::WireSessionId;
-use daemon_discovery::queue::{DialEntry, DialQueue, DiscoverySource};
-use core_types::TofuTrustLevel;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -53,13 +53,19 @@ async fn dial_queue_drives_handshake() {
     let responder_handle = tokio::spawn(async move {
         let (stream, _addr) = listener.accept().await.unwrap();
         let (mut reader, mut writer) = tokio::io::split(stream);
-        xx_responder(&mut reader, &mut writer, &responder_kp).await.unwrap()
+        xx_responder(&mut reader, &mut writer, &responder_kp)
+            .await
+            .unwrap()
     });
 
     // Initiator dials and handshakes.
-    let stream = tokio::net::TcpStream::connect(responder_addr).await.unwrap();
+    let stream = tokio::net::TcpStream::connect(responder_addr)
+        .await
+        .unwrap();
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let init_transport = xx_initiator(&mut reader, &mut writer, &initiator_kp).await.unwrap();
+    let init_transport = xx_initiator(&mut reader, &mut writer, &initiator_kp)
+        .await
+        .unwrap();
     let resp_transport = responder_handle.await.unwrap();
 
     // Both sides see each other's static keys.
@@ -84,7 +90,12 @@ async fn dial_queue_drives_handshake() {
     // TOFU pin.
     let dir = tempfile::tempdir().unwrap();
     let tofu = TofuStore::open(&dir.path().join("tofu.db"), "test-install").unwrap();
-    tofu.pin(&hex::encode(init_sees), &responder_addr.to_string(), TofuTrustLevel::Tofu).unwrap();
+    tofu.pin(
+        &hex::encode(init_sees),
+        &responder_addr.to_string(),
+        TofuTrustLevel::Tofu,
+    )
+    .unwrap();
 
     let peer = tofu.lookup_key(&hex::encode(init_sees)).unwrap().unwrap();
     assert_eq!(peer.trust_level, TofuTrustLevel::Tofu);

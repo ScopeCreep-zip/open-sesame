@@ -142,7 +142,9 @@ pub fn chacha20_open(
     let mut in_out = ciphertext.to_vec();
     let plaintext = opening_key
         .open_in_place(nonce, Aad::from(aad), &mut in_out)
-        .map_err(|_| core_types::Error::Crypto("ChaCha20 decryption failed: tag mismatch".into()))?;
+        .map_err(|_| {
+            core_types::Error::Crypto("ChaCha20 decryption failed: tag mismatch".into())
+        })?;
 
     let result = SecureBytes::from_slice(plaintext);
     in_out.zeroize();
@@ -243,8 +245,8 @@ pub fn blake2b_512(data: &[u8]) -> [u8; 64] {
 /// BLAKE2b-512. Different output length produces different hash values.
 #[must_use]
 pub fn blake2b_256(data: &[u8]) -> [u8; 32] {
-    use blake2::digest::consts::U32;
     use blake2::Blake2b;
+    use blake2::digest::consts::U32;
     let mut hasher = <Blake2b<U32>>::new();
     hasher.update(data);
     let result = hasher.finalize();
@@ -258,8 +260,8 @@ pub fn blake2b_256(data: &[u8]) -> [u8; 32] {
 /// Uses BLAKE2b-MAC with 512-bit output as the PRF for HKDF.
 #[must_use]
 pub fn hmac_blake2b(key: &[u8], data: &[u8]) -> [u8; 64] {
-    let mut mac = <Blake2bMac<U64>>::new_from_slice(key)
-        .expect("BLAKE2b-MAC accepts any key length");
+    let mut mac =
+        <Blake2bMac<U64>>::new_from_slice(key).expect("BLAKE2b-MAC accepts any key length");
     mac.update(data);
     let result = mac.finalize().into_bytes();
     let mut out = [0u8; 64];
@@ -327,10 +329,7 @@ pub fn derive_signing_keypair(
     master_key: &SecureBytes,
     installation_id: &uuid::Uuid,
 ) -> core_types::Result<Ed25519SigningKey> {
-    let context = format!(
-        "opensesame:installation:signing:v1:{}",
-        installation_id
-    );
+    let context = format!("opensesame:installation:signing:v1:{}", installation_id);
     let mut seed = zeroize::Zeroizing::new(blake3::derive_key(&context, master_key.as_bytes()));
 
     let kp = Ed25519KeyPair::from_seed_unchecked(&*seed)
@@ -395,8 +394,7 @@ mod tests {
     #[test]
     fn x25519_keypair_private_derives_public() {
         let (private, public) = generate_x25519_keypair().unwrap();
-        let derived_public =
-            x25519_public_from_private(private.as_bytes().try_into().unwrap());
+        let derived_public = x25519_public_from_private(private.as_bytes().try_into().unwrap());
         assert_eq!(public, derived_public);
     }
 
@@ -606,7 +604,11 @@ mod tests {
         // Then HKDF-BLAKE2b(shared_secret, "opensesame:vault:replication:v1") → enc_key.
         // Then ChaCha20-Poly1305(enc_key, random_nonce, aad=entry_id, plaintext=secret).
         let shared_sender = x25519_dh(&sender_eph_private, &dest_public).unwrap();
-        let enc_keys = hkdf_blake2b(shared_sender.as_bytes(), b"opensesame:vault:replication:v1", 1);
+        let enc_keys = hkdf_blake2b(
+            shared_sender.as_bytes(),
+            b"opensesame:vault:replication:v1",
+            1,
+        );
         let enc_key: [u8; 32] = enc_keys[0].as_bytes().try_into().unwrap();
         let nonce = random_bytes::<12>();
         let ciphertext = chacha20_seal(&enc_key, &nonce, entry_id, secret_value).unwrap();
@@ -615,10 +617,15 @@ mod tests {
         let shared_dest = x25519_dh(&dest_private, &sender_eph_public).unwrap();
 
         assert_eq!(
-            shared_sender.as_bytes(), shared_dest.as_bytes(),
+            shared_sender.as_bytes(),
+            shared_dest.as_bytes(),
             "ECDH shared secrets must match: DH(a,B) == DH(b,A)"
         );
-        let dec_keys = hkdf_blake2b(shared_dest.as_bytes(), b"opensesame:vault:replication:v1", 1);
+        let dec_keys = hkdf_blake2b(
+            shared_dest.as_bytes(),
+            b"opensesame:vault:replication:v1",
+            1,
+        );
         let dec_key: [u8; 32] = dec_keys[0].as_bytes().try_into().unwrap();
         assert_eq!(enc_key, dec_key, "same shared secret must produce same key");
 

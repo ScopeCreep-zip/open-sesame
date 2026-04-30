@@ -50,12 +50,7 @@ impl DiscoveryManager {
     }
 
     /// Add a discovered peer to the dial queue and emit an event.
-    pub fn add_peer(
-        &self,
-        addr: SocketAddr,
-        source: DiscoverySource,
-        pubkey_hex: Option<String>,
-    ) {
+    pub fn add_peer(&self, addr: SocketAddr, source: DiscoverySource, pubkey_hex: Option<String>) {
         let entry = DialEntry {
             addr,
             source,
@@ -66,7 +61,8 @@ impl DiscoveryManager {
 
         if self.queue.push(entry) {
             if source == DiscoverySource::Mdns {
-                self.mdns_peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.mdns_peer_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let _ = self.event_tx.try_send(DiscoveryEvent::PeerDiscovered {
                 addr,
@@ -98,16 +94,11 @@ impl DiscoveryManager {
     /// (TTL=0), SWIM `MemberDown`, DNS SRV target removal, or operator unpin.
     /// Does NOT modify the TOFU store — removal is transport-layer, not
     /// trust-layer. The peer remains pinned for future reconnection.
-    pub fn remove_peer(
-        &self,
-        addr: SocketAddr,
-        source: DiscoverySource,
-    ) {
+    pub fn remove_peer(&self, addr: SocketAddr, source: DiscoverySource) {
         self.queue.remove(&addr);
-        let _ = self.event_tx.try_send(DiscoveryEvent::PeerRemoved {
-            addr,
-            source,
-        });
+        let _ = self
+            .event_tx
+            .try_send(DiscoveryEvent::PeerRemoved { addr, source });
         tracing::info!(%addr, ?source, "peer removed from discovery");
     }
 
@@ -120,7 +111,8 @@ impl DiscoveryManager {
     /// Number of mDNS peers discovered.
     #[must_use]
     pub fn mdns_peer_count(&self) -> u32 {
-        self.mdns_peer_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.mdns_peer_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
