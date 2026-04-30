@@ -28,6 +28,7 @@ let
     || lib.hasPrefix "extension-" name
     || lib.hasPrefix "sesame-" name
     || name == "open-sesame"
+    || name == "workspace-hack"
     || name == "xtask";
   crateDirs = lib.filter isCrateDir rootEntries;
 
