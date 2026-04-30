@@ -54,19 +54,15 @@ run = "cargo nextest run"
 
 [tasks."cargo:build"]
 hide = true
-run = "cargo build --profile release_dev"
+run = "cargo build"
 
 [tasks."cargo:build:release"]
 hide = true
 run = "cargo build --release"
 
-[tasks."cargo:build:debug"]
+[tasks."cargo:build:release-logging"]
 hide = true
-run = "cargo build"
-
-[tasks."cargo:build:debug-logging"]
-hide = true
-run = "cargo build --profile release_dev --features debug-logging"
+run = "cargo build --release --features debug-logging"
 
 [tasks."cargo:build:amd64"]
 hide = true
@@ -136,13 +132,13 @@ mise run cargo:test
 
 [tasks.build]
 alias = [ "b" ]
-description = "Build release_dev binary (fast release, no LTO)"
+description = "Build dev binary (Cranelift, fastest compile)"
 depends = [ "test", "cargo:build" ]
 
-[tasks."build:debug"]
-alias = [ "bd" ]
-description = "Build debug binary"
-depends = [ "test", "cargo:build:debug" ]
+[tasks."build:release"]
+alias = [ "br" ]
+description = "Build release binary (LLVM, LTO, codegen-units=1)"
+depends = [ "test", "cargo:build:release" ]
 
 [tasks."build:amd64"]
 depends = [ "test", "cargo:build:amd64" ]
@@ -188,7 +184,7 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 mise run test
-mise run cargo:build:debug-logging
+mise run cargo:build:release-logging
 mise run cargo:deb
 """
 
@@ -847,9 +843,9 @@ QUALITY GATES:
   test             (t)    Format + clippy + test
 
 BUILD (all run quality gates first):
-  build            (b)    Release-dev binary (fast release, no LTO)
-  build:debug      (bd)   Debug binary (Cranelift, fastest compile)
-  build:deb        (bde)  Both .deb packages (full release, LTO)
+  build            (b)    Dev binary (Cranelift, fastest compile)
+  build:release    (br)   Release binary (LLVM, LTO, codegen-units=1)
+  build:deb        (bde)  Both .deb packages (full release)
   build:deb:debug         .deb with debug logging
   build:all        (ba)   All packages
 
