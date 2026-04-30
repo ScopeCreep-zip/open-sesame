@@ -99,6 +99,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     exit_code || quiet,
                     quiet,
                 )
+                .await
             } else {
                 status::cmd_status().await
             }
