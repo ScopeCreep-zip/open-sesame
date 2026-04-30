@@ -1,9 +1,19 @@
-//! Network-layer cryptographic primitives backed by aws-lc-rs and blake2.
+//! Network-layer cryptographic primitives.
 //!
 //! Provides X25519 ECDH, ChaCha20-Poly1305 AEAD, AES-256-GCM AEAD,
 //! BLAKE2b hashing, HKDF-BLAKE2b, Ed25519 signing, and deterministic
 //! keypair derivation for the Noise XX network transport, vault
 //! replication re-encryption, and installation signing.
+//!
+//! # Crypto backend selection
+//!
+//! Two backends are available, selected at compile time via feature flags:
+//! - `fips-crypto` (default): `aws-lc-rs` (FIPS 140-3 #4816). Requires
+//!   cmake C build (~3 min cold). Use for production and CI release builds.
+//! - `fast-dev`: `ring` (pure Rust, builds in seconds). Use for dev
+//!   iteration: `cargo build --no-default-features --features=fast-dev`
+//!
+//! Both crates expose identical APIs for aead, signature, and rand.
 //!
 //! # Separation from Vault Hierarchy
 //!
@@ -12,15 +22,24 @@
 //!
 //! - **Vault hierarchy** (unchanged): RustCrypto crates — Argon2id, BLAKE3,
 //!   AES-256-GCM via `aes-gcm`, HKDF-SHA256 via `hkdf`+`sha2`.
-//! - **Network layer** (this module): `aws-lc-rs` (FIPS 140-3 #4816) for
-//!   X25519, ChaCha20-Poly1305, AES-256-GCM, Ed25519, HKDF-SHA256.
-//!   `blake2` crate for BLAKE2b (not FIPS-scope).
+//! - **Network layer** (this module): pluggable backend for X25519,
+//!   ChaCha20-Poly1305, AES-256-GCM, Ed25519, HKDF-SHA256.
+//!   `blake2` crate for BLAKE2b (not backend-dependent).
+
+#[cfg(not(any(feature = "fips-crypto", feature = "fast-dev")))]
+compile_error!("core-crypto requires either `fips-crypto` or `fast-dev` feature");
+
+#[cfg(feature = "fips-crypto")]
+use aws_lc_rs as crypto_backend;
+
+#[cfg(all(feature = "fast-dev", not(feature = "fips-crypto")))]
+use ring as crypto_backend;
 
 use crate::SecureBytes;
-use aws_lc_rs::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
-use aws_lc_rs::signature::{self, Ed25519KeyPair, KeyPair};
 use blake2::digest::{Mac, consts::U64};
 use blake2::{Blake2b512, Blake2bMac, Digest};
+use crypto_backend::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
+use crypto_backend::signature::{self, Ed25519KeyPair, KeyPair};
 use zeroize::Zeroize;
 
 /// Ed25519 signing key wrapper. Debug-redacted.
@@ -53,7 +72,7 @@ impl std::fmt::Debug for Ed25519SigningKey {
 #[must_use]
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut buf = [0u8; N];
-    aws_lc_rs::rand::fill(&mut buf).expect("system RNG failed");
+    crypto_backend::rand::fill(&mut buf).expect("system RNG failed");
     buf
 }
 

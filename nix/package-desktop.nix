@@ -14,6 +14,8 @@
   libxkbcommon,
   xkeyboard-config,
   libseccomp,
+  mold-wrapped,
+  clang,
   open-sesame,
 }:
 
@@ -83,7 +85,14 @@ rustPlatform.buildRustPackage {
     makeWrapper
     perl
     cmake
+    mold-wrapped
+    clang
   ];
+
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
   buildInputs = [
     openssl

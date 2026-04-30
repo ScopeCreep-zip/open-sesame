@@ -844,6 +844,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -862,6 +863,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -881,12 +883,14 @@ dependencies = [
  "hmac",
  "pbkdf2",
  "proptest",
+ "ring",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "workspace-hack",
  "x25519-dalek",
  "zeroize",
 ]
@@ -917,6 +921,7 @@ dependencies = [
  "proptest",
  "rusqlite",
  "thiserror 2.0.18",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -960,6 +965,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -969,6 +975,7 @@ version = "1.9.5"
 dependencies = [
  "libc",
  "tracing",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -988,6 +995,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -1004,6 +1012,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1018,6 +1027,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1508,6 +1518,7 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1538,6 +1549,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -1561,6 +1573,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "workspace-hack",
  "xkbcommon",
 ]
 
@@ -1587,6 +1600,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1630,6 +1644,7 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1659,6 +1674,7 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1696,6 +1712,7 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -1720,6 +1737,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -1753,6 +1771,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols-wlr",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -2160,6 +2179,7 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -2171,6 +2191,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "wit-bindgen 0.42.1",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -4953,6 +4974,7 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -5198,6 +5220,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "workspace-hack",
  "zbus",
 ]
 
@@ -5216,6 +5239,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5230,6 +5254,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6126,6 +6151,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "ureq",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -8554,6 +8580,101 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "wast 35.0.2",
+]
+
+[[package]]
+name = "workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "aead",
+ "aes-gcm",
+ "arrayvec",
+ "base64",
+ "base64ct",
+ "bitflags 2.11.1",
+ "blake2",
+ "bytemuck",
+ "byteorder",
+ "cc",
+ "cipher",
+ "clap",
+ "clap_builder",
+ "cranelift-bitset",
+ "crc32fast",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "crypto-common 0.1.7",
+ "curve25519-dalek 4.1.3",
+ "digest 0.10.7",
+ "either",
+ "fastrand",
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-lite",
+ "futures-sink",
+ "futures-util",
+ "generic-array",
+ "getrandom 0.2.17",
+ "hashbrown 0.14.5",
+ "hashbrown 0.15.5",
+ "hashbrown 0.16.1",
+ "hmac",
+ "indexmap",
+ "ipnet",
+ "lazy_static",
+ "libc",
+ "linux-raw-sys 0.12.1",
+ "lock_api",
+ "log",
+ "memchr",
+ "mio",
+ "num-traits",
+ "once_cell",
+ "parking_lot",
+ "percent-encoding",
+ "portable-atomic",
+ "ppv-lite86",
+ "proc-macro2",
+ "pulley-interpreter",
+ "quote",
+ "rand 0.8.6",
+ "rand 0.9.4",
+ "rand_chacha 0.3.1",
+ "rand_chacha 0.9.0",
+ "rand_core 0.6.4",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
+ "ring",
+ "rustix 1.1.4",
+ "semver",
+ "serde",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "sha2 0.10.9",
+ "slab",
+ "smallvec",
+ "socket2 0.6.3",
+ "spin",
+ "subtle",
+ "syn",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "tracing",
+ "tracing-core",
+ "typenum",
+ "url",
+ "wasmparser 0.236.1",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "winnow 0.7.15",
+ "winnow 1.0.2",
+ "zerocopy",
+ "zeroize",
 ]
 
 [[package]]

@@ -539,6 +539,7 @@
               patchelf
               cargo-deb
               cargo-cross
+              cargo-hakari
               cargo-nextest
 
               # Documentation

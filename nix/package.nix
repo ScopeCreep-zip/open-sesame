@@ -8,6 +8,8 @@
   cmake,
   openssl,
   libseccomp,
+  mold-wrapped,
+  clang,
 }:
 
 let
@@ -84,7 +86,15 @@ rustPlatform.buildRustPackage {
     installShellFiles
     perl
     cmake
+    mold-wrapped
+    clang
   ];
+
+  # Use mold linker for parallel linking inside Nix sandbox.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
   buildInputs = [
     openssl

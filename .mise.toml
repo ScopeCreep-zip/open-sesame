@@ -56,6 +56,7 @@ run = "cargo nextest run"
 hide = true
 run = "cargo build"
 
+
 [tasks."cargo:build:release"]
 hide = true
 run = "cargo build --release"
@@ -92,6 +93,14 @@ hide = true
 env.TARGET = "{{vars.arch_arm64}}"
 run = "cargo deb -p daemon-wm --no-build --target ${TARGET}"
 
+[tasks."cargo:hakari:check"]
+hide = true
+run = "cargo hakari generate --diff && cargo hakari manage-deps --dry-run"
+
+[tasks."cargo:hakari:generate"]
+hide = true
+run = "cargo hakari generate && cargo hakari manage-deps --yes"
+
 [tasks."cargo:clean"]
 hide = true
 run = "cargo clean"
@@ -99,6 +108,15 @@ run = "cargo clean"
 # =============================================================================
 # QUALITY GATES (composable checkpoints)
 # =============================================================================
+
+[tasks.hakari]
+alias = [ "wh" ]
+description = "Regenerate workspace-hack (run after dependency changes)"
+depends = [ "cargo:hakari:generate" ]
+
+[tasks."hakari:check"]
+description = "Check workspace-hack is up to date"
+depends = [ "cargo:hakari:check" ]
 
 [tasks.fmt]
 alias = [ "f" ]
@@ -121,6 +139,7 @@ description = "Run all quality gates + tests"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
+mise run cargo:hakari:check
 mise run cargo:fmt
 mise run cargo:clippy
 mise run cargo:test
@@ -548,11 +567,12 @@ description = "CI install APT repository tools"
 run = "sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils"
 
 [tasks."ci:test"]
-description = "CI test job (fmt + clippy + nextest + build)"
+description = "CI test job (hakari + fmt + clippy + nextest + build)"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
+mise run cargo:hakari:check
 mise run cargo:fmt:check
 mise run cargo:clippy
 cargo nextest run --workspace
@@ -838,9 +858,11 @@ cat << 'EOF'
 Open Sesame
 
 QUALITY GATES:
+  hakari           (wh)   Regenerate workspace-hack (after dep changes)
+  hakari:check            Check workspace-hack is up to date
   fmt              (f)    Format code
   lint             (l)    Format + clippy
-  test             (t)    Format + clippy + test
+  test             (t)    Hakari + format + clippy + nextest
 
 BUILD (all run quality gates first):
   build            (b)    Dev binary (Cranelift, fastest compile)
