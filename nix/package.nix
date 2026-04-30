@@ -91,6 +91,12 @@ rustPlatform.buildRustPackage {
     libseccomp
   ];
 
+  # release-dev profile: no LTO, codegen-units=16. 3-5x faster than full
+  # release (lto=thin, codegen-units=1) with near-identical daemon runtime
+  # performance. Full release profile used by CI/CD .deb pipeline only.
+  buildType = "release-dev";
+  checkType = "release-dev";
+
   # Build headless crates with desktop features disabled.
   cargoBuildFlags =
     (lib.concatMap (c: [ "--package" c ]) binaryCrates)
@@ -110,7 +116,7 @@ rustPlatform.buildRustPackage {
     runHook preInstall
 
     mkdir -p $out/bin
-    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release
+    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release-dev
     for bin in ${lib.concatStringsSep " " expectedBinaries}; do
       install -Dm755 "$releaseDir/$bin" "$out/bin/$bin"
     done

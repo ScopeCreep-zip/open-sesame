@@ -522,10 +522,16 @@
               clippy
               rustfmt
 
+              # Build acceleration
+              mold            # parallel linker (3-5x faster link than GNU ld)
+              clang           # mold driver (rustc -C link-arg=-fuse-ld=mold)
+              sccache         # compilation cache (shared via S3/Minio backend)
+
               # Build tools
               pkg-config
               patchelf
               cargo-deb
+              cargo-nextest   # parallel test execution (40-60% faster test suites)
 
               # Documentation
               mdbook
@@ -602,8 +608,16 @@
               ]
             );
 
+            # Mold linker via env vars — only active inside nix develop.
+            # Does not pollute .cargo/config.toml which would break
+            # cargo outside the devShell.
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold -Z threads=8";
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold -Z threads=8";
+
             shellHook = ''
-              echo "open-sesame v2 devShell ready"
+              echo "open-sesame v2 devShell ready (mold linker, sccache available)"
               echo "  cargo check --workspace"
             '';
           };
