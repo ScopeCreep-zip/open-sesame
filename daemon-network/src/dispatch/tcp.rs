@@ -59,7 +59,8 @@ pub fn handle_tcp_event(event: transport::tcp::TcpInbound, state: &DaemonState) 
             Metrics::inc(&state.metrics.frames_received_total);
             let sid = WireSessionId(frame.session_id.0);
             if let Some(mut peer) = state.peer_table.get_mut(&sid) {
-                if let Ok(plaintext) = peer.transport.decrypt(&frame.body) {
+                let header_aad = frame.header_bytes();
+                if let Ok(plaintext) = peer.transport.decrypt_with_aad(&header_aad, &frame.body) {
                     #[allow(clippy::cast_possible_truncation)]
                     peer.record_productive_recv(plaintext.len() as u64);
 

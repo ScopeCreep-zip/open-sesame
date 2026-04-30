@@ -95,7 +95,7 @@ getrandom       = "0.2"
 governor        = { version = "0.10", default-features = false, features = ["std"] }
 socket2         = { version = "0.5", features = ["all"] }
 dashmap         = "6"
-snow            = "0.10"
+snow            = { git = "https://github.com/mcginty/snow.git", rev = "295dc7b" }
 aws-lc-rs       = { version = "1", features = ["aws-lc-sys"] }
 ring            = "0.17"
 blake2          = "0.10"

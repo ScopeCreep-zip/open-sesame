@@ -43,7 +43,7 @@ pub struct NoiseTransport {
 }
 
 impl NoiseTransport {
-    /// Encrypt a plaintext message.
+    /// Encrypt a plaintext message without additional authenticated data.
     ///
     /// Returns the ciphertext (plaintext + 16-byte AEAD tag).
     ///
@@ -51,27 +51,56 @@ impl NoiseTransport {
     ///
     /// Returns `NoiseError::Snow` if the Noise transport encryption fails.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+        self.encrypt_with_aad(&[], plaintext)
+    }
+
+    /// Encrypt a plaintext message with additional authenticated data.
+    ///
+    /// The `aad` is mixed into the AEAD tag but NOT encrypted. The receiver
+    /// must provide the same `aad` for decryption to succeed. Use this to
+    /// bind frame headers to the ciphertext — an attacker who can observe
+    /// plaintext headers cannot splice headers from different frames onto
+    /// a valid ciphertext without breaking the AEAD tag.
+    ///
+    /// Uses snow's `write_message_with_additional_data` (pinned to git rev
+    /// 295dc7b which adds this API to `TransportState`).
+    pub fn encrypt_with_aad(
+        &mut self,
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
         let mut buf = vec![0u8; plaintext.len() + 16];
         let len = self
             .state
-            .write_message(plaintext, &mut buf)
+            .write_message_with_additional_data(aad, plaintext, &mut buf)
             .map_err(NoiseError::Snow)?;
         buf.truncate(len);
         Ok(buf)
     }
 
-    /// Decrypt a ciphertext message.
+    /// Decrypt a ciphertext message without additional authenticated data.
     ///
     /// Returns the plaintext.
     ///
     /// # Errors
     ///
-    /// Returns `NoiseError::Snow` if AEAD tag verification fails (tampered or wrong key).
+    /// Returns `NoiseError::Snow` if AEAD tag verification fails.
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
+        self.decrypt_with_aad(&[], ciphertext)
+    }
+
+    /// Decrypt a ciphertext message with additional authenticated data.
+    ///
+    /// The `aad` must match what was provided during encryption.
+    pub fn decrypt_with_aad(
+        &mut self,
+        aad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
         let mut buf = vec![0u8; ciphertext.len()];
         let len = self
             .state
-            .read_message(ciphertext, &mut buf)
+            .read_message_with_additional_data(aad, ciphertext, &mut buf)
             .map_err(NoiseError::Snow)?;
         buf.truncate(len);
         Ok(buf)

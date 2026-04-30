@@ -57,7 +57,8 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                 // (session ID, sequence number) cannot forge a frame that
                 // passes this check without the session's symmetric key.
                 if ft == FrameType::Data {
-                    match peer.transport.decrypt(&frame.body) {
+                    let header_aad = frame.header_bytes();
+                    match peer.transport.decrypt_with_aad(&header_aad, &frame.body) {
                         Ok(plaintext) => {
                             // Step 3: Commit replay window (AEAD proved authenticity).
                             peer.replay_window.accept(frame.sequence);
@@ -160,8 +161,9 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
                         }
                     }
                 } else {
-                    // KeepAlive: empty body, still AEAD-sealed.
-                    match peer.transport.decrypt(&frame.body) {
+                    // KeepAlive: empty body, still AEAD-sealed with header AAD.
+                    let ka_header = frame.header_bytes();
+                    match peer.transport.decrypt_with_aad(&ka_header, &frame.body) {
                         Ok(_) => {
                             peer.replay_window.accept(frame.sequence);
                             peer.record_recv(0);
@@ -194,7 +196,8 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
         FrameType::Close => {
             let sid = WireSessionId(frame.session_id.0);
             if let Some(mut peer) = state.peer_table.get_mut(&sid) {
-                match peer.transport.decrypt(&frame.body) {
+                let close_header = frame.header_bytes();
+                match peer.transport.decrypt_with_aad(&close_header, &frame.body) {
                     Ok(_) => {
                         drop(peer);
                         state.peer_table.remove(&sid);
@@ -219,7 +222,8 @@ pub fn handle_udp_frame(inbound: &UdpInbound, state: &DaemonState) {
         FrameType::RehandshakeRequest => {
             let sid = WireSessionId(frame.session_id.0);
             if let Some(mut peer) = state.peer_table.get_mut(&sid) {
-                match peer.transport.decrypt(&frame.body) {
+                let rhr_header = frame.header_bytes();
+                match peer.transport.decrypt_with_aad(&rhr_header, &frame.body) {
                     Ok(_) => {
                         drop(peer);
                         state.peer_table.remove(&sid);

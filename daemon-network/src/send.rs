@@ -59,11 +59,17 @@ pub async fn send_data(
     let mut frames = Vec::with_capacity(chunks.len());
 
     for chunk in &chunks {
+        // Determine sequence number and build the frame header BEFORE
+        // encryption so the header bytes can be bound as AEAD AAD.
+        // This prevents an attacker from splicing headers from different
+        // frames onto a valid ciphertext.
+        let seq = peer.next_send_seq();
+        let header = Frame::new(FrameType::Data as u8, *session_id, seq, vec![])
+            .header_bytes();
         let ciphertext = peer
             .transport
-            .encrypt(chunk)
+            .encrypt_with_aad(&header, chunk)
             .map_err(|e| format!("encrypt failed: {e}"))?;
-        let seq = peer.next_send_seq();
         #[allow(clippy::cast_possible_truncation)]
         peer.record_send(ciphertext.len() as u64);
         frames.push(Frame::new(
@@ -101,12 +107,15 @@ fn encrypt_control_frame(
         .get_mut(session_id)
         .ok_or_else(|| format!("session {session_id} not found"))?;
 
+    // Build the header BEFORE encryption so it can be bound as AEAD AAD.
+    let seq = peer.next_send_seq();
+    let header =
+        Frame::new(frame_type as u8, *session_id, seq, vec![]).header_bytes();
     let ciphertext = peer
         .transport
-        .encrypt(&[])
+        .encrypt_with_aad(&header, &[])
         .map_err(|e| format!("encrypt {frame_type:?} failed: {e}"))?;
 
-    let seq = peer.next_send_seq();
     if frame_type != FrameType::Close {
         peer.record_send(0);
     }
