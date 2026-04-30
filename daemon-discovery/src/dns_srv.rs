@@ -6,6 +6,23 @@
 //!
 //! SRV records provide host + port. TXT records carry advisory
 //! public key and installation ID (same fields as mDNS TXT).
+//!
+//! # Security: TXT records are advisory, not authoritative
+//!
+//! The `pubkey=` and `iid=` fields from TXT records are NOT
+//! cryptographically verified. They are used ONLY for TOFU
+//! pre-population in the dial queue — the actual trust decision
+//! happens during the Noise XX handshake where the peer's X25519
+//! static key is verified via AEAD. On compromised DNS infrastructure,
+//! an attacker could inject a TXT record with their own pubkey to
+//! trigger a TOFU pin to the wrong identity on first contact.
+//! Mitigations:
+//! - `require_known_peers = true` in config rejects all unknown peers,
+//!   requiring Bootstrap or Endorsed trust level (pre-configured).
+//! - mDNS discovery on the LAN is separate and not DNS-dependent.
+//! - TOFU pin TTL (24h) limits the persistence of a poisoned pin.
+//! - The BLAKE3-chained TOFU event log records all pin/unpin events
+//!   for forensic detection of pin-splicing attacks.
 
 use hickory_resolver::TokioResolver;
 use std::net::SocketAddr;

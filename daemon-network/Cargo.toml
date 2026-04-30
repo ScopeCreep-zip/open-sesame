@@ -34,6 +34,10 @@ path = "tests/integration/lifecycle.rs"
 name = "noise_vectors"
 path = "tests/integration/noise_vectors.rs"
 
+[[test]]
+name = "e2e_two_process"
+path = "tests/integration/e2e_two_process.rs"
+
 [dependencies]
 core-types.workspace = true
 core-crypto.workspace = true
