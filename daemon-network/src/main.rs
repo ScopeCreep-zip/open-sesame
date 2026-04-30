@@ -558,8 +558,20 @@ fn spawn_discovery(state: &DaemonState, config: &core_config::NetworkConfig) {
                         return;
                     }
                 };
+                // Detect a routable local IP for BEP-44 presence publishing.
+                // Iterates network interfaces for non-loopback, non-link-local
+                // IPv4 addresses. This works for LAN peers; WAN requires STUN.
+                let publish_addr = detect_routable_ipv4()
+                    .map(|ip| format!("{ip}:{port}"))
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "no routable IPv4 address found — BEP-44 will publish 0.0.0.0:{port} \
+                             (peers behind NAT need STUN, not yet implemented)"
+                        );
+                        format!("0.0.0.0:{port}")
+                    });
                 let record = daemon_discovery::bep44::schema::PresenceRecord {
-                    addrs: vec![format!("0.0.0.0:{port}")],
+                    addrs: vec![publish_addr],
                     signing_pubkey: signing_pubkey_hex,
                     noise_pubkey: noise_pubkey_hex,
                     display_name: install_id,
@@ -823,6 +835,31 @@ fn init_tracing() {
 fn notify_ready() {
     #[cfg(target_os = "linux")]
     platform_linux::systemd::notify_ready();
+}
+
+/// Detect a routable (non-loopback, non-link-local) IPv4 address.
+///
+/// Returns `None` if no routable address is found (e.g., no network
+/// interfaces up, or all interfaces are loopback/link-local).
+/// Uses a UDP connect trick to determine the outbound IP: connect a
+/// UDP socket to a public address (no traffic sent), then read the
+/// local address the kernel assigned.
+fn detect_routable_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Connect to a well-known public address (Google DNS). No packets are
+    // sent — the kernel just resolves the route and assigns a local addr.
+    socket.connect("8.8.8.8:80").ok()?;
+    match socket.local_addr().ok()? {
+        std::net::SocketAddr::V4(addr) => {
+            let ip = *addr.ip();
+            if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() {
+                None
+            } else {
+                Some(ip)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn notify_watchdog() {
