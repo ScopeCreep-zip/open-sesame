@@ -623,6 +623,133 @@ pub enum EventKind {
         received_factors: Vec<AuthFactorId>,
     },
 
+    // -- RPC: Network Identity (M1) --
+    /// Request the network transport identity keypair from daemon-secrets.
+    NetworkIdentityRequest,
+    /// Response with the network identity keypair.
+    NetworkIdentityResponse {
+        /// X25519 private key (32 bytes) in ProtectedAlloc-backed memory.
+        private_key: SensitiveBytes,
+        /// X25519 public key (32 bytes).
+        public_key: Vec<u8>,
+    },
+
+    // -- Vault Replication (M3) --
+    /// A replicated vault log entry received from a network peer.
+    VaultLogEntryReceived {
+        /// The installation ID of the peer that delivered this entry.
+        /// NOT a profile ID — the field was renamed from the original
+        /// `profile_id` to prevent confused-deputy misuse.
+        peer_installation_id: Uuid,
+        entry_json: String,
+    },
+    /// Request vault log entries from daemon-secrets for replication serving.
+    VaultReplicationPullRequest {
+        /// Trust profile name to replicate (e.g. "work", "personal").
+        profile_name: String,
+        /// Opaque peer identifier echoed back in the response so the caller
+        /// can key per-peer watermark caches without correlating by `msg_id`.
+        #[serde(default)]
+        peer_id: String,
+        #[serde(default)]
+        since_watermark_json: Option<String>,
+        max_entries: u32,
+    },
+    /// Response with vault log entries for replication.
+    VaultReplicationPullResponse {
+        profile_name: String,
+        /// Echoed from the request — the peer this response is for.
+        #[serde(default)]
+        peer_id: String,
+        entries_json: String,
+        has_more: bool,
+        /// HLC of the last returned entry, for the caller to cache as the
+        /// next pull's watermark. `None` if no entries matched.
+        #[serde(default)]
+        last_hlc_json: Option<String>,
+    },
+
+    /// Update pull progress for a peer after processing a pull response.
+    /// Sent by daemon-network to daemon-secrets so the `pull_progress` table
+    /// reflects where we left off pulling from each peer.
+    ReplicationPullProgressUpdate {
+        peer_id: String,
+        profile_name: String,
+        /// HLC JSON `{"wall_secs":N,"counter":N}` of the last entry in the batch.
+        last_hlc_json: String,
+    },
+
+    // -- RPC: Network Status (M2 CLI→daemon-network IPC) --
+    /// Request daemon-network's current status (sessions, discovery, TOFU).
+    NetworkStatusRequest,
+    /// Response with daemon-network status.
+    NetworkStatusResponse {
+        /// Number of active peer sessions.
+        active_sessions: u32,
+        /// Number of TOFU-pinned peers.
+        tofu_peers: u32,
+        /// Number of TOFU fork-evidence log events.
+        tofu_events: u32,
+        /// Discovery dial queue depth.
+        dial_queue_depth: u32,
+        /// Listen port.
+        listen_port: u16,
+        /// Whether the daemon is enabled.
+        enabled: bool,
+    },
+
+    /// Request daemon-network to dial a remote peer.
+    NetworkDialRequest {
+        /// Target address in `host:port` format.
+        addr: String,
+    },
+    /// Response to a dial request.
+    NetworkDialResponse {
+        /// Whether the dial succeeded.
+        success: bool,
+        /// Session ID if established.
+        #[serde(default)]
+        session_id: Option<String>,
+        /// Error message if failed.
+        #[serde(default)]
+        error: Option<String>,
+    },
+
+    /// Request discovery subsystem state.
+    NetworkDiscoverRequest,
+    /// Response with discovery state.
+    NetworkDiscoverResponse {
+        /// mDNS peers discovered on LAN.
+        mdns_peers: u32,
+        /// BEP-44 records published.
+        bep44_published: bool,
+        /// DNS SRV domains configured.
+        dns_srv_domains: Vec<String>,
+        /// Dial queue depth.
+        dial_queue_depth: u32,
+        /// SWIM cluster members.
+        swim_members: u32,
+    },
+
+    /// Request daemon-network to reload bootstrap.json and DNS SRV config.
+    NetworkDiscoveryReloadRequest,
+    /// Response to discovery reload request.
+    NetworkDiscoveryReloadResponse {
+        /// Number of new peers added to the dial queue.
+        added: u32,
+    },
+
+    /// Request to unpin a TOFU peer by public key hex.
+    NetworkUnpinRequest {
+        public_key_hex: String,
+    },
+    /// Response to unpin request.
+    NetworkUnpinResponse {
+        success: bool,
+        #[serde(default)]
+        error: Option<String>,
+    },
+
     // Forward compatibility: unknown events deserialize to this variant.
     #[serde(other)]
     Unknown,
@@ -686,6 +813,7 @@ impl_event_debug! {
         UnlockRequest { password => REDACTED, profile },
         SshUnlockRequest { master_key => REDACTED, profile, ssh_fingerprint },
         FactorSubmit { factor_id, key_material => REDACTED, profile, audit_metadata },
+        NetworkIdentityResponse { private_key => REDACTED, public_key },
     }
     transparent {
         WindowFocused { window_id, app_id, workspace_id },
@@ -792,6 +920,21 @@ impl_event_debug! {
         VaultAuthQuery { profile },
         VaultAuthQueryResponse { profile, enrolled_factors, auth_policy, partial_in_progress, received_factors },
         AccessDenied { reason },
+        NetworkIdentityRequest,
+        VaultLogEntryReceived { peer_installation_id, entry_json },
+        VaultReplicationPullRequest { profile_name, peer_id, since_watermark_json, max_entries },
+        VaultReplicationPullResponse { profile_name, peer_id, entries_json, has_more, last_hlc_json },
+        ReplicationPullProgressUpdate { peer_id, profile_name, last_hlc_json },
+        NetworkStatusRequest,
+        NetworkStatusResponse { active_sessions, tofu_peers, tofu_events, dial_queue_depth, listen_port, enabled },
+        NetworkDialRequest { addr },
+        NetworkDialResponse { success, session_id, error },
+        NetworkDiscoverRequest,
+        NetworkDiscoverResponse { mdns_peers, bep44_published, dns_srv_domains, dial_queue_depth, swim_members },
+        NetworkDiscoveryReloadRequest,
+        NetworkDiscoveryReloadResponse { added },
+        NetworkUnpinRequest { public_key_hex },
+        NetworkUnpinResponse { success, error },
         Unknown,
     }
 }

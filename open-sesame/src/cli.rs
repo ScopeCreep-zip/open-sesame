@@ -239,6 +239,39 @@ pub(crate) enum Command {
     /// Workspace management (directory-scoped project environments).
     #[command(subcommand, alias = "ws")]
     Workspace(WorkspaceCmd),
+
+    /// Network federation commands.
+    #[command(subcommand, alias = "net")]
+    Network(NetworkCmd),
+}
+
+#[derive(Subcommand)]
+pub(crate) enum NetworkCmd {
+    /// Show this installation's network identity (public key, installation ID).
+    Identity {
+        /// Output as JSON for bootstrap.json inclusion.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List known peers from the TOFU store.
+    Peers {
+        /// Unpin a peer by public key hex prefix (removes TOFU trust).
+        #[arg(long)]
+        unpin: Option<String>,
+    },
+    /// Show discovery subsystem state.
+    Discover,
+    /// Generate a gossip authentication key for bootstrap.json.
+    Keygen,
+    /// Reload bootstrap.json and DNS SRV configuration.
+    Reload,
+    /// Show daemon-network status.
+    Status,
+    /// Dial a remote peer by address (initiates Noise XX handshake).
+    Dial {
+        /// Remote address in `host:port` format (e.g., `10.0.0.1:48627`).
+        addr: String,
+    },
 }
 
 /// Resolve the workspace root from `SESAME_WORKSPACE_ROOT` or fall back to `/workspace`.

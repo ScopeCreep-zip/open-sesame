@@ -618,6 +618,8 @@ mod tests {
             org_ns: None,
             namespace: Uuid::from_u128(300),
             machine_binding: None,
+            network_pubkey: None,
+            signing_pubkey: None,
         };
         let profile_name = core_types::TrustProfileName::try_from("work").unwrap();
         let req_id = Uuid::from_u128(500);

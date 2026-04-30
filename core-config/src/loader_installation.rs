@@ -63,6 +63,11 @@ mod tests {
                 namespace: uuid::Uuid::from_u128(7),
             }),
             machine_binding: None,
+            created_at: None,
+            display_name: None,
+            network_pubkey_hex: None,
+            signing_pubkey_hex: None,
+            ceremony_completed: None,
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         atomic_write(&path, toml_str.as_bytes()).unwrap();

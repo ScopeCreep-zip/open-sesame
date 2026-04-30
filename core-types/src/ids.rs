@@ -53,6 +53,7 @@ define_id!(ClipboardEntryId, "clip");
 define_id!(DaemonId, "dmon");
 define_id!(ExtensionId, "ext");
 define_id!(AgentId, "agent");
+define_id!(SessionId, "sess");
 
 // ============================================================================
 // AppId

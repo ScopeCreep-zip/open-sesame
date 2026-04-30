@@ -6,6 +6,7 @@
   installShellFiles,
   makeWrapper,
   perl,
+  cmake,
   openssl,
   fontconfig,
   wayland,
@@ -13,6 +14,8 @@
   libxkbcommon,
   xkeyboard-config,
   libseccomp,
+  mold-wrapped,
+  clang,
   open-sesame,
 }:
 
@@ -28,6 +31,7 @@ let
     || lib.hasPrefix "extension-" name
     || lib.hasPrefix "sesame-" name
     || name == "open-sesame"
+    || name == "workspace-hack"
     || name == "xtask";
   crateDirs = lib.filter isCrateDir rootEntries;
 
@@ -73,6 +77,7 @@ rustPlatform.buildRustPackage {
       "cosmic-client-toolkit-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
       "cosmic-protocols-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
       "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
+      "snow-0.10.0" = "sha256-ePbZaa07wy+hemsoKDKKJDMwUJq2YnTecr97N9dqwSQ=";
     };
   };
 
@@ -81,7 +86,15 @@ rustPlatform.buildRustPackage {
     installShellFiles
     makeWrapper
     perl
+    cmake
+    mold-wrapped
+    clang
   ];
+
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
   buildInputs = [
     openssl
@@ -91,6 +104,9 @@ rustPlatform.buildRustPackage {
     libxkbcommon
     libseccomp
   ];
+
+  buildType = "release_dev";
+  checkType = "release_dev";
 
   # Build desktop crates with default features (desktop enabled).
   cargoBuildFlags =
@@ -111,7 +127,7 @@ rustPlatform.buildRustPackage {
     runHook preInstall
 
     mkdir -p $out/bin
-    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release
+    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release_dev
     for bin in ${lib.concatStringsSep " " expectedBinaries}; do
       install -Dm755 "$releaseDir/$bin" "$out/bin/$bin"
     done

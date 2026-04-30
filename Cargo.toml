@@ -1,3 +1,5 @@
+cargo-features = ["codegen-backend"]
+
 [workspace]
 members = [
     "core-memory",
@@ -23,6 +25,9 @@ members = [
     "sesame-workspace",
     "extension-host",
     "extension-sdk",
+    "daemon-network",
+    "daemon-discovery",
+    "workspace-hack",
 ]
 exclude = ["xtask"]
 resolver = "2"
@@ -59,6 +64,8 @@ platform-windows = { path = "platform-windows" }
 sesame-workspace = { path = "sesame-workspace" }
 extension-host  = { path = "extension-host" }
 extension-sdk   = { path = "extension-sdk" }
+daemon-network  = { path = "daemon-network" }
+daemon-discovery = { path = "daemon-discovery" }
 
 # -- Serialization --
 serde           = { version = "1", features = ["derive"] }
@@ -86,7 +93,24 @@ zeroize         = { version = "1", features = ["derive"] }
 blake3          = "1.8"
 getrandom       = "0.2"
 governor        = { version = "0.10", default-features = false, features = ["std"] }
-snow            = "0.10"
+socket2         = { version = "0.5", features = ["all"] }
+dashmap         = "6"
+snow            = { git = "https://github.com/mcginty/snow.git", rev = "295dc7b" }
+aws-lc-rs       = { version = "1", features = ["aws-lc-sys"] }
+ring            = "0.17"
+blake2          = "0.10"
+x25519-dalek    = { version = "2", features = ["static_secrets"] }
+equix           = { version = "0.6", default-features = false }
+hashx           = { version = "0.7", default-features = false }
+mainline        = { version = "6", features = ["async"] }
+# ed25519-dalek is NOT a workspace dep — mainline v6 re-exports it as
+# mainline::SigningKey. The pre-release v3 chain (rand_core 0.10-rc,
+# sha2 0.11-rc, getrandom 0.4-rc) conflicts with our stable crypto deps.
+# Access SigningKey only through mainline's re-export.
+foca            = { version = "1", features = ["std", "postcard-codec"] }
+hickory-resolver = { version = "0.25", features = ["tokio"] }
+bs58             = "0.5"
+base64           = "0.22"
 pbkdf2          = "0.12"
 sha2            = "0.10"
 hmac            = "0.12"
@@ -110,7 +134,7 @@ dirs            = "6"
 
 # -- Logging --
 tracing             = "0.1"
-tracing-subscriber  = { version = "0.3.20", features = ["env-filter", "fmt", "json", "ansi"] }  # MANDATORY pin: CVE-2025-58160
+tracing-subscriber  = { version = "0.3.23", features = ["env-filter", "fmt", "json", "ansi"] }  # MANDATORY pin: CVE-2025-58160
 tracing-journald    = "0.3"
 
 # -- CLI --
@@ -197,15 +221,57 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
 # ============================================================================
-# Release Profiles
+# Build Profiles
 # ============================================================================
 
+# Dev profile: fast compile, slow runtime. Optimized dependencies are cached
+# after first build — subsequent rebuilds only recompile changed workspace code.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+codegen-backend = "cranelift"
+
+# Optimize all dependencies in dev mode. Crypto crates (aws-lc-rs, blake3,
+# x25519-dalek, snow, argon2) are cripplingly slow without optimization.
+# Dependencies change rarely — this cost is paid once and cached.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+codegen-backend = "llvm"
+
+# Workspace crates that link C FFI static libraries must use LLVM — Cranelift
+# cannot resolve symbols from cmake-built C objects or handle panic unwinding
+# through FFI boundaries (libgit2, aws-lc-sys).
+[profile.dev.package.core-crypto]
+codegen-backend = "llvm"
+
+[profile.dev.package.sesame-workspace]
+codegen-backend = "llvm"
+
+# Build scripts and proc macros stay unoptimized — they run at compile time
+# and benefit from fast compilation, not fast execution.
+[profile.dev.build-override]
+opt-level = 0
+debug = false
+
+# Fast release: near-release performance, 3-5x faster link than full release.
+# Use for integration testing, smoketesting, and home-manager dev iteration.
+# Nix package.nix should use this profile for development builds.
+[profile.release_dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+incremental = true
+
+# Shipping release: maximum optimization for .deb and production deployment.
 [profile.release]
 lto = "thin"
 strip = true
 opt-level = 3
 codegen-units = 1
 
+# Maximum release: fat LTO for benchmark baselines and size-critical deployment.
 [profile.release-full]
 inherits = "release"
 lto = "fat"

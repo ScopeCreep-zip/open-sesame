@@ -11,37 +11,37 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Timeout for partial multi-factor unlock state (seconds).
-pub(crate) const PARTIAL_UNLOCK_TIMEOUT_SECS: u64 = 120;
+pub const PARTIAL_UNLOCK_TIMEOUT_SECS: u64 = 120;
 
 /// Interval for sweeping expired partial unlock state (seconds).
-pub(crate) const PARTIAL_UNLOCK_SWEEP_INTERVAL_SECS: u64 = 30;
+pub const PARTIAL_UNLOCK_SWEEP_INTERVAL_SECS: u64 = 30;
 
 /// BLAKE3 key derivation context prefix for combining factor pieces in `All` mode.
 /// The full context is `"{ALL_MODE_KDF_CONTEXT} {profile_name}"`.
-pub(crate) const ALL_MODE_KDF_CONTEXT: &str = "pds v2 combined-master-key";
+pub const ALL_MODE_KDF_CONTEXT: &str = "pds v2 combined-master-key";
 
 /// Partial unlock state for a profile awaiting additional factors.
-pub(crate) struct PartialUnlock {
+pub struct PartialUnlock {
     /// Master key candidates from factors received so far.
     /// For any/policy mode: each factor independently unwraps to the same master key.
     /// For all mode: factor pieces collected here, combined when all present.
-    pub(crate) received_factors: HashMap<AuthFactorId, SecureBytes>,
+    pub received_factors: HashMap<AuthFactorId, SecureBytes>,
     /// Which factors are still needed.
-    pub(crate) remaining_required: HashSet<AuthFactorId>,
+    pub remaining_required: HashSet<AuthFactorId>,
     /// How many additional factors are still needed (beyond required).
-    pub(crate) remaining_additional: u32,
+    pub remaining_additional: u32,
     /// Deadline after which partial state is discarded.
-    pub(crate) deadline: tokio::time::Instant,
+    pub deadline: tokio::time::Instant,
 }
 
 impl PartialUnlock {
     /// Check if the unlock policy is fully satisfied.
-    pub(crate) fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.remaining_required.is_empty() && self.remaining_additional == 0
     }
 
     /// Check if the deadline has passed.
-    pub(crate) fn is_expired(&self) -> bool {
+    pub fn is_expired(&self) -> bool {
         tokio::time::Instant::now() >= self.deadline
     }
 }
@@ -50,24 +50,24 @@ impl PartialUnlock {
 ///
 /// Always present after daemon init (as an empty container). Individual profiles
 /// are unlocked/locked independently — there is no global "locked" state.
-pub(crate) struct VaultState {
+pub struct VaultState {
     /// Per-profile master keys. Each derived independently from its own password+salt.
     /// Key: profile name. Value: master key (mlock'd, zeroize-on-drop).
-    pub(crate) master_keys: HashMap<TrustProfileName, SecureBytes>,
+    pub master_keys: HashMap<TrustProfileName, SecureBytes>,
     /// Trust profile name -> JitDelivery wrapping SqlCipherStore.
     /// Multiple vaults may be open concurrently.
-    pub(crate) vaults: HashMap<TrustProfileName, JitDelivery<SqlCipherStore>>,
+    pub vaults: HashMap<TrustProfileName, JitDelivery<SqlCipherStore>>,
     /// Profiles explicitly authorized for secret access.
     /// This is the security boundary — vault_for() refuses profiles not in this set.
     /// Distinct from `vaults.keys()`: a profile may be authorized before its vault
     /// is lazily opened, or a vault may be open while deactivation is in progress.
-    pub(crate) active_profiles: HashSet<TrustProfileName>,
+    pub active_profiles: HashSet<TrustProfileName>,
     /// In-progress multi-factor unlocks. At most one per profile.
-    pub(crate) partial_unlocks: HashMap<TrustProfileName, PartialUnlock>,
+    pub partial_unlocks: HashMap<TrustProfileName, PartialUnlock>,
     /// JIT TTL from CLI.
-    pub(crate) ttl: Duration,
+    pub ttl: Duration,
     /// Config directory for vault DB storage.
-    pub(crate) config_dir: PathBuf,
+    pub config_dir: PathBuf,
 }
 
 impl VaultState {
@@ -78,7 +78,7 @@ impl VaultState {
     ///
     /// Vault opening uses `spawn_blocking` to avoid blocking the tokio event loop
     /// during synchronous SQLCipher I/O (PRAGMA key, schema migration).
-    pub(crate) async fn vault_for(
+    pub async fn vault_for(
         &mut self,
         profile: &TrustProfileName,
     ) -> core_types::Result<&JitDelivery<SqlCipherStore>> {
@@ -136,7 +136,7 @@ impl VaultState {
     }
 
     /// Authorize a profile for secret access. Must be called before vault_for().
-    pub(crate) fn activate_profile(&mut self, profile: &TrustProfileName) {
+    pub fn activate_profile(&mut self, profile: &TrustProfileName) {
         self.active_profiles.insert(profile.clone());
         tracing::info!(profile = %profile, "profile authorized for secret access");
     }
@@ -146,7 +146,7 @@ impl VaultState {
     /// Idempotent: deactivating an already-inactive profile is not an error.
     /// Deauthorization (removing from active_profiles) is the security operation
     /// and happens FIRST — before vault close.
-    pub(crate) async fn deactivate_profile(&mut self, profile: &TrustProfileName) {
+    pub async fn deactivate_profile(&mut self, profile: &TrustProfileName) {
         self.active_profiles.remove(profile);
         if let Some(vault) = self.vaults.remove(profile) {
             vault.flush().await;
@@ -161,7 +161,7 @@ impl VaultState {
     /// Returns the authorization set, NOT the set of open vaults.
     /// These can diverge: a profile may be authorized before its vault
     /// is lazily opened.
-    pub(crate) fn active_profiles(&self) -> Vec<TrustProfileName> {
+    pub fn active_profiles(&self) -> Vec<TrustProfileName> {
         self.active_profiles.iter().cloned().collect()
     }
 
@@ -201,7 +201,7 @@ impl VaultState {
     }
 
     #[cfg(feature = "ipc-field-encryption")]
-    pub(crate) fn encrypt_for_ipc(
+    pub fn encrypt_for_ipc(
         &self,
         profile: &TrustProfileName,
         plaintext: &[u8],
@@ -218,7 +218,7 @@ impl VaultState {
     }
 
     #[cfg(feature = "ipc-field-encryption")]
-    pub(crate) fn decrypt_from_ipc(
+    pub fn decrypt_from_ipc(
         &self,
         profile: &TrustProfileName,
         wire: &[u8],
@@ -239,10 +239,10 @@ impl VaultState {
 }
 
 /// Result of a successful profile unlock.
-pub(crate) struct UnlockResult {
+pub struct UnlockResult {
     /// Per-profile master key (mlock'd, zeroize-on-drop).
-    pub(crate) master_key: SecureBytes,
+    pub master_key: SecureBytes,
     /// Pre-verified vault store, if a vault DB existed at unlock time.
     /// Cached to avoid redundant SQLCipher open on first ProfileActivate.
-    pub(crate) verified_store: Option<SqlCipherStore>,
+    pub verified_store: Option<SqlCipherStore>,
 }

@@ -18,6 +18,7 @@ mod init;
 mod input;
 mod ipc;
 mod launch;
+mod network;
 mod profile;
 mod secrets;
 mod snippets;
@@ -98,6 +99,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     exit_code || quiet,
                     quiet,
                 )
+                .await
             } else {
                 status::cmd_status().await
             }
@@ -216,5 +218,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             prefix,
         } => env::cmd_export(profile.as_deref(), &format, prefix.as_deref()).await,
         Command::Workspace(sub) => workspace::cmd_workspace(sub).await,
+        Command::Network(sub) => network::cmd_network(sub).await,
     }
 }

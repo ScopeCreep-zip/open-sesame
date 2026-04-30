@@ -47,7 +47,7 @@ impl std::fmt::Display for Status {
 const ALL_CATEGORIES: &[&str] = &["daemon", "memory", "sandbox", "platform"];
 
 /// Run diagnostic checks and produce output.
-pub fn cmd_doctor(
+pub async fn cmd_doctor(
     categories: &str,
     output_format: &str,
     exit_code: bool,
@@ -63,7 +63,7 @@ pub fn cmd_doctor(
 
     for cat in &selected {
         match *cat {
-            "daemon" => checks.extend(daemon::checks()),
+            "daemon" => checks.extend(daemon::checks().await),
             "memory" => checks.extend(memory::checks()),
             "sandbox" => checks.extend(sandbox::checks()),
             "platform" => checks.extend(platform::checks()),

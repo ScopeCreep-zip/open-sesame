@@ -251,7 +251,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             //   "auto"   → init on new org dir, inform on existing
             //   "always" → init or update without asking
             //   "never"  → no probes, no informs
-            //   "prompt" → interactive confirmation (TODO: future)
+            //   "prompt" → interactive confirmation before init/update
             //
             // This block is best-effort — probe failures or clone failures are
             // non-fatal. The project repo clone always proceeds.
@@ -271,6 +271,14 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     let has_workspace_git = org_dir.join(".git").is_dir();
                     let org_dir_exists = org_dir.exists();
 
+                    // Helper: prompt user for Y/N confirmation on stdin.
+                    let confirm = |question: &str| -> bool {
+                        eprint!("{question} [y/N] ");
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input).unwrap_or(0);
+                        matches!(input.trim(), "y" | "Y" | "yes" | "Yes")
+                    };
+
                     if has_workspace_git {
                         // Workspace.git already initialized.
                         if workspace_update || mode == "always" {
@@ -280,8 +288,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 Ok(()) => eprintln!("  Workspace updated."),
                                 Err(e) => eprintln!("  Warning: workspace pull failed: {e}"),
                             }
-                        } else if mode == "auto" {
-                            // Auto mode: show local vs remote state, don't modify.
+                        } else if mode == "auto" || mode == "prompt" {
+                            // Auto/prompt: show local vs remote state.
                             let local = sesame_workspace::git::head_commit_short(&org_dir)
                                 .ok()
                                 .flatten()
@@ -297,19 +305,48 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                             if let Some(ref remote_commit) = tracking
                                 && *remote_commit != local
                             {
-                                eprintln!(
-                                    "Note: org workspace at {} is at {local}, origin/{branch} is at {remote_commit}",
-                                    org_dir.display(),
-                                );
-                                eprintln!(
-                                    "  Update with: sesame workspace clone {} --workspace-update",
-                                    url,
-                                );
+                                if mode == "prompt" {
+                                    eprintln!(
+                                        "Org workspace at {} is at {local}, origin/{branch} is at {remote_commit}",
+                                        org_dir.display(),
+                                    );
+                                    if confirm("Pull workspace update?") {
+                                        match sesame_workspace::git::pull_ff_only(&org_dir) {
+                                            Ok(()) => eprintln!("  Workspace updated."),
+                                            Err(e) => {
+                                                eprintln!("  Warning: workspace pull failed: {e}")
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    eprintln!(
+                                        "Note: org workspace at {} is at {local}, origin/{branch} is at {remote_commit}",
+                                        org_dir.display(),
+                                    );
+                                    eprintln!(
+                                        "  Update with: sesame workspace clone {} --workspace-update",
+                                        url,
+                                    );
+                                }
                             }
                         }
                     } else if !org_dir_exists {
-                        // Org dir is new (doesn't exist) — safe to init assertively.
-                        if sesame_workspace::git::probe_remote(&ws_url) {
+                        // Org dir is new (doesn't exist).
+                        // Prompt mode: ask before init. Other modes: init assertively.
+                        let should_init = if mode == "prompt" {
+                            if sesame_workspace::git::probe_remote(&ws_url) {
+                                eprintln!(
+                                    "Detected {}/{}/{}.git for org workspace.",
+                                    conv.server, conv.org, ws_repo_name,
+                                );
+                                confirm("Initialize org workspace?")
+                            } else {
+                                false
+                            }
+                        } else {
+                            true
+                        };
+                        if should_init && sesame_workspace::git::probe_remote(&ws_url) {
                             eprintln!(
                                 "Detected {}/{}/{}.git — setting up org workspace...",
                                 conv.server, conv.org, ws_repo_name,

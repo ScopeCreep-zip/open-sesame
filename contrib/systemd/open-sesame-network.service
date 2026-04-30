@@ -1,0 +1,26 @@
+[Unit]
+Description=Open Sesame Network Transport Daemon
+Documentation=https://scopecreep-zip.github.io/open-sesame/book/
+After=open-sesame-profile.service open-sesame-secrets.service
+Requires=open-sesame-profile.service open-sesame-secrets.service
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+ExecStart=/usr/bin/daemon-network
+Type=notify
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateNetwork=no
+LimitCORE=0
+LimitNOFILE=4096
+LimitMEMLOCK=67108864
+MemoryMax=128M
+RuntimeDirectory=pds
+ConfigurationDirectory=pds
+StateDirectory=pds
+
+[Install]
+WantedBy=open-sesame-headless.target

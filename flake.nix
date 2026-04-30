@@ -8,17 +8,24 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, ... }:
+    { self, nixpkgs, rust-overlay, ... }:
     let
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
-      pkgsFor = system: nixpkgs.legacyPackages.${system};
+      pkgsFor = system: import nixpkgs {
+        inherit system;
+        overlays = [ rust-overlay.overlays.default ];
+      };
     in
     {
       packages = forAllSystems (system: {
@@ -117,6 +124,22 @@
               '';
             };
 
+            network = lib.mkOption {
+              type = tomlFormat.type;
+              default = { };
+              example = lib.literalExpression ''
+                {
+                  enabled = true;
+                  transport.listen_port = 48627;
+                }
+              '';
+              description = ''
+                Network federation configuration. Set `enabled = true` to
+                activate the Noise XX transport, TOFU peer discovery, and
+                vault replication. Maps to `[network]` in config.toml.
+              '';
+            };
+
             logLevel = lib.mkOption {
               type = lib.types.enum [
                 "error"
@@ -174,7 +197,7 @@
                 allProfiles = { default = mergedDefault; } // namedOtherProfiles;
               in
               lib.mkIf hasConfig {
-                source = tomlFormat.generate "open-sesame-config" {
+                source = tomlFormat.generate "open-sesame-config" ({
                   config_version = 3;
                   global = {
                     default_profile = "default";
@@ -185,7 +208,9 @@
                   crypto = { };
                   agents = { };
                   extensions = { };
-                };
+                } // lib.optionalAttrs (cfg.network != { }) {
+                  network = cfg.network;
+                });
               };
 
             # Ensure %t/pds exists on the host filesystem before services start.
@@ -196,6 +221,7 @@
             systemd.user.tmpfiles.rules = [
               "d %t/pds 0700 - - -"
               "d %h/.config/pds 0700 - - -"
+              "d %h/.local/state/pds 0700 - - -"
               "d %h/.cache/open-sesame 0700 - - -"
             ] ++ lib.optionals (!isHeadless) [
               "d %h/.cache/fontconfig 0755 - - -"
@@ -357,6 +383,39 @@
               };
             };
 
+            # Network daemon — federation transport (UDP/TCP, Noise XX).
+            # Requires secrets daemon for network identity keypair retrieval.
+            # PrivateNetwork is NOT set — this daemon needs real network access.
+            systemd.user.services.open-sesame-network = {
+              Unit = {
+                Description = "Open Sesame network transport daemon";
+                Documentation = "https://github.com/scopecreep-zip/open-sesame";
+                Requires = [ "open-sesame-profile.service" "open-sesame-secrets.service" ];
+                After = [ "open-sesame-profile.service" "open-sesame-secrets.service" ];
+                PartOf = [ "open-sesame-headless.target" ];
+              };
+              Service = {
+                Type = "notify";
+                ExecStart = "${headlessPkg}/bin/daemon-network";
+                Restart = "on-failure";
+                RestartSec = 5;
+                TimeoutStopSec = 5;
+                WatchdogSec = 30;
+                NoNewPrivileges = true;
+                ProtectHome = "read-only";
+                ProtectSystem = "strict";
+                ReadWritePaths = [ "%t/pds" "%h/.config/pds" "%h/.local/state/pds" ];
+                LimitNOFILE = 4096;
+                LimitCORE = 0;
+                LimitMEMLOCK = "64M";
+                MemoryMax = "128M";
+                Environment = [ "RUST_LOG=${cfg.logLevel}" ];
+              };
+              Install = {
+                WantedBy = [ "open-sesame-headless.target" ];
+              };
+            };
+
             # === Desktop-only daemons (skipped in headless mode) ===
 
             # Window manager daemon — overlay window switcher.
@@ -459,21 +518,30 @@
         system:
         let
           pkgs = pkgsFor system;
+          # Read toolchain from rust-toolchain.toml — nightly with Cranelift.
+          # All components (rustfmt, clippy, rust-analyzer, rust-src,
+          # rustc-codegen-cranelift-preview) come from this single derivation.
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         in
         {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
-              # Rust toolchain
-              cargo
-              rustc
-              rust-analyzer
-              clippy
-              rustfmt
+              # Rust toolchain (nightly, pinned via rust-toolchain.toml)
+              rustToolchain
+
+              # Build acceleration
+              mold            # parallel linker (3-5x faster link than GNU ld)
+              clang           # mold driver (rustc -C link-arg=-fuse-ld=mold)
+              sccache         # compilation cache (shared via S3/Minio backend)
 
               # Build tools
               pkg-config
               patchelf
               cargo-deb
+              cargo-cross
+              cargo-hakari
+              cargo-nextest
+              mise
 
               # Documentation
               mdbook
@@ -552,6 +620,7 @@
 
             shellHook = ''
               echo "open-sesame v2 devShell ready"
+              echo "  rustc: $(rustc --version)"
               echo "  cargo check --workspace"
             '';
           };

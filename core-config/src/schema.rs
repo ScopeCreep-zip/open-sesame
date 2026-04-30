@@ -13,8 +13,10 @@ pub use crate::schema_agents::{
 };
 pub use crate::schema_crypto::CryptoConfigToml;
 pub use crate::schema_installation::{InstallationConfig, MachineBindingConfig, OrgConfig};
+pub use crate::schema_network::NetworkConfig;
 pub use crate::schema_peripheral::{AuditConfig, ClipboardConfig, InputConfig, LauncherConfig};
 pub use crate::schema_secrets::{AuthConfig, SecretsConfig};
+pub use crate::schema_vault_sync::VaultSyncConfig;
 pub use crate::schema_wm::{LaunchProfile, WmConfig, WmKeyBinding};
 pub use crate::schema_workspace::{LocalSesameConfig, WorkspaceConfig, WorkspaceSettings};
 
@@ -40,6 +42,12 @@ pub struct Config {
     /// Extension policy configuration.
     pub extensions: ExtensionsConfig,
 
+    /// Vault replication and sync configuration.
+    pub vault_sync: VaultSyncConfig,
+
+    /// Network transport and discovery configuration.
+    pub network: NetworkConfig,
+
     /// System policy overrides (read-only at runtime).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policy: Vec<PolicyOverride>,
@@ -54,6 +62,8 @@ impl Default for Config {
             crypto: CryptoConfigToml::default(),
             agents: AgentsConfig::default(),
             extensions: ExtensionsConfig::default(),
+            vault_sync: VaultSyncConfig::default(),
+            network: NetworkConfig::default(),
             policy: Vec::new(),
         }
     }

@@ -18,6 +18,194 @@ fn validate_secret_key(key: &str) -> core_types::Result<()> {
     core_types::validate_secret_key(key)
 }
 
+/// Check whether a secret key access should be blocked by the system key
+/// ACL. System keys (underscore prefix) are only accessible from callers
+/// with `SecurityLevel::Internal` or higher.
+///
+/// Returns `true` if the access is **denied** (caller lacks clearance).
+fn is_system_key_denied(key: &str, security_level: SecurityLevel) -> bool {
+    key.starts_with('_') && security_level < SecurityLevel::Internal
+}
+
+/// Filter system keys from a key list for non-Internal callers.
+fn filter_system_keys(keys: &mut Vec<String>, security_level: SecurityLevel) {
+    if security_level < SecurityLevel::Internal {
+        keys.retain(|k| !k.starts_with('_'));
+    }
+}
+
+/// Global vault log handle, initialised from `main.rs` at startup.
+///
+/// Uses `OnceLock` to avoid threading the `Arc<VaultLog>` through every
+/// CRUD function signature. The vault log is set once and read many times.
+static VAULT_LOG: std::sync::OnceLock<std::sync::Arc<crate::vault_log::VaultLog>> =
+    std::sync::OnceLock::new();
+
+/// Cached installation ID to avoid re-reading installation.toml on every write.
+pub static INSTALL_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Signing seed for vault log entry signing.
+/// `RwLock` (not `OnceLock`) because the seed lifecycle is:
+/// unavailable (startup) → available (vault unlock) → unavailable (vault lock).
+/// `OnceLock` can't be cleared on lock or re-set after init ceremony creates the seed.
+/// `Zeroizing` wrapper ensures the old value is zeroized when replaced or cleared.
+static SIGNING_SEED: std::sync::RwLock<Option<zeroize::Zeroizing<[u8; 32]>>> =
+    std::sync::RwLock::new(None);
+
+/// Network identity private key for replication re-encryption decryption.
+/// Same lifecycle as `SIGNING_SEED`.
+static NETWORK_PRIVATE_KEY: std::sync::RwLock<Option<zeroize::Zeroizing<[u8; 32]>>> =
+    std::sync::RwLock::new(None);
+
+/// Set the signing seed. Takes `Zeroizing` to avoid unzeroized boundary copies.
+/// Called after vault unlock delivers `_signing-seed`.
+pub fn set_signing_seed(seed: Option<zeroize::Zeroizing<[u8; 32]>>) {
+    let mut guard = SIGNING_SEED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = seed;
+}
+
+/// Clear the signing seed. Called on vault lock.
+/// Uses `into_inner` on poisoned locks — zeroization must not be blocked by poisoning.
+pub fn clear_signing_seed() {
+    let mut guard = SIGNING_SEED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = None;
+}
+
+/// Set the network identity private key. Takes `Zeroizing` to avoid boundary copies.
+pub fn set_network_private_key(key: Option<zeroize::Zeroizing<[u8; 32]>>) {
+    let mut guard = NETWORK_PRIVATE_KEY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = key;
+}
+
+/// Clear the network private key. Called on vault lock.
+pub fn clear_network_private_key() {
+    let mut guard = NETWORK_PRIVATE_KEY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = None;
+}
+
+/// Check if the signing seed is available without copying it.
+/// Use this for predicate checks instead of `with_signing_seed(..).is_some()`.
+pub fn signing_seed_is_set() -> bool {
+    SIGNING_SEED
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+/// Check if the network private key is available without copying it.
+#[allow(dead_code)] // API symmetry with signing_seed_is_set; used when predicates are needed.
+pub fn network_private_key_is_set() -> bool {
+    NETWORK_PRIVATE_KEY
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+/// Access the signing seed inside a closure. The seed never leaves the lock
+/// scope — no stack copies, no `Zeroize` burden on callers.
+pub fn with_signing_seed<R>(f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
+    let guard = SIGNING_SEED
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.as_deref().map(f)
+}
+
+/// Access the network private key inside a closure.
+pub fn with_network_private_key<R>(f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
+    let guard = NETWORK_PRIVATE_KEY
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.as_deref().map(f)
+}
+
+/// Set the global vault log instance. Called once from `main.rs`.
+///
+/// Accepts the installation ID as a pre-validated parameter from the caller
+/// instead of re-reading `installation.toml` from disk. The caller (main.rs)
+/// loads the installation config once and passes the ID — no redundant disk
+/// reads, no divergence between what main.rs and the vault log think the
+/// installation ID is.
+///
+/// # Errors
+///
+/// Returns an error if `installation_id` is not a valid non-nil UUID. The
+/// vault log requires a stable installation ID for per-author hash chain
+/// semantics — running without one is a misconfiguration that must be loud.
+pub fn set_vault_log(
+    log: std::sync::Arc<crate::vault_log::VaultLog>,
+    installation_id: &str,
+) -> Result<(), String> {
+    // Validate FIRST, set INSTALL_ID only after success.
+    // This prevents the OnceLock from being poisoned with an invalid value
+    // if validation fails — the expect() in write_local_entry relies on
+    // INSTALL_ID being a valid non-nil UUID when set.
+    let parsed = uuid::Uuid::parse_str(installation_id)
+        .map_err(|e| format!("installation ID '{installation_id}' is not a valid UUID: {e}"))?;
+    if parsed.is_nil() {
+        return Err(
+            "installation ID is nil UUID — vault log requires a non-nil installation ID. \
+             Run `sesame init` to create one."
+                .into(),
+        );
+    }
+    // Only NOW set the OnceLock — validation passed.
+    let _ = INSTALL_ID.set(installation_id.to_string());
+    let _ = VAULT_LOG.set(log);
+    Ok(())
+}
+
+/// Get a reference to the global vault log (for dispatch handlers).
+pub fn vault_log_ref() -> Option<&'static std::sync::Arc<crate::vault_log::VaultLog>> {
+    VAULT_LOG.get()
+}
+
+/// Vault-log hook: writes a log entry after every successful secret mutation.
+///
+/// System keys (underscore prefix) are skipped — they are per-installation
+/// infrastructure (signing seed, network private key) that don't replicate.
+/// The init ceremony stores these before the signing seed is available,
+/// creating a bootstrapping chicken-and-egg. The audit log in daemon-profile
+/// provides ops visibility for system key writes.
+///
+/// If the vault log is not initialised or the signing seed is unavailable,
+/// the hook silently skips. Secret mutations succeed regardless — the vault
+/// log is for replication, not for gating CRUD operations.
+fn vault_log_hook(
+    profile: &TrustProfileName,
+    operation: core_types::VaultLogOp,
+    key: &str,
+    value_bytes: &[u8],
+) {
+    // System keys don't replicate — skip logging.
+    if key.starts_with('_') {
+        return;
+    }
+
+    let Some(log) = VAULT_LOG.get() else {
+        return;
+    };
+
+    // If the signing seed isn't available yet, skip silently.
+    // This happens between daemon start and vault unlock.
+    if !signing_seed_is_set() {
+        return;
+    }
+
+    let install_id = INSTALL_ID.get().map_or("", |s| s.as_str());
+
+    if let Err(e) = log.write_local_entry(profile, operation, key, install_id, value_bytes) {
+        tracing::warn!(error = %e, "vault log write failed (non-fatal)");
+    }
+}
+
 /// Emit a secret operation audit event on the IPC bus for persistent logging
 /// by daemon-profile. Fire-and-forget: audit event delivery failure must not
 /// block or fail secret operations.
@@ -225,12 +413,19 @@ fn deny_delete(_key: &str, reason: SecretDenialReason) -> EventKind {
 }
 
 /// Handle `SecretGet` event.
-pub(crate) async fn handle_secret_get(
+pub async fn handle_secret_get(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile: &TrustProfileName,
     key: &str,
 ) -> anyhow::Result<Option<EventKind>> {
+    if is_system_key_denied(key, msg.security_level) {
+        return Ok(Some(EventKind::SecretGetResponse {
+            key: key.to_string(),
+            value: SensitiveBytes::from_slice(&[]),
+            denial: Some(SecretDenialReason::AccessDenied),
+        }));
+    }
     // Gates 1-5.5: lock, active profile, identity, rate limit, ACL, key validation.
     if let Err(early) = secret_gate_pipeline(msg, ctx, "get", profile, key, deny_get).await {
         return early;
@@ -323,13 +518,19 @@ pub(crate) async fn handle_secret_get(
 }
 
 /// Handle `SecretSet` event.
-pub(crate) async fn handle_secret_set(
+pub async fn handle_secret_set(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile: &TrustProfileName,
     key: &str,
     value: &SensitiveBytes,
 ) -> anyhow::Result<Option<EventKind>> {
+    if is_system_key_denied(key, msg.security_level) {
+        return Ok(Some(EventKind::SecretSetResponse {
+            success: false,
+            denial: Some(SecretDenialReason::AccessDenied),
+        }));
+    }
     // Gates 1-5.5: lock, active profile, identity, rate limit, ACL, key validation.
     if let Err(early) = secret_gate_pipeline(msg, ctx, "set", profile, key, deny_set).await {
         return early;
@@ -365,10 +566,47 @@ pub(crate) async fn handle_secret_set(
     #[cfg(feature = "ipc-field-encryption")]
     let store_bytes: &[u8] = &store_value;
 
+    let default_profile = ctx.default_profile.clone();
     let (success, denial) = match state.vault_for(profile).await {
         Ok(vault) => match vault.store().set(key, store_bytes).await {
             Ok(()) => {
                 vault.flush().await;
+                // H-03: After sesame init writes _signing-seed or _network-identity-private
+                // to the default profile vault, reactively cache them so vault log
+                // signing and replication decryption work without a lock+unlock cycle.
+                if profile == &default_profile {
+                    if key == "_signing-seed" {
+                        if store_bytes.len() == 32 {
+                            let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+                            seed.copy_from_slice(store_bytes);
+                            set_signing_seed(Some(seed));
+                            tracing::info!("signing seed reactively cached after vault write");
+                        } else {
+                            // M-02: wrong-length value invalidates the cache.
+                            set_signing_seed(None);
+                            tracing::warn!(
+                                len = store_bytes.len(),
+                                "signing seed wrong length, cache invalidated"
+                            );
+                        }
+                    } else if key == "_network-identity-private" {
+                        if store_bytes.len() == 32 {
+                            let mut pk = zeroize::Zeroizing::new([0u8; 32]);
+                            pk.copy_from_slice(store_bytes);
+                            set_network_private_key(Some(pk));
+                            tracing::info!(
+                                "network private key reactively cached after vault write"
+                            );
+                        } else {
+                            set_network_private_key(None);
+                            tracing::warn!(
+                                len = store_bytes.len(),
+                                "network private key wrong length, cache invalidated"
+                            );
+                        }
+                    }
+                }
+                vault_log_hook(profile, core_types::VaultLogOp::Set, key, store_bytes);
                 (true, None)
             }
             Err(e) => {
@@ -400,12 +638,18 @@ pub(crate) async fn handle_secret_set(
 }
 
 /// Handle `SecretDelete` event.
-pub(crate) async fn handle_secret_delete(
+pub async fn handle_secret_delete(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile: &TrustProfileName,
     key: &str,
 ) -> anyhow::Result<Option<EventKind>> {
+    if is_system_key_denied(key, msg.security_level) {
+        return Ok(Some(EventKind::SecretDeleteResponse {
+            success: false,
+            denial: Some(SecretDenialReason::AccessDenied),
+        }));
+    }
     // Gates 1-5.5: lock, active profile, identity, rate limit, ACL, key validation.
     if let Err(early) = secret_gate_pipeline(msg, ctx, "delete", profile, key, deny_delete).await {
         return early;
@@ -418,6 +662,7 @@ pub(crate) async fn handle_secret_delete(
         Ok(vault) => match vault.store().delete(key).await {
             Ok(()) => {
                 vault.flush().await;
+                vault_log_hook(profile, core_types::VaultLogOp::Delete, key, &[]);
                 (true, None)
             }
             Err(e) => {
@@ -446,7 +691,7 @@ pub(crate) async fn handle_secret_delete(
 }
 
 /// Handle `SecretList` event.
-pub(crate) async fn handle_secret_list(
+pub async fn handle_secret_list(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile: &TrustProfileName,
@@ -570,7 +815,11 @@ pub(crate) async fn handle_secret_list(
 
     // 6. VAULT ACCESS.
     let (keys, denial) = match state.vault_for(profile).await {
-        Ok(vault) => (vault.store().list_keys().await.unwrap_or_default(), None),
+        Ok(vault) => {
+            let mut all_keys = vault.store().list_keys().await.unwrap_or_default();
+            filter_system_keys(&mut all_keys, msg.security_level);
+            (all_keys, None)
+        }
         Err(e) => {
             tracing::error!(profile = %profile, error = %e, "vault access failed");
             (vec![], Some(SecretDenialReason::VaultError(e.to_string())))
@@ -598,7 +847,7 @@ pub(crate) async fn handle_secret_list(
 }
 
 /// Handle `ProfileActivate` event.
-pub(crate) async fn handle_profile_activate(
+pub async fn handle_profile_activate(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile_name: &TrustProfileName,
@@ -637,7 +886,7 @@ pub(crate) async fn handle_profile_activate(
 }
 
 /// Handle `ProfileDeactivate` event.
-pub(crate) async fn handle_profile_deactivate(
+pub async fn handle_profile_deactivate(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile_name: &TrustProfileName,
@@ -652,7 +901,7 @@ pub(crate) async fn handle_profile_deactivate(
 }
 
 /// Handle `SecretsStateRequest` event.
-pub(crate) fn handle_secrets_state_request(ctx: &mut MessageContext<'_>) -> Option<EventKind> {
+pub fn handle_secrets_state_request(ctx: &mut MessageContext<'_>) -> Option<EventKind> {
     let state = &ctx.vault_state;
     let all_locked = state.master_keys.is_empty();
     let active_profiles = state.active_profiles();
@@ -672,4 +921,107 @@ pub(crate) fn handle_secrets_state_request(ctx: &mut MessageContext<'_>) -> Opti
         active_profiles,
         lock_state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ================================================================
+    // System key ACL: is_system_key_denied
+    // ================================================================
+
+    #[test]
+    fn system_key_denied_for_open_clearance() {
+        assert!(is_system_key_denied("_signing-seed", SecurityLevel::Open));
+        assert!(is_system_key_denied(
+            "_network-identity-private",
+            SecurityLevel::Open
+        ));
+    }
+
+    #[test]
+    fn system_key_allowed_for_internal_clearance() {
+        assert!(!is_system_key_denied(
+            "_signing-seed",
+            SecurityLevel::Internal
+        ));
+    }
+
+    #[test]
+    fn system_key_allowed_for_secrets_only_clearance() {
+        // SecretsOnly > Internal in the SecurityLevel ordering.
+        assert!(!is_system_key_denied(
+            "_signing-seed",
+            SecurityLevel::SecretsOnly
+        ));
+    }
+
+    #[test]
+    fn non_system_key_allowed_for_all_clearance_levels() {
+        assert!(!is_system_key_denied("api-key", SecurityLevel::Open));
+        assert!(!is_system_key_denied("api-key", SecurityLevel::Internal));
+        assert!(!is_system_key_denied(
+            "github-token",
+            SecurityLevel::SecretsOnly
+        ));
+    }
+
+    #[test]
+    fn empty_key_is_not_system_key() {
+        assert!(!is_system_key_denied("", SecurityLevel::Open));
+    }
+
+    #[test]
+    fn single_underscore_is_system_key() {
+        assert!(is_system_key_denied("_", SecurityLevel::Open));
+    }
+
+    // ================================================================
+    // System key ACL: filter_system_keys
+    // ================================================================
+
+    #[test]
+    fn filter_hides_system_keys_for_open_clearance() {
+        let mut keys = vec![
+            "api-key".into(),
+            "_signing-seed".into(),
+            "github-token".into(),
+            "_network-identity-private".into(),
+        ];
+        filter_system_keys(&mut keys, SecurityLevel::Open);
+        assert_eq!(keys, vec!["api-key", "github-token"]);
+    }
+
+    #[test]
+    fn filter_preserves_system_keys_for_internal_clearance() {
+        let mut keys = vec![
+            "api-key".into(),
+            "_signing-seed".into(),
+            "github-token".into(),
+        ];
+        filter_system_keys(&mut keys, SecurityLevel::Internal);
+        assert_eq!(keys, vec!["api-key", "_signing-seed", "github-token"]);
+    }
+
+    #[test]
+    fn filter_preserves_all_keys_for_secrets_only() {
+        let mut keys = vec!["_a".into(), "_b".into(), "c".into()];
+        filter_system_keys(&mut keys, SecurityLevel::SecretsOnly);
+        assert_eq!(keys, vec!["_a", "_b", "c"]);
+    }
+
+    #[test]
+    fn filter_empty_list_is_noop() {
+        let mut keys: Vec<String> = vec![];
+        filter_system_keys(&mut keys, SecurityLevel::Open);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn filter_all_system_keys_produces_empty() {
+        let mut keys = vec!["_a".into(), "_b".into()];
+        filter_system_keys(&mut keys, SecurityLevel::Open);
+        assert!(keys.is_empty());
+    }
 }

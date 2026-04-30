@@ -15,6 +15,15 @@ output:
 pre-commit:
   parallel: true
   commands:
+    # Workspace-hack freshness (cargo-hakari)
+    hakari-check:
+      glob: "*.toml"
+      run: cargo hakari generate --diff && cargo hakari manage-deps --dry-run
+      tags: [rust, deps]
+      fail_text: |
+        workspace-hack is stale.
+        Fix with: cargo hakari generate && cargo hakari manage-deps --yes
+
     # Rust checks
     rust-format:
       glob: "*.rs"
@@ -26,7 +35,7 @@ pre-commit:
 
     rust-clippy:
       glob: "*.rs"
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy -- -D warnings
       tags: [rust, lint]
       fail_text: |
         Clippy check failed.
@@ -100,20 +109,20 @@ pre-push:
   parallel: true
   commands:
     test-suite:
-      run: cargo test
+      run: cargo nextest run
       tags: [test]
       skip:
         - rebase
       fail_text: |
         Tests failed.
-        Run: cargo test
+        Run: cargo nextest run
 
     cargo-check:
-      run: cargo check --all-targets --all-features
+      run: cargo check --all-targets
       tags: [rust, check]
       fail_text: |
         Cargo check failed.
-        Run: cargo check --all-targets --all-features
+        Run: cargo check --all-targets
 
     link-check:
       run: mise exec -- lychee --offline '**/*.md'

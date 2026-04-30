@@ -31,21 +31,11 @@
 //! Per-profile password → Argon2id(password, per-profile salt) → Master Key → BLAKE3 derive_key → vault key
 //! ```
 
-#[cfg(target_os = "linux")]
-mod key_locker_linux;
-
-mod acl;
-mod crud;
-mod dispatch;
-mod keyring;
-mod rate_limit;
-mod sandbox;
-mod unlock;
-mod vault;
-
-use dispatch::MessageContext;
-use rate_limit::SecretRateLimiter;
-use vault::{PARTIAL_UNLOCK_SWEEP_INTERVAL_SECS, VaultState};
+use daemon_secrets::crud;
+use daemon_secrets::dispatch::{self, MessageContext};
+use daemon_secrets::rate_limit::SecretRateLimiter;
+use daemon_secrets::vault::{PARTIAL_UNLOCK_SWEEP_INTERVAL_SECS, VaultState};
+use daemon_secrets::vault_log;
 
 use anyhow::Context;
 use clap::Parser;
@@ -117,6 +107,21 @@ async fn main() -> anyhow::Result<()> {
     let config_dir = core_config::config_dir();
     let default_profile: TrustProfileName = config.global.default_profile.clone();
 
+    // -- Installation identity --
+    let install_config = core_config::load_installation()
+        .context("failed to load installation config — run `sesame init` first")?;
+    let installation_id = install_config.id.to_string();
+
+    // -- Vault log (M3 pre-qualification) --
+    let vault_log_path = config_dir.join("vaults").join("vault-log.db");
+    let vault_log = std::sync::Arc::new(
+        vault_log::VaultLog::open(&vault_log_path)
+            .map_err(|e| anyhow::anyhow!("failed to open vault-log.db: {e}"))?,
+    );
+    crud::set_vault_log(std::sync::Arc::clone(&vault_log), &installation_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    tracing::info!(path = %vault_log_path.display(), "vault log opened");
+
     // -- IPC bus connection: read keypair BEFORE sandbox (keypair files need to be open) --
     let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
     tracing::info!(path = %socket_path.display(), "connecting to IPC bus");
@@ -147,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
 
     // -- Sandbox (Linux) -- applied AFTER keypair read, BEFORE IPC traffic.
     #[cfg(target_os = "linux")]
-    sandbox::apply_sandbox();
+    daemon_secrets::sandbox::apply_sandbox();
 
     tracing::info!("connected to IPC bus (Noise IK encrypted)");
 
@@ -189,6 +194,10 @@ async fn main() -> anyhow::Result<()> {
     let mut partial_sweep =
         tokio::time::interval(Duration::from_secs(PARTIAL_UNLOCK_SWEEP_INTERVAL_SECS));
     partial_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut compaction_sweep = tokio::time::interval(Duration::from_secs(300));
+    compaction_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut fold_sweep = tokio::time::interval(Duration::from_secs(30));
+    fold_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = partial_sweep.tick() => {
@@ -203,6 +212,28 @@ async fn main() -> anyhow::Result<()> {
                     vault_state.partial_unlocks.remove(name);
                     tracing::info!(profile = %name, "expired partial unlock state removed");
                 }
+            }
+            _ = compaction_sweep.tick() => {
+                if let Some(log) = crud::vault_log_ref() {
+                    #[allow(clippy::cast_possible_wrap)]
+                    match log.compact(u64::from(config.vault_sync.compaction_threshold), config.vault_sync.compaction_retention_secs as i64) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!(deleted = n, "vault log compaction complete"),
+                        Err(e) => tracing::warn!(error = %e, "vault log compaction failed"),
+                    }
+                }
+            }
+            _ = fold_sweep.tick() => {
+                let mut ctx = MessageContext {
+                    client: &mut client,
+                    vault_state: &mut vault_state,
+                    config_dir: &config_dir,
+                    default_profile: &default_profile,
+                    daemon_id,
+                    rate_limiter: &mut rate_limiter,
+                    config: &config,
+                };
+                dispatch::apply_deferred_entries(&mut ctx).await;
             }
             _ = watchdog.tick() => {
                 watchdog_count += 1;
@@ -294,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
         }
         vault_state.master_keys.clear(); // Each SecureBytes zeroizes on drop.
         #[cfg(target_os = "linux")]
-        keyring::keyring_delete_all(&profile_names).await;
+        daemon_secrets::keyring::keyring_delete_all(&profile_names).await;
         tracing::info!(
             vault_count = count,
             "all master keys zeroized, all vaults closed"
@@ -352,11 +383,11 @@ fn init_logging(format: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::keyring::keylocker_account;
-    use crate::unlock::{
+    use daemon_secrets::keyring::keylocker_account;
+    use daemon_secrets::unlock::{
         derive_master_key, generate_profile_salt, load_salt, profile_salt_path, unlock_profile,
     };
-    use crate::vault::{PartialUnlock, VaultState};
+    use daemon_secrets::vault::{PartialUnlock, VaultState};
 
     use core_crypto::SecureBytes;
     use core_secrets::{SecretsStore, SqlCipherStore};

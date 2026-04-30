@@ -417,10 +417,18 @@ pub struct InstallationId {
     /// Optional organizational namespace for enterprise deployments.
     pub org_ns: Option<OrganizationNamespace>,
     /// Derived namespace for deterministic ID generation (e.g., profile IDs).
-    /// Computed as `uuid5(org_ns.namespace || PROFILE_NS, "install:{id}")`.
+    /// Computed as `uuid5(PROFILE_NAMESPACE, id.as_bytes())`.
     pub namespace: Uuid,
     /// Optional machine binding for hardware attestation.
     pub machine_binding: Option<MachineBinding>,
+    /// X25519 public key for network transport identity (32 bytes).
+    /// `None` for installations that have not run the extended init ceremony.
+    #[serde(default)]
+    pub network_pubkey: Option<Vec<u8>>,
+    /// Ed25519 public key for vault log signing and coordinator operations (32 bytes).
+    /// `None` for installations that have not run the extended init ceremony.
+    #[serde(default)]
+    pub signing_pubkey: Option<Vec<u8>>,
 }
 
 /// Organizational namespace for enterprise-managed installations.

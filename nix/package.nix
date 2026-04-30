@@ -5,8 +5,11 @@
   pkg-config,
   installShellFiles,
   perl,
+  cmake,
   openssl,
   libseccomp,
+  mold-wrapped,
+  clang,
 }:
 
 let
@@ -25,6 +28,7 @@ let
     || lib.hasPrefix "extension-" name
     || lib.hasPrefix "sesame-" name
     || name == "open-sesame"
+    || name == "workspace-hack"
     || name == "xtask";
   crateDirs = lib.filter isCrateDir rootEntries;
 
@@ -50,6 +54,7 @@ let
     "daemon-secrets"
     "daemon-launcher"
     "daemon-snippets"
+    "daemon-network"
   ];
 
   expectedBinaries = [
@@ -58,6 +63,7 @@ let
     "daemon-secrets"
     "daemon-launcher"
     "daemon-snippets"
+    "daemon-network"
   ];
 in
 rustPlatform.buildRustPackage {
@@ -73,6 +79,7 @@ rustPlatform.buildRustPackage {
       "cosmic-client-toolkit-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
       "cosmic-protocols-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
       "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
+      "snow-0.10.0" = "sha256-ePbZaa07wy+hemsoKDKKJDMwUJq2YnTecr97N9dqwSQ=";
     };
   };
 
@@ -80,12 +87,27 @@ rustPlatform.buildRustPackage {
     pkg-config
     installShellFiles
     perl
+    cmake
+    mold-wrapped
+    clang
   ];
+
+  # Use mold linker for parallel linking inside Nix sandbox.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "clang";
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
   buildInputs = [
     openssl
     libseccomp
   ];
+
+  # release_dev profile: no LTO, codegen-units=16. 3-5x faster than full
+  # release (lto=thin, codegen-units=1) with near-identical daemon runtime
+  # performance. Full release profile used by CI/CD .deb pipeline only.
+  buildType = "release_dev";
+  checkType = "release_dev";
 
   # Build headless crates with desktop features disabled.
   cargoBuildFlags =
@@ -106,7 +128,7 @@ rustPlatform.buildRustPackage {
     runHook preInstall
 
     mkdir -p $out/bin
-    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release
+    releaseDir=target/${stdenv.hostPlatform.rust.cargoShortTarget}/release_dev
     for bin in ${lib.concatStringsSep " " expectedBinaries}; do
       install -Dm755 "$releaseDir/$bin" "$out/bin/$bin"
     done
@@ -116,7 +138,7 @@ rustPlatform.buildRustPackage {
     # Headless systemd units
     install -Dm644 contrib/systemd/open-sesame-headless.target \
       $out/lib/systemd/user/open-sesame-headless.target
-    for svc in profile secrets launcher snippets; do
+    for svc in profile secrets launcher snippets network; do
       install -Dm644 "contrib/systemd/open-sesame-$svc.service" \
         "$out/lib/systemd/user/open-sesame-$svc.service"
     done

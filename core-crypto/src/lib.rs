@@ -10,6 +10,7 @@
 mod encryption;
 pub mod hkdf;
 mod kdf;
+pub mod network;
 mod secure_bytes;
 mod secure_vec;
 

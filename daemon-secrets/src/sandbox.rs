@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 /// Apply Landlock + seccomp sandbox (Linux only).
 #[cfg(target_os = "linux")]
-pub(crate) fn apply_sandbox() {
+pub fn apply_sandbox() {
     use platform_linux::sandbox::{FsAccess, LandlockRule, SeccompProfile, apply_sandbox};
 
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());

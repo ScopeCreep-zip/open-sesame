@@ -1,0 +1,87 @@
+[package]
+name = "daemon-network"
+description = "Open Sesame network transport — Noise XX over UDP/TCP with TOFU identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "daemon_network"
+path = "src/lib.rs"
+
+[[bin]]
+name = "daemon-network"
+path = "src/main.rs"
+
+[[test]]
+name = "two_peer"
+path = "tests/integration/two_peer.rs"
+
+[[test]]
+name = "flood"
+path = "tests/integration/flood.rs"
+
+[[test]]
+name = "discovery"
+path = "tests/integration/discovery.rs"
+
+[[test]]
+name = "lifecycle"
+path = "tests/integration/lifecycle.rs"
+
+[[test]]
+name = "noise_vectors"
+path = "tests/integration/noise_vectors.rs"
+
+[[test]]
+name = "e2e_two_process"
+path = "tests/integration/e2e_two_process.rs"
+
+[dependencies]
+core-types.workspace = true
+core-crypto.workspace = true
+daemon-discovery.workspace = true
+mainline = { workspace = true }
+foca = { workspace = true }
+core-memory.workspace = true
+core-ipc.workspace = true
+core-config.workspace = true
+aws-lc-rs = { workspace = true }
+blake2 = { workspace = true }
+blake3.workspace = true
+zeroize = { workspace = true }
+tokio = { workspace = true }
+socket2 = { workspace = true }
+dashmap = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+governor = { workspace = true }
+snow = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+hex = { workspace = true }
+equix = { workspace = true }
+base64 = { workspace = true }
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux = { workspace = true }
+tracing-journald = { workspace = true }
+libc = { workspace = true }
+rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+core-ipc = { workspace = true }
+
+[lints]
+workspace = true

@@ -240,7 +240,7 @@ pub async fn cmd_init(
 
     // Step 2: Installation Identity
     step_header(2, total_steps, "Installation Identity");
-    init_installation(org.as_deref())?;
+    let install_keys = init_installation(org.as_deref())?;
 
     // Step 3: Services
     step_header(3, total_steps, "Services");
@@ -252,10 +252,16 @@ pub async fn cmd_init(
         None => None,
     };
 
-    // Step 4: Vault initialization
+    // Step 4: Vault initialization (includes storing network + signing keys)
     let combine_mode = parse_auth_policy(&auth_policy)?;
     step_header(4, total_steps, "Vault");
-    init_vault(ssh_fingerprint.as_deref(), password, combine_mode).await?;
+    init_vault(
+        ssh_fingerprint.as_deref(),
+        password,
+        combine_mode,
+        install_keys,
+    )
+    .await?;
 
     // Step 5: Keybinding (conditional)
     if do_keybinding {
@@ -307,12 +313,19 @@ fn init_config() -> anyhow::Result<()> {
 
 // ── Step 2: Installation Identity ──────────────────────────────────────────
 
-fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
+/// Key material generated during installation identity setup.
+/// Returned to `cmd_init` for vault storage after unlock.
+struct InstallationKeys {
+    network_private: core_crypto::SecureBytes,
+    signing_seed: [u8; 32],
+}
+
+fn init_installation(org: Option<&str>) -> anyhow::Result<Option<InstallationKeys>> {
     let installation_path = core_config::installation_path();
 
     if installation_path.exists() {
         step_skip("Installation identity exists");
-        return Ok(());
+        return Ok(None);
     }
 
     let id = uuid::Uuid::new_v4();
@@ -346,11 +359,52 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
         }
     });
 
+    // Generate network identity X25519 keypair.
+    // The private key is stored in the vault AFTER unlock (later in the ceremony).
+    // The public key is recorded in installation.toml for TOFU and HandshakeAck.
+    let (network_private, network_public) = core_crypto::network::generate_x25519_keypair()
+        .map_err(|e| anyhow::anyhow!("network identity keypair generation failed: {e}"))?;
+    let network_pubkey_hex = hex::encode(network_public);
+    step_done("Generated network identity X25519 keypair");
+
+    // Generate Ed25519 signing keypair from random seed.
+    // The seed (not the master key) is the source of truth. It is stored in the
+    // vault alongside the network private key during init_vault(). The signing
+    // keypair is reconstructed from the seed on every boot after vault unlock.
+    // This design ensures the signing key is stable across password changes
+    // (SQLCipher PRAGMA rekey re-encrypts pages, not entries — the seed survives).
+    //
+    // Source: aws-lc-rs Ed25519KeyPair::from_seed_unchecked accepts raw 32-byte seed.
+    //   /workspace/usrbinkat/github.com/aws/aws-lc-rs/aws-lc-rs/src/ed25519.rs:353
+    // Source: rusqlite bundled-sqlcipher PRAGMA rekey is page-level.
+    //   /workspace/usrbinkat/github.com/rusqlite/rusqlite/ (bundled-sqlcipher feature)
+    let signing_seed = core_crypto::network::random_bytes::<32>();
+    let signing_keypair = core_crypto::network::derive_signing_keypair(
+        &core_crypto::SecureBytes::from_slice(&signing_seed),
+        &id,
+    )
+    .map_err(|e| anyhow::anyhow!("signing keypair derivation failed: {e}"))?;
+    let signing_pubkey_hex = hex::encode(signing_keypair.public_key());
+    step_done("Generated Ed25519 signing keypair");
+
+    let created_at = {
+        use std::time::SystemTime;
+        let d = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{}Z", d.as_secs())
+    };
+
     let install_config = core_config::InstallationConfig {
         id,
         namespace: install_ns,
         org: org_config,
         machine_binding: machine_binding.clone(),
+        created_at: Some(created_at),
+        display_name: None,
+        network_pubkey_hex: Some(network_pubkey_hex),
+        signing_pubkey_hex: Some(signing_pubkey_hex),
+        ceremony_completed: Some(true),
     };
 
     core_config::write_installation(&install_config)
@@ -413,6 +467,8 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
                     org_ns: audit_org_ns,
                     namespace: install_ns,
                     machine_binding: audit_machine_binding,
+                    network_pubkey: None,
+                    signing_pubkey: None,
                 },
                 org: org.map(|s| s.to_string()),
                 machine_binding_present: machine_binding.is_some(),
@@ -435,7 +491,10 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
         }
     );
 
-    Ok(())
+    Ok(Some(InstallationKeys {
+        network_private,
+        signing_seed,
+    }))
 }
 
 // ── Step 3: Services ────────────────────────────────────────────────────────
@@ -443,6 +502,7 @@ fn init_installation(org: Option<&str>) -> anyhow::Result<()> {
 async fn init_services() -> anyhow::Result<()> {
     // Check if already running.
     let is_active = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args([
             "--user",
             "is-active",
@@ -471,11 +531,13 @@ async fn init_services() -> anyhow::Result<()> {
 
     // daemon-reload to pick up any new/changed unit files.
     let _ = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args(["--user", "daemon-reload"])
         .status();
 
     // Detect whether desktop units are installed before reset-failed / start.
     let desktop_installed = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args([
             "--user",
             "list-unit-files",
@@ -489,6 +551,7 @@ async fn init_services() -> anyhow::Result<()> {
 
     // Reset any failed units from prior crash-loops.
     let _ = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args(["--user", "reset-failed", "open-sesame-headless.target"])
         .status();
     for unit in [
@@ -498,11 +561,13 @@ async fn init_services() -> anyhow::Result<()> {
         "open-sesame-snippets",
     ] {
         let _ = std::process::Command::new("systemctl")
+            .env_remove("LD_LIBRARY_PATH")
             .args(["--user", "reset-failed", unit])
             .status();
     }
     if desktop_installed {
         let _ = std::process::Command::new("systemctl")
+            .env_remove("LD_LIBRARY_PATH")
             .args(["--user", "reset-failed", "open-sesame-desktop.target"])
             .status();
         for unit in [
@@ -511,6 +576,7 @@ async fn init_services() -> anyhow::Result<()> {
             "open-sesame-input",
         ] {
             let _ = std::process::Command::new("systemctl")
+                .env_remove("LD_LIBRARY_PATH")
                 .args(["--user", "reset-failed", unit])
                 .status();
         }
@@ -518,6 +584,7 @@ async fn init_services() -> anyhow::Result<()> {
 
     // Start the headless target (always present).
     let start = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args(["--user", "start", "open-sesame-headless.target"])
         .output()
         .context("failed to run systemctl")?;
@@ -534,6 +601,7 @@ async fn init_services() -> anyhow::Result<()> {
 
     if desktop_installed {
         let _ = std::process::Command::new("systemctl")
+            .env_remove("LD_LIBRARY_PATH")
             .args(["--user", "start", "open-sesame-desktop.target"])
             .status();
         step_done("Starting desktop daemons");
@@ -564,6 +632,7 @@ async fn init_vault(
     ssh_fingerprint: Option<&str>,
     use_password: bool,
     combine_mode: core_types::AuthCombineMode,
+    install_keys: Option<InstallationKeys>,
 ) -> anyhow::Result<()> {
     let config_dir = core_config::config_dir();
     let profile =
@@ -787,6 +856,41 @@ async fn init_vault(
         }
     }
 
+    // Store network + signing key material in vault (if generated this run).
+    // The keys persist as vault entries — they survive password changes because
+    // SQLCipher PRAGMA rekey re-encrypts pages, not individual entries.
+    if let Some(keys) = install_keys {
+        // Store network private key.
+        let set_net = EventKind::SecretSet {
+            profile: profile.clone(),
+            key: "_network-identity-private".into(),
+            value: SensitiveBytes::from_slice(keys.network_private.as_bytes()),
+        };
+        match crate::ipc::rpc(&client, set_net, SecurityLevel::SecretsOnly).await? {
+            EventKind::SecretSetResponse { success: true, .. } => {
+                step_done("Network identity private key stored in vault");
+            }
+            other => {
+                tracing::warn!(response = ?other, "failed to store network private key");
+            }
+        }
+
+        // Store signing seed.
+        let set_sign = EventKind::SecretSet {
+            profile: profile.clone(),
+            key: "_signing-seed".into(),
+            value: SensitiveBytes::from_slice(&keys.signing_seed),
+        };
+        match crate::ipc::rpc(&client, set_sign, SecurityLevel::SecretsOnly).await? {
+            EventKind::SecretSetResponse { success: true, .. } => {
+                step_done("Ed25519 signing seed stored in vault");
+            }
+            other => {
+                tracing::warn!(response = ?other, "failed to store signing seed");
+            }
+        }
+    }
+
     // Activate default profile.
     let event = EventKind::ProfileActivate {
         target: ProfileId::new(),
@@ -874,9 +978,11 @@ pub fn cmd_wipe() -> anyhow::Result<()> {
 
     // Stop daemons — desktop first, then headless.
     let _ = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args(["--user", "stop", "open-sesame-desktop.target"])
         .status();
     let _ = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .args(["--user", "stop", "open-sesame-headless.target"])
         .status();
     println!("  Stopping daemons ... {}", "done".green());

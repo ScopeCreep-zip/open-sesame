@@ -1,4 +1,8 @@
 //! Daemon health checks — running state, uptime, memory, restarts.
+//!
+//! Every check is collected into the results Vec progressively. No check
+//! can block indefinitely — IPC queries are bounded by a 2-second timeout
+//! and failure produces a degraded-but-present result, never silence.
 
 use super::{Check, Status};
 
@@ -6,6 +10,7 @@ use super::{Check, Status};
 const DAEMONS: &[(&str, &str)] = &[
     ("profile", "open-sesame-profile.service"),
     ("secrets", "open-sesame-secrets.service"),
+    ("network", "open-sesame-network.service"),
     ("wm", "open-sesame-wm.service"),
     ("launcher", "open-sesame-launcher.service"),
     ("clipboard", "open-sesame-clipboard.service"),
@@ -13,10 +18,11 @@ const DAEMONS: &[(&str, &str)] = &[
     ("snippets", "open-sesame-snippets.service"),
 ];
 
-pub fn checks() -> Vec<Check> {
+pub async fn checks() -> Vec<Check> {
     let mut results = Vec::new();
 
     for &(name, unit) in DAEMONS {
+        let is_network = name == "network";
         let active = systemctl_prop(unit, "ActiveState");
         let pid = systemctl_prop(unit, "MainPID");
         let restarts = systemctl_prop(unit, "NRestarts");
@@ -115,14 +121,129 @@ pub fn checks() -> Vec<Check> {
             value: uptime.unwrap_or_else(|| "unknown".into()),
             description: String::new(),
         });
+
+        // Network daemon: additional checks from TOFU store + IPC.
+        if is_network && is_active {
+            collect_network_checks(&mut results, unit, &active).await;
+        }
     }
 
     results
 }
 
+/// Collect network-daemon-specific checks: TOFU store stats and IPC health.
+///
+/// TOFU store reads are synchronous filesystem I/O (SQLite read-only open).
+/// IPC health is bounded by a 2-second `tokio::time::timeout` — the `.await`
+/// runs directly on the caller's async runtime with no thread spawning and
+/// no `block_on`. If the IPC call times out or fails, a degraded check is
+/// emitted showing the systemd unit state.
+async fn collect_network_checks(results: &mut Vec<Check>, unit: &str, active: &Option<String>) {
+    // TOFU store stats (sync filesystem I/O — fast, cannot hang).
+    let state_dir = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("pds");
+    let tofu_path = state_dir.join("network-tofu.db");
+    if tofu_path.exists()
+        && let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &tofu_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+    {
+        let peer_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tofu_peers", [], |row| row.get(0))
+            .unwrap_or(0);
+        results.push(Check {
+            id: "daemon.network.tofu_peers".into(),
+            category: "daemon",
+            status: Status::Pass,
+            value: peer_count.to_string(),
+            description: String::new(),
+        });
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tofu_events", [], |row| row.get(0))
+            .unwrap_or(0);
+        results.push(Check {
+            id: "daemon.network.tofu_events".into(),
+            category: "daemon",
+            status: Status::Pass,
+            value: event_count.to_string(),
+            description: String::new(),
+        });
+    }
+
+    // IPC health: session count, listen port, dial queue depth.
+    // Hard 2-second timeout. Direct .await — no thread spawning, no block_on,
+    // no deadlock possible on current_thread runtime.
+    let ipc_result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let client = crate::ipc::connect().await.ok()?;
+        let msg = client
+            .request(
+                core_types::EventKind::NetworkStatusRequest,
+                core_types::SecurityLevel::Internal,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .ok()?;
+        if let core_types::EventKind::NetworkStatusResponse {
+            active_sessions,
+            listen_port,
+            dial_queue_depth,
+            ..
+        } = msg.payload
+        {
+            Some((active_sessions, listen_port, dial_queue_depth))
+        } else {
+            None
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match ipc_result {
+        Some((sessions, port, queue)) => {
+            results.push(Check {
+                id: "daemon.network.sessions".into(),
+                category: "daemon",
+                status: Status::Pass,
+                value: sessions.to_string(),
+                description: String::new(),
+            });
+            results.push(Check {
+                id: "daemon.network.listen_port".into(),
+                category: "daemon",
+                status: Status::Pass,
+                value: port.to_string(),
+                description: String::new(),
+            });
+            results.push(Check {
+                id: "daemon.network.dial_queue".into(),
+                category: "daemon",
+                status: Status::Pass,
+                value: queue.to_string(),
+                description: String::new(),
+            });
+        }
+        None => {
+            let sub_state = systemctl_prop(unit, "SubState").unwrap_or_else(|| "unknown".into());
+            let active_state = active.as_deref().unwrap_or("unknown");
+            results.push(Check {
+                id: "daemon.network.ipc".into(),
+                category: "daemon",
+                status: Status::Warn,
+                value: format!("{active_state}/{sub_state}"),
+                description: "not responding on IPC bus".into(),
+            });
+        }
+    }
+}
+
 /// Read a property from a systemd user unit via `systemctl --user show`.
 fn systemctl_prop(unit: &str, prop: &str) -> Option<String> {
     let output = std::process::Command::new("systemctl")
+        .env_remove("LD_LIBRARY_PATH")
         .arg("--user")
         .arg("show")
         .arg(unit)

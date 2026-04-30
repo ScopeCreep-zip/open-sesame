@@ -43,6 +43,10 @@ core-crypto  = { workspace = true }
 ssh-key      = { workspace = true }
 ssh-agent-client-rs = { workspace = true }
 getrandom    = { workspace = true }
+rusqlite     = { workspace = true }
+hex          = { workspace = true }
+base64       = { workspace = true }
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux   = { workspace = true }

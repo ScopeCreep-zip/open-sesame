@@ -39,7 +39,7 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: cachix/cachix-action@v15
+      - uses: cachix/cachix-action@v17
         with:
           name: scopecreep-zip
           authToken: ${{ secrets.SCOPE_CREEP_CACHIX_PRIVATE_KEY }}

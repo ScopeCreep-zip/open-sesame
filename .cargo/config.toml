@@ -1,4 +1,7 @@
 # Cargo configuration for Open Sesame
+#
+# Build acceleration env vars (mold linker, parallel frontend) are in
+# .env.example, loaded by .envrc (direnv) and .mise.toml.
 
 [alias]
 xtask = "run --manifest-path xtask/Cargo.toml --"

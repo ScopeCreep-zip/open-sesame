@@ -345,9 +345,7 @@ impl VaultAuthBackend for SshAgentBackend {
 
             // Overwrite with zeros before deletion to prevent casual recovery
             #[allow(clippy::cast_possible_truncation)]
-            let file_len = std::fs::metadata(&path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(256);
+            let file_len = std::fs::metadata(&path).map_or(256, |m| m.len() as usize);
             let zeros = vec![0u8; file_len];
             let _ = std::fs::write(&path, &zeros);
             std::fs::remove_file(&path)?;

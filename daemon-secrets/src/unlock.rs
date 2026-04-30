@@ -18,20 +18,17 @@ use zeroize::Zeroize;
 use crate::vault::UnlockResult;
 
 /// Per-profile salt file path: `{config_dir}/vaults/{profile}.salt`
-pub(crate) fn profile_salt_path(config_dir: &Path, profile: &TrustProfileName) -> PathBuf {
+pub fn profile_salt_path(config_dir: &Path, profile: &TrustProfileName) -> PathBuf {
     config_dir.join("vaults").join(format!("{profile}.salt"))
 }
 
 /// Derive the master key from password + salt via Argon2id.
-pub(crate) fn derive_master_key(
-    password: &[u8],
-    salt: &[u8; 16],
-) -> core_types::Result<SecureBytes> {
+pub fn derive_master_key(password: &[u8], salt: &[u8; 16]) -> core_types::Result<SecureBytes> {
     core_crypto::derive_key_argon2(password, salt)
 }
 
 /// Generate a new per-profile salt and persist to disk.
-pub(crate) fn generate_profile_salt(salt_path: &Path) -> core_types::Result<[u8; 16]> {
+pub fn generate_profile_salt(salt_path: &Path) -> core_types::Result<[u8; 16]> {
     let mut salt = [0u8; 16];
     getrandom::getrandom(&mut salt)
         .map_err(|e| core_types::Error::Crypto(format!("getrandom failed: {e}")))?;
@@ -46,7 +43,7 @@ pub(crate) fn generate_profile_salt(salt_path: &Path) -> core_types::Result<[u8;
 }
 
 /// Load a salt file from disk.
-pub(crate) fn load_salt(path: &Path) -> core_types::Result<[u8; 16]> {
+pub fn load_salt(path: &Path) -> core_types::Result<[u8; 16]> {
     let salt_bytes = std::fs::read(path).map_err(|e| {
         core_types::Error::Config(format!("failed to read salt from {}: {e}", path.display()))
     })?;
@@ -62,7 +59,7 @@ pub(crate) fn load_salt(path: &Path) -> core_types::Result<[u8; 16]> {
 /// First unlock generates the salt. Subsequent unlocks read existing salt.
 /// If a vault DB exists, the derived key is verified against it and the
 /// opened store is returned for caching.
-pub(crate) async fn unlock_profile(
+pub async fn unlock_profile(
     password: &[u8],
     profile: &TrustProfileName,
     config_dir: &Path,
@@ -134,7 +131,7 @@ pub(crate) async fn unlock_profile(
 }
 
 /// Handle `UnlockRequest` event.
-pub(crate) async fn handle_unlock_request(
+pub async fn handle_unlock_request(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     password: &core_types::SensitiveBytes,
@@ -192,6 +189,13 @@ pub(crate) async fn handle_unlock_request(
                 ctx.vault_state.vaults.insert(target.clone(), jit);
             }
 
+            // Populate the signing seed for vault log entry signing.
+            // Only attempt once (OnceLock) — if the default profile vault
+            // has `_signing-seed`, cache it for all future log writes.
+            if target == *ctx.default_profile {
+                populate_signing_seed(ctx).await;
+            }
+
             tracing::info!(profile = %target, "vault unlocked");
             "success"
         }
@@ -208,7 +212,7 @@ pub(crate) async fn handle_unlock_request(
 }
 
 /// Handle `SshUnlockRequest` event.
-pub(crate) async fn handle_ssh_unlock(
+pub async fn handle_ssh_unlock(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     master_key: &core_types::SensitiveBytes,
@@ -283,6 +287,9 @@ pub(crate) async fn handle_ssh_unlock(
             let jit = JitDelivery::new(store, ctx.vault_state.ttl);
             ctx.vault_state.vaults.insert(target.clone(), jit);
         }
+        if target == *ctx.default_profile {
+            populate_signing_seed(ctx).await;
+        }
         tracing::info!(profile = %target, ssh_fingerprint = %ssh_fingerprint, "vault unlocked via SSH");
     }
 
@@ -300,7 +307,7 @@ pub(crate) async fn handle_ssh_unlock(
 }
 
 /// Handle `FactorSubmit` event.
-pub(crate) async fn handle_factor_submit(
+pub async fn handle_factor_submit(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     factor_id: &AuthFactorId,
@@ -554,7 +561,7 @@ pub(crate) async fn handle_factor_submit(
 }
 
 /// Handle `VaultAuthQuery` event.
-pub(crate) fn handle_vault_auth_query(
+pub fn handle_vault_auth_query(
     ctx: &mut MessageContext<'_>,
     profile: &TrustProfileName,
 ) -> Option<EventKind> {
@@ -597,8 +604,72 @@ pub(crate) fn handle_vault_auth_query(
     }
 }
 
+/// Attempt to read `_signing-seed` from the default profile vault and
+/// cache it for vault log entry signing. Called after the default profile's
+/// vault is unlocked.
+///
+/// Reads directly from `vault_state.vaults` (not `vault_for`) because the
+/// profile may not yet be in `active_profiles` at unlock time — activation
+/// is a separate IPC event from daemon-profile.
+///
+/// # Thread safety
+///
+/// This function takes `&mut MessageContext`, which guarantees exclusive
+/// access at compile time — no concurrent call can hold another `&mut`
+/// reference. The `signing_seed_is_set()` early-return is safe because
+/// the exclusive borrow prevents concurrent mutation of the signing seed
+/// state from within the dispatch path. External mutation (vault lock
+/// clearing the seed) is sequenced through the same `&mut` borrow in
+/// `handle_lock_request`.
+async fn populate_signing_seed(ctx: &mut MessageContext<'_>) {
+    // Skip if already populated (avoid redundant vault reads).
+    if crate::crud::signing_seed_is_set() {
+        return;
+    }
+
+    let Some(vault) = ctx.vault_state.vaults.get(ctx.default_profile) else {
+        // Vault not cached (no vault DB existed at unlock time). Don't set
+        // None — the RwLock allows a future call to set the seed after the
+        // vault is created (e.g., after sesame init stores _signing-seed).
+        return;
+    };
+
+    match vault.resolve("_signing-seed").await {
+        Ok(seed_bytes) if seed_bytes.as_bytes().len() == 32 => {
+            let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+            seed.copy_from_slice(seed_bytes.as_bytes());
+            tracing::info!("signing seed loaded for vault log entry signing");
+            crate::crud::set_signing_seed(Some(seed));
+        }
+        Ok(seed_bytes) => {
+            tracing::warn!(
+                len = seed_bytes.as_bytes().len(),
+                "signing seed wrong length, vault log entries will be unsigned"
+            );
+            crate::crud::set_signing_seed(None);
+        }
+        Err(_) => {
+            tracing::debug!("_signing-seed not found in vault, log entries will be unsigned");
+            crate::crud::set_signing_seed(None);
+        }
+    }
+
+    // Also cache the network identity private key for re-encryption decryption.
+    match vault.resolve("_network-identity-private").await {
+        Ok(key_bytes) if key_bytes.as_bytes().len() == 32 => {
+            let mut key = zeroize::Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(key_bytes.as_bytes());
+            tracing::info!("network private key loaded for replication decryption");
+            crate::crud::set_network_private_key(Some(key));
+        }
+        _ => {
+            crate::crud::set_network_private_key(None);
+        }
+    }
+}
+
 /// Handle `LockRequest` event.
-pub(crate) async fn handle_lock_request(
+pub async fn handle_lock_request(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
     profile: &Option<TrustProfileName>,
@@ -614,6 +685,10 @@ pub(crate) async fn handle_lock_request(
             }
             ctx.vault_state.master_keys.remove(target); // zeroizes on drop
             ctx.vault_state.partial_unlocks.remove(target); // zeroizes on drop
+            if target == ctx.default_profile {
+                crate::crud::clear_signing_seed();
+                crate::crud::clear_network_private_key();
+            }
             #[cfg(target_os = "linux")]
             crate::keyring::keyring_delete_profile(target).await;
             tracing::info!(profile = %target, "vault locked, key material zeroized");
@@ -631,13 +706,20 @@ pub(crate) async fn handle_lock_request(
             }
             ctx.vault_state.master_keys.clear(); // each SecureBytes zeroizes on drop
             ctx.vault_state.partial_unlocks.clear(); // each SecureBytes zeroizes on drop
+            crate::crud::clear_signing_seed();
+            crate::crud::clear_network_private_key();
             #[cfg(target_os = "linux")]
             crate::keyring::keyring_delete_all(&locked).await;
             tracing::info!("all vaults locked, key material zeroized");
             locked
         }
     };
-    *ctx.rate_limiter = SecretRateLimiter::new();
+    // Reset rate limiter only on lock-all, not on per-profile lock.
+    // Per-profile lock doesn't change the threat surface — secrets in
+    // other profiles are still accessible. Lock-all is a clean slate.
+    if profile.is_none() {
+        *ctx.rate_limiter = SecretRateLimiter::new();
+    }
     audit_secret_access("lock", msg.sender, "-", None, "success");
     Some(EventKind::LockResponse {
         success: true,
