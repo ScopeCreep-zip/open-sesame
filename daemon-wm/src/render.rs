@@ -239,7 +239,7 @@ impl OverlayTheme {
             badge_text: Color::rgba(badge_on.0, badge_on.1, badge_on.2, badge_on.3),
             badge_matched_background: Color::rgba(accent_base.0, accent_base.1, accent_base.2, 255),
             badge_matched_text: Color::rgba(accent_on.0, accent_on.1, accent_on.2, accent_on.3),
-            selection_highlight: Color::rgba(255, 255, 255, 25),
+            selection_highlight: Color::rgba(accent_base.0, accent_base.1, accent_base.2, 50),
             border_color: Color::rgba(accent_base.0, accent_base.1, accent_base.2, 255),
             border_width: 2.0,
             corner_radius,
@@ -588,6 +588,20 @@ pub fn draw_full_overlay(
     let layout = Layout::new(scale);
 
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
+
+    // Full-screen background tint — when frosted, this is a semi-transparent
+    // dark wash that lets the compositor's blur shader show through while
+    // dimming the desktop beneath. When opaque, it's a solid dark background.
+    fill_rounded_rect(
+        pixmap,
+        0.0,
+        0.0,
+        width,
+        height,
+        layout.corner_radius,
+        theme.background,
+    );
+
     draw_screen_border(
         pixmap,
         width,
@@ -728,6 +742,15 @@ pub fn draw_status_toast(
 ) {
     let layout = Layout::new(scale);
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    fill_rounded_rect(
+        pixmap,
+        0.0,
+        0.0,
+        width,
+        height,
+        layout.corner_radius,
+        theme.background,
+    );
     draw_screen_border(
         pixmap,
         width,
@@ -799,6 +822,15 @@ pub fn draw_error_toast(
     let error_border = Color::rgba(239, 68, 68, 255);
 
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    fill_rounded_rect(
+        pixmap,
+        0.0,
+        0.0,
+        width,
+        height,
+        layout.corner_radius,
+        theme.background,
+    );
     draw_screen_border(
         pixmap,
         width,
@@ -875,6 +907,15 @@ pub fn draw_unlock_prompt(
     let unlock_border = Color::rgba(250, 204, 21, 255);
 
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    fill_rounded_rect(
+        pixmap,
+        0.0,
+        0.0,
+        width,
+        height,
+        layout.corner_radius,
+        theme.background,
+    );
     draw_screen_border(
         pixmap,
         width,
