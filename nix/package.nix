@@ -18,7 +18,8 @@ let
   # and cargo needs their Cargo.toml files to resolve the lock, even if they aren't built.
   rootDir = ./..;
   rootEntries = builtins.attrNames (builtins.readDir rootDir);
-  isCrateDir = name:
+  isCrateDir =
+    name:
     lib.hasPrefix "core-" name
     || lib.hasPrefix "daemon-" name
     || lib.hasPrefix "platform-" name
@@ -70,8 +71,8 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
     outputHashes = {
       # Required by Cargo.lock even though headless doesn't build these crates.
-      "cosmic-client-toolkit-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
-      "cosmic-protocols-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
+      "cosmic-client-toolkit-0.2.0" = "sha256-u1Ur9lPm2HE60jCEJVhKtbGYfzV8pdiDjrsGwgKf3nA=";
+      "cosmic-protocols-0.2.0" = "sha256-u1Ur9lPm2HE60jCEJVhKtbGYfzV8pdiDjrsGwgKf3nA=";
       "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
     };
   };
@@ -89,11 +90,17 @@ rustPlatform.buildRustPackage {
 
   # Build headless crates with desktop features disabled.
   cargoBuildFlags =
-    (lib.concatMap (c: [ "--package" c ]) binaryCrates)
+    (lib.concatMap (c: [
+      "--package"
+      c
+    ]) binaryCrates)
     ++ [ "--no-default-features" ];
 
   cargoTestFlags =
-    (lib.concatMap (c: [ "--package" c ]) binaryCrates)
+    (lib.concatMap (c: [
+      "--package"
+      c
+    ]) binaryCrates)
     ++ [ "--no-default-features" ];
 
   preCheck = ''

@@ -21,7 +21,8 @@ let
 
   rootDir = ./..;
   rootEntries = builtins.attrNames (builtins.readDir rootDir);
-  isCrateDir = name:
+  isCrateDir =
+    name:
     lib.hasPrefix "core-" name
     || lib.hasPrefix "daemon-" name
     || lib.hasPrefix "platform-" name
@@ -70,8 +71,8 @@ rustPlatform.buildRustPackage {
   cargoLock = {
     lockFile = ../Cargo.lock;
     outputHashes = {
-      "cosmic-client-toolkit-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
-      "cosmic-protocols-0.2.0" = "sha256-ymn+BUTTzyHquPn4hvuoA3y1owFj8LVrmsPu2cdkFQ8=";
+      "cosmic-client-toolkit-0.2.0" = "sha256-u1Ur9lPm2HE60jCEJVhKtbGYfzV8pdiDjrsGwgKf3nA=";
+      "cosmic-protocols-0.2.0" = "sha256-u1Ur9lPm2HE60jCEJVhKtbGYfzV8pdiDjrsGwgKf3nA=";
       "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
     };
   };
@@ -93,8 +94,10 @@ rustPlatform.buildRustPackage {
   ];
 
   # Build desktop crates with default features (desktop enabled).
-  cargoBuildFlags =
-    lib.concatMap (c: [ "--package" c ]) binaryCrates;
+  cargoBuildFlags = lib.concatMap (c: [
+    "--package"
+    c
+  ]) binaryCrates;
 
   cargoTestFlags = [ "--workspace" ];
 
