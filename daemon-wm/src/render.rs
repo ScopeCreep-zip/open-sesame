@@ -183,22 +183,39 @@ impl OverlayTheme {
     }
 
     /// Build theme from COSMIC desktop system theme.
+    ///
+    /// When frosted glass is active, uses the transparent container colors
+    /// (which have reduced alpha) so the compositor's blur shader shows through.
     #[cfg(target_os = "linux")]
     fn from_cosmic() -> Option<Self> {
         let cosmic = platform_linux::cosmic_theme::CosmicTheme::load()?;
 
-        let bg = cosmic.background.base.to_rgba();
-        let primary_base = cosmic.primary.base.to_rgba();
-        let primary_on = cosmic.primary.on.to_rgba();
-        let badge_base = cosmic.secondary.component.base.to_rgba();
-        let badge_on = cosmic.secondary.component.on.to_rgba();
+        // Use transparent containers when frosted glass is active, otherwise opaque.
+        let bg_container = if cosmic.frosted {
+            cosmic.transparent_background.as_ref().unwrap_or(&cosmic.background)
+        } else {
+            &cosmic.background
+        };
+        let primary_container = if cosmic.frosted {
+            cosmic.transparent_primary.as_ref().unwrap_or(&cosmic.primary)
+        } else {
+            &cosmic.primary
+        };
+
+        let bg = bg_container.base.to_rgba();
+        let primary_base = primary_container.base.to_rgba();
+        let primary_on = primary_container.on.to_rgba();
+        let badge_base = cosmic.secondary.component_base.to_rgba();
+        let badge_on = cosmic.secondary.component_on.to_rgba();
         let accent_base = cosmic.accent.base.to_rgba();
         let accent_on = cosmic.accent.on.to_rgba();
         let corner_radius = cosmic.corner_radii.radius_m[0] as f64;
 
         Some(Self {
-            background: Color::rgba(bg.0, bg.1, bg.2, 200),
-            card_background: Color::rgba(primary_base.0, primary_base.1, primary_base.2, 245),
+            // Use actual alpha from the theme — when frosted, these already have
+            // reduced alpha baked in by the ThemeBuilder. When opaque, alpha is FF.
+            background: Color::rgba(bg.0, bg.1, bg.2, bg.3),
+            card_background: Color::rgba(primary_base.0, primary_base.1, primary_base.2, primary_base.3),
             card_border: Color::rgba(accent_base.0, accent_base.1, accent_base.2, 255),
             text_primary: Color::rgba(primary_on.0, primary_on.1, primary_on.2, primary_on.3),
             text_secondary: Color::rgba(
