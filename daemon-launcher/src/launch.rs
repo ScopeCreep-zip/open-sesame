@@ -304,13 +304,11 @@ pub(crate) async fn launch_entry(
 
     tracing::info!(entry_id, %program, arg_count = args.len(), %scope_name, "spawning process");
 
-    // Read the LIVE systemd user environment so spawned apps get graphical
-    // session variables (WAYLAND_DISPLAY, DISPLAY, XDG_SESSION_TYPE, etc.)
-    // even when daemon-launcher started before the graphical session imported
-    // them. This is the critical bridge between headless daemon startup and
-    // graphical app launching.
-    let session_env = read_systemd_user_environment();
-
+    // Spawn via systemd-run --user --scope. The scope inherits the systemd
+    // user manager's environment automatically — including WAYLAND_DISPLAY,
+    // DISPLAY, XDG_SESSION_TYPE, etc. that cosmic-session imported via
+    // `systemctl --user import-environment` at session startup. No manual
+    // env propagation needed for the scope path.
     let mut scope_cmd = std::process::Command::new("systemd-run");
     scope_cmd
         .arg("--user")
@@ -329,17 +327,12 @@ pub(crate) async fn launch_entry(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
 
-    // Layer 1: systemd user session environment (WAYLAND_DISPLAY, DISPLAY, etc.)
-    for (k, v) in &session_env {
-        scope_cmd.env(k, v);
-    }
-
-    // Layer 2: composed launch profile env vars (override session vars if needed)
+    // Launch profile env vars (user-configured per-app environment).
     for (k, v) in &composed_env {
         scope_cmd.env(k, v);
     }
 
-    // Layer 3: SESAME_ vars (highest priority, cannot be overridden)
+    // SESAME_ vars (highest priority, cannot be overridden by profiles).
     scope_cmd.env("SESAME_PROFILE", default_profile);
     scope_cmd.env("SESAME_APP_ID", &cached.id);
     if let Ok(sock) = core_ipc::socket_path() {
@@ -355,10 +348,6 @@ pub(crate) async fn launch_entry(
         Ok(child) => (child, true),
         Err(e) => {
             tracing::warn!(error = %e, "systemd-run unavailable, falling back to direct spawn");
-            // Apply session env to direct spawn fallback too
-            for (k, v) in &session_env {
-                cmd.env(k, v);
-            }
             cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::inherit());
@@ -399,87 +388,6 @@ pub(crate) async fn launch_entry(
     );
 
     Ok(pid)
-}
-
-/// Read the current systemd user manager environment via D-Bus.
-///
-/// Calls org.freedesktop.systemd1.Manager.Environment on the user session
-/// bus — the native systemd API for reading the manager's environment.
-/// No subprocess overhead, no PATH dependency, no shell parsing.
-///
-/// This provides the LIVE session variables (WAYLAND_DISPLAY, DISPLAY,
-/// XDG_SESSION_TYPE, etc.) even when the daemon started before the graphical
-/// session imported them. Ensures spawned GUI apps always get the correct
-/// display connection regardless of daemon startup ordering.
-///
-/// Returns an empty map on failure (D-Bus unavailable, property read error).
-fn read_systemd_user_environment() -> HashMap<String, String> {
-    // Use a blocking D-Bus call since we're about to spawn a process anyway.
-    // tokio::task::block_in_place is not needed — this runs on spawn_blocking
-    // context or before the async runtime matters for this path.
-    let rt = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => {
-            tracing::debug!("no tokio runtime for D-Bus env query");
-            return HashMap::new();
-        }
-    };
-
-    rt.block_on(async {
-        let connection = match zbus::Connection::session().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(error = %e, "D-Bus session connection failed for env query");
-                return HashMap::new();
-            }
-        };
-
-        // Call org.freedesktop.DBus.Properties.Get on the systemd1 Manager
-        // to read the Environment property (Vec<String> of "KEY=VALUE")
-        let reply = connection
-            .call_method(
-                Some("org.freedesktop.systemd1"),
-                "/org/freedesktop/systemd1",
-                Some("org.freedesktop.DBus.Properties"),
-                "Get",
-                &("org.freedesktop.systemd1.Manager", "Environment"),
-            )
-            .await;
-
-        match reply {
-            Ok(msg) => {
-                // The reply body is a Variant containing an array of strings
-                let body = msg.body();
-                let variant: Result<zbus::zvariant::Value<'_>, _> = body.deserialize();
-                match variant {
-                    Ok(zbus::zvariant::Value::Array(arr)) => arr
-                        .iter()
-                        .filter_map(|v| {
-                            if let zbus::zvariant::Value::Str(s) = v {
-                                let entry = s.as_str();
-                                let (key, value) = entry.split_once('=')?;
-                                Some((key.to_string(), value.to_string()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
-                    Ok(_) => {
-                        tracing::debug!("unexpected variant type for Environment property");
-                        HashMap::new()
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "failed to deserialize Environment property");
-                        HashMap::new()
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "D-Bus call to systemd1 Manager failed");
-                HashMap::new()
-            }
-        }
-    })
 }
 
 /// Parse a tag into (profile_name, launch_profile_name).

@@ -55,11 +55,18 @@ pub fn apply_sandbox() {
             path: std::path::PathBuf::from("/usr/share/fonts"),
             access: FsAccess::ReadOnly,
         },
-        // COSMIC desktop theme (read-only, for native theme integration).
+        // COSMIC desktop theme (read-write: cosmic-config creates version
+        // subdirectories via fs::create_dir_all on first access).
         LandlockRule {
             path: dirs::config_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"))
                 .join("cosmic"),
+            access: FsAccess::ReadWrite,
+        },
+        // System shared libraries (read-only, for dlopen of libwayland-client,
+        // libfontconfig, etc. when running patchelf'd binaries without RPATH).
+        LandlockRule {
+            path: std::path::PathBuf::from("/lib"),
             access: FsAccess::ReadOnly,
         },
         // Nix store (read-only, shared libs, schemas, locale data, XKB).

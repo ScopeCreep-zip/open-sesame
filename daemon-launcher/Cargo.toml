@@ -19,7 +19,6 @@ anyhow       = { workspace = true }
 serde        = { workspace = true }
 snow         = { workspace = true }
 zeroize      = { workspace = true }
-zbus         = { workspace = true }
 
 [features]
 default = []

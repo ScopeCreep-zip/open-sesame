@@ -65,7 +65,7 @@ serde           = { version = "1", features = ["derive"] }
 postcard        = { version = "1", features = ["use-std"] }
 toml            = "1"
 serde_json      = "1"
-ron             = "0.9"
+ron             = "0.12"
 
 # -- Types & Errors --
 thiserror       = "2"
@@ -132,6 +132,8 @@ wayland-protocols-wlr   = { version = "0.3", features = ["client"] }
 smithay-client-toolkit  = { version = "0.20", features = ["xkbcommon"] }
 cosmic-client-toolkit   = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit" }
 cosmic-protocols        = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-protocols" }
+cosmic-theme            = { git = "https://github.com/pop-os/libcosmic", package = "cosmic-theme", default-features = false }
+cosmic-config           = { git = "https://github.com/pop-os/libcosmic", package = "cosmic-config", default-features = false, features = ["macro"] }
 zbus                    = { version = "5", default-features = false, features = ["tokio"] }
 landlock                = "0.4"
 libseccomp              = "0.4"
