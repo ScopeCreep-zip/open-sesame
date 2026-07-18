@@ -192,12 +192,18 @@ impl OverlayTheme {
 
         // Use transparent containers when frosted glass is active, otherwise opaque.
         let bg_container = if cosmic.frosted {
-            cosmic.transparent_background.as_ref().unwrap_or(&cosmic.background)
+            cosmic
+                .transparent_background
+                .as_ref()
+                .unwrap_or(&cosmic.background)
         } else {
             &cosmic.background
         };
         let primary_container = if cosmic.frosted {
-            cosmic.transparent_primary.as_ref().unwrap_or(&cosmic.primary)
+            cosmic
+                .transparent_primary
+                .as_ref()
+                .unwrap_or(&cosmic.primary)
         } else {
             &cosmic.primary
         };
@@ -215,7 +221,12 @@ impl OverlayTheme {
             // Use actual alpha from the theme — when frosted, these already have
             // reduced alpha baked in by the ThemeBuilder. When opaque, alpha is FF.
             background: Color::rgba(bg.0, bg.1, bg.2, bg.3),
-            card_background: Color::rgba(primary_base.0, primary_base.1, primary_base.2, primary_base.3),
+            card_background: Color::rgba(
+                primary_base.0,
+                primary_base.1,
+                primary_base.2,
+                primary_base.3,
+            ),
             card_border: Color::rgba(accent_base.0, accent_base.1, accent_base.2, 255),
             text_primary: Color::rgba(primary_on.0, primary_on.1, primary_on.2, primary_on.3),
             text_secondary: Color::rgba(

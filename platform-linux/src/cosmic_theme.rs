@@ -77,7 +77,12 @@ struct HexColor(String);
 
 impl HexColor {
     fn to_theme_color(&self) -> ThemeColor {
-        ThemeColor::from_hex(&self.0).unwrap_or(ThemeColor { r: 0, g: 0, b: 0, a: 255 })
+        ThemeColor::from_hex(&self.0).unwrap_or(ThemeColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        })
     }
 }
 
@@ -402,14 +407,21 @@ fn read_v1_accent(theme_id: &str) -> Option<AccentColors> {
 fn read_theme_key(theme_id: &str, version: &str, key: &str) -> Option<String> {
     // User config
     if let Some(config_dir) = dirs::config_dir() {
-        let path = config_dir.join("cosmic").join(theme_id).join(version).join(key);
+        let path = config_dir
+            .join("cosmic")
+            .join(theme_id)
+            .join(version)
+            .join(key);
         if let Ok(content) = fs::read_to_string(&path) {
             return Some(content);
         }
     }
 
     // System defaults
-    let system_path = Path::new("/usr/share/cosmic").join(theme_id).join(version).join(key);
+    let system_path = Path::new("/usr/share/cosmic")
+        .join(theme_id)
+        .join(version)
+        .join(key);
     fs::read_to_string(system_path).ok()
 }
 

@@ -452,19 +452,18 @@ fn read_systemd_user_environment() -> HashMap<String, String> {
                 let body = msg.body();
                 let variant: Result<zbus::zvariant::Value<'_>, _> = body.deserialize();
                 match variant {
-                    Ok(zbus::zvariant::Value::Array(arr)) => {
-                        arr.iter()
-                            .filter_map(|v| {
-                                if let zbus::zvariant::Value::Str(s) = v {
-                                    let entry = s.as_str();
-                                    let (key, value) = entry.split_once('=')?;
-                                    Some((key.to_string(), value.to_string()))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    }
+                    Ok(zbus::zvariant::Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|v| {
+                            if let zbus::zvariant::Value::Str(s) = v {
+                                let entry = s.as_str();
+                                let (key, value) = entry.split_once('=')?;
+                                Some((key.to_string(), value.to_string()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
                     Ok(_) => {
                         tracing::debug!("unexpected variant type for Environment property");
                         HashMap::new()
