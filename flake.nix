@@ -3,22 +3,41 @@
 
   nixConfig = {
     extra-substituters = [ "https://scopecreep-zip.cachix.org" ];
-    extra-trusted-public-keys = [ "scopecreep-zip.cachix.org-1:LPiVDsYXJvgljVfZPN43zBWB7ZCGFr2jZ/lBinnPGvU=" ];
+    extra-trusted-public-keys = [
+      "scopecreep-zip.cachix.org-1:LPiVDsYXJvgljVfZPN43zBWB7ZCGFr2jZ/lBinnPGvU="
+    ];
   };
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    konductor = {
+      url = "github:braincraftio/konductor";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      konductor,
+      ...
+    }:
     let
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
-      pkgsFor = system: nixpkgs.legacyPackages.${system};
+      pkgsFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [
+            konductor.inputs.rust-overlay.overlays.default
+            konductor.overlays.default
+          ];
+        };
     in
     {
       packages = forAllSystems (system: {
@@ -131,16 +150,21 @@
           };
 
           config = lib.mkIf cfg.enable {
-            warnings = lib.optional
-              (!isHeadless && builtins.pathExists "/dev/input" && !(builtins.elem "input" (config.home.extraGroups or [])))
-              ''
-                open-sesame: daemon-input requires 'input' group membership for
-                keyboard capture on desktops without a focused window.
-                Run: sudo usermod -aG input $USER (logout/login required)
-                This requirement will be removed once cosmic-comp is patched
-                to grant keyboard focus to exclusive layer-shell surfaces
-                when no window is focused.
-              '';
+            warnings =
+              lib.optional
+                (
+                  !isHeadless
+                  && builtins.pathExists "/dev/input"
+                  && !(builtins.elem "input" (config.home.extraGroups or [ ]))
+                )
+                ''
+                  open-sesame: daemon-input requires 'input' group membership for
+                  keyboard capture on desktops without a focused window.
+                  Run: sudo usermod -aG input $USER (logout/login required)
+                  This requirement will be removed once cosmic-comp is patched
+                  to grant keyboard focus to exclusive layer-shell surfaces
+                  when no window is focused.
+                '';
 
             home.packages = [ cfg.package ];
 
@@ -164,14 +188,20 @@
                 # Merge explicit default profile attrs (e.g. launch_profiles) into the
                 # base default profile, then add all other named profiles.
                 explicitDefault = cfg.profiles.default or { };
-                mergedDefault = defaultProfile // explicitDefault // {
-                  # Preserve wm from settings even if profiles.default is set.
-                  wm = cfg.settings;
-                };
+                mergedDefault =
+                  defaultProfile
+                  // explicitDefault
+                  // {
+                    # Preserve wm from settings even if profiles.default is set.
+                    wm = cfg.settings;
+                  };
                 otherProfiles = lib.filterAttrs (n: _: n != "default") cfg.profiles;
                 # Add `name` field to each non-default profile.
                 namedOtherProfiles = lib.mapAttrs (name: value: { inherit name; } // value) otherProfiles;
-                allProfiles = { default = mergedDefault; } // namedOtherProfiles;
+                allProfiles = {
+                  default = mergedDefault;
+                }
+                // namedOtherProfiles;
               in
               lib.mkIf hasConfig {
                 source = tomlFormat.generate "open-sesame-config" {
@@ -197,7 +227,8 @@
               "d %t/pds 0700 - - -"
               "d %h/.config/pds 0700 - - -"
               "d %h/.cache/open-sesame 0700 - - -"
-            ] ++ lib.optionals (!isHeadless) [
+            ]
+            ++ lib.optionals (!isHeadless) [
               "d %h/.cache/fontconfig 0755 - - -"
             ];
 
@@ -217,8 +248,14 @@
               Unit = {
                 Description = "Open Sesame Desktop Suite";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";
-                Requires = [ "open-sesame-headless.target" "graphical-session.target" ];
-                After = [ "open-sesame-headless.target" "graphical-session.target" ];
+                Requires = [
+                  "open-sesame-headless.target"
+                  "graphical-session.target"
+                ];
+                After = [
+                  "open-sesame-headless.target"
+                  "graphical-session.target"
+                ];
               };
               Install = {
                 WantedBy = [ "graphical-session.target" ];
@@ -244,7 +281,10 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
+                ReadWritePaths = [
+                  "%t/pds"
+                  "%h/.config/pds"
+                ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
                 LimitMEMLOCK = "64M";
@@ -277,7 +317,10 @@
                 PrivateNetwork = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                ReadWritePaths = [ "%t/pds" "%h/.config/pds" ];
+                ReadWritePaths = [
+                  "%t/pds"
+                  "%h/.config/pds"
+                ];
                 LimitNOFILE = 1024;
                 LimitCORE = 0;
                 LimitMEMLOCK = "64M";
@@ -378,7 +421,11 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" "%h/.cache/fontconfig" ];
+                ReadWritePaths = [
+                  "%t/pds"
+                  "%h/.cache/open-sesame"
+                  "%h/.cache/fontconfig"
+                ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
                 LimitMEMLOCK = "64M";
@@ -410,7 +457,10 @@
                 NoNewPrivileges = true;
                 ProtectHome = "read-only";
                 ProtectSystem = "strict";
-                ReadWritePaths = [ "%t/pds" "%h/.cache/open-sesame" ];
+                ReadWritePaths = [
+                  "%t/pds"
+                  "%h/.cache/open-sesame"
+                ];
                 LimitNOFILE = 4096;
                 LimitCORE = 0;
                 LimitMEMLOCK = "64M";
@@ -463,12 +513,15 @@
         {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
-              # Rust toolchain
-              cargo
-              rustc
-              rust-analyzer
-              clippy
-              rustfmt
+              # Rust toolchain (from konductor's rust-overlay, version-locked)
+              (rust-bin.stable."1.97.0".minimal.override {
+                extensions = [
+                  "rust-src"
+                  "rust-analyzer"
+                  "clippy"
+                  "rustfmt"
+                ];
+              })
 
               # Build tools
               pkg-config

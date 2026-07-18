@@ -1,7 +1,8 @@
 {
   lib,
   stdenv,
-  rustPlatform,
+  makeRustPlatform,
+  rust-bin,
   pkg-config,
   installShellFiles,
   makeWrapper,
@@ -17,6 +18,14 @@
 }:
 
 let
+  rustToolchain = rust-bin.stable."1.97.0".minimal.override {
+    extensions = [ "rust-src" ];
+  };
+  rustPlatform = makeRustPlatform {
+    cargo = rustToolchain;
+    rustc = rustToolchain;
+  };
+
   workspaceToml = builtins.fromTOML (builtins.readFile ../Cargo.toml);
 
   rootDir = ./..;
