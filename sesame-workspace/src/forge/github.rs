@@ -51,8 +51,8 @@ impl GitHub {
             );
             if std::env::var("GITHUB_TOKEN")
                 .ok()
-                .filter(|t| !t.is_empty())
-                .is_none()
+                .as_ref()
+                .is_none_or(String::is_empty)
             {
                 eprintln!("  Set GITHUB_TOKEN for 5000 req/hr instead of 60 req/hr.");
             }
