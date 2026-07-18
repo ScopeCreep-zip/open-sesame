@@ -579,6 +579,17 @@ async fn main() -> anyhow::Result<()> {
                         };
                         tracing::info!("{label} requested via IPC");
 
+                        // Refresh theme on each new activation cycle so dark/light
+                        // mode changes, accent color tweaks, and frosted glass toggles
+                        // are picked up immediately without requiring daemon restart.
+                        // Only on fresh activation (idle → armed), not re-activations.
+                        if controller.is_idle() {
+                            let cfg = wm_config.lock().await;
+                            let theme = OverlayTheme::from_config(&cfg);
+                            drop(cfg);
+                            let _ = overlay_cmd_tx.send(OverlayCmd::UpdateTheme(Box::new(theme)));
+                        }
+
                         // Request fresh window list from the poll thread before
                         // building the overlay snapshot. Without this, the cached
                         // list can be up to 2 seconds stale and include windows
