@@ -407,7 +407,7 @@ dependencies = [
 [[package]]
 name = "build_helpers"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#0eef591171c6c449b99fe0966571cd3ea3507919"
+source = "git+https://github.com/pop-os/libcosmic#ef162b8e16ba4493e05c169cd56c7b9f77f0fda5"
 dependencies = [
  "cfg_aliases",
 ]
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "core-auth"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-types",
  "dirs",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -945,7 +945,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-types",
  "criterion",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "blake3",
  "core-types",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "libc",
  "tracing",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "blake3",
  "core-types",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1073,7 +1073,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#0eef591171c6c449b99fe0966571cd3ea3507919"
+source = "git+https://github.com/pop-os/libcosmic#ef162b8e16ba4493e05c169cd56c7b9f77f0fda5"
 dependencies = [
  "atomicwrites",
  "cosmic-config-derive",
@@ -1090,7 +1090,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config-derive"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#0eef591171c6c449b99fe0966571cd3ea3507919"
+source = "git+https://github.com/pop-os/libcosmic#ef162b8e16ba4493e05c169cd56c7b9f77f0fda5"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1136,7 +1136,7 @@ dependencies = [
 [[package]]
 name = "cosmic-theme"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#0eef591171c6c449b99fe0966571cd3ea3507919"
+source = "git+https://github.com/pop-os/libcosmic#ef162b8e16ba4493e05c169cd56c7b9f77f0fda5"
 dependencies = [
  "almost",
  "configparser",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "core-config",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-types",
  "proptest",
@@ -2153,9 +2153,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.4.1"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fd-lock"
@@ -3910,7 +3910,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#0eef591171c6c449b99fe0966571cd3ea3507919"
+source = "git+https://github.com/pop-os/libcosmic#ef162b8e16ba4493e05c169cd56c7b9f77f0fda5"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
@@ -3934,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#0eef591171c6c449b99fe0966571cd3ea3507919"
+source = "git+https://github.com/pop-os/libcosmic#ef162b8e16ba4493e05c169cd56c7b9f77f0fda5"
 dependencies = [
  "futures",
  "iced_core",
@@ -4200,11 +4200,12 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "0.2.32"
+version = "0.2.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "961d16382652bfdd8c6f68b223b26a8c93e0d475c672f414411db31c6c5c900e"
+checksum = "dc43d6fb25860892c78ef7ce2ffed572087a6853ecb60f587f499329717ed7da"
 dependencies = [
  "defmt",
+ "jiff-core",
  "jiff-static",
  "jiff-tzdb-platform",
  "log",
@@ -4215,11 +4216,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "jiff-static"
-version = "0.2.32"
+name = "jiff-core"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0879bd39df99c4c5e2c6615ccc026391a423dde10532c573e6086eb94a802cc"
+checksum = "7feca88439efe53da3754500c1851dedf3cb36c524dd5cf8225cc0794de95d09"
 dependencies = [
+ "defmt",
+]
+
+[[package]]
+name = "jiff-static"
+version = "0.2.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96fb828bff41eeb269a9665f950cb359e8018f7288b8f34db24937ff54ed8fc5"
+dependencies = [
+ "jiff-core",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4796,7 +4807,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -5163,7 +5174,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "platform-linux"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -5193,7 +5204,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -5210,7 +5221,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-types",
  "proptest",
@@ -5399,9 +5410,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.106"
+version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
@@ -5475,9 +5486,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.46"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
@@ -6079,7 +6090,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "core-config",
  "core-types",
