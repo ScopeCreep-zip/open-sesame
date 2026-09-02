@@ -406,7 +406,7 @@ dependencies = [
 [[package]]
 name = "build_helpers"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#c3ced76094376bcbe331da0d4518fcc6b27006bb"
+source = "git+https://github.com/pop-os/libcosmic#9cc82abd9ca5601bb0341edd12a9acbc97e77801"
 dependencies = [
  "cfg_aliases",
 ]
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "core-auth"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-types",
  "dirs",
@@ -901,14 +901,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "core-crypto"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -944,7 +944,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-fuzzy"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-types",
  "criterion",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "libc",
  "tracing",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "blake3",
  "core-crypto",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1072,7 +1072,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#c3ced76094376bcbe331da0d4518fcc6b27006bb"
+source = "git+https://github.com/pop-os/libcosmic#9cc82abd9ca5601bb0341edd12a9acbc97e77801"
 dependencies = [
  "atomicwrites",
  "cosmic-config-derive",
@@ -1089,7 +1089,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config-derive"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#c3ced76094376bcbe331da0d4518fcc6b27006bb"
+source = "git+https://github.com/pop-os/libcosmic#9cc82abd9ca5601bb0341edd12a9acbc97e77801"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1135,7 +1135,7 @@ dependencies = [
 [[package]]
 name = "cosmic-theme"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#c3ced76094376bcbe331da0d4518fcc6b27006bb"
+source = "git+https://github.com/pop-os/libcosmic#9cc82abd9ca5601bb0341edd12a9acbc97e77801"
 dependencies = [
  "almost",
  "configparser",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "core-config",
@@ -2112,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "extension-sdk"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-types",
  "proptest",
@@ -3901,7 +3901,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#c3ced76094376bcbe331da0d4518fcc6b27006bb"
+source = "git+https://github.com/pop-os/libcosmic#9cc82abd9ca5601bb0341edd12a9acbc97e77801"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
@@ -3925,7 +3925,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#c3ced76094376bcbe331da0d4518fcc6b27006bb"
+source = "git+https://github.com/pop-os/libcosmic#9cc82abd9ca5601bb0341edd12a9acbc97e77801"
 dependencies = [
  "futures",
  "iced_core",
@@ -4567,9 +4567,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "log",
@@ -4789,7 +4789,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4818,7 +4818,7 @@ dependencies = [
  "ssh-key",
  "tempfile",
  "tokio",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
@@ -5120,7 +5120,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-linux"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-types",
  "cosmic-client-toolkit",
@@ -5150,7 +5150,7 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -5167,7 +5167,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-types",
  "proptest",
@@ -6036,7 +6036,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.15.3"
+version = "1.16.0"
 dependencies = [
  "core-config",
  "core-types",
@@ -6048,7 +6048,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "ureq",
 ]
@@ -6439,7 +6439,7 @@ dependencies = [
  "cfg-expr",
  "heck",
  "pkg-config",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "version-compare",
 ]
 
@@ -6708,9 +6708,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
