@@ -835,7 +835,7 @@ ls -la "$RPM_SITE" "$RPM_SITE/repo" "$RPM_SITE/repo/repodata"
 
 [tasks."ci:setup:arch-repo"]
 description = "CI install Arch packaging tools"
-run = "sudo apt-get update && sudo apt-get install -y makepkg pacman-package-manager zstd binutils"
+run = "sudo apt-get update && sudo apt-get install -y makepkg pacman-package-manager zstd binutils libarchive-tools"
 
 [tasks."ci:build:arch"]
 description = "CI build tarballs and .pkg.tar.zst (amd64)"
