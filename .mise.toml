@@ -705,30 +705,14 @@ mise run docs:completions
 [tasks."ci:release:rename-rpm"]
 description = "CI rename .rpm packages for release (x86_64)"
 env.TARGET = "{{vars.arch_amd64}}"
-run = """
-#!/usr/bin/env bash
-set -euxo pipefail
-mapfile -t HEADLESS < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-[0-9]*.rpm' ! -name 'open-sesame-desktop*')
-mapfile -t DESKTOP < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-desktop-*.rpm')
-[[ ${#HEADLESS[@]} -eq 1 ]] || { echo "ERROR: expected 1 headless RPM, found ${#HEADLESS[@]}: ${HEADLESS[*]}" >&2; exit 1; }
-[[ ${#DESKTOP[@]} -eq 1 ]] || { echo "ERROR: expected 1 desktop RPM, found ${#DESKTOP[@]}: ${DESKTOP[*]}" >&2; exit 1; }
-mv "${HEADLESS[0]}" "open-sesame-linux-x86_64.rpm"
-mv "${DESKTOP[0]}" "open-sesame-desktop-linux-x86_64.rpm"
-"""
+env.ARCH = "x86_64"
+run = "./scripts/rpm/rename-rpm.sh"
 
 [tasks."ci:release:rename-rpm:arm64"]
 description = "CI rename .rpm packages for release (aarch64)"
 env.TARGET = "{{vars.arch_arm64}}"
-run = """
-#!/usr/bin/env bash
-set -euxo pipefail
-mapfile -t HEADLESS < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-[0-9]*.rpm' ! -name 'open-sesame-desktop*')
-mapfile -t DESKTOP < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-desktop-*.rpm')
-[[ ${#HEADLESS[@]} -eq 1 ]] || { echo "ERROR: expected 1 headless RPM, found ${#HEADLESS[@]}: ${HEADLESS[*]}" >&2; exit 1; }
-[[ ${#DESKTOP[@]} -eq 1 ]] || { echo "ERROR: expected 1 desktop RPM, found ${#DESKTOP[@]}: ${DESKTOP[*]}" >&2; exit 1; }
-mv "${HEADLESS[0]}" "open-sesame-linux-aarch64.rpm"
-mv "${DESKTOP[0]}" "open-sesame-desktop-linux-aarch64.rpm"
-"""
+env.ARCH = "aarch64"
+run = "./scripts/rpm/rename-rpm.sh"
 
 [tasks."ci:release:rpm-repo"]
 description = "CI generate DNF repository structure"
