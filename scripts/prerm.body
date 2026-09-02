@@ -1,27 +1,17 @@
-#!/bin/bash
-# Pre-removal script for open-sesame (headless)
-set -e
-
-active_user_uids() {
-    systemctl list-units 'user@*' --legend=no 2>/dev/null \
-        | sed -n 's/.*user@\([0-9]\+\)\.service.*/\1/p'
-}
-
+# %prerm for open-sesame (headless) — deb
 case "$1" in
     remove|deconfigure)
-        # Stop services for all active users.
         for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-snippets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-launcher.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-secrets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-profile.service 2>/dev/null || true
         done
 
-        # Disable globally.
         systemctl --global disable \
             open-sesame-profile.service \
             open-sesame-secrets.service \
@@ -32,15 +22,14 @@ case "$1" in
         #DEBHELPER#
         ;;
     upgrade)
-        # On upgrade, stop services so postinst can restart with new binaries.
         for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-snippets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-launcher.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-secrets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-profile.service 2>/dev/null || true
         done
         #DEBHELPER#

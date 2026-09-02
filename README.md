@@ -138,7 +138,7 @@ Press `Alt+Tab` to switch windows. Press `Alt+Space` to open the launcher overla
 - Two-package split with automatic systemd user service lifecycle
 - COSMIC keybinding integration via `sesame setup-keybinding`
 - Nix flake with overlay, home-manager module (`headless` option), and [Cachix binary cache](https://app.cachix.org/cache/scopecreep-zip)
-- GPG-signed APT and DNF repositories with SLSA build provenance attestations
+- GPG-signed APT, DNF, and pacman repositories with SLSA build provenance attestations
 - Landlock + seccomp sandbox per daemon, systemd hardening directives
 - macOS and Windows platform crates scaffolded for future support
 
@@ -280,9 +280,51 @@ The `open-sesame` package installs 5 binaries and systemd user services under `o
 </details>
 
 <details>
+<summary><b>🔹 AUR (Arch Linux)</b></summary>
+
+Install from the AUR with any AUR helper:
+
+```bash
+yay -S open-sesame-bin open-sesame-desktop-bin
+```
+
+Or from the self-hosted pacman repository:
+
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo pacman-key --add -
+sudo pacman-key --lsign-key $(curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | gpg --show-keys --with-colons 2>/dev/null | awk -F: '/^pub/{print $5; exit}')
+```
+
+Add to `/etc/pacman.conf`:
+
+```ini
+[open-sesame]
+SigLevel = Required DatabaseRequired
+Server = https://scopecreep-zip.github.io/open-sesame/arch/$arch
+```
+
+Install:
+
+```bash
+sudo pacman -Syu open-sesame-bin open-sesame-desktop-bin
+```
+
+Initialize:
+
+```bash
+sesame init
+```
+
+The `-bin` packages install pre-built binaries from release tarballs. Systemd user presets declare default enablement. Run `systemctl --user enable --now open-sesame-headless.target` to start services.
+
+</details>
+
+<details>
 <summary><b>🔹 GitHub Releases (direct download)</b></summary>
 
-Download both packages:
+Each release includes `.deb`, `.rpm`, `.tar.gz`, and `.pkg.tar.zst` packages for x86_64 and aarch64.
+
+Download `.deb` packages:
 
 ```bash
 ARCH=$(uname -m)
@@ -294,10 +336,6 @@ Verify build provenance ([SLSA](https://slsa.dev/)):
 
 ```bash
 gh attestation verify /tmp/open-sesame.deb --owner ScopeCreep-zip
-```
-
-```bash
-gh attestation verify /tmp/open-sesame-desktop.deb --owner ScopeCreep-zip
 ```
 
 Install (headless first, then desktop):

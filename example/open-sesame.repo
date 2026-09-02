@@ -1,3 +1,5 @@
+# Development only. Production repos should use gpgcheck=1 with
+# open-sesame-signed.repo instead.
 [open-sesame]
 name=Open Sesame RPMs (GitHub Pages)
 baseurl=https://scopecreep-zip.github.io/open-sesame/repo/

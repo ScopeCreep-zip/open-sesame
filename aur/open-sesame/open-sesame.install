@@ -1,0 +1,25 @@
+post_install() {
+    echo ""
+    echo ":: open-sesame installed"
+    echo "   First-time setup:  sesame init"
+    echo "   Service control:   systemctl --user enable --now open-sesame-headless.target"
+    echo "   Verify:            sesame status"
+    echo ""
+    echo "   For desktop features: pacman -S open-sesame-desktop"
+    echo ""
+}
+
+post_upgrade() {
+    echo ""
+    echo ":: open-sesame upgraded"
+    echo "   Restart services:  systemctl --user restart open-sesame-headless.target"
+    echo ""
+}
+
+post_remove() {
+    echo ""
+    echo ":: open-sesame removed"
+    echo "   User config remains at ~/.config/pds/"
+    echo "   To remove: rm -rf ~/.config/pds/"
+    echo ""
+}

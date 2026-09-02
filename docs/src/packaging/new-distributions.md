@@ -50,70 +50,24 @@ All binaries install to `/usr/bin/`. Configuration lives under
 
 ## AUR (Arch Linux)
 
-Arch packaging uses `PKGBUILD` files. Two packages are needed.
+Arch packaging is officially supported via split PKGBUILDs and a self-hosted pacman
+repository on GitHub Pages. Full documentation is in [Arch Packaging](arch.md).
 
-### open-sesame
+Two AUR pkgbases are maintained:
 
-```bash
-pkgname=open-sesame
-pkgver=1.6.3
-pkgrel=1
-pkgdesc='Programmable desktop suite - headless daemons and CLI'
-arch=('x86_64' 'aarch64')
-url='https://github.com/ScopeCreep-zip/open-sesame'
-license=('GPL-3.0-only')
-depends=('gcc-libs' 'sqlcipher' 'openssl')
-makedepends=('cargo' 'pkg-config')
+- `open-sesame-bin` — split binary package from release tarballs, installs
+  `open-sesame-bin` and `open-sesame-desktop-bin`
+- `open-sesame` — split source-build package from release source tarball,
+  installs `open-sesame` and `open-sesame-desktop`
 
-build() {
-    cd "$srcdir/$pkgname-$pkgver"
-    cargo build --release \
-        --bin sesame \
-        --bin daemon-profile \
-        --bin daemon-secrets \
-        --bin daemon-launcher \
-        --bin daemon-snippets
-}
+Both use split `package_*()` functions for the headless/desktop split.
+`conflicts=('sesame')` avoids file collision with the AUR `sesame` package.
+Systemd user presets are shipped per package (no `.install`-based enablement).
+`check()` in the source pkgbase self-skips when `RLIMIT_MEMLOCK` is insufficient
+for `memfd_secret` test allocations.
 
-package() {
-    cd "$srcdir/$pkgname-$pkgver"
-    for bin in sesame daemon-profile daemon-secrets daemon-launcher daemon-snippets; do
-        install -Dm755 "target/release/$bin" "$pkgdir/usr/bin/$bin"
-    done
-    install -Dm644 dist/systemd/*.service -t "$pkgdir/usr/lib/systemd/user/"
-    install -Dm644 dist/limits.conf "$pkgdir/etc/security/limits.d/open-sesame.conf"
-}
-```
-
-### open-sesame-desktop
-
-```bash
-pkgname=open-sesame-desktop
-pkgver=1.6.3
-pkgrel=1
-pkgdesc='Programmable desktop suite - COSMIC/Wayland compositor integration'
-arch=('x86_64' 'aarch64')
-depends=('open-sesame' 'wayland' 'libxkbcommon' 'cosmic-protocols')
-makedepends=('cargo' 'pkg-config')
-
-build() {
-    cd "$srcdir/open-sesame-$pkgver"
-    cargo build --release \
-        --bin daemon-wm \
-        --bin daemon-clipboard \
-        --bin daemon-input
-}
-
-package() {
-    cd "$srcdir/open-sesame-$pkgver"
-    for bin in daemon-wm daemon-clipboard daemon-input; do
-        install -Dm755 "target/release/$bin" "$pkgdir/usr/bin/$bin"
-    done
-    install -Dm644 dist/systemd/daemon-wm.service -t "$pkgdir/usr/lib/systemd/user/"
-    install -Dm644 dist/systemd/daemon-clipboard.service -t "$pkgdir/usr/lib/systemd/user/"
-    install -Dm644 dist/systemd/daemon-input.service -t "$pkgdir/usr/lib/systemd/user/"
-}
-```
+aarch64 packages serve Arch Linux ARM (ALARM) users. Apple Silicon users should
+use the DNF repository via Fedora Asahi Remix.
 
 ## RPM (Fedora / RHEL)
 

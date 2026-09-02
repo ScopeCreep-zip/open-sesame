@@ -1,0 +1,17 @@
+post_install() {
+    echo ""
+    echo ":: open-sesame-desktop installed"
+    echo "   Enable services: systemctl --user enable --now open-sesame-desktop.target"
+    echo ""
+    echo "   NOTE: daemon-input requires 'input' group membership for keyboard capture."
+    echo "     sudo usermod -aG input \$USER"
+    echo "     (logout and login required)"
+    echo ""
+}
+
+post_upgrade() {
+    echo ""
+    echo ":: open-sesame-desktop upgraded"
+    echo "   Restart services: systemctl --user restart open-sesame-desktop.target"
+    echo ""
+}

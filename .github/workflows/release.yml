@@ -52,6 +52,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "node"
 
       - name: Install semantic-release plugins
@@ -128,6 +129,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "rust cargo:cargo-deb"
           cache: true
 
@@ -174,6 +176,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "rust cargo:cargo-generate-rpm"
           cache: true
 
@@ -202,11 +205,59 @@ jobs:
           retention-days: 1
 
   # ==========================================================================
+  # Build Arch tarballs and .pkg.tar.zst packages for each architecture
+  # ==========================================================================
+  build-arch:
+    name: Build Arch ${{ matrix.arch }}
+    needs: semantic-release
+    if: needs.semantic-release.outputs.new_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            build_task: ci:build:arch
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            build_task: ci:build:arch:arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      GITHUB_REF_NAME: ${{ needs.semantic-release.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
+
+      - uses: jdx/mise-action@v4
+        with:
+          minimum_release_age: 7d
+          install_args: "rust"
+          cache: true
+
+      - name: Install Arch packaging tools
+        run: mise run ci:setup:arch-repo
+
+      - name: Build packages (with raised mlock limit for ProtectedAlloc)
+        run: |
+          sudo prlimit --pid $$ --memlock=268435456:268435456
+          mise run ${{ matrix.build_task }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch-${{ matrix.arch }}
+          path: |
+            *.tar.gz
+            *.pkg.tar.zst
+          retention-days: 1
+
+  # ==========================================================================
   # Generate build attestations for supply chain security
   # ==========================================================================
   attest:
     name: Attest Build Provenance
-    needs: [semantic-release, build, build-rpm]
+    needs: [semantic-release, build, build-rpm, build-arch]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
 
@@ -221,18 +272,25 @@ jobs:
           pattern: rpm-*
           merge-multiple: true
 
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: arch-*
+          merge-multiple: true
+
       - uses: actions/attest@v4
         with:
           subject-path: |
             *.deb
             *.rpm
+            *.tar.gz
+            *.pkg.tar.zst
 
   # ==========================================================================
   # Upload .deb and .rpm assets to GitHub Release
   # ==========================================================================
   upload-assets:
     name: Upload Release Assets
-    needs: [semantic-release, build, build-rpm]
+    needs: [semantic-release, build, build-rpm, build-arch]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
     env:
@@ -252,29 +310,18 @@ jobs:
           pattern: rpm-*
           merge-multiple: true
 
-      - name: Generate checksums and install instructions
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: arch-*
+          merge-multiple: true
+
+      - name: Generate source tarball
         run: |
-          sha256sum ./*.deb ./*.rpm > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          SHA_HEADLESS_X86_64=$(grep "open-sesame-linux-x86_64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_HEADLESS_AARCH64=$(grep "open-sesame-linux-aarch64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_DESKTOP_X86_64=$(grep "open-sesame-desktop-linux-x86_64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_DESKTOP_AARCH64=$(grep "open-sesame-desktop-linux-aarch64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_RPM_HEADLESS_X86_64=$(grep "open-sesame-linux-x86_64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_RPM_HEADLESS_AARCH64=$(grep "open-sesame-linux-aarch64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_RPM_DESKTOP_X86_64=$(grep "open-sesame-desktop-linux-x86_64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_RPM_DESKTOP_AARCH64=$(grep "open-sesame-desktop-linux-aarch64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
-          sed -e "s/\${TAG}/${TAG}/g" \
-              -e "s/\${VERSION}/${VERSION}/g" \
-              -e "s/\${SHA256_HEADLESS_X86_64}/${SHA_HEADLESS_X86_64}/g" \
-              -e "s/\${SHA256_HEADLESS_AARCH64}/${SHA_HEADLESS_AARCH64}/g" \
-              -e "s/\${SHA256_DESKTOP_X86_64}/${SHA_DESKTOP_X86_64}/g" \
-              -e "s/\${SHA256_DESKTOP_AARCH64}/${SHA_DESKTOP_AARCH64}/g" \
-              -e "s/\${SHA256_RPM_HEADLESS_X86_64}/${SHA_RPM_HEADLESS_X86_64}/g" \
-              -e "s/\${SHA256_RPM_HEADLESS_AARCH64}/${SHA_RPM_HEADLESS_AARCH64}/g" \
-              -e "s/\${SHA256_RPM_DESKTOP_X86_64}/${SHA_RPM_DESKTOP_X86_64}/g" \
-              -e "s/\${SHA256_RPM_DESKTOP_AARCH64}/${SHA_RPM_DESKTOP_AARCH64}/g" \
-              .github/templates/RELEASE_BODY.md > install_instructions.md
+          git archive --format=tar.gz --prefix=open-sesame-${VERSION}/ \
+            -o "open-sesame-${VERSION}-source.tar.gz" "${TAG}"
+
+      - name: Generate checksums and install instructions
+        run: ./scripts/release/generate-checksums.sh
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v3
@@ -283,6 +330,8 @@ jobs:
           files: |
             *.deb
             *.rpm
+            *.tar.gz
+            *.pkg.tar.zst
             SHA256SUMS.txt
           body_path: install_instructions.md
           append_body: true
@@ -303,6 +352,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "rust"
           cache: true
 
@@ -321,7 +371,7 @@ jobs:
   # ==========================================================================
   publish:
     name: Publish Repositories & Docs
-    needs: [semantic-release, build, build-rpm, upload-assets, build-docs]
+    needs: [semantic-release, build, build-rpm, build-arch, upload-assets, build-docs]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -346,6 +396,12 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
+          pattern: arch-*
+          path: packages/
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
           name: documentation
           path: docs-site/
 
@@ -355,6 +411,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "rust"
           cache: true
 
@@ -364,10 +421,15 @@ jobs:
       - name: Generate RPM repository
         run: mise run ci:release:rpm-repo
 
-      - name: Merge RPM repo into gh-pages
+      - name: Generate Arch repository
+        run: mise run ci:release:arch-repo
+
+      - name: Merge RPM and Arch repos into gh-pages
         run: |
           cp -r rpm-site/repo gh-pages/repo
           cp rpm-site/RPM-GPG-KEY gh-pages/RPM-GPG-KEY
+          mkdir -p gh-pages/arch
+          cp -rL arch-site/. gh-pages/arch/
 
       - uses: actions/upload-pages-artifact@v5
         with:
@@ -380,37 +442,50 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
+        run: ./scripts/release/verify-deployment.sh
+
+  # ==========================================================================
+  # Publish AUR packages
+  # ==========================================================================
+  aur-publish:
+    name: AUR Publish
+    needs: [semantic-release, upload-assets]
+    if: needs.semantic-release.outputs.new_release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.semantic-release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          minimum_release_age: 7d
+          install_args: "rust"
+          cache: true
+
+      - name: Download SHA256SUMS.txt from release
         run: |
-          set -euo pipefail
-          base="https://${OWNER}.github.io/${REPO}"
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/SHA256SUMS.txt" -o SHA256SUMS.txt
 
-          echo "Polling APT Release..."
-          for i in $(seq 1 24); do
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --location "${base}/dists/noble/Release" || true)"
-            echo "attempt $i: HTTP $code"
-            if [ "$code" = "200" ]; then
-              echo "APT Release is live"
-              break
-            fi
-            sleep 10
-          done
+      - name: Update PKGBUILD with version and checksums
+        run: |
+          export SHA256SUMS=SHA256SUMS.txt PKGBUILD_DIR=aur/open-sesame-bin
+          ./scripts/arch/update-pkgbuild.sh
 
-          echo "Polling repomd.xml..."
-          for i in $(seq 1 24); do
-            code="$(curl -sS -o /tmp/repomd.xml -w '%{http_code}' --location "${base}/repo/repodata/repomd.xml" || true)"
-            echo "attempt $i: HTTP $code"
-            if [ "$code" = "200" ] && grep -q repomd /tmp/repomd.xml; then
-              echo "repomd.xml is live"
-              head -5 /tmp/repomd.xml
-              break
-            fi
-            sleep 10
-          done
-
-          if curl -fsSL "${base}/RPM-GPG-KEY" -o /tmp/RPM-GPG-KEY 2>/dev/null; then
-            grep -q 'BEGIN PGP PUBLIC KEY BLOCK' /tmp/RPM-GPG-KEY \
-              && echo "RPM-GPG-KEY is live" || true
-          fi
+      # TODO: Re-enable when AUR registration reopens (paused since June 2026
+      # malicious packages incident). PKGBUILD is still updated and validated
+      # above; only the push to aur.archlinux.org is disabled.
+      # - name: Publish open-sesame-bin to AUR
+      #   uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+      #   with:
+      #     pkgname: open-sesame-bin
+      #     asset_dir: aur/open-sesame-bin/
+      #     commit_username: usrbinkat
+      #     commit_email: usrbinkat@braincraft.io
+      #     ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      #     test: true
+      #     test_flags: --clean --cleanbuild --nodeps
 
   # ==========================================================================
   # Cleanup old releases (keep last 10)

@@ -1,11 +1,7 @@
-#!/bin/bash
-# Post-removal script for open-sesame (headless)
-set -e
-
+# %postrm for open-sesame (headless) — deb
 case "$1" in
     remove|purge)
-        # Reload all active user managers to clear removed unit files.
-        systemctl reload 'user@*.service' 2>/dev/null || true
+        reload_user_managers
         echo "open-sesame removed."
         echo "User configuration remains at ~/.config/pds/"
         echo "To remove: rm -rf ~/.config/pds/"

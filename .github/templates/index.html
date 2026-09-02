@@ -76,6 +76,9 @@ EOF</pre>
   <p>Headless only (servers, containers):</p>
   <pre>sudo dnf install -y open-sesame</pre>
 
+  <h2>AUR (Arch Linux)</h2>
+  <pre>yay -S open-sesame-bin open-sesame-desktop-bin</pre>
+
   <h2>Initialize</h2>
   <pre>sesame init</pre>
 
@@ -98,10 +101,11 @@ EOF</pre>
   </ul>
 
   <h2>Verify Packages</h2>
-  <p>All <code>.deb</code> and <code>.rpm</code> packages include <a href="https://slsa.dev/">SLSA Build Provenance</a> attestations:</p>
+  <p>All release artifacts include <a href="https://slsa.dev/">SLSA Build Provenance</a> attestations:</p>
   <pre>gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip</pre>
   <pre>gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip</pre>
   <pre>gh attestation verify "open-sesame-linux-$(uname -m).rpm" --owner ScopeCreep-zip</pre>
   <pre>gh attestation verify "open-sesame-desktop-linux-$(uname -m).rpm" --owner ScopeCreep-zip</pre>
+  <pre>gh attestation verify "open-sesame-v&lt;VERSION&gt;-$(uname -m).tar.gz" --owner ScopeCreep-zip</pre>
 </body>
 </html>

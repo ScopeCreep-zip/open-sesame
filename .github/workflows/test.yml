@@ -28,6 +28,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "rust"
           cache: true
 
@@ -35,3 +36,14 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=268435456:268435456
           mise run ci:test
+
+  lint-pkgbuild:
+    name: Lint PKGBUILDs (namcap)
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint PKGBUILDs
+        run: ./scripts/arch/lint-pkgbuild.sh

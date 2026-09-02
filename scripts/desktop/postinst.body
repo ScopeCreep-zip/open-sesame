@@ -1,15 +1,6 @@
-#!/bin/bash
-# Post-installation script for open-sesame-desktop
-set -e
-
-active_user_uids() {
-    systemctl list-units 'user@*' --legend=no 2>/dev/null \
-        | sed -n 's/.*user@\([0-9]\+\)\.service.*/\1/p'
-}
-
+# %postinst for open-sesame-desktop — deb
 case "$1" in
     configure)
-        # 1. Enable globally.
         systemctl --global enable \
             open-sesame-wm.service \
             open-sesame-clipboard.service \
@@ -17,16 +8,14 @@ case "$1" in
             open-sesame-desktop.target \
             2>/dev/null || true
 
-        # 2. Reload all active user managers.
-        systemctl reload 'user@*.service' 2>/dev/null || true
+        reload_user_managers
 
-        # 3. Start desktop services for all active users.
         for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-wm.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-clipboard.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-input.service 2>/dev/null || true
         done
 

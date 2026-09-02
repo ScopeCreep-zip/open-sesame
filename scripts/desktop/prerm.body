@@ -1,20 +1,12 @@
-#!/bin/bash
-# Pre-removal script for open-sesame-desktop
-set -e
-
-active_user_uids() {
-    systemctl list-units 'user@*' --legend=no 2>/dev/null \
-        | sed -n 's/.*user@\([0-9]\+\)\.service.*/\1/p'
-}
-
+# %prerm for open-sesame-desktop — deb
 case "$1" in
     remove|deconfigure)
         for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-input.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-clipboard.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-wm.service 2>/dev/null || true
         done
 
@@ -28,11 +20,11 @@ case "$1" in
         ;;
     upgrade)
         for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-input.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-clipboard.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 stop open-sesame-wm.service 2>/dev/null || true
         done
         #DEBHELPER#

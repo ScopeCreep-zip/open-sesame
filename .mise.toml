@@ -104,35 +104,67 @@ set -euo pipefail
 # Single patchelf invocation per binary to avoid aarch64 .dynstr corruption
 # (patchelf#244). Only needed when building inside nix devShell — CI uses
 # rustup and produces FHS-standard binaries without nix store paths.
+# Accepts TARGET env var for cross-compilation (e.g. x86_64-unknown-linux-gnu).
+# Without TARGET, operates on target/release/.
 BINS=(sesame daemon-profile daemon-secrets daemon-wm daemon-launcher daemon-clipboard daemon-input daemon-snippets)
+if [ -n "${TARGET:-}" ]; then
+  RELEASE_DIR="target/${TARGET}/release"
+else
+  RELEASE_DIR="target/release"
+fi
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  INTERP="/lib64/ld-linux-x86-64.so.2" ;;
   aarch64) INTERP="/lib/ld-linux-aarch64.so.1" ;;
   *)       echo "ERROR: unsupported architecture '$ARCH' for patchelf" >&2; exit 1 ;;
 esac
+patched=0
 for bin in "${BINS[@]}"; do
-  if [ -f "target/release/${bin}" ]; then
-    patchelf --set-interpreter "$INTERP" --remove-rpath "target/release/${bin}"
+  if [ -f "${RELEASE_DIR}/${bin}" ]; then
+    current_interp="$(patchelf --print-interpreter "${RELEASE_DIR}/${bin}" 2>/dev/null || true)"
+    if [[ "${current_interp}" == /nix/store/* ]]; then
+      patchelf --set-interpreter "$INTERP" --remove-rpath "${RELEASE_DIR}/${bin}"
+      echo "patchelf: ${bin}"
+      patched=$((patched + 1))
+    fi
   fi
 done
-echo "patchelf complete"
+if [ "$patched" -eq 0 ]; then
+  echo "patchelf: no nix interpreters found (CI or already patched)"
+else
+  echo "patchelf: ${patched} binary(ies) patched"
+fi
 """
 
-[tasks."cargo:rpm:assemble-scriptlets"]
+[tasks."cargo:assemble-scriptlets"]
 hide = true
-description = "Concatenate common.sh + body files into RPM scriptlets"
+description = "Concatenate scriptlet-helpers.sh + body files into deb and RPM scriptlets"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-for body in scripts/rpm/postinst.body scripts/rpm/prerm.body scripts/rpm/postrm.body scripts/rpm/posttrans.body; do
+HELPERS=scripts/common/scriptlet-helpers.sh
+# Deb headless
+for body in scripts/postinst.body scripts/prerm.body scripts/postrm.body; do
   out="${body%.body}"
-  { echo '#!/bin/bash'; cat scripts/rpm/common.sh; echo ''; cat "$body"; } > "$out"
+  { echo '#!/bin/bash'; echo 'set -e'; cat "$HELPERS"; echo ''; cat "$body"; } > "$out"
   chmod +x "$out"
 done
+# Deb desktop
+for body in scripts/desktop/postinst.body scripts/desktop/prerm.body scripts/desktop/postrm.body; do
+  out="${body%.body}"
+  { echo '#!/bin/bash'; echo 'set -e'; cat "$HELPERS"; echo ''; cat "$body"; } > "$out"
+  chmod +x "$out"
+done
+# RPM headless
+for body in scripts/rpm/postinst.body scripts/rpm/prerm.body scripts/rpm/postrm.body scripts/rpm/posttrans.body; do
+  out="${body%.body}"
+  { echo '#!/bin/bash'; cat "$HELPERS"; echo ''; cat "$body"; } > "$out"
+  chmod +x "$out"
+done
+# RPM desktop
 for body in scripts/rpm/desktop/postinst.body scripts/rpm/desktop/prerm.body scripts/rpm/desktop/postrm.body scripts/rpm/desktop/posttrans.body; do
   out="${body%.body}"
-  { echo '#!/bin/bash'; cat scripts/rpm/common.sh; echo ''; cat "$body"; } > "$out"
+  { echo '#!/bin/bash'; cat "$HELPERS"; echo ''; cat "$body"; } > "$out"
   chmod +x "$out"
 done
 echo "scriptlets assembled"
@@ -140,23 +172,23 @@ echo "scriptlets assembled"
 
 [tasks."cargo:rpm"]
 hide = true
-depends = ["cargo:rpm:assemble-scriptlets"]
+depends = ["cargo:assemble-scriptlets"]
 run = "cargo generate-rpm -p open-sesame --payload-compress gzip"
 
 [tasks."cargo:rpm:desktop"]
 hide = true
-depends = ["cargo:rpm:assemble-scriptlets"]
+depends = ["cargo:assemble-scriptlets"]
 run = "cargo generate-rpm -p daemon-wm --payload-compress gzip"
 
 [tasks."cargo:rpm:arm64"]
 hide = true
-depends = ["cargo:rpm:assemble-scriptlets"]
+depends = ["cargo:assemble-scriptlets"]
 env.TARGET = "{{vars.arch_arm64}}"
 run = "cargo generate-rpm -p open-sesame --payload-compress gzip --target ${TARGET}"
 
 [tasks."cargo:rpm:desktop:arm64"]
 hide = true
-depends = ["cargo:rpm:assemble-scriptlets"]
+depends = ["cargo:assemble-scriptlets"]
 env.TARGET = "{{vars.arch_arm64}}"
 run = "cargo generate-rpm -p daemon-wm --payload-compress gzip --target ${TARGET}"
 
@@ -216,6 +248,7 @@ mise run cargo:build
 mise run docs:man
 mise run docs:completions
 mise run cargo:patchelf
+mise run cargo:assemble-scriptlets
 
 echo "==> Building headless .deb (open-sesame)..."
 cargo deb -p open-sesame --no-build
@@ -266,10 +299,59 @@ mise run cargo:rpm
 mise run cargo:rpm:desktop
 """
 
+[tasks."build:arch"]
+alias = [ "barch" ]
+description = "Build Arch tarballs (headless + desktop)"
+depends = [ "test" ]
+env.TARGET = "{{vars.arch_amd64}}"
+env.ARCH = "x86_64"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+mise run cargo:patchelf
+VERSION=$(./scripts/common/cargo-version.sh)
+export VERSION
+./scripts/arch/build-tarball.sh
+"""
+
 [tasks."build:all"]
 alias = [ "ba" ]
 description = "Build all packages"
-depends = [ "build:deb:all", "build:rpm" ]
+depends = [ "build:deb:all", "build:rpm", "build:arch" ]
+
+# =============================================================================
+# TEST: ARCH PACKAGING
+# =============================================================================
+
+[tasks."test:arch:namcap"]
+description = "Lint PKGBUILDs with namcap (Arch container)"
+run = "./scripts/arch/lint-pkgbuild.sh"
+
+[tasks."test:arch:pkg"]
+description = "Build .pkg.tar.zst + install + verify in Arch container (from local tarballs)"
+depends = [ "build:arch" ]
+run = "./scripts/arch/test-install.sh"
+
+[tasks."test:arch:install"]
+description = "End-to-end Arch install verification (Docker compose, needs published release)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+: "${OPEN_SESAME_VERSION:?OPEN_SESAME_VERSION must be set (e.g. 1.15.3)}"
+export OPEN_SESAME_VERSION
+docker compose -f .config/docker/compose.yml up --build -d arch
+echo "Waiting for systemd boot..."
+sleep 8
+echo "=== sesame --version ==="
+docker exec --user testuser open-sesame-arch sesame --version
+echo "=== sesame status ==="
+docker exec --user testuser open-sesame-arch sesame status
+echo "=== systemd units ==="
+docker exec --user testuser open-sesame-arch systemctl --user list-units 'open-sesame-*' --no-pager
+"""
 
 # =============================================================================
 # INSTALL (composed from build + install steps)
@@ -646,6 +728,7 @@ run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
+mise run cargo:assemble-scriptlets
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
@@ -660,6 +743,7 @@ run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
+mise run cargo:assemble-scriptlets
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
@@ -678,7 +762,7 @@ run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
-mise run cargo:rpm:assemble-scriptlets
+mise run cargo:assemble-scriptlets
 # No patchelf needed: CI uses mise-action with rustup (not nix devShell),
 # so binaries have FHS-standard interpreter and no nix store RPATHs.
 cargo build --release --target ${TARGET}
@@ -694,7 +778,7 @@ run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
-mise run cargo:rpm:assemble-scriptlets
+mise run cargo:assemble-scriptlets
 # No patchelf needed: CI uses mise-action with rustup (not nix devShell).
 cargo build --release --target ${TARGET}
 mise run docs:man
@@ -747,6 +831,64 @@ gpg --batch --yes --armor --detach-sign \
 
 echo "RPM repo generated at $RPM_SITE"
 ls -la "$RPM_SITE" "$RPM_SITE/repo" "$RPM_SITE/repo/repodata"
+"""
+
+[tasks."ci:setup:arch-repo"]
+description = "CI install Arch packaging tools"
+run = "sudo apt-get update && sudo apt-get install -y makepkg pacman-package-manager zstd binutils"
+
+[tasks."ci:build:arch"]
+description = "CI build tarballs and .pkg.tar.zst (amd64)"
+env.TARGET = "{{vars.arch_amd64}}"
+env.ARCH = "x86_64"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+VERSION=$(./scripts/common/cargo-version.sh)
+export VERSION
+./scripts/arch/build-tarball.sh
+./scripts/arch/build-pkg.sh
+"""
+
+[tasks."ci:build:arch:arm64"]
+description = "CI build tarballs and .pkg.tar.zst (arm64)"
+env.TARGET = "{{vars.arch_arm64}}"
+env.ARCH = "aarch64"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+VERSION=$(./scripts/common/cargo-version.sh)
+export VERSION
+./scripts/arch/build-tarball.sh
+./scripts/arch/build-pkg.sh
+"""
+
+[tasks."ci:release:arch-repo"]
+description = "CI generate Arch pacman repository"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup:arch-repo
+GPG_KEY_ID=$(gpg --list-keys --with-colons | awk -F: '/^pub/ {print $5; exit}')
+./scripts/arch/generate-arch-repo.sh arch-site packages "${GPG_KEY_ID}"
+"""
+
+[tasks."ci:release:aur-update"]
+description = "CI update AUR PKGBUILD with version and checksums"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+VERSION=$(./scripts/common/cargo-version.sh)
+export VERSION SHA256SUMS=SHA256SUMS.txt PKGBUILD_DIR=aur/open-sesame-bin
+./scripts/arch/update-pkgbuild.sh
 """
 
 [tasks."ci:docs:all"]
@@ -970,13 +1112,19 @@ BUILD (all run quality gates first):
   build:deb        (bde)  Both .deb packages (headless + desktop)
   build:deb:debug         .deb with debug logging
   build:rpm        (brpm) Both .rpm packages (headless + desktop)
-  build:all        (ba)   All packages (deb + rpm)
+  build:arch       (barch) Arch tarballs (headless + desktop)
+  build:all        (ba)   All packages (deb + rpm + arch tarballs)
 
 INSTALL:
   install          (i)    Build + install both .debs (headless + desktop)
   install:desktop  (id)   Same as install (explicit desktop)
   install:headless (ih)   Build + install headless .deb only
   install:debug    (idbg) Nuclear clean + debug .deb
+
+TEST (Arch packaging):
+  test:arch:namcap        Lint PKGBUILDs with namcap (Arch container)
+  test:arch:pkg           Build + install + verify from local tarballs (Arch container)
+  test:arch:install       End-to-end install from published release (Docker compose)
 
 CLEAN:
   clean            (c)    Build artifacts (target/, docs/book/)
@@ -1036,6 +1184,10 @@ CI (GitHub Actions entry points):
   ci:release:rename-rpm:arm64  Rename .rpm with version (arm64)
   ci:release:apt-repo     Generate APT repository
   ci:release:rpm-repo     Generate DNF repository
+  ci:build:arch            CI build Arch tarballs + .pkg.tar.zst (amd64)
+  ci:build:arch:arm64      CI build Arch tarballs + .pkg.tar.zst (arm64)
+  ci:release:arch-repo     Generate Arch pacman repository
+  ci:release:aur-update    Update AUR PKGBUILD with version + checksums
 
 OTHER:
   setup            (s)    Install tools + deps
