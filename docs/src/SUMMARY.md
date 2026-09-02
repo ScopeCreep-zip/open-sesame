@@ -90,6 +90,7 @@
 - [Nix](packaging/nix.md)
 - [Debian](packaging/deb.md)
 - [RPM](packaging/rpm.md)
+- [Arch](packaging/arch.md)
 - [Distribution](packaging/distribution.md)
 - [New Distributions](packaging/new-distributions.md)
 

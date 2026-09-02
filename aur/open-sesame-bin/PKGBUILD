@@ -1,0 +1,83 @@
+# Maintainer: Kat Morgan <usrbinkat at braincraft dot io>
+# https://github.com/ScopeCreep-zip/open-sesame
+pkgbase=open-sesame-bin
+pkgname=('open-sesame-bin' 'open-sesame-desktop-bin')
+pkgver=VERSION
+pkgrel=1
+pkgdesc="Programmable desktop suite: encrypted vaults, trust profiles, window switching, clipboard, input capture"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ScopeCreep-zip/open-sesame"
+license=('GPL-3.0-only')
+options=('!strip' '!debug')
+
+source_x86_64=(
+    "${url}/releases/download/v${pkgver}/open-sesame-v${pkgver}-x86_64.tar.gz"
+    "${url}/releases/download/v${pkgver}/open-sesame-desktop-v${pkgver}-x86_64.tar.gz"
+)
+source_aarch64=(
+    "${url}/releases/download/v${pkgver}/open-sesame-v${pkgver}-aarch64.tar.gz"
+    "${url}/releases/download/v${pkgver}/open-sesame-desktop-v${pkgver}-aarch64.tar.gz"
+)
+sha256sums_x86_64=('HEADLESS_X86_64_SHA' 'DESKTOP_X86_64_SHA')
+sha256sums_aarch64=('HEADLESS_AARCH64_SHA' 'DESKTOP_AARCH64_SHA')
+
+package_open-sesame-bin() {
+    install=open-sesame-bin.install
+    pkgdesc="Encrypted secret vaults, trust profiles, application launching, and snippet expansion"
+    depends=('glibc' 'gcc-libs' 'libseccomp')
+    optdepends=(
+        'openssh: SSH agent authentication'
+        'open-sesame-desktop: window switcher, clipboard, input capture'
+    )
+    provides=("open-sesame=${pkgver}")
+    conflicts=('open-sesame' 'sesame')
+
+    cd "${srcdir}"
+
+    install -Dm755 usr/bin/sesame "${pkgdir}/usr/bin/sesame"
+    install -Dm755 usr/bin/daemon-profile "${pkgdir}/usr/bin/daemon-profile"
+    install -Dm755 usr/bin/daemon-secrets "${pkgdir}/usr/bin/daemon-secrets"
+    install -Dm755 usr/bin/daemon-launcher "${pkgdir}/usr/bin/daemon-launcher"
+    install -Dm755 usr/bin/daemon-snippets "${pkgdir}/usr/bin/daemon-snippets"
+
+    install -Dm644 usr/lib/systemd/user/open-sesame-headless.target "${pkgdir}/usr/lib/systemd/user/open-sesame-headless.target"
+    install -Dm644 usr/lib/systemd/user/open-sesame-profile.service "${pkgdir}/usr/lib/systemd/user/open-sesame-profile.service"
+    install -Dm644 usr/lib/systemd/user/open-sesame-secrets.service "${pkgdir}/usr/lib/systemd/user/open-sesame-secrets.service"
+    install -Dm644 usr/lib/systemd/user/open-sesame-launcher.service "${pkgdir}/usr/lib/systemd/user/open-sesame-launcher.service"
+    install -Dm644 usr/lib/systemd/user/open-sesame-snippets.service "${pkgdir}/usr/lib/systemd/user/open-sesame-snippets.service"
+
+    install -Dm644 usr/lib/systemd/user-preset/90-open-sesame.preset "${pkgdir}/usr/lib/systemd/user-preset/90-open-sesame.preset"
+
+    install -Dm644 usr/share/man/man1/sesame.1.gz "${pkgdir}/usr/share/man/man1/sesame.1.gz"
+    install -Dm644 usr/share/bash-completion/completions/sesame "${pkgdir}/usr/share/bash-completion/completions/sesame"
+    install -Dm644 usr/share/zsh/site-functions/_sesame "${pkgdir}/usr/share/zsh/site-functions/_sesame"
+    install -Dm644 usr/share/fish/vendor_completions.d/sesame.fish "${pkgdir}/usr/share/fish/vendor_completions.d/sesame.fish"
+    install -Dm644 usr/share/doc/open-sesame/config.example.toml "${pkgdir}/usr/share/doc/open-sesame/config.example.toml"
+    install -Dm644 usr/share/licenses/open-sesame/LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
+
+package_open-sesame-desktop-bin() {
+    install=open-sesame-desktop-bin.install
+    pkgdesc="Vimium-style window switcher, clipboard manager, and keyboard input capture for COSMIC/Wayland"
+    depends=("open-sesame=${pkgver}" 'glibc' 'gcc-libs' 'libseccomp' 'libxkbcommon' 'wayland' 'fontconfig' 'freetype2')
+    optdepends=(
+        'xdg-utils: xdg-open integration'
+        'ttf-dejavu: default UI font'
+    )
+    provides=('open-sesame-desktop')
+    conflicts=('open-sesame-desktop')
+
+    cd "${srcdir}"
+
+    install -Dm755 usr/bin/daemon-wm "${pkgdir}/usr/bin/daemon-wm"
+    install -Dm755 usr/bin/daemon-clipboard "${pkgdir}/usr/bin/daemon-clipboard"
+    install -Dm755 usr/bin/daemon-input "${pkgdir}/usr/bin/daemon-input"
+
+    install -Dm644 usr/lib/systemd/user/open-sesame-desktop.target "${pkgdir}/usr/lib/systemd/user/open-sesame-desktop.target"
+    install -Dm644 usr/lib/systemd/user/open-sesame-wm.service "${pkgdir}/usr/lib/systemd/user/open-sesame-wm.service"
+    install -Dm644 usr/lib/systemd/user/open-sesame-clipboard.service "${pkgdir}/usr/lib/systemd/user/open-sesame-clipboard.service"
+    install -Dm644 usr/lib/systemd/user/open-sesame-input.service "${pkgdir}/usr/lib/systemd/user/open-sesame-input.service"
+
+    install -Dm644 usr/lib/systemd/user-preset/90-open-sesame-desktop.preset "${pkgdir}/usr/lib/systemd/user-preset/90-open-sesame-desktop.preset"
+    install -Dm644 usr/share/licenses/open-sesame-desktop/LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

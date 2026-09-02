@@ -1,7 +1,7 @@
 # Open Sesame package install verification
 #
-# Tests .deb and .rpm packages from GitHub Releases against
-# Ubuntu and Fedora containers with systemd as PID 1.
+# Tests .deb, .rpm, and .pkg.tar.zst packages from GitHub Releases against
+# Ubuntu, Fedora, and Arch Linux containers with systemd as PID 1.
 #
 # Each container runs:
 # - systemd for service lifecycle
@@ -10,10 +10,11 @@
 # - sesame-init.service for non-interactive vault creation
 # - All open-sesame daemons via systemd global enable
 #
-# Usage:
+# Usage (OPEN_SESAME_VERSION is required):
 #   OPEN_SESAME_VERSION=1.15.3 docker compose -f .config/docker/compose.yml up --build -d
 #   docker exec --user ubuntu open-sesame-ubuntu sesame status
 #   docker exec --user testuser open-sesame-fedora sesame status
+#   docker exec --user testuser open-sesame-arch sesame status
 #   docker compose -f .config/docker/compose.yml down -v
 
 services:
@@ -65,6 +66,29 @@ services:
       - /run/lock:exec,mode=755
       - /tmp:exec,mode=1777
 
+  arch:
+    build:
+      context: ../..
+      dockerfile: .config/docker/Dockerfile.arch
+      args:
+        VERSION: "${OPEN_SESAME_VERSION}"
+    container_name: open-sesame-arch
+    hostname: arch
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - arch-config:/home/testuser/.config/pds
+      - arch-cache:/home/testuser/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
 volumes:
   ubuntu-config:
     driver: local
@@ -73,4 +97,8 @@ volumes:
   fedora-config:
     driver: local
   fedora-cache:
+    driver: local
+  arch-config:
+    driver: local
+  arch-cache:
     driver: local

@@ -20,6 +20,7 @@ jobs:
 
       - uses: jdx/mise-action@v4
         with:
+          minimum_release_age: 7d
           install_args: "rust"
           cache: true
 

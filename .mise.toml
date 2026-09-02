@@ -749,6 +749,64 @@ echo "RPM repo generated at $RPM_SITE"
 ls -la "$RPM_SITE" "$RPM_SITE/repo" "$RPM_SITE/repo/repodata"
 """
 
+[tasks."ci:setup:arch-repo"]
+description = "CI install Arch packaging tools"
+run = "sudo apt-get update && sudo apt-get install -y makepkg pacman-package-manager zstd binutils"
+
+[tasks."ci:build:arch"]
+description = "CI build tarballs and .pkg.tar.zst (amd64)"
+env.TARGET = "{{vars.arch_amd64}}"
+env.ARCH = "x86_64"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+VERSION=$(cargo metadata --format-version=1 -q | jq -r '.packages[] | select(.name == "open-sesame") | .version')
+export VERSION
+./scripts/arch/build-tarball.sh
+./scripts/arch/build-pkg.sh
+"""
+
+[tasks."ci:build:arch:arm64"]
+description = "CI build tarballs and .pkg.tar.zst (arm64)"
+env.TARGET = "{{vars.arch_arm64}}"
+env.ARCH = "aarch64"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+VERSION=$(cargo metadata --format-version=1 -q | jq -r '.packages[] | select(.name == "open-sesame") | .version')
+export VERSION
+./scripts/arch/build-tarball.sh
+./scripts/arch/build-pkg.sh
+"""
+
+[tasks."ci:release:arch-repo"]
+description = "CI generate Arch pacman repository"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup:arch-repo
+GPG_KEY_ID=$(gpg --list-keys --with-colons | awk -F: '/^pub/ {print $5; exit}')
+./scripts/arch/generate-arch-repo.sh arch-site packages "${GPG_KEY_ID}"
+"""
+
+[tasks."ci:release:aur-update"]
+description = "CI update AUR PKGBUILD with version and checksums"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+VERSION=$(cargo metadata --format-version=1 -q | jq -r '.packages[] | select(.name == "open-sesame") | .version')
+export VERSION SHA256SUMS=SHA256SUMS.txt PKGBUILD_DIR=aur/open-sesame-bin
+./scripts/arch/update-pkgbuild.sh
+"""
+
 [tasks."ci:docs:all"]
 description = "CI generate all documentation for release"
 run = """
@@ -1036,6 +1094,10 @@ CI (GitHub Actions entry points):
   ci:release:rename-rpm:arm64  Rename .rpm with version (arm64)
   ci:release:apt-repo     Generate APT repository
   ci:release:rpm-repo     Generate DNF repository
+  ci:build:arch            CI build Arch tarballs + .pkg.tar.zst (amd64)
+  ci:build:arch:arm64      CI build Arch tarballs + .pkg.tar.zst (arm64)
+  ci:release:arch-repo     Generate Arch pacman repository
+  ci:release:aur-update    Update AUR PKGBUILD with version + checksums
 
 OTHER:
   setup            (s)    Install tools + deps

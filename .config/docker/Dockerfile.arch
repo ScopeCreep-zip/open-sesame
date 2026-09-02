@@ -1,0 +1,95 @@
+# Open Sesame Arch Linux install verification — archlinux:latest with systemd
+#
+# x86_64 only (official archlinux image does not support aarch64).
+#
+# Shell:  docker exec -it --user testuser open-sesame-arch bash
+# Verify: docker exec --user testuser open-sesame-arch sesame --version
+# Status: docker exec --user testuser open-sesame-arch sesame status
+
+FROM archlinux:latest
+
+ARG VERSION
+
+# =============================================================================
+# System packages
+# =============================================================================
+RUN pacman -Syu --noconfirm \
+    systemd \
+    dbus \
+    curl \
+    sudo \
+    openssh \
+    && pacman -Scc --noconfirm
+
+# =============================================================================
+# systemd configuration for container environment
+# =============================================================================
+RUN systemctl mask \
+    getty.target \
+    console-getty.service \
+    systemd-networkd.service \
+    systemd-resolved.service \
+    systemd-timesyncd.service \
+    systemd-hostnamed.service \
+    systemd-machined.service \
+    systemd-journald-audit.socket \
+    systemd-udevd.service \
+    systemd-udev-trigger.service \
+    systemd-firstboot.service \
+    systemd-machine-id-commit.service \
+    first-boot-complete.target
+
+RUN systemctl set-default multi-user.target
+
+# =============================================================================
+# PAM override for user@.service in container
+# =============================================================================
+COPY .config/docker/data/common/etc/pam.d/systemd-user /etc/pam.d/systemd-user
+
+# =============================================================================
+# Create testuser with linger
+# =============================================================================
+RUN useradd -m -s /bin/bash -u 1000 -G wheel testuser \
+    && echo "testuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/testuser \
+    && chmod 0440 /etc/sudoers.d/testuser
+
+RUN mkdir -p \
+      /home/testuser/.config/pds \
+      /home/testuser/.cache/open-sesame \
+      /home/testuser/.ssh \
+    && chown -R testuser:testuser /home/testuser \
+    && mkdir -p /var/lib/systemd/linger \
+    && touch /var/lib/systemd/linger/testuser
+
+# =============================================================================
+# SSH agent and sesame-init services
+# Reuses Fedora's systemd units — both use 'testuser' at UID 1000.
+# If the Fedora username changes, these COPY paths must update to match.
+# =============================================================================
+COPY .config/docker/data/fedora/etc/systemd/system/ssh-agent.service /etc/systemd/system/ssh-agent.service
+COPY .config/docker/data/fedora/etc/systemd/system/sesame-init.service /etc/systemd/system/sesame-init.service
+COPY .config/docker/data/fedora/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
+RUN chmod 755 /usr/local/bin/sesame-init.sh \
+    && mkdir -p /run/user/1000 \
+    && chown testuser:testuser /run/user/1000 \
+    && systemctl enable ssh-agent.service sesame-init.service
+
+# =============================================================================
+# Install open-sesame from GitHub Releases (.pkg.tar.zst)
+# =============================================================================
+RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-bin-${VERSION}-1-x86_64.pkg.tar.zst" -o /tmp/open-sesame.pkg.tar.zst \
+    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-bin-${VERSION}-1-x86_64.pkg.tar.zst" -o /tmp/open-sesame-desktop.pkg.tar.zst \
+    && pacman -U --noconfirm /tmp/open-sesame.pkg.tar.zst /tmp/open-sesame-desktop.pkg.tar.zst \
+    && rm /tmp/*.pkg.tar.zst
+
+# =============================================================================
+# Runtime environment
+# =============================================================================
+ENV HOME=/home/testuser
+ENV XDG_RUNTIME_DIR=/run/user/1000
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ENV SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock
+
+WORKDIR /home/testuser
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/lib/systemd/systemd"]

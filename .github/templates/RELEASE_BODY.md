@@ -31,6 +31,20 @@
 | `open-sesame-desktop-linux-x86_64.rpm` | `${SHA256_RPM_DESKTOP_X86_64}` |
 | `open-sesame-desktop-linux-aarch64.rpm` | `${SHA256_RPM_DESKTOP_AARCH64}` |
 
+### open-sesame tarball (headless)
+
+| File | SHA256 |
+|------|--------|
+| `open-sesame-v${VERSION}-x86_64.tar.gz` | `${SHA256_TAR_HEADLESS_X86_64}` |
+| `open-sesame-v${VERSION}-aarch64.tar.gz` | `${SHA256_TAR_HEADLESS_AARCH64}` |
+
+### open-sesame-desktop tarball
+
+| File | SHA256 |
+|------|--------|
+| `open-sesame-desktop-v${VERSION}-x86_64.tar.gz` | `${SHA256_TAR_DESKTOP_X86_64}` |
+| `open-sesame-desktop-v${VERSION}-aarch64.tar.gz` | `${SHA256_TAR_DESKTOP_AARCH64}` |
+
 ### Quick Install DEB (auto-detects architecture)
 
 **Desktop (full suite):**
@@ -61,6 +75,22 @@ sudo dnf install -y /tmp/open-sesame.rpm /tmp/open-sesame-desktop.rpm
 ```bash
 curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-linux-$(uname -m).rpm" -o /tmp/open-sesame.rpm
 sudo dnf install -y /tmp/open-sesame.rpm
+```
+
+### Quick Install Arch (pacman -U from release)
+
+**Desktop (full suite):**
+```bash
+ARCH=$(uname -m)
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-bin-${VERSION}-1-${ARCH}.pkg.tar.zst" -o /tmp/open-sesame.pkg.tar.zst
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-desktop-bin-${VERSION}-1-${ARCH}.pkg.tar.zst" -o /tmp/open-sesame-desktop.pkg.tar.zst
+sudo pacman -U /tmp/open-sesame.pkg.tar.zst /tmp/open-sesame-desktop.pkg.tar.zst
+```
+
+**Headless only:**
+```bash
+curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/${TAG}/open-sesame-bin-${VERSION}-1-$(uname -m).pkg.tar.zst" -o /tmp/open-sesame.pkg.tar.zst
+sudo pacman -U /tmp/open-sesame.pkg.tar.zst
 ```
 
 ### x86_64 DEB (with checksum verification)

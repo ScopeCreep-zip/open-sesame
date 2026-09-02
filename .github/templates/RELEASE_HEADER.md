@@ -46,6 +46,23 @@ sudo dnf install -y open-sesame open-sesame-desktop
 sudo dnf install -y open-sesame
 ```
 
+### AUR (Arch Linux)
+
+```bash
+yay -S open-sesame-bin open-sesame-desktop-bin
+```
+
+Or from the self-hosted pacman repo:
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo pacman-key --add -
+sudo pacman-key --lsign-key 2B8C6081C58479B3FB7DA66F8581D8C7DCEF93E3
+# Add to /etc/pacman.conf:
+# [open-sesame]
+# SigLevel = Required DatabaseRequired
+# Server = https://scopecreep-zip.github.io/open-sesame/arch/$arch
+sudo pacman -Syu open-sesame-bin open-sesame-desktop-bin
+```
+
 ### Direct Download
 
 See release assets below for `.deb` and `.rpm` packages (amd64/arm64) with SHA256 checksums.
@@ -71,12 +88,14 @@ See release assets below for `.deb` and `.rpm` packages (amd64/arm64) with SHA25
 
 ## Supply Chain Security
 
-All `.deb` and `.rpm` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
+All release artifacts include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
 ```bash
 gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip
 gh attestation verify "open-sesame-linux-$(uname -m).rpm" --owner ScopeCreep-zip
 gh attestation verify "open-sesame-desktop-linux-$(uname -m).rpm" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-v${TAG#v}-$(uname -m).tar.gz" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-v${TAG#v}-$(uname -m).tar.gz" --owner ScopeCreep-zip
 ```
 
 ---
