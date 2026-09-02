@@ -473,16 +473,19 @@ jobs:
           export SHA256SUMS=SHA256SUMS.txt PKGBUILD_DIR=aur/open-sesame-bin
           ./scripts/arch/update-pkgbuild.sh
 
-      - name: Publish open-sesame-bin to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
-        with:
-          pkgname: open-sesame-bin
-          asset_dir: aur/open-sesame-bin/
-          commit_username: usrbinkat
-          commit_email: usrbinkat@braincraft.io
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          test: true
-          test_flags: --clean --cleanbuild --nodeps
+      # TODO: Re-enable when AUR registration reopens (paused since June 2026
+      # malicious packages incident). PKGBUILD is still updated and validated
+      # above; only the push to aur.archlinux.org is disabled.
+      # - name: Publish open-sesame-bin to AUR
+      #   uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+      #   with:
+      #     pkgname: open-sesame-bin
+      #     asset_dir: aur/open-sesame-bin/
+      #     commit_username: usrbinkat
+      #     commit_email: usrbinkat@braincraft.io
+      #     ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      #     test: true
+      #     test_flags: --clean --cleanbuild --nodeps
 
   # ==========================================================================
   # Cleanup old releases (keep last 10)
