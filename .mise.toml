@@ -335,6 +335,11 @@ description = "Build .pkg.tar.zst + install + verify in Arch container (from loc
 depends = [ "build:arch" ]
 run = "./scripts/arch/test-install.sh"
 
+[tasks."test:arch:ci"]
+description = "Reproduce CI arch build on ubuntu:24.04 (from local tarballs)"
+depends = [ "build:arch" ]
+run = "./scripts/arch/test-ci-build.sh"
+
 [tasks."test:arch:install"]
 description = "End-to-end Arch install verification (Docker compose, needs published release)"
 run = """
@@ -1124,6 +1129,7 @@ INSTALL:
 TEST (Arch packaging):
   test:arch:namcap        Lint PKGBUILDs with namcap (Arch container)
   test:arch:pkg           Build + install + verify from local tarballs (Arch container)
+  test:arch:ci            Reproduce CI arch build on ubuntu:24.04 container
   test:arch:install       End-to-end install from published release (Docker compose)
 
 CLEAN:
