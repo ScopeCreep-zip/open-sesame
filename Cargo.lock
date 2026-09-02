@@ -406,7 +406,7 @@ dependencies = [
 [[package]]
 name = "build_helpers"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#6347ba2390edd72512c3030d06e2f23d185afc12"
+source = "git+https://github.com/pop-os/libcosmic?rev=6347ba2#6347ba2390edd72512c3030d06e2f23d185afc12"
 dependencies = [
  "cfg_aliases",
 ]
@@ -1072,7 +1072,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#6347ba2390edd72512c3030d06e2f23d185afc12"
+source = "git+https://github.com/pop-os/libcosmic?rev=6347ba2#6347ba2390edd72512c3030d06e2f23d185afc12"
 dependencies = [
  "atomicwrites",
  "cosmic-config-derive",
@@ -1089,7 +1089,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config-derive"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#6347ba2390edd72512c3030d06e2f23d185afc12"
+source = "git+https://github.com/pop-os/libcosmic?rev=6347ba2#6347ba2390edd72512c3030d06e2f23d185afc12"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1135,7 +1135,7 @@ dependencies = [
 [[package]]
 name = "cosmic-theme"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#6347ba2390edd72512c3030d06e2f23d185afc12"
+source = "git+https://github.com/pop-os/libcosmic?rev=6347ba2#6347ba2390edd72512c3030d06e2f23d185afc12"
 dependencies = [
  "almost",
  "configparser",
@@ -3901,7 +3901,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#6347ba2390edd72512c3030d06e2f23d185afc12"
+source = "git+https://github.com/pop-os/libcosmic?rev=6347ba2#6347ba2390edd72512c3030d06e2f23d185afc12"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
@@ -3925,7 +3925,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#6347ba2390edd72512c3030d06e2f23d185afc12"
+source = "git+https://github.com/pop-os/libcosmic?rev=6347ba2#6347ba2390edd72512c3030d06e2f23d185afc12"
 dependencies = [
  "futures",
  "iced_core",

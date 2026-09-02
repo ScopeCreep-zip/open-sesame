@@ -130,10 +130,16 @@ wayland-client          = "0.31"
 wayland-protocols       = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr   = { version = "0.3", features = ["client"] }
 smithay-client-toolkit  = { version = "0.20", features = ["xkbcommon"] }
+# Pinned to specific revs for nix build reproducibility. Without rev pins,
+# builtins.fetchGit resolves to HEAD at fetch time, producing a different
+# NAR hash every time upstream pushes. Update procedure:
+#   1. cargo update -p cosmic-theme -p cosmic-config -p cosmic-client-toolkit -p cosmic-protocols
+#   2. grep the new rev from Cargo.lock
+#   3. update rev = here AND outputHashes in nix/package.nix + nix/package-desktop.nix
 cosmic-client-toolkit   = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit" }
 cosmic-protocols        = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-protocols" }
-cosmic-theme            = { git = "https://github.com/pop-os/libcosmic", package = "cosmic-theme", default-features = false }
-cosmic-config           = { git = "https://github.com/pop-os/libcosmic", package = "cosmic-config", default-features = false, features = ["macro"] }
+cosmic-theme            = { git = "https://github.com/pop-os/libcosmic", rev = "6347ba2", package = "cosmic-theme", default-features = false }
+cosmic-config           = { git = "https://github.com/pop-os/libcosmic", rev = "6347ba2", package = "cosmic-config", default-features = false, features = ["macro"] }
 zbus                    = { version = "5", default-features = false, features = ["tokio"] }
 landlock                = "0.4"
 libseccomp              = "0.4"
