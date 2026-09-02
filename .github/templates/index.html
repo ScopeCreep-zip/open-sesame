@@ -28,6 +28,7 @@
     <a href="book/">📖 User Guide</a>
     <a href="doc/sesame/">📚 API Docs</a>
     <a href="repo/">📦 RPM Repo</a>
+    <a href="arch/">📦 Arch Repo</a>
     <a href="https://github.com/ScopeCreep-zip/open-sesame">🔗 GitHub</a>
   </div>
 
@@ -76,8 +77,22 @@ EOF</pre>
   <p>Headless only (servers, containers):</p>
   <pre>sudo dnf install -y open-sesame</pre>
 
-  <h2>AUR (Arch Linux)</h2>
-  <pre>yay -S open-sesame-bin open-sesame-desktop-bin</pre>
+  <h2>pacman (Arch Linux)</h2>
+
+  <p>Import the GPG key and add the pacman repository:</p>
+  <pre>curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo pacman-key --add -
+sudo pacman-key --lsign-key $(curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | gpg --show-keys --with-colons 2>/dev/null | awk -F: '/^pub/{print $5; exit}')</pre>
+
+  <p>Add to <code>/etc/pacman.conf</code>:</p>
+  <pre>[open-sesame]
+SigLevel = Required DatabaseRequired
+Server = https://scopecreep-zip.github.io/open-sesame/arch/$arch</pre>
+
+  <p>Desktop (full suite):</p>
+  <pre>sudo pacman -Syu open-sesame-bin open-sesame-desktop-bin</pre>
+
+  <p>Headless only (servers, containers):</p>
+  <pre>sudo pacman -Syu open-sesame-bin</pre>
 
   <h2>Initialize</h2>
   <pre>sesame init</pre>
@@ -97,6 +112,7 @@ EOF</pre>
     <li><a href="book/">User Guide</a> — Installation, configuration, keybindings, theming</li>
     <li><a href="doc/sesame/">API Documentation</a> — Library reference for developers</li>
     <li><a href="repo/">RPM Repository</a> — DNF/yum package index</li>
+    <li><a href="arch/">Arch Repository</a> — pacman package index</li>
     <li><a href="https://github.com/ScopeCreep-zip/open-sesame">GitHub</a> — Source code, issues, releases</li>
   </ul>
 
