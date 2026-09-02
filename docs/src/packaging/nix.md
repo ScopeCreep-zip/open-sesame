@@ -121,7 +121,8 @@ The module generates two systemd user targets and up to seven services:
 
 **Desktop target** (`open-sesame-desktop`, omitted in headless mode):
 
-- `Requires = [ "open-sesame-headless.target" "graphical-session.target" ]`
+- `Requires = [ "open-sesame-headless.target" ]`
+- `BindsTo = [ "graphical-session.target" ]`
 - `WantedBy = [ "graphical-session.target" ]`
 - Three services: `open-sesame-wm`, `open-sesame-clipboard`, `open-sesame-input`
 

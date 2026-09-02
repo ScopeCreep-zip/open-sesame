@@ -1,0 +1,4 @@
+enable open-sesame-wm.service
+enable open-sesame-clipboard.service
+enable open-sesame-input.service
+enable open-sesame-desktop.target

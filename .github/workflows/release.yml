@@ -18,6 +18,10 @@ permissions:
   issues: write
   pull-requests: write
 
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   MISE_AUTO_INSTALL: "false"
@@ -35,7 +39,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -92,7 +96,7 @@ jobs:
   # Build .deb packages for each architecture
   # ==========================================================================
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build DEB ${{ matrix.arch }}
     needs: semantic-release
     if: needs.semantic-release.outputs.new_release == 'true'
     strategy:
@@ -112,7 +116,7 @@ jobs:
       GITHUB_REF_NAME: ${{ needs.semantic-release.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.semantic-release.outputs.tag }}
 
@@ -128,10 +132,67 @@ jobs:
 
       - run: mise run ${{ matrix.rename_task }}
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: "*.deb"
+          retention-days: 1
+
+  # ==========================================================================
+  # Build .rpm packages for each architecture
+  # ==========================================================================
+  build-rpm:
+    name: Build RPM ${{ matrix.arch }}
+    needs: semantic-release
+    if: needs.semantic-release.outputs.new_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            build_task: ci:build:rpm
+            rename_task: ci:release:rename-rpm
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            build_task: ci:build:rpm:arm64
+            rename_task: ci:release:rename-rpm:arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      GITHUB_REF_NAME: ${{ needs.semantic-release.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
+
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: "rust cargo:cargo-generate-rpm"
+          cache: true
+
+      - uses: crazy-max/ghaction-import-gpg@v7
+        id: gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Export GPG signing key for cargo-generate-rpm
+        run: |
+          KEY_FILE="$(mktemp)"
+          gpg --armor --export-secret-keys "${{ steps.gpg.outputs.keyid }}" > "$KEY_FILE"
+          echo "GPG_SIGNING_KEY_FILE=$KEY_FILE" >> "$GITHUB_ENV"
+
+      - name: Build packages (with raised mlock limit for ProtectedAlloc)
+        run: |
+          sudo prlimit --pid $$ --memlock=268435456:268435456
+          mise run ${{ matrix.build_task }}
+
+      - run: mise run ${{ matrix.rename_task }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpm-${{ matrix.arch }}
+          path: "*.rpm"
           retention-days: 1
 
   # ==========================================================================
@@ -139,26 +200,33 @@ jobs:
   # ==========================================================================
   attest:
     name: Attest Build Provenance
-    needs: [semantic-release, build]
+    needs: [semantic-release, build, build-rpm]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: deb-*
           merge-multiple: true
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/download-artifact@v8
         with:
-          subject-path: "*.deb"
+          pattern: rpm-*
+          merge-multiple: true
+
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            *.deb
+            *.rpm
 
   # ==========================================================================
-  # Upload .deb assets to GitHub Release
+  # Upload .deb and .rpm assets to GitHub Release
   # ==========================================================================
   upload-assets:
     name: Upload Release Assets
-    needs: [semantic-release, build]
+    needs: [semantic-release, build, build-rpm]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
     env:
@@ -166,35 +234,49 @@ jobs:
       TAG: ${{ needs.semantic-release.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: deb-*
           merge-multiple: true
 
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rpm-*
+          merge-multiple: true
+
       - name: Generate checksums and install instructions
         run: |
-          sha256sum ./*.deb > SHA256SUMS.txt
+          sha256sum ./*.deb ./*.rpm > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          SHA_HEADLESS_X86_64=$(grep "^[a-f0-9].*open-sesame-linux-x86_64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_HEADLESS_AARCH64=$(grep "^[a-f0-9].*open-sesame-linux-aarch64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_DESKTOP_X86_64=$(grep "open-sesame-desktop-linux-x86_64" SHA256SUMS.txt | cut -d' ' -f1)
-          SHA_DESKTOP_AARCH64=$(grep "open-sesame-desktop-linux-aarch64" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_HEADLESS_X86_64=$(grep "open-sesame-linux-x86_64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_HEADLESS_AARCH64=$(grep "open-sesame-linux-aarch64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_DESKTOP_X86_64=$(grep "open-sesame-desktop-linux-x86_64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_DESKTOP_AARCH64=$(grep "open-sesame-desktop-linux-aarch64\.deb" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_RPM_HEADLESS_X86_64=$(grep "open-sesame-linux-x86_64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_RPM_HEADLESS_AARCH64=$(grep "open-sesame-linux-aarch64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_RPM_DESKTOP_X86_64=$(grep "open-sesame-desktop-linux-x86_64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
+          SHA_RPM_DESKTOP_AARCH64=$(grep "open-sesame-desktop-linux-aarch64\.rpm" SHA256SUMS.txt | cut -d' ' -f1)
           sed -e "s/\${TAG}/${TAG}/g" \
               -e "s/\${VERSION}/${VERSION}/g" \
               -e "s/\${SHA256_HEADLESS_X86_64}/${SHA_HEADLESS_X86_64}/g" \
               -e "s/\${SHA256_HEADLESS_AARCH64}/${SHA_HEADLESS_AARCH64}/g" \
               -e "s/\${SHA256_DESKTOP_X86_64}/${SHA_DESKTOP_X86_64}/g" \
               -e "s/\${SHA256_DESKTOP_AARCH64}/${SHA_DESKTOP_AARCH64}/g" \
+              -e "s/\${SHA256_RPM_HEADLESS_X86_64}/${SHA_RPM_HEADLESS_X86_64}/g" \
+              -e "s/\${SHA256_RPM_HEADLESS_AARCH64}/${SHA_RPM_HEADLESS_AARCH64}/g" \
+              -e "s/\${SHA256_RPM_DESKTOP_X86_64}/${SHA_RPM_DESKTOP_X86_64}/g" \
+              -e "s/\${SHA256_RPM_DESKTOP_AARCH64}/${SHA_RPM_DESKTOP_AARCH64}/g" \
               .github/templates/RELEASE_BODY.md > install_instructions.md
 
       - name: Upload assets to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
           files: |
             *.deb
+            *.rpm
             SHA256SUMS.txt
           body_path: install_instructions.md
           append_body: true
@@ -209,7 +291,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.semantic-release.outputs.tag }}
 
@@ -222,39 +304,46 @@ jobs:
 
       - run: mise run ci:docs:combine
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: documentation
           path: combined-docs/
           retention-days: 1
 
   # ==========================================================================
-  # Generate and deploy APT repository + documentation to GitHub Pages
+  # Generate and deploy APT + DNF repositories and documentation to GitHub Pages
   # ==========================================================================
   publish:
-    name: Publish APT Repository & Docs
-    needs: [semantic-release, build, upload-assets, build-docs]
+    name: Publish Repositories & Docs
+    needs: [semantic-release, build, build-rpm, upload-assets, build-docs]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: deb-*
           path: packages/
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rpm-*
+          path: packages/
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
         with:
           name: documentation
           path: docs-site/
 
-      - uses: crazy-max/ghaction-import-gpg@v6
+      - uses: crazy-max/ghaction-import-gpg@v7
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
 
@@ -263,14 +352,59 @@ jobs:
           install_args: "rust"
           cache: true
 
-      - run: mise run ci:release:apt-repo
+      - name: Generate APT repository
+        run: mise run ci:release:apt-repo
 
-      - uses: actions/upload-pages-artifact@v4
+      - name: Generate RPM repository
+        run: mise run ci:release:rpm-repo
+
+      - name: Merge RPM repo into gh-pages
+        run: |
+          cp -r rpm-site/repo gh-pages/repo
+          cp rpm-site/RPM-GPG-KEY gh-pages/RPM-GPG-KEY
+
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: gh-pages/
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
+
+      - name: Verify deployment
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          base="https://${OWNER}.github.io/${REPO}"
+
+          echo "Polling APT Release..."
+          for i in $(seq 1 24); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --location "${base}/dists/noble/Release" || true)"
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "APT Release is live"
+              break
+            fi
+            sleep 10
+          done
+
+          echo "Polling repomd.xml..."
+          for i in $(seq 1 24); do
+            code="$(curl -sS -o /tmp/repomd.xml -w '%{http_code}' --location "${base}/repo/repodata/repomd.xml" || true)"
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ] && grep -q repomd /tmp/repomd.xml; then
+              echo "repomd.xml is live"
+              head -5 /tmp/repomd.xml
+              break
+            fi
+            sleep 10
+          done
+
+          if curl -fsSL "${base}/RPM-GPG-KEY" -o /tmp/RPM-GPG-KEY 2>/dev/null; then
+            grep -q 'BEGIN PGP PUBLIC KEY BLOCK' /tmp/RPM-GPG-KEY \
+              && echo "RPM-GPG-KEY is live" || true
+          fi
 
   # ==========================================================================
   # Cleanup old releases (keep last 10)

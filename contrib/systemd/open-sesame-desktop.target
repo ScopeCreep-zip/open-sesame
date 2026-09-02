@@ -3,7 +3,8 @@ Description=Open Sesame Desktop Suite
 Documentation=https://github.com/scopecreep-zip/open-sesame
 # Desktop layer: window manager, clipboard, input capture.
 # Requires the headless target for core infrastructure.
-Requires=open-sesame-headless.target graphical-session.target
+Requires=open-sesame-headless.target
+BindsTo=graphical-session.target
 After=open-sesame-headless.target graphical-session.target
 
 [Install]

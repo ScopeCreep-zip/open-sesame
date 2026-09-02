@@ -99,16 +99,19 @@ regardless of whether a graphical session exists. The four headless services dec
 [Unit]
 Description=Open Sesame Desktop Suite
 Documentation=https://github.com/scopecreep-zip/open-sesame
-Requires=open-sesame-headless.target graphical-session.target
+Requires=open-sesame-headless.target
+BindsTo=graphical-session.target
 After=open-sesame-headless.target graphical-session.target
 
 [Install]
 WantedBy=graphical-session.target
 ```
 
-The desktop target requires both the headless target (for IPC bus and secrets infrastructure) and
-`graphical-session.target` (for Wayland compositor access). It is wanted by
-`graphical-session.target`, so it only activates when a graphical session starts.
+The desktop target requires the headless target (for IPC bus and secrets infrastructure) and
+uses `BindsTo=graphical-session.target` (for Wayland compositor access). `BindsTo=` is stronger
+than `Requires=` — it propagates unexpected deactivation (compositor crash) back to the desktop
+target, ensuring desktop services tear down when the graphical session exits ungracefully. It is
+wanted by `graphical-session.target`, so it only activates when a graphical session starts.
 
 ## Service Hardening
 

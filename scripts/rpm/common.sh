@@ -1,0 +1,15 @@
+# common.sh — shared helpers for open-sesame RPM scriptlets.
+# Concatenated into each scriptlet at build time by the mise task.
+# Do not add a shebang — this file is sourced, not executed directly.
+
+active_user_uids() {
+    systemctl list-units 'user@*' --legend=no 2>/dev/null \
+        | sed -n 's/.*user@\([0-9]\+\)\.service.*/\1/p'
+}
+
+reload_user_managers() {
+    for uid in $(active_user_uids); do
+        SYSTEMD_BUS_TIMEOUT=15s systemctl --user -M "$uid@" \
+            daemon-reload 2>/dev/null || :
+    done
+}

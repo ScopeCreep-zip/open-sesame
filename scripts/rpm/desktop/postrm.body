@@ -1,0 +1,10 @@
+# %postun scriptlet for open-sesame-desktop
+# $1: 0=remove, >=1=upgrade
+
+if [ "$1" -eq 0 ]; then
+    reload_user_managers
+    echo "open-sesame-desktop removed."
+    echo "Headless daemons (open-sesame) are still installed."
+fi
+
+:

@@ -248,10 +248,8 @@
               Unit = {
                 Description = "Open Sesame Desktop Suite";
                 Documentation = "https://github.com/scopecreep-zip/open-sesame";
-                Requires = [
-                  "open-sesame-headless.target"
-                  "graphical-session.target"
-                ];
+                Requires = [ "open-sesame-headless.target" ];
+                BindsTo = [ "graphical-session.target" ];
                 After = [
                   "open-sesame-headless.target"
                   "graphical-session.target"
@@ -527,6 +525,7 @@
               pkg-config
               patchelf
               cargo-deb
+              (pkgs.callPackage ./nix/cargo-generate-rpm.nix { })
 
               # Documentation
               mdbook

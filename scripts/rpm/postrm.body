@@ -1,0 +1,11 @@
+# %postun scriptlet for open-sesame (headless)
+# $1: 0=remove, >=1=upgrade
+
+if [ "$1" -eq 0 ]; then
+    reload_user_managers
+    echo "open-sesame removed."
+    echo "User configuration remains at ~/.config/pds/"
+    echo "To remove: rm -rf ~/.config/pds/"
+fi
+
+:

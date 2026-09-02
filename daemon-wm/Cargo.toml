@@ -84,3 +84,41 @@ assets = [
     ["../contrib/systemd/open-sesame-clipboard.service", "/usr/lib/systemd/user/open-sesame-clipboard.service", "644"],
     ["../contrib/systemd/open-sesame-input.service", "/usr/lib/systemd/user/open-sesame-input.service", "644"],
 ]
+
+[package.metadata.generate-rpm]
+name = "open-sesame-desktop"
+summary = "Open Sesame desktop layer: Vimium-style window switcher, clipboard manager, and keyboard input capture for COSMIC/Wayland"
+vendor = "scopecreep.zip"
+url = "https://github.com/ScopeCreep-zip/open-sesame"
+release = "1"
+auto-req = "no"
+
+post_install_script = "../scripts/rpm/desktop/postinst"
+pre_uninstall_script = "../scripts/rpm/desktop/prerm"
+post_uninstall_script = "../scripts/rpm/desktop/postrm"
+post_trans_script = "../scripts/rpm/desktop/posttrans"
+
+assets = [
+    { source = "target/release/daemon-wm", dest = "/usr/bin/daemon-wm", mode = "755" },
+    { source = "target/release/daemon-clipboard", dest = "/usr/bin/daemon-clipboard", mode = "755" },
+    { source = "target/release/daemon-input", dest = "/usr/bin/daemon-input", mode = "755" },
+    { source = "../contrib/systemd/open-sesame-desktop.target", dest = "/usr/lib/systemd/user/open-sesame-desktop.target", mode = "644" },
+    { source = "../contrib/systemd/open-sesame-wm.service", dest = "/usr/lib/systemd/user/open-sesame-wm.service", mode = "644" },
+    { source = "../contrib/systemd/open-sesame-clipboard.service", dest = "/usr/lib/systemd/user/open-sesame-clipboard.service", mode = "644" },
+    { source = "../contrib/systemd/open-sesame-input.service", dest = "/usr/lib/systemd/user/open-sesame-input.service", mode = "644" },
+    { source = "../contrib/systemd/user-preset/90-open-sesame-desktop.preset", dest = "/usr/lib/systemd/user-preset/90-open-sesame-desktop.preset", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+open-sesame = "*"
+glibc = "*"
+libgcc = "*"
+libseccomp = "*"
+libxkbcommon = "*"
+libwayland-client = "*"
+fontconfig = "*"
+freetype = "*"
+
+[package.metadata.generate-rpm.recommends]
+xdg-utils = "*"
+dejavu-sans-fonts = "*"

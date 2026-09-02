@@ -1,0 +1,5 @@
+[open-sesame]
+name=Open Sesame RPMs (GitHub Pages)
+baseurl=https://scopecreep-zip.github.io/open-sesame/repo/
+enabled=1
+gpgcheck=0

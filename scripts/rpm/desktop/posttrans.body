@@ -1,0 +1,11 @@
+# %posttrans scriptlet for open-sesame-desktop
+
+if [ -x /usr/lib/systemd/systemd-update-helper ]; then
+    /usr/lib/systemd/systemd-update-helper mark-restart-user-units \
+        open-sesame-wm.service \
+        open-sesame-clipboard.service \
+        open-sesame-input.service \
+        || :
+fi
+
+:
