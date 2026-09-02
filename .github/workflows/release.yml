@@ -299,6 +299,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -318,7 +320,7 @@ jobs:
       - name: Generate source tarball
         run: |
           git archive --format=tar.gz --prefix=open-sesame-${VERSION}/ \
-            -o "open-sesame-${VERSION}-source.tar.gz" "${TAG}"
+            -o "open-sesame-${VERSION}-source.tar.gz" HEAD
 
       - name: Generate checksums and install instructions
         run: ./scripts/release/generate-checksums.sh
@@ -381,6 +383,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -457,6 +461,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
 
       - uses: jdx/mise-action@v4
         with:
