@@ -1,5 +1,12 @@
 # Open Sesame RPM install verification — Fedora 44 with systemd
 #
+# Full Linux environment for package install testing:
+# - systemd as PID 1 with logind for user manager sessions
+# - PAM override permits user@.service without /etc/shadow auth
+# - Linger-enabled user for persistent user services
+# - SSH agent with generated keypair for non-interactive sesame init
+# - Packages downloaded from GitHub Releases at build time
+#
 # Shell:  docker exec -it --user testuser open-sesame-fedora bash
 # Verify: docker exec --user testuser open-sesame-fedora sesame --version
 # Status: docker exec --user testuser open-sesame-fedora sesame status
@@ -9,38 +16,86 @@ FROM fedora:44
 ARG VERSION
 ARG ARCH
 
+# =============================================================================
+# System packages
+# =============================================================================
 RUN dnf install -y \
     systemd \
-    dbus \
+    dbus-daemon \
     curl \
     sudo \
+    procps-ng \
+    openssh-clients \
+    systemd-pam \
     && dnf clean all
 
+# =============================================================================
+# systemd configuration for container environment
+# Note: systemd-logind is NOT masked — required for pam_systemd
+# =============================================================================
 RUN systemctl mask \
-    systemd-logind.service \
     getty.target \
     console-getty.service \
     systemd-networkd.service \
     systemd-resolved.service \
     systemd-timesyncd.service \
     systemd-hostnamed.service \
+    systemd-machined.service \
+    systemd-journald-audit.socket \
     systemd-udevd.service \
     systemd-udev-trigger.service \
     systemd-firstboot.service \
-    systemd-machine-id-commit.service
+    systemd-machine-id-commit.service \
+    first-boot-complete.target
 
 RUN systemctl set-default multi-user.target
 
-RUN useradd -m -s /bin/bash testuser \
+# =============================================================================
+# PAM override: permit user@.service without /etc/shadow authentication
+# =============================================================================
+COPY .config/docker/data/common/etc/pam.d/systemd-user /etc/pam.d/systemd-user
+
+# =============================================================================
+# Create testuser (Fedora has no built-in UID 1000 user)
+# Enable linger for persistent user services without login session
+# =============================================================================
+RUN useradd -m -s /bin/bash -u 1000 testuser \
     && echo "testuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/testuser \
-    && chmod 0440 /etc/sudoers.d/testuser \
+    && chmod 0440 /etc/sudoers.d/testuser
+
+RUN mkdir -p \
+      /home/testuser/.config/pds \
+      /home/testuser/.cache/open-sesame \
+      /home/testuser/.ssh \
+    && chown -R testuser:testuser /home/testuser \
     && mkdir -p /var/lib/systemd/linger \
     && touch /var/lib/systemd/linger/testuser
 
+# =============================================================================
+# SSH agent and sesame-init services
+# =============================================================================
+COPY .config/docker/data/fedora/etc/systemd/system/ssh-agent.service /etc/systemd/system/ssh-agent.service
+COPY .config/docker/data/fedora/etc/systemd/system/sesame-init.service /etc/systemd/system/sesame-init.service
+COPY .config/docker/data/fedora/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
+RUN chmod 755 /usr/local/bin/sesame-init.sh \
+    && systemctl enable ssh-agent.service sesame-init.service
+
+# =============================================================================
+# Install open-sesame from GitHub Releases
+# =============================================================================
 RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-linux-${ARCH}.rpm" -o /tmp/open-sesame.rpm \
     && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-linux-${ARCH}.rpm" -o /tmp/open-sesame-desktop.rpm \
     && dnf install -y /tmp/open-sesame.rpm /tmp/open-sesame-desktop.rpm \
     && rm /tmp/*.rpm
 
+# =============================================================================
+# Runtime environment for docker exec --user testuser
+# =============================================================================
+ENV HOME=/home/testuser
+ENV XDG_RUNTIME_DIR=/run/user/1000
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ENV SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock
+
+WORKDIR /home/testuser
 STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/lib/systemd/systemd"]

@@ -1,0 +1,7 @@
+# Container-compatible PAM config for systemd user manager.
+# Permits auth/account without /etc/shadow while preserving
+# pam_systemd session setup (XDG_RUNTIME_DIR, user scope, logind).
+auth      sufficient  pam_permit.so
+account   sufficient  pam_permit.so
+session   required    pam_systemd.so
+session   optional    pam_keyinit.so force revoke

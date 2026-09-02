@@ -1,0 +1,24 @@
+[Unit]
+Description=Open Sesame identity initialization (first boot only)
+After=user@1000.service ssh-agent.service open-sesame-profile.service
+Requires=ssh-agent.service
+ConditionPathExists=!/home/ubuntu/.config/pds/installation.toml
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock
+ExecStart=/usr/local/bin/sesame-init.sh
+RemainAfterExit=yes
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

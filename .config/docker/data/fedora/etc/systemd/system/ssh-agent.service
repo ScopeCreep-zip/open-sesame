@@ -1,0 +1,19 @@
+[Unit]
+Description=SSH agent for testuser
+After=user@1000.service
+Before=sesame-init.service
+
+[Service]
+Type=forking
+User=testuser
+Group=testuser
+Environment=HOME=/home/testuser
+ExecStartPre=/bin/bash -c '[ -f /home/testuser/.ssh/id_ed25519 ] || /usr/bin/ssh-keygen -t ed25519 -f /home/testuser/.ssh/id_ed25519 -N "" -q'
+ExecStart=/usr/bin/ssh-agent -a /run/user/1000/ssh-agent.sock
+ExecStartPost=/bin/bash -c 'SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock /usr/bin/ssh-add /home/testuser/.ssh/id_ed25519'
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
