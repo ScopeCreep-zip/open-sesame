@@ -8,6 +8,18 @@ pkgdesc="Programmable desktop suite: encrypted vaults, trust profiles, window sw
 arch=('x86_64' 'aarch64')
 url="https://github.com/ScopeCreep-zip/open-sesame"
 license=('GPL-3.0-only')
+# makedepends lists runtime deps of all split sub-packages so namcap
+# can verify dependency resolution at build time (binary package has
+# no build() but makepkg still validates the dependency tree).
+makedepends=(
+    'fontconfig'
+    'freetype2'
+    'gcc-libs'
+    'glibc'
+    'libseccomp'
+    'libxkbcommon'
+    'wayland'
+)
 options=('!strip' '!debug')
 
 source_x86_64=(

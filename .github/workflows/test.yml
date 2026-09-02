@@ -45,19 +45,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install namcap
-        run: pacman -Syu --noconfirm namcap
-
-      - name: Lint binary PKGBUILD
-        run: |
-          cd aur/open-sesame-bin
-          sed -i 's/^pkgver=VERSION$/pkgver=0.0.1/' PKGBUILD
-          sed -i 's/HEADLESS_X86_64_SHA/SKIP/g; s/HEADLESS_AARCH64_SHA/SKIP/g; s/DESKTOP_X86_64_SHA/SKIP/g; s/DESKTOP_AARCH64_SHA/SKIP/g' PKGBUILD
-          namcap PKGBUILD
-
-      - name: Lint source PKGBUILD
-        run: |
-          cd aur/open-sesame
-          sed -i 's/^pkgver=VERSION$/pkgver=0.0.1/' PKGBUILD
-          sed -i 's/SOURCE_SHA/SKIP/g' PKGBUILD
-          namcap PKGBUILD
+      - name: Lint PKGBUILDs
+        run: ./scripts/arch/lint-pkgbuild.sh

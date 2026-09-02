@@ -266,10 +266,58 @@ mise run cargo:rpm
 mise run cargo:rpm:desktop
 """
 
+[tasks."build:arch"]
+alias = [ "barch" ]
+description = "Build Arch tarballs (headless + desktop)"
+depends = [ "test" ]
+env.TARGET = "{{vars.arch_amd64}}"
+env.ARCH = "x86_64"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+VERSION=$(cargo metadata --format-version=1 -q | jq -r '.packages[] | select(.name == "open-sesame") | .version')
+export VERSION
+./scripts/arch/build-tarball.sh
+"""
+
 [tasks."build:all"]
 alias = [ "ba" ]
 description = "Build all packages"
-depends = [ "build:deb:all", "build:rpm" ]
+depends = [ "build:deb:all", "build:rpm", "build:arch" ]
+
+# =============================================================================
+# TEST: ARCH PACKAGING
+# =============================================================================
+
+[tasks."test:arch:namcap"]
+description = "Lint PKGBUILDs with namcap (Arch container)"
+run = "./scripts/arch/lint-pkgbuild.sh"
+
+[tasks."test:arch:pkg"]
+description = "Build .pkg.tar.zst + install + verify in Arch container (from local tarballs)"
+depends = [ "build:arch" ]
+run = "./scripts/arch/test-install.sh"
+
+[tasks."test:arch:install"]
+description = "End-to-end Arch install verification (Docker compose, needs published release)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+: "${OPEN_SESAME_VERSION:?OPEN_SESAME_VERSION must be set (e.g. 1.15.3)}"
+export OPEN_SESAME_VERSION
+docker compose -f .config/docker/compose.yml up --build -d arch
+echo "Waiting for systemd boot..."
+sleep 8
+echo "=== sesame --version ==="
+docker exec --user testuser open-sesame-arch sesame --version
+echo "=== sesame status ==="
+docker exec --user testuser open-sesame-arch sesame status
+echo "=== systemd units ==="
+docker exec --user testuser open-sesame-arch systemctl --user list-units 'open-sesame-*' --no-pager
+"""
 
 # =============================================================================
 # INSTALL (composed from build + install steps)
@@ -1028,13 +1076,19 @@ BUILD (all run quality gates first):
   build:deb        (bde)  Both .deb packages (headless + desktop)
   build:deb:debug         .deb with debug logging
   build:rpm        (brpm) Both .rpm packages (headless + desktop)
-  build:all        (ba)   All packages (deb + rpm)
+  build:arch       (barch) Arch tarballs (headless + desktop)
+  build:all        (ba)   All packages (deb + rpm + arch tarballs)
 
 INSTALL:
   install          (i)    Build + install both .debs (headless + desktop)
   install:desktop  (id)   Same as install (explicit desktop)
   install:headless (ih)   Build + install headless .deb only
   install:debug    (idbg) Nuclear clean + debug .deb
+
+TEST (Arch packaging):
+  test:arch:namcap        Lint PKGBUILDs with namcap (Arch container)
+  test:arch:pkg           Build + install + verify from local tarballs (Arch container)
+  test:arch:install       End-to-end install from published release (Docker compose)
 
 CLEAN:
   clean            (c)    Build artifacts (target/, docs/book/)

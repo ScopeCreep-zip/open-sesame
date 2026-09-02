@@ -17,6 +17,7 @@ url="https://github.com/ScopeCreep-zip/open-sesame"
 license=('GPL-3.0-only')
 makedepends=(
     'cargo'
+    'gcc-libs'
     'pkgconf'
     'libseccomp'
     'wayland'
