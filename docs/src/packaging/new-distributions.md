@@ -1,8 +1,8 @@
 # Packaging for New Distributions
 
-This guide covers the requirements and considerations for packaging Open
-Sesame on Linux distributions beyond the officially supported Debian/Ubuntu
-`.deb` packages, Fedora/RHEL `.rpm` packages, and Nix flake.
+This guide covers the requirements for packaging Open Sesame on distributions
+not yet officially supported. For existing packages see:
+[Debian](deb.md), [RPM](rpm.md), [Arch](arch.md), [Nix](nix.md).
 
 ## Common Requirements
 
@@ -17,8 +17,8 @@ Open Sesame ships as two logical packages:
   user service units. Has no GUI dependencies.
 - **open-sesame-desktop** (requires open-sesame) -- Contains `daemon-wm`,
   `daemon-clipboard`, `daemon-input`, and the COSMIC/Wayland compositor
-  integration. Depends on `libwayland-client`, `libxkbcommon`, and
-  `cosmic-protocols`.
+  integration. Depends on `libwayland-client`, `libxkbcommon`, `fontconfig`,
+  `freetype`.
 
 ### systemd User Services
 
@@ -29,6 +29,11 @@ install unit files to `/usr/lib/systemd/user/`. The services use:
 - `Restart=on-failure` with `RestartSec=2`.
 - Ordering via `After=` and `Requires=` (daemon-profile starts first as the
   IPC bus host; all others depend on it).
+- `BindsTo=graphical-session.target` on the desktop target (not `Requires=`)
+  to tear down desktop services when the compositor exits unexpectedly.
+
+Preset files ship under `/usr/lib/systemd/user-preset/` -- one per package
+to avoid file conflicts between headless and desktop.
 
 ### LimitMEMLOCK
 
@@ -48,74 +53,23 @@ to fail. The corresponding PAM/security limit is:
 All binaries install to `/usr/bin/`. Configuration lives under
 `~/.config/pds/` (per XDG Base Directory specification).
 
-## AUR (Arch Linux)
+### Scriptlet Helpers
 
-Arch packaging is officially supported via split PKGBUILDs and a self-hosted pacman
-repository on GitHub Pages. Full documentation is in [Arch Packaging](arch.md).
+Deb and RPM scriptlets share a common helper library at
+`scripts/common/scriptlet-helpers.sh` containing `active_user_uids()` and
+`reload_user_managers()`. New packaging formats that need systemd lifecycle
+management during install/upgrade/removal should use the same functions.
+The helpers are concatenated into scriptlets at build time by the
+`cargo:assemble-scriptlets` mise task. `SESAME_BUS_TIMEOUT=15s` matches the
+upstream systemd-update-helper default (`UPDATE_HELPER_USER_TIMEOUT_SEC`).
 
-Two AUR pkgbases are maintained:
+### Patchelf (nix devShell builds only)
 
-- `open-sesame-bin` — split binary package from release tarballs, installs
-  `open-sesame-bin` and `open-sesame-desktop-bin`
-- `open-sesame` — split source-build package from release source tarball,
-  installs `open-sesame` and `open-sesame-desktop`
-
-Both use split `package_*()` functions for the headless/desktop split.
-`conflicts=('sesame')` avoids file collision with the AUR `sesame` package.
-Systemd user presets are shipped per package (no `.install`-based enablement).
-`check()` in the source pkgbase self-skips when `RLIMIT_MEMLOCK` is insufficient
-for `memfd_secret` test allocations.
-
-aarch64 packages serve Arch Linux ARM (ALARM) users. Apple Silicon users should
-use the DNF repository via Fedora Asahi Remix.
-
-## RPM (Fedora / RHEL)
-
-RPM packaging is officially supported via `cargo-generate-rpm`. Full documentation is in
-[RPM Packaging](rpm.md). The following is a summary for packagers familiar with RPM conventions.
-
-### Build Tool
-
-Open Sesame uses `cargo-generate-rpm` (not `rpmbuild` with spec files). Package metadata lives
-in `[package.metadata.generate-rpm]` sections in `open-sesame/Cargo.toml` and
-`daemon-wm/Cargo.toml`. The tool reads Cargo metadata, embeds scriptlets verbatim, and produces
-`.rpm` files using the `rpm` crate. No spec file, no rpmbuild dependency.
-
-### Dependencies
-
-- **Headless requires**: `glibc`, `libgcc`, `libseccomp`
-- **Headless recommends**: `openssh-clients`
-- **Desktop requires**: `glibc`, `libgcc`, `libseccomp`, `libxkbcommon`, `libwayland-client`,
-  `fontconfig`, `freetype`
-- **Desktop recommends**: `xdg-utils`, `dejavu-sans-fonts`
-- **License tag**: `GPL-3.0-only` (from `workspace.package.license`)
-- **auto-req**: Disabled (`auto-req = "no"`). CI builds on Ubuntu runners produce Debian-style
-  soname deps via `ldd`; Fedora package names are declared explicitly in `[requires]`.
-
-### Systemd Integration
-
-- **Scriptlets**: `%post`, `%preun`, `%postun`, `%posttrans` call
-  `/usr/lib/systemd/systemd-update-helper` directly. RPM macros like `%systemd_user_post` cannot
-  be used because `cargo-generate-rpm` embeds scripts verbatim without rpmbuild's macro parser.
-- **Preset file**: `/usr/lib/systemd/user-preset/90-open-sesame.preset` enables all services and
-  targets by default, integrating with Fedora's preset policy. Administrators override via
-  higher-priority presets in `/etc/systemd/user-preset/`.
-- **BindsTo**: `open-sesame-desktop.target` uses `BindsTo=graphical-session.target` (not
-  `Requires=`) to ensure desktop services tear down when the compositor exits unexpectedly.
-
-### SELinux
-
-daemon-secrets performs `mlock` and reads `SSH_AUTH_SOCK`. On SELinux-enforcing systems with
-confined users, the `mlock` syscall may require the `allow_mlock` boolean or a custom policy
-module. The base package does not ship a `.te` policy file — document the required booleans
-in deployment guides for confined environments.
-
-### Vendor Dependencies
-
-Fedora policy requires vendored dependencies to be audited for bundled library packaging.
-`cargo-generate-rpm` produces a binary RPM from pre-built binaries; it does not run `cargo build`
-or vendor sources. For Fedora review submission, run `cargo vendor` and include the vendor tarball
-as a secondary source in a spec file wrapper around the `cargo-generate-rpm` output.
+Binaries built inside the nix devShell have nix store interpreters and RPATHs.
+The `cargo:patchelf` mise task strips these before packaging. CI builds use
+rustup and produce FHS-standard binaries. New packaging formats that build
+from the nix devShell must run patchelf; formats that build from rustup or
+system Rust do not.
 
 ## Alpine Linux
 
@@ -142,30 +96,38 @@ The APKBUILD follows the same two-package split. Use `subpackages` for
 the desktop variant. Alpine's Rust packaging infrastructure supports
 `cargo auditable build` for SBOM embedding.
 
-## Flatpak
+## Flatpak: Not Applicable
 
-### Sandbox Implications
+Open Sesame is a host-level system integration tool. The Flatpak sandbox model
+is architecturally incompatible with the project's design:
 
-Flatpak introduces a second layer of sandboxing on top of Open Sesame's own
-Noise IK IPC isolation and Landlock filesystem restrictions.
+1. **Wayland privileged protocols.** `daemon-wm` requires toplevel-info/management,
+   layer-shell, keyboard-shortcut-inhibit, and `ext_background_effect_v1` (blur).
+   Flatpak 1.16+ routes sandboxed clients through a security-context-tagged
+   Wayland socket so compositors can filter these privileged globals.
+2. **No systemd user units.** Flatpak exports `.desktop` files and D-Bus services
+   but never installs systemd unit files. Open Sesame's lifecycle model (targets,
+   presets, `BindsTo=`, per-user restart on upgrade) has no Flatpak equivalent.
+3. **`/dev/input` access.** `daemon-input` requires `/dev/input` for keyboard
+   capture. Flatpak's `--device=input` permission exposes this but defeats the
+   sandbox's purpose.
+4. **IPC in `XDG_RUNTIME_DIR`.** The `sesame` CLI communicates with daemons via
+   Unix sockets in `XDG_RUNTIME_DIR`. Flatpak remaps this path inside the sandbox.
+   The CLI would require `flatpak run --command=sesame` invocations, which is
+   unusable for a CLI-first tool without host-side wrappers that reintroduce
+   host packaging.
 
-Key issues:
+The correct relationship between Open Sesame and Flatpak is provider, not tenant.
+Future work: implement `org.freedesktop.impl.portal.Secret` backed by
+`daemon-secrets` so sandboxed Flatpak apps get per-app secrets from the vault
+through the XDG Secret portal. That is a host-installed D-Bus service shipped by
+existing deb/rpm/pacman/nix packages.
 
-- **Nested sandboxing**: daemon-secrets uses `mlock`, `seccomp`, and Landlock.
-  Inside a Flatpak sandbox, `seccomp` filters compose (the stricter filter
-  wins), but Landlock may conflict with Flatpak's own filesystem portals.
-- **Unix socket access**: The IPC bus uses a Unix domain socket under
-  `$XDG_RUNTIME_DIR`. Flatpak must be configured to expose this path, or the
-  socket must use a portal.
-- **SSH agent**: Flatpak does not expose `SSH_AUTH_SOCK` by default. The
-  `--socket=ssh-auth` permission is required for SSH agent unlock.
-- **Wayland**: The desktop package requires `--socket=wayland` and access to
-  the COSMIC compositor protocols, which may not be available through the
-  standard Wayland portal.
+Users on immutable desktops (Fedora Silverblue/Kinoite) can layer the RPM package
+via `rpm-ostree install` from the DNF repository.
 
-For these reasons, Flatpak packaging is considered lower priority. The
-recommended approach is native packaging for distributions that target
-the COSMIC desktop.
+See [issue #34](https://github.com/ScopeCreep-zip/open-sesame/issues/34) for the
+full evaluation.
 
 ## Homebrew (macOS)
 
