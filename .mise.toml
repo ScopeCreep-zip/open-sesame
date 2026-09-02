@@ -684,16 +684,7 @@ mise run cargo:rpm:assemble-scriptlets
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
-
-# Inject version floor for desktop requires and sign with GPG key
-VERSION=$(cargo metadata --format-version=1 -q | python3 -c "import sys,json; [print(p['version']) for p in json.load(sys.stdin)['packages'] if p['name']=='open-sesame']")
-SIGN_ARGS=()
-if [ -n "${GPG_SIGNING_KEY_FILE:-}" ]; then
-  SIGN_ARGS=(--signing-key "$GPG_SIGNING_KEY_FILE")
-fi
-cargo generate-rpm -p open-sesame --payload-compress gzip --target ${TARGET} "${SIGN_ARGS[@]}"
-cargo generate-rpm -p daemon-wm --payload-compress gzip --target ${TARGET} \
-  -s "requires.open-sesame = \">= ${VERSION}\"" "${SIGN_ARGS[@]}"
+./scripts/rpm/build-rpm.sh
 """
 
 [tasks."ci:build:rpm:arm64"]
@@ -708,15 +699,7 @@ mise run cargo:rpm:assemble-scriptlets
 cargo build --release --target ${TARGET}
 mise run docs:man
 mise run docs:completions
-
-VERSION=$(cargo metadata --format-version=1 -q | python3 -c "import sys,json; [print(p['version']) for p in json.load(sys.stdin)['packages'] if p['name']=='open-sesame']")
-SIGN_ARGS=()
-if [ -n "${GPG_SIGNING_KEY_FILE:-}" ]; then
-  SIGN_ARGS=(--signing-key "$GPG_SIGNING_KEY_FILE")
-fi
-cargo generate-rpm -p open-sesame --payload-compress gzip --target ${TARGET} "${SIGN_ARGS[@]}"
-cargo generate-rpm -p daemon-wm --payload-compress gzip --target ${TARGET} \
-  -s "requires.open-sesame = \">= ${VERSION}\"" "${SIGN_ARGS[@]}"
+./scripts/rpm/build-rpm.sh
 """
 
 [tasks."ci:release:rename-rpm"]
