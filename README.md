@@ -1276,3 +1276,5 @@ the Free Software Foundation, either version 3 of the License, or
 Built with [Rust](https://www.rust-lang.org/), [smithay-client-toolkit](https://github.com/Smithay/client-toolkit), [COSMIC Protocols](https://github.com/pop-os/cosmic-protocols), [snow](https://github.com/mcginty/snow), [SQLCipher](https://www.zetetic.net/sqlcipher/), [tiny-skia](https://github.com/nickel-corp/tiny-skia), [cosmic-text](https://github.com/nickel-corp/cosmic-text), [nucleo](https://github.com/helix-editor/nucleo), [argon2](https://crates.io/crates/argon2), [blake3](https://github.com/BLAKE3-team/BLAKE3), and [aes-gcm](https://crates.io/crates/aes-gcm).
 
 Inspired by [Vimium](https://github.com/philc/vimium) -- the browser extension that proves keyboard navigation is superior.
+
+DNF/RPM packaging uses patterns from [@sirredbeard](https://github.com/sirredbeard)'s [github-pages-rpm-repo](https://github.com/sirredbeard/github-pages-rpm-repo) template for hosting RPM repositories on GitHub Pages.
