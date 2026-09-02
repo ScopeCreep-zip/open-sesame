@@ -27,6 +27,7 @@
   <div class="nav">
     <a href="book/">📖 User Guide</a>
     <a href="doc/sesame/">📚 API Docs</a>
+    <a href="repo/">📦 RPM Repo</a>
     <a href="https://github.com/ScopeCreep-zip/open-sesame">🔗 GitHub</a>
   </div>
 
@@ -43,6 +44,8 @@
     </div>
   </div>
 
+  <h2>APT (Pop!_OS / Ubuntu / Debian)</h2>
+
   <p>Add the APT repository:</p>
   <pre>curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg</pre>
   <pre>echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list</pre>
@@ -53,7 +56,27 @@
   <p>Headless only (servers, containers):</p>
   <pre>sudo apt update && sudo apt install -y open-sesame</pre>
 
-  <p>Initialize:</p>
+  <h2>DNF (Fedora / RHEL)</h2>
+
+  <p>Import the GPG key and add the DNF repository:</p>
+  <pre>sudo curl -fsSL https://scopecreep-zip.github.io/open-sesame/RPM-GPG-KEY -o /etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame</pre>
+  <pre>sudo tee /etc/yum.repos.d/open-sesame.repo &lt;&lt; 'EOF'
+[open-sesame]
+name=Open Sesame RPMs (GitHub Pages)
+baseurl=https://scopecreep-zip.github.io/open-sesame/repo/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+EOF</pre>
+
+  <p>Desktop (full suite):</p>
+  <pre>sudo dnf install -y open-sesame open-sesame-desktop</pre>
+
+  <p>Headless only (servers, containers):</p>
+  <pre>sudo dnf install -y open-sesame</pre>
+
+  <h2>Initialize</h2>
   <pre>sesame init</pre>
 
   <h2>What You Get</h2>
@@ -70,12 +93,15 @@
   <ul>
     <li><a href="book/">User Guide</a> — Installation, configuration, keybindings, theming</li>
     <li><a href="doc/sesame/">API Documentation</a> — Library reference for developers</li>
+    <li><a href="repo/">RPM Repository</a> — DNF/yum package index</li>
     <li><a href="https://github.com/ScopeCreep-zip/open-sesame">GitHub</a> — Source code, issues, releases</li>
   </ul>
 
   <h2>Verify Packages</h2>
-  <p>All <code>.deb</code> packages include <a href="https://slsa.dev/">SLSA Build Provenance</a> attestations:</p>
+  <p>All <code>.deb</code> and <code>.rpm</code> packages include <a href="https://slsa.dev/">SLSA Build Provenance</a> attestations:</p>
   <pre>gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip</pre>
   <pre>gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip</pre>
+  <pre>gh attestation verify "open-sesame-linux-$(uname -m).rpm" --owner ScopeCreep-zip</pre>
+  <pre>gh attestation verify "open-sesame-desktop-linux-$(uname -m).rpm" --owner ScopeCreep-zip</pre>
 </body>
 </html>

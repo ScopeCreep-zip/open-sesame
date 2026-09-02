@@ -136,7 +136,7 @@ Press `Alt+Tab` to switch windows. Press `Alt+Space` to open the launcher overla
 - Two-package split with automatic systemd user service lifecycle
 - COSMIC keybinding integration via `sesame setup-keybinding`
 - Nix flake with overlay, home-manager module (`headless` option), and [Cachix binary cache](https://app.cachix.org/cache/scopecreep-zip)
-- GPG-signed APT repository with SLSA build provenance attestations
+- GPG-signed APT and DNF repositories with SLSA build provenance attestations
 - Landlock + seccomp sandbox per daemon, systemd hardening directives
 - macOS and Windows platform crates scaffolded for future support
 
@@ -228,6 +228,52 @@ sesame init
 ```
 
 The `open-sesame` package installs 5 binaries and systemd user services under `open-sesame-headless.target` (WantedBy `default.target`). The `open-sesame-desktop` package adds 3 GUI daemons under `open-sesame-desktop.target` (Requires `graphical-session.target`). Package postinst scripts handle `systemctl --global enable` and per-user service activation automatically -- no manual `systemctl` commands needed.
+
+</details>
+
+<details>
+<summary><b>🔹 DNF Repository (Fedora / RHEL)</b></summary>
+
+Import the GPG key:
+
+```bash
+sudo curl -fsSL https://scopecreep-zip.github.io/open-sesame/RPM-GPG-KEY \
+  -o /etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+```
+
+Add the repository:
+
+```bash
+sudo tee /etc/yum.repos.d/open-sesame.repo << 'EOF'
+[open-sesame]
+name=Open Sesame RPMs (GitHub Pages)
+baseurl=https://scopecreep-zip.github.io/open-sesame/repo/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+EOF
+```
+
+Install desktop (full suite):
+
+```bash
+sudo dnf install -y open-sesame open-sesame-desktop
+```
+
+Or install headless only (servers, containers, VMs):
+
+```bash
+sudo dnf install -y open-sesame
+```
+
+Initialize:
+
+```bash
+sesame init
+```
+
+The `open-sesame` package installs 5 binaries and systemd user services under `open-sesame-headless.target`. The `open-sesame-desktop` package adds 3 GUI daemons under `open-sesame-desktop.target` (BindsTo `graphical-session.target`). Scriptlets call `systemd-update-helper` for preset-based enablement and per-user service activation automatically.
 
 </details>
 

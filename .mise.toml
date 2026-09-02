@@ -7,8 +7,9 @@
 # Local dev: `direnv allow` loads the devshell with all deps including cargo-deb.
 [tools]
 node = "22"
-"cargo:cargo-deb" = "latest"
-"cargo:cross" = "latest"
+"cargo:cargo-deb" = "3.7.0"
+"cargo:cargo-generate-rpm" = "0.21.0"
+"cargo:cross" = "0.2.5"
 
 # npm packages installed via `mise run setup:npm` for proper dependency resolution
 # "npm:@commitlint/cli" = "latest"                 # Commit message linter
@@ -94,6 +95,71 @@ hide = true
 env.TARGET = "{{vars.arch_arm64}}"
 run = "cargo deb -p daemon-wm --no-build --target ${TARGET}"
 
+[tasks."cargo:patchelf"]
+hide = true
+description = "Strip nix store interpreter and rpath from release binaries"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+# Single patchelf invocation per binary to avoid aarch64 .dynstr corruption
+# (patchelf#244). Only needed when building inside nix devShell — CI uses
+# rustup and produces FHS-standard binaries without nix store paths.
+BINS=(sesame daemon-profile daemon-secrets daemon-wm daemon-launcher daemon-clipboard daemon-input daemon-snippets)
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  INTERP="/lib64/ld-linux-x86-64.so.2" ;;
+  aarch64) INTERP="/lib/ld-linux-aarch64.so.1" ;;
+  *)       echo "ERROR: unsupported architecture '$ARCH' for patchelf" >&2; exit 1 ;;
+esac
+for bin in "${BINS[@]}"; do
+  if [ -f "target/release/${bin}" ]; then
+    patchelf --set-interpreter "$INTERP" --remove-rpath "target/release/${bin}"
+  fi
+done
+echo "patchelf complete"
+"""
+
+[tasks."cargo:rpm:assemble-scriptlets"]
+hide = true
+description = "Concatenate common.sh + body files into RPM scriptlets"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+for body in scripts/rpm/postinst.body scripts/rpm/prerm.body scripts/rpm/postrm.body scripts/rpm/posttrans.body; do
+  out="${body%.body}"
+  { echo '#!/bin/bash'; cat scripts/rpm/common.sh; echo ''; cat "$body"; } > "$out"
+  chmod +x "$out"
+done
+for body in scripts/rpm/desktop/postinst.body scripts/rpm/desktop/prerm.body scripts/rpm/desktop/postrm.body scripts/rpm/desktop/posttrans.body; do
+  out="${body%.body}"
+  { echo '#!/bin/bash'; cat scripts/rpm/common.sh; echo ''; cat "$body"; } > "$out"
+  chmod +x "$out"
+done
+echo "scriptlets assembled"
+"""
+
+[tasks."cargo:rpm"]
+hide = true
+depends = ["cargo:rpm:assemble-scriptlets"]
+run = "cargo generate-rpm -p open-sesame --payload-compress gzip"
+
+[tasks."cargo:rpm:desktop"]
+hide = true
+depends = ["cargo:rpm:assemble-scriptlets"]
+run = "cargo generate-rpm -p daemon-wm --payload-compress gzip"
+
+[tasks."cargo:rpm:arm64"]
+hide = true
+depends = ["cargo:rpm:assemble-scriptlets"]
+env.TARGET = "{{vars.arch_arm64}}"
+run = "cargo generate-rpm -p open-sesame --payload-compress gzip --target ${TARGET}"
+
+[tasks."cargo:rpm:desktop:arm64"]
+hide = true
+depends = ["cargo:rpm:assemble-scriptlets"]
+env.TARGET = "{{vars.arch_arm64}}"
+run = "cargo generate-rpm -p daemon-wm --payload-compress gzip --target ${TARGET}"
+
 [tasks."cargo:clean"]
 hide = true
 run = "cargo clean"
@@ -149,18 +215,7 @@ mise run test
 mise run cargo:build
 mise run docs:man
 mise run docs:completions
-
-# Strip nix store paths from release binaries so .deb works on stock Debian/Ubuntu.
-BINS=(sesame daemon-profile daemon-secrets daemon-wm daemon-launcher daemon-clipboard daemon-input daemon-snippets)
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64)  INTERP="/lib64/ld-linux-x86-64.so.2" ;;
-  aarch64) INTERP="/lib/ld-linux-aarch64.so.1" ;;
-  *)       echo "ERROR: unsupported architecture '$ARCH' for patchelf" >&2; exit 1 ;;
-esac
-for bin in "${BINS[@]}"; do
-  patchelf --set-interpreter "$INTERP" --remove-rpath "target/release/${bin}"
-done
+mise run cargo:patchelf
 
 echo "==> Building headless .deb (open-sesame)..."
 cargo deb -p open-sesame --no-build
@@ -196,10 +251,25 @@ alias = [ "bda" ]
 description = "Build all .deb packages (all architectures)"
 depends = [ "build:deb", "build:deb:arm64" ]
 
+[tasks."build:rpm"]
+alias = [ "brpm" ]
+description = "Build all .rpm packages (headless + desktop)"
+depends = [ "test" ]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run cargo:build
+mise run docs:man
+mise run docs:completions
+mise run cargo:patchelf
+mise run cargo:rpm
+mise run cargo:rpm:desktop
+"""
+
 [tasks."build:all"]
 alias = [ "ba" ]
 description = "Build all packages"
-depends = [ "build:deb:all" ]
+depends = [ "build:deb:all", "build:rpm" ]
 
 # =============================================================================
 # INSTALL (composed from build + install steps)
@@ -597,6 +667,121 @@ cargo deb -p open-sesame --no-build --target ${TARGET}
 cargo deb -p daemon-wm --no-build --target ${TARGET}
 """
 
+[tasks."ci:setup:rpm-repo"]
+description = "CI install RPM repository tools"
+run = "sudo apt-get update && sudo apt-get install -y createrepo-c"
+
+[tasks."ci:build:rpm"]
+description = "CI build both .rpm packages (amd64)"
+env.TARGET = "{{vars.arch_amd64}}"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup
+mise run cargo:rpm:assemble-scriptlets
+# No patchelf needed: CI uses mise-action with rustup (not nix devShell),
+# so binaries have FHS-standard interpreter and no nix store RPATHs.
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+
+# Inject version floor for desktop requires and sign with GPG key
+VERSION=$(cargo metadata --format-version=1 -q | python3 -c "import sys,json; [print(p['version']) for p in json.load(sys.stdin)['packages'] if p['name']=='open-sesame']")
+SIGN_ARGS=()
+if [ -n "${GPG_SIGNING_KEY_FILE:-}" ]; then
+  SIGN_ARGS=(--signing-key "$GPG_SIGNING_KEY_FILE")
+fi
+cargo generate-rpm -p open-sesame --payload-compress gzip --target ${TARGET} "${SIGN_ARGS[@]}"
+cargo generate-rpm -p daemon-wm --payload-compress gzip --target ${TARGET} \
+  -s "requires.open-sesame = \">= ${VERSION}\"" "${SIGN_ARGS[@]}"
+"""
+
+[tasks."ci:build:rpm:arm64"]
+description = "CI build both .rpm packages (arm64)"
+env.TARGET = "{{vars.arch_arm64}}"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup
+mise run cargo:rpm:assemble-scriptlets
+# No patchelf needed: CI uses mise-action with rustup (not nix devShell).
+cargo build --release --target ${TARGET}
+mise run docs:man
+mise run docs:completions
+
+VERSION=$(cargo metadata --format-version=1 -q | python3 -c "import sys,json; [print(p['version']) for p in json.load(sys.stdin)['packages'] if p['name']=='open-sesame']")
+SIGN_ARGS=()
+if [ -n "${GPG_SIGNING_KEY_FILE:-}" ]; then
+  SIGN_ARGS=(--signing-key "$GPG_SIGNING_KEY_FILE")
+fi
+cargo generate-rpm -p open-sesame --payload-compress gzip --target ${TARGET} "${SIGN_ARGS[@]}"
+cargo generate-rpm -p daemon-wm --payload-compress gzip --target ${TARGET} \
+  -s "requires.open-sesame = \">= ${VERSION}\"" "${SIGN_ARGS[@]}"
+"""
+
+[tasks."ci:release:rename-rpm"]
+description = "CI rename .rpm packages for release (x86_64)"
+env.TARGET = "{{vars.arch_amd64}}"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mapfile -t HEADLESS < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-[0-9]*.rpm' ! -name 'open-sesame-desktop*')
+mapfile -t DESKTOP < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-desktop-*.rpm')
+[[ ${#HEADLESS[@]} -eq 1 ]] || { echo "ERROR: expected 1 headless RPM, found ${#HEADLESS[@]}: ${HEADLESS[*]}" >&2; exit 1; }
+[[ ${#DESKTOP[@]} -eq 1 ]] || { echo "ERROR: expected 1 desktop RPM, found ${#DESKTOP[@]}: ${DESKTOP[*]}" >&2; exit 1; }
+mv "${HEADLESS[0]}" "open-sesame-linux-x86_64.rpm"
+mv "${DESKTOP[0]}" "open-sesame-desktop-linux-x86_64.rpm"
+"""
+
+[tasks."ci:release:rename-rpm:arm64"]
+description = "CI rename .rpm packages for release (aarch64)"
+env.TARGET = "{{vars.arch_arm64}}"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mapfile -t HEADLESS < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-[0-9]*.rpm' ! -name 'open-sesame-desktop*')
+mapfile -t DESKTOP < <(find "target/${TARGET}/generate-rpm" -maxdepth 1 -name 'open-sesame-desktop-*.rpm')
+[[ ${#HEADLESS[@]} -eq 1 ]] || { echo "ERROR: expected 1 headless RPM, found ${#HEADLESS[@]}: ${HEADLESS[*]}" >&2; exit 1; }
+[[ ${#DESKTOP[@]} -eq 1 ]] || { echo "ERROR: expected 1 desktop RPM, found ${#DESKTOP[@]}: ${DESKTOP[*]}" >&2; exit 1; }
+mv "${HEADLESS[0]}" "open-sesame-linux-aarch64.rpm"
+mv "${DESKTOP[0]}" "open-sesame-desktop-linux-aarch64.rpm"
+"""
+
+[tasks."ci:release:rpm-repo"]
+description = "CI generate DNF repository structure"
+run = """
+#!/usr/bin/env bash
+set -euxo pipefail
+mise run ci:setup:rpm-repo
+
+RPM_SITE="rpm-site"
+mkdir -p "$RPM_SITE/repo"
+
+# Copy .rpm packages — hard fail if none exist
+cp packages/*.rpm "$RPM_SITE/repo/"
+
+# Export GPG public key for the repo
+gpg --armor --export > "$RPM_SITE/RPM-GPG-KEY"
+test -s "$RPM_SITE/RPM-GPG-KEY" || { echo "ERROR: no GPG key available for RPM-GPG-KEY" >&2; exit 1; }
+cp "$RPM_SITE/RPM-GPG-KEY" "$RPM_SITE/repo/RPM-GPG-KEY"
+
+createrepo_c "$RPM_SITE/repo"
+find "$RPM_SITE/repo" -maxdepth 1 -type f -name '*.rpm' -printf '%f\n' | sort \
+    > "$RPM_SITE/repo/manifest.txt" || : > "$RPM_SITE/repo/manifest.txt"
+
+export PAGES_OWNER="${GITHUB_REPOSITORY_OWNER:-ScopeCreep-zip}"
+export PAGES_REPO="${GITHUB_REPOSITORY_NAME:-open-sesame}"
+./scripts/rpm/generate-repo-index.sh "$RPM_SITE"
+
+# Sign repomd.xml for repo_gpgcheck
+gpg --batch --yes --armor --detach-sign \
+    --output "$RPM_SITE/repo/repodata/repomd.xml.asc" \
+    "$RPM_SITE/repo/repodata/repomd.xml"
+
+echo "RPM repo generated at $RPM_SITE"
+ls -la "$RPM_SITE" "$RPM_SITE/repo" "$RPM_SITE/repo/repodata"
+"""
+
 [tasks."ci:docs:all"]
 description = "CI generate all documentation for release"
 run = """
@@ -817,7 +1002,8 @@ BUILD (all run quality gates first):
   build:debug      (bd)   Debug binary
   build:deb        (bde)  Both .deb packages (headless + desktop)
   build:deb:debug         .deb with debug logging
-  build:all        (ba)   All packages
+  build:rpm        (brpm) Both .rpm packages (headless + desktop)
+  build:all        (ba)   All packages (deb + rpm)
 
 INSTALL:
   install          (i)    Build + install both .debs (headless + desktop)
@@ -868,15 +1054,21 @@ RELEASE (semantic-release automation):
 CI (GitHub Actions entry points):
   ci:setup                Install system dependencies
   ci:setup:apt-repo       Install APT repository tools
+  ci:setup:rpm-repo       Install RPM repository tools
   ci:test                 CI test job (fmt + clippy + test + build)
   ci:docs                 CI documentation job
   ci:build:deb            CI build .deb package (amd64)
   ci:build:deb:arm64      CI build .deb package (arm64)
+  ci:build:rpm            CI build .rpm package (amd64)
+  ci:build:rpm:arm64      CI build .rpm package (arm64)
   ci:docs:all             CI generate all documentation
   ci:docs:combine         Combine rustdoc + mdBook
   ci:release:rename-deb   Rename .deb with version (amd64)
   ci:release:rename-deb:arm64  Rename .deb with version (arm64)
+  ci:release:rename-rpm   Rename .rpm with version (amd64)
+  ci:release:rename-rpm:arm64  Rename .rpm with version (arm64)
   ci:release:apt-repo     Generate APT repository
+  ci:release:rpm-repo     Generate DNF repository
 
 OTHER:
   setup            (s)    Install tools + deps

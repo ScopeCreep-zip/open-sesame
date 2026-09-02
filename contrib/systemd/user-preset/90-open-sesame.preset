@@ -1,0 +1,5 @@
+enable open-sesame-profile.service
+enable open-sesame-secrets.service
+enable open-sesame-launcher.service
+enable open-sesame-snippets.service
+enable open-sesame-headless.target

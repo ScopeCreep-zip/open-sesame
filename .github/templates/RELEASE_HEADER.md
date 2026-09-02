@@ -1,6 +1,6 @@
 ## Quick Install
 
-### APT Repository (recommended)
+### APT Repository (Pop!_OS / Ubuntu / Debian)
 
 ```bash
 curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
@@ -20,9 +20,35 @@ sudo apt install -y open-sesame open-sesame-desktop
 sudo apt install -y open-sesame
 ```
 
+### DNF Repository (Fedora / RHEL)
+
+```bash
+sudo curl -fsSL https://scopecreep-zip.github.io/open-sesame/RPM-GPG-KEY \
+  -o /etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+sudo tee /etc/yum.repos.d/open-sesame.repo << 'EOF'
+[open-sesame]
+name=Open Sesame RPMs (GitHub Pages)
+baseurl=https://scopecreep-zip.github.io/open-sesame/repo/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+EOF
+```
+
+**Desktop** (window switcher + clipboard + input + headless):
+```bash
+sudo dnf install -y open-sesame open-sesame-desktop
+```
+
+**Headless** (secrets, profiles, launcher, snippets — no GUI):
+```bash
+sudo dnf install -y open-sesame
+```
+
 ### Direct Download
 
-See release assets below for `.deb` packages (amd64/arm64) with SHA256 checksums.
+See release assets below for `.deb` and `.rpm` packages (amd64/arm64) with SHA256 checksums.
 
 ## What You Get
 
@@ -45,10 +71,12 @@ See release assets below for `.deb` packages (amd64/arm64) with SHA256 checksums
 
 ## Supply Chain Security
 
-All `.deb` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
+All `.deb` and `.rpm` packages include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
 ```bash
 gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
 gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-linux-$(uname -m).rpm" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-linux-$(uname -m).rpm" --owner ScopeCreep-zip
 ```
 
 ---

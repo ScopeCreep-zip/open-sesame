@@ -2,7 +2,7 @@
 
 This guide covers the requirements and considerations for packaging Open
 Sesame on Linux distributions beyond the officially supported Debian/Ubuntu
-`.deb` packages and Nix flake.
+`.deb` packages, Fedora/RHEL `.rpm` packages, and Nix flake.
 
 ## Common Requirements
 
@@ -117,21 +117,51 @@ package() {
 
 ## RPM (Fedora / RHEL)
 
-### Spec File Considerations
+RPM packaging is officially supported via `cargo-generate-rpm`. Full documentation is in
+[RPM Packaging](rpm.md). The following is a summary for packagers familiar with RPM conventions.
 
-- **BuildRequires**: `cargo`, `rust-packaging`, `pkg-config`, `sqlcipher-devel`,
-  `openssl-devel`, `wayland-devel`, `libxkbcommon-devel`.
-- **License tag**: `GPL-3.0-only`.
-- **Subpackages**: Use `%package desktop` for the GUI subpackage with
-  `Requires: %{name} = %{version}-%{release}`.
-- **systemd macros**: Use `%systemd_user_post`, `%systemd_user_preun`, and
-  `%systemd_user_postun` for service lifecycle.
-- **Vendor dependencies**: Fedora policy requires vendored dependencies to be
-  audited. Run `cargo vendor` and include the vendor tarball as a secondary
-  source.
-- **SELinux**: daemon-secrets performs `mlock` and reads `SSH_AUTH_SOCK`. A
-  custom SELinux policy module may be required for confined users. The base
-  package should include a `.te` policy file or document the required booleans.
+### Build Tool
+
+Open Sesame uses `cargo-generate-rpm` (not `rpmbuild` with spec files). Package metadata lives
+in `[package.metadata.generate-rpm]` sections in `open-sesame/Cargo.toml` and
+`daemon-wm/Cargo.toml`. The tool reads Cargo metadata, embeds scriptlets verbatim, and produces
+`.rpm` files using the `rpm` crate. No spec file, no rpmbuild dependency.
+
+### Dependencies
+
+- **Headless requires**: `glibc`, `libgcc`, `libseccomp`
+- **Headless recommends**: `openssh-clients`
+- **Desktop requires**: `glibc`, `libgcc`, `libseccomp`, `libxkbcommon`, `libwayland-client`,
+  `fontconfig`, `freetype`
+- **Desktop recommends**: `xdg-utils`, `dejavu-sans-fonts`
+- **License tag**: `GPL-3.0-only` (from `workspace.package.license`)
+- **auto-req**: Disabled (`auto-req = "no"`). CI builds on Ubuntu runners produce Debian-style
+  soname deps via `ldd`; Fedora package names are declared explicitly in `[requires]`.
+
+### Systemd Integration
+
+- **Scriptlets**: `%post`, `%preun`, `%postun`, `%posttrans` call
+  `/usr/lib/systemd/systemd-update-helper` directly. RPM macros like `%systemd_user_post` cannot
+  be used because `cargo-generate-rpm` embeds scripts verbatim without rpmbuild's macro parser.
+- **Preset file**: `/usr/lib/systemd/user-preset/90-open-sesame.preset` enables all services and
+  targets by default, integrating with Fedora's preset policy. Administrators override via
+  higher-priority presets in `/etc/systemd/user-preset/`.
+- **BindsTo**: `open-sesame-desktop.target` uses `BindsTo=graphical-session.target` (not
+  `Requires=`) to ensure desktop services tear down when the compositor exits unexpectedly.
+
+### SELinux
+
+daemon-secrets performs `mlock` and reads `SSH_AUTH_SOCK`. On SELinux-enforcing systems with
+confined users, the `mlock` syscall may require the `allow_mlock` boolean or a custom policy
+module. The base package does not ship a `.te` policy file — document the required booleans
+in deployment guides for confined environments.
+
+### Vendor Dependencies
+
+Fedora policy requires vendored dependencies to be audited for bundled library packaging.
+`cargo-generate-rpm` produces a binary RPM from pre-built binaries; it does not run `cargo build`
+or vendor sources. For Fedora review submission, run `cargo vendor` and include the vendor tarball
+as a secondary source in a spec file wrapper around the `cargo-generate-rpm` output.
 
 ## Alpine Linux
 
