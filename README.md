@@ -43,29 +43,31 @@ Install `open-sesame-desktop` and it pulls in `open-sesame` automatically. On a 
 
 ## 🚀 Quick Start
 
-Add the GPG key:
+### APT (Pop!_OS / Ubuntu / Debian)
 
 ```bash
 curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
-```
-
-Add the APT repository:
-
-```bash
 echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" | sudo tee /etc/apt/sources.list.d/open-sesame.list
-```
-
-Install on a desktop:
-
-```bash
 sudo apt update && sudo apt install -y open-sesame open-sesame-desktop
 ```
 
-Or install headless only (servers, containers, VMs -- no GUI dependencies):
+### DNF (Fedora / RHEL)
 
 ```bash
-sudo apt update && sudo apt install -y open-sesame
+sudo curl -fsSL https://scopecreep-zip.github.io/open-sesame/RPM-GPG-KEY -o /etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+sudo tee /etc/yum.repos.d/open-sesame.repo << 'EOF'
+[open-sesame]
+name=Open Sesame RPMs (GitHub Pages)
+baseurl=https://scopecreep-zip.github.io/open-sesame/repo/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+EOF
+sudo dnf install -y open-sesame open-sesame-desktop
 ```
+
+For headless servers, containers, and VMs, install `open-sesame` without `open-sesame-desktop`.
 
 All daemons start automatically after install. Run `sesame init` to create your config directory, generate IPC keypairs, and set a master password for your first vault:
 
@@ -227,7 +229,7 @@ Initialize:
 sesame init
 ```
 
-The `open-sesame` package installs 5 binaries and systemd user services under `open-sesame-headless.target` (WantedBy `default.target`). The `open-sesame-desktop` package adds 3 GUI daemons under `open-sesame-desktop.target` (Requires `graphical-session.target`). Package postinst scripts handle `systemctl --global enable` and per-user service activation automatically -- no manual `systemctl` commands needed.
+The `open-sesame` package installs 5 binaries and systemd user services under `open-sesame-headless.target`. The `open-sesame-desktop` package adds 3 GUI daemons under `open-sesame-desktop.target` with `BindsTo=graphical-session.target`. Package postinst scripts handle `systemctl --global enable` and per-user service activation automatically.
 
 </details>
 
@@ -1157,7 +1159,7 @@ The two targets compose cleanly:
 | `open-sesame-headless.target` | `default.target` | profile, secrets, launcher, snippets |
 | `open-sesame-desktop.target` | `graphical-session.target` | wm, clipboard, input |
 
-The desktop target `Requires` the headless target. Starting desktop starts headless first. Stopping desktop leaves headless running. All daemons use `Type=notify` with `WatchdogSec=30` for health monitoring.
+The desktop target `Requires` the headless target and `BindsTo` the graphical session. Starting desktop starts headless first. Stopping desktop leaves headless running. If the compositor exits unexpectedly, `BindsTo` tears down the desktop services. All daemons use `Type=notify` with `WatchdogSec=30` for health monitoring.
 
 ### 🗝️ Key Hierarchy
 
