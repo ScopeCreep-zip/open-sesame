@@ -526,6 +526,7 @@
               patchelf
               cargo-deb
               (pkgs.callPackage ./nix/cargo-generate-rpm.nix { })
+              jq
 
               # Documentation
               mdbook
