@@ -9,9 +9,8 @@ set -euo pipefail
 
 : "${TARGET:?TARGET must be set (e.g. x86_64-unknown-linux-gnu)}"
 
-# Extract workspace version from Cargo metadata
-VERSION=$(cargo metadata --format-version=1 -q \
-  | jq -r '.packages[] | select(.name == "open-sesame") | .version')
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+VERSION=$("${ROOT}/scripts/common/cargo-version.sh")
 
 # Build signing arguments if key file is provided
 SIGN_ARGS=()

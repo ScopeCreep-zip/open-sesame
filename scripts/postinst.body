@@ -1,17 +1,6 @@
-#!/bin/bash
-# Post-installation script for open-sesame (headless)
-set -e
-
-# List UIDs of all active user systemd instances.
-# This is the same pattern used by systemd-update-helper.in.
-active_user_uids() {
-    systemctl list-units 'user@*' --legend=no 2>/dev/null \
-        | sed -n 's/.*user@\([0-9]\+\)\.service.*/\1/p'
-}
-
+# %postinst for open-sesame (headless) — deb
 case "$1" in
     configure)
-        # 1. Enable services globally (persists for future logins and new users).
         systemctl --global enable \
             open-sesame-profile.service \
             open-sesame-secrets.service \
@@ -20,19 +9,16 @@ case "$1" in
             open-sesame-headless.target \
             2>/dev/null || true
 
-        # 2. Reload all active user managers so they see the new unit files.
-        #    reload on user@.service triggers a manager re-exec (not just config reload).
-        systemctl reload 'user@*.service' 2>/dev/null || true
+        reload_user_managers
 
-        # 3. Start services for all currently logged-in users.
         for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-profile.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-secrets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-launcher.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT=25s systemctl --user -M "$uid@" \
+            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
                 restart open-sesame-snippets.service 2>/dev/null || true
         done
 

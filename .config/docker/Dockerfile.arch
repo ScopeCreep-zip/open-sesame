@@ -9,6 +9,7 @@
 FROM archlinux:latest
 
 ARG VERSION
+ARG ARCH=x86_64
 
 # =============================================================================
 # System packages
@@ -63,12 +64,12 @@ RUN mkdir -p \
 
 # =============================================================================
 # SSH agent and sesame-init services
-# Reuses Fedora's systemd units — both use 'testuser' at UID 1000.
-# If the Fedora username changes, these COPY paths must update to match.
+# Uses Fedora's per-distro systemd units (both use 'testuser' at UID 1000).
+# sesame-init.sh is shared across all distros from data/common/.
 # =============================================================================
 COPY .config/docker/data/fedora/etc/systemd/system/ssh-agent.service /etc/systemd/system/ssh-agent.service
 COPY .config/docker/data/fedora/etc/systemd/system/sesame-init.service /etc/systemd/system/sesame-init.service
-COPY .config/docker/data/fedora/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
+COPY .config/docker/data/common/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
 RUN chmod 755 /usr/local/bin/sesame-init.sh \
     && mkdir -p /run/user/1000 \
     && chown testuser:testuser /run/user/1000 \
@@ -77,8 +78,8 @@ RUN chmod 755 /usr/local/bin/sesame-init.sh \
 # =============================================================================
 # Install open-sesame from GitHub Releases (.pkg.tar.zst)
 # =============================================================================
-RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-bin-${VERSION}-1-x86_64.pkg.tar.zst" -o /tmp/open-sesame.pkg.tar.zst \
-    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-bin-${VERSION}-1-x86_64.pkg.tar.zst" -o /tmp/open-sesame-desktop.pkg.tar.zst \
+RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-bin-${VERSION}-1-${ARCH}.pkg.tar.zst" -o /tmp/open-sesame.pkg.tar.zst \
+    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-bin-${VERSION}-1-${ARCH}.pkg.tar.zst" -o /tmp/open-sesame-desktop.pkg.tar.zst \
     && pacman -U --noconfirm /tmp/open-sesame.pkg.tar.zst /tmp/open-sesame-desktop.pkg.tar.zst \
     && rm /tmp/*.pkg.tar.zst
 

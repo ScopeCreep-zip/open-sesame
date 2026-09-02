@@ -76,7 +76,7 @@ RUN mkdir -p \
 # =============================================================================
 COPY .config/docker/data/fedora/etc/systemd/system/ssh-agent.service /etc/systemd/system/ssh-agent.service
 COPY .config/docker/data/fedora/etc/systemd/system/sesame-init.service /etc/systemd/system/sesame-init.service
-COPY .config/docker/data/fedora/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
+COPY .config/docker/data/common/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
 RUN chmod 755 /usr/local/bin/sesame-init.sh \
     && systemctl enable ssh-agent.service sesame-init.service
 

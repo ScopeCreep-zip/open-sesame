@@ -15,26 +15,6 @@ set -euo pipefail
 RELEASE_DIR="target/${TARGET}/release"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# ── Patchelf: strip nix store interpreter and rpath ──────────────────────────
-# Only needed when building inside nix devShell. CI uses rustup and produces
-# FHS-standard binaries. Single invocation per binary for aarch64 safety
-# (patchelf#244).
-BINS=(sesame daemon-profile daemon-secrets daemon-launcher daemon-snippets daemon-wm daemon-clipboard daemon-input)
-case "${ARCH}" in
-    x86_64)  INTERP="/lib64/ld-linux-x86-64.so.2" ;;
-    aarch64) INTERP="/lib/ld-linux-aarch64.so.1" ;;
-    *)       echo "ERROR: unsupported architecture '${ARCH}' for patchelf" >&2; exit 1 ;;
-esac
-for bin in "${BINS[@]}"; do
-    if [ -f "${RELEASE_DIR}/${bin}" ]; then
-        current_interp="$(patchelf --print-interpreter "${RELEASE_DIR}/${bin}" 2>/dev/null || true)"
-        if [[ "${current_interp}" == /nix/store/* ]]; then
-            patchelf --set-interpreter "${INTERP}" --remove-rpath "${RELEASE_DIR}/${bin}"
-            echo "patchelf: ${bin}"
-        fi
-    fi
-done
-
 # ── Headless tarball ─────────────────────────────────────────────────────────
 HEADLESS_STAGING="$(mktemp -d)"
 DESKTOP_STAGING="$(mktemp -d)"
