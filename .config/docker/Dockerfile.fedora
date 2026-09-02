@@ -1,0 +1,46 @@
+# Open Sesame RPM install verification — Fedora 44 with systemd
+#
+# Shell:  docker exec -it --user testuser open-sesame-fedora bash
+# Verify: docker exec --user testuser open-sesame-fedora sesame --version
+# Status: docker exec --user testuser open-sesame-fedora sesame status
+
+FROM fedora:44
+
+ARG VERSION
+ARG ARCH
+
+RUN dnf install -y \
+    systemd \
+    dbus \
+    curl \
+    sudo \
+    && dnf clean all
+
+RUN systemctl mask \
+    systemd-logind.service \
+    getty.target \
+    console-getty.service \
+    systemd-networkd.service \
+    systemd-resolved.service \
+    systemd-timesyncd.service \
+    systemd-hostnamed.service \
+    systemd-udevd.service \
+    systemd-udev-trigger.service \
+    systemd-firstboot.service \
+    systemd-machine-id-commit.service
+
+RUN systemctl set-default multi-user.target
+
+RUN useradd -m -s /bin/bash testuser \
+    && echo "testuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/testuser \
+    && chmod 0440 /etc/sudoers.d/testuser \
+    && mkdir -p /var/lib/systemd/linger \
+    && touch /var/lib/systemd/linger/testuser
+
+RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-linux-${ARCH}.rpm" -o /tmp/open-sesame.rpm \
+    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-linux-${ARCH}.rpm" -o /tmp/open-sesame-desktop.rpm \
+    && dnf install -y /tmp/open-sesame.rpm /tmp/open-sesame-desktop.rpm \
+    && rm /tmp/*.rpm
+
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/lib/systemd/systemd"]

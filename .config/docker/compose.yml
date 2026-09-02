@@ -1,0 +1,47 @@
+# Open Sesame package install verification
+#
+# Tests .deb and .rpm packages from GitHub Releases against
+# Ubuntu and Fedora containers with systemd as PID 1.
+#
+# Usage:
+#   docker compose -f .config/docker/compose.yml up --build -d
+#   docker exec --user testuser open-sesame-ubuntu sesame --version
+#   docker exec --user testuser open-sesame-fedora sesame --version
+#   docker compose -f .config/docker/compose.yml down
+
+services:
+  ubuntu:
+    build:
+      context: ../..
+      dockerfile: .config/docker/Dockerfile.ubuntu
+      args:
+        VERSION: "${OPEN_SESAME_VERSION:-1.15.3}"
+        ARCH: "${OPEN_SESAME_ARCH:-x86_64}"
+    container_name: open-sesame-ubuntu
+    hostname: ubuntu
+    init: false
+    privileged: true
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+  fedora:
+    build:
+      context: ../..
+      dockerfile: .config/docker/Dockerfile.fedora
+      args:
+        VERSION: "${OPEN_SESAME_VERSION:-1.15.3}"
+        ARCH: "${OPEN_SESAME_ARCH:-x86_64}"
+    container_name: open-sesame-fedora
+    hostname: fedora
+    init: false
+    privileged: true
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777

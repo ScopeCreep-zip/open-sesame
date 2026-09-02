@@ -1,0 +1,52 @@
+# Open Sesame DEB install verification — Ubuntu 24.04 with systemd
+#
+# Shell:  docker exec -it --user testuser open-sesame-ubuntu bash
+# Verify: docker exec --user testuser open-sesame-ubuntu sesame --version
+# Status: docker exec --user testuser open-sesame-ubuntu sesame status
+
+FROM ubuntu:24.04
+
+ARG VERSION
+ARG ARCH
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    systemd \
+    systemd-sysv \
+    dbus \
+    curl \
+    ca-certificates \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN systemctl mask \
+    systemd-logind.service \
+    getty.target \
+    console-getty.service \
+    systemd-networkd.service \
+    systemd-resolved.service \
+    systemd-timesyncd.service \
+    systemd-hostnamed.service \
+    systemd-udevd.service \
+    systemd-udev-trigger.service \
+    systemd-firstboot.service \
+    systemd-machine-id-commit.service
+
+RUN systemctl set-default multi-user.target
+
+RUN useradd -m -s /bin/bash testuser \
+    && echo "testuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/testuser \
+    && chmod 0440 /etc/sudoers.d/testuser \
+    && mkdir -p /var/lib/systemd/linger \
+    && touch /var/lib/systemd/linger/testuser
+
+RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-linux-${ARCH}.deb" -o /tmp/open-sesame.deb \
+    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-linux-${ARCH}.deb" -o /tmp/open-sesame-desktop.deb \
+    && apt-get update \
+    && apt-get install -y /tmp/open-sesame.deb /tmp/open-sesame-desktop.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/*.deb
+
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/lib/systemd/systemd"]
