@@ -340,22 +340,108 @@ description = "Reproduce CI arch build on ubuntu:24.04 (from local tarballs)"
 depends = [ "build:arch" ]
 run = "./scripts/arch/test-ci-build.sh"
 
-[tasks."test:arch:install"]
-description = "End-to-end Arch install verification (Docker compose, needs published release)"
+[tasks."clean:docker"]
+alias = [ "cd" ]
+description = "Stop and remove open-sesame containers"
+run = """
+#!/usr/bin/env bash
+docker compose down 2>/dev/null || true
+echo "Containers removed"
+"""
+
+[tasks."clean:docker:volumes"]
+alias = [ "cdv" ]
+description = "Stop and remove open-sesame containers + volumes"
+run = """
+#!/usr/bin/env bash
+docker compose down -v 2>/dev/null || true
+echo "Containers and volumes removed"
+"""
+
+[tasks."test:docker:arch:repo"]
+description = "Arch: install from GitHub Pages pacman repo"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-: "${OPEN_SESAME_VERSION:?OPEN_SESAME_VERSION must be set (e.g. 1.15.3)}"
-export OPEN_SESAME_VERSION
-docker compose -f .config/docker/compose.yml up --build -d arch
-echo "Waiting for systemd boot..."
-sleep 8
-echo "=== sesame --version ==="
-docker exec --user testuser open-sesame-arch sesame --version
-echo "=== sesame status ==="
-docker exec --user testuser open-sesame-arch sesame status
-echo "=== systemd units ==="
-docker exec --user testuser open-sesame-arch systemctl --user list-units 'open-sesame-*' --no-pager
+docker compose down -v arch-repo 2>/dev/null || true
+docker compose up --build -d arch-repo
+sleep 12
+docker exec open-sesame-arch-repo install-repo.sh
+docker exec --user arch open-sesame-arch-repo post-install.sh
+"""
+
+[tasks."test:docker:ubuntu:repo"]
+description = "Ubuntu: install from GitHub Pages APT repo"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose down -v ubuntu-repo 2>/dev/null || true
+docker compose up --build -d ubuntu-repo
+sleep 12
+docker exec open-sesame-ubuntu-repo install-repo.sh
+docker exec --user ubuntu open-sesame-ubuntu-repo post-install.sh
+"""
+
+[tasks."test:docker:fedora:repo"]
+description = "Fedora: install from GitHub Pages DNF repo"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose down -v fedora-repo 2>/dev/null || true
+docker compose up --build -d fedora-repo
+sleep 12
+docker exec open-sesame-fedora-repo install-repo.sh
+docker exec --user fedora open-sesame-fedora-repo post-install.sh
+"""
+
+[tasks."test:docker:arch:local"]
+description = "Arch: install from locally built .pkg.tar.zst"
+depends = [ "test:arch:pkg" ]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose down -v arch-local 2>/dev/null || true
+docker compose up --build -d arch-local
+sleep 12
+docker exec open-sesame-arch-local install-local.sh
+docker exec --user arch open-sesame-arch-local post-install.sh
+"""
+
+[tasks."test:docker:ubuntu:local"]
+description = "Ubuntu: install from locally built .deb"
+depends = [ "build:deb" ]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose down -v ubuntu-local 2>/dev/null || true
+docker compose up --build -d ubuntu-local
+sleep 12
+docker exec open-sesame-ubuntu-local install-local.sh
+docker exec --user ubuntu open-sesame-ubuntu-local post-install.sh
+"""
+
+[tasks."test:docker:fedora:local"]
+description = "Fedora: install from locally built .rpm"
+depends = [ "build:rpm" ]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose down -v fedora-local 2>/dev/null || true
+docker compose up --build -d fedora-local
+sleep 12
+docker exec open-sesame-fedora-local install-local.sh
+docker exec --user fedora open-sesame-fedora-local post-install.sh
+"""
+
+[tasks."test:docker:ubuntu:source"]
+description = "Ubuntu: build from source (Dockerfile builder stage)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose down -v ubuntu-source 2>/dev/null || true
+docker compose up --build -d ubuntu-source
+sleep 12
+docker exec --user ubuntu open-sesame-ubuntu-source post-install.sh
 """
 
 # =============================================================================
@@ -1130,12 +1216,22 @@ TEST (Arch packaging):
   test:arch:namcap        Lint PKGBUILDs with namcap (Arch container)
   test:arch:pkg           Build + install + verify from local tarballs (Arch container)
   test:arch:ci            Reproduce CI arch build on ubuntu:24.04 container
-  test:arch:install       End-to-end install from published release (Docker compose)
+
+TEST (Docker containers):
+  test:docker:ubuntu:repo    Ubuntu: install from GitHub Pages APT repo
+  test:docker:ubuntu:local   Ubuntu: install from locally built .deb
+  test:docker:ubuntu:source  Ubuntu: build from source and install
+  test:docker:fedora:repo    Fedora: install from GitHub Pages DNF repo
+  test:docker:fedora:local   Fedora: install from locally built .rpm
+  test:docker:arch:repo      Arch: install from GitHub Pages pacman repo
+  test:docker:arch:local     Arch: install from locally built .pkg.tar.zst
 
 CLEAN:
   clean            (c)    Build artifacts (target/, docs/book/)
   clean:install    (ci)   Uninstall package (dpkg + ~/.local/bin)
   clean:all        (ca)   Nuclear: uninstall + config + cache + build
+  clean:docker         (cd)   Stop and remove open-sesame containers
+  clean:docker:volumes (cdv)  Stop and remove containers + volumes
 
 DEV:
   dev              (d)    Build debug + run

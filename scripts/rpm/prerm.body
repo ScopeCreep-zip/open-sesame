@@ -1,19 +1,12 @@
-# %preun scriptlet for open-sesame (headless)
+# %preun for open-sesame (headless)
 # $1: 0=remove, >=1=upgrade
 
-if [ "$1" -eq 0 ]; then
-    # Stop services for all active users in reverse dependency order
-    for uid in $(active_user_uids); do
-        SYSTEMD_BUS_TIMEOUT=15s systemctl --user -M "$uid@" \
-            stop open-sesame-snippets.service 2>/dev/null || :
-        SYSTEMD_BUS_TIMEOUT=15s systemctl --user -M "$uid@" \
-            stop open-sesame-launcher.service 2>/dev/null || :
-        SYSTEMD_BUS_TIMEOUT=15s systemctl --user -M "$uid@" \
-            stop open-sesame-secrets.service 2>/dev/null || :
-        SYSTEMD_BUS_TIMEOUT=15s systemctl --user -M "$uid@" \
-            stop open-sesame-profile.service 2>/dev/null || :
-    done
+sesame_require_systemd
 
+if [ "$1" -eq 0 ]; then
+    # Removal: disable and stop via systemd-update-helper.
+    # remove-user-units calls systemctl --global disable then
+    # systemctl --user -M "$user@" disable --now per active user.
     if [ -x /usr/lib/systemd/systemd-update-helper ]; then
         /usr/lib/systemd/systemd-update-helper remove-user-units \
             open-sesame-profile.service \

@@ -1,7 +1,7 @@
-# %postrm for open-sesame-desktop — deb
+# %postrm for open-sesame-desktop -- deb
 case "$1" in
     remove|purge)
-        reload_user_managers
+        # daemon-reload handled by dpkg triggers on unit file removal.
         echo "open-sesame-desktop removed."
         echo "Headless daemons (open-sesame) are still installed."
         #DEBHELPER#

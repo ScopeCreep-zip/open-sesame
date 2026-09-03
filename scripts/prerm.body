@@ -1,15 +1,13 @@
-# %prerm for open-sesame (headless) — deb
+# %prerm for open-sesame (headless) -- deb
 case "$1" in
     remove|deconfigure)
-        for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-snippets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-launcher.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-secrets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-profile.service 2>/dev/null || true
+        sesame_require_systemd
+
+        for uid in $(sesame_active_user_uids); do
+            sesame_user_systemctl "$uid" stop open-sesame-snippets.service
+            sesame_user_systemctl "$uid" stop open-sesame-launcher.service
+            sesame_user_systemctl "$uid" stop open-sesame-secrets.service
+            sesame_user_systemctl "$uid" stop open-sesame-profile.service
         done
 
         systemctl --global disable \
@@ -22,15 +20,13 @@ case "$1" in
         #DEBHELPER#
         ;;
     upgrade)
-        for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-snippets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-launcher.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-secrets.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                stop open-sesame-profile.service 2>/dev/null || true
+        sesame_require_systemd
+
+        for uid in $(sesame_active_user_uids); do
+            sesame_user_systemctl "$uid" stop open-sesame-snippets.service
+            sesame_user_systemctl "$uid" stop open-sesame-launcher.service
+            sesame_user_systemctl "$uid" stop open-sesame-secrets.service
+            sesame_user_systemctl "$uid" stop open-sesame-profile.service
         done
         #DEBHELPER#
         ;;

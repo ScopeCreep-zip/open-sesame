@@ -1,0 +1,32 @@
+# Fedora -- install from GitHub Pages DNF repository
+#
+# docker compose up -d fedora-repo
+# docker exec --user fedora open-sesame-fedora-repo sesame status --doctor --exit-code
+
+services:
+  fedora-repo:
+    build:
+      context: ../../..
+      dockerfile: .config/docker/Dockerfile.fedora
+    container_name: open-sesame-fedora-repo
+    hostname: fedora-repo
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - fedora-repo-config:/home/fedora/.config/pds
+      - fedora-repo-cache:/home/fedora/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+volumes:
+  fedora-repo-config:
+    driver: local
+  fedora-repo-cache:
+    driver: local

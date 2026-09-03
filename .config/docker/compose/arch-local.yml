@@ -1,0 +1,36 @@
+# Arch -- install from locally prebuilt .pkg.tar.zst packages
+#
+# Requires: mise run build:arch (produces *.tar.gz at repo root)
+#           then mise run test:arch:pkg to build .pkg.tar.zst
+#
+# docker compose up -d arch-local
+# docker exec --user arch open-sesame-arch-local sesame status --doctor --exit-code
+
+services:
+  arch-local:
+    build:
+      context: ../../..
+      dockerfile: .config/docker/Dockerfile.arch
+    container_name: open-sesame-arch-local
+    hostname: arch-local
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - ../../..:/packages:ro
+      - arch-local-config:/home/arch/.config/pds
+      - arch-local-cache:/home/arch/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+volumes:
+  arch-local-config:
+    driver: local
+  arch-local-cache:
+    driver: local

@@ -6,7 +6,8 @@ StartLimitBurst=5
 StartLimitIntervalSec=300
 
 [Service]
-Type=notify
+Type=notify-reload
+NotifyAccess=main
 ExecStart=/usr/bin/daemon-profile
 Restart=on-failure
 RestartSec=5

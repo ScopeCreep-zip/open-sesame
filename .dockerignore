@@ -1,0 +1,10 @@
+target/
+.direnv/
+result
+docs/book/
+node_modules/
+.git/
+*.tar.gz
+*.pkg.tar.zst
+*.deb
+*.rpm
