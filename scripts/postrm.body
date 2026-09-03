@@ -1,7 +1,7 @@
-# %postrm for open-sesame (headless) — deb
+# %postrm for open-sesame (headless) -- deb
 case "$1" in
     remove|purge)
-        reload_user_managers
+        # daemon-reload handled by dpkg triggers on unit file removal.
         echo "open-sesame removed."
         echo "User configuration remains at ~/.config/pds/"
         echo "To remove: rm -rf ~/.config/pds/"

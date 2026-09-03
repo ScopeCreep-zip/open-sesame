@@ -1,11 +1,7 @@
-# %postun scriptlet for open-sesame (headless)
+# %postun for open-sesame (headless)
 # $1: 0=remove, >=1=upgrade
 
-if [ "$1" -eq 0 ]; then
-    reload_user_managers
-    echo "open-sesame removed."
-    echo "User configuration remains at ~/.config/pds/"
-    echo "To remove: rm -rf ~/.config/pds/"
-fi
+# No-op. File triggers in the systemd package handle daemon-reload
+# when unit files are removed from /usr/lib/systemd/user/.
 
 :

@@ -1,105 +1,101 @@
-# Open Sesame DEB install verification — Ubuntu 24.04 with systemd
+# check=skip=SecretsUsedInArgOrEnv
+# Open Sesame -- Ubuntu 24.04 with systemd
 #
-# Full Linux environment for package install testing:
-# - systemd as PID 1 with logind for user manager sessions
-# - PAM override permits user@.service without /etc/shadow auth
-# - Linger-enabled user for persistent user services
-# - SSH agent with generated keypair for non-interactive sesame init
-# - Packages downloaded from GitHub Releases at build time
-#
-# Shell:  docker exec -it --user ubuntu open-sesame-ubuntu bash
-# Verify: docker exec --user ubuntu open-sesame-ubuntu sesame --version
-# Status: docker exec --user ubuntu open-sesame-ubuntu sesame status
+# Three build targets selected by compose profiles:
+#   base:   systemd + user + ssh-agent (repo/local install via docker exec)
+#   source: base + compiled binaries + units from builder stage
 
-FROM ubuntu:24.04
+# =============================================================================
+# Builder: compile headless binaries from source
+# =============================================================================
+FROM rust:1.97-bookworm AS builder
 
-ARG VERSION
-ARG ARCH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libwayland-dev libxkbcommon-dev libseccomp-dev \
+    libfontconfig1-dev libfreetype-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /src
+WORKDIR /src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release \
+    --package open-sesame \
+    --package daemon-profile \
+    --package daemon-secrets \
+    --package daemon-launcher \
+    --package daemon-snippets \
+    && cp target/release/sesame target/release/daemon-profile \
+       target/release/daemon-secrets target/release/daemon-launcher \
+       target/release/daemon-snippets /tmp/
+
+# =============================================================================
+# Base: systemd + user + ssh-agent (no open-sesame packages)
+# =============================================================================
+FROM ubuntu:24.04 AS base
+
+ARG USERNAME=ubuntu
+ARG USER_UID=1000
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
-# =============================================================================
-# System packages
-# =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    systemd \
-    systemd-sysv \
-    dbus \
-    curl \
-    ca-certificates \
-    sudo \
-    procps \
-    openssh-client \
-    libpam-systemd \
+    systemd systemd-sysv dbus curl ca-certificates sudo procps \
+    openssh-client gnupg libpam-systemd \
     && rm -rf /var/lib/apt/lists/*
 
-# =============================================================================
-# systemd configuration for container environment
-# Note: systemd-logind is NOT masked — it is required for pam_systemd
-# session registration which enables user@.service startup.
-# =============================================================================
 RUN systemctl mask \
-    getty.target \
-    console-getty.service \
-    systemd-networkd.service \
-    systemd-resolved.service \
-    systemd-timesyncd.service \
-    systemd-hostnamed.service \
-    systemd-machined.service \
-    systemd-journald-audit.socket \
-    systemd-udevd.service \
-    systemd-udev-trigger.service \
-    systemd-firstboot.service \
-    systemd-machine-id-commit.service \
-    first-boot-complete.target
+    getty.target console-getty.service systemd-networkd.service \
+    systemd-resolved.service systemd-timesyncd.service \
+    systemd-hostnamed.service systemd-machined.service \
+    systemd-journald-audit.socket systemd-udevd.service \
+    systemd-udev-trigger.service systemd-firstboot.service \
+    systemd-machine-id-commit.service first-boot-complete.target
 
 RUN systemctl set-default multi-user.target
 
-# =============================================================================
-# PAM override: permit user@.service without /etc/shadow authentication
-# while preserving pam_systemd session setup for XDG_RUNTIME_DIR and logind
-# =============================================================================
 COPY .config/docker/data/common/etc/pam.d/systemd-user /etc/pam.d/systemd-user
 
-# =============================================================================
-# Use built-in ubuntu user (UID 1000, already in sudo group)
-# Enable linger for persistent user services without login session
-# =============================================================================
 RUN mkdir -p \
-      /home/ubuntu/.config/pds \
-      /home/ubuntu/.cache/open-sesame \
-      /home/ubuntu/.ssh \
-    && chown -R ubuntu:ubuntu /home/ubuntu \
+      /home/${USERNAME}/.config/pds \
+      /home/${USERNAME}/.cache/open-sesame \
+      /home/${USERNAME}/.ssh \
+    && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME} \
     && mkdir -p /var/lib/systemd/linger \
-    && touch /var/lib/systemd/linger/ubuntu
+    && touch /var/lib/systemd/linger/${USERNAME}
 
-# =============================================================================
-# SSH agent and sesame-init services
-# =============================================================================
-COPY .config/docker/data/ubuntu/etc/systemd/system/ssh-agent.service /etc/systemd/system/ssh-agent.service
-COPY .config/docker/data/ubuntu/etc/systemd/system/sesame-init.service /etc/systemd/system/sesame-init.service
+COPY .config/docker/data/common/etc/systemd/user/ssh-agent.service /usr/lib/systemd/user/ssh-agent.service
+COPY .config/docker/data/common/etc/systemd/user/sesame-init.service /usr/lib/systemd/user/sesame-init.service
 COPY .config/docker/data/common/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
-RUN chmod 755 /usr/local/bin/sesame-init.sh \
-    && systemctl enable ssh-agent.service sesame-init.service
+COPY scripts/docker/post-install.sh /usr/local/bin/post-install.sh
+COPY scripts/docker/install-ubuntu-repo.sh /usr/local/bin/install-repo.sh
+COPY scripts/docker/install-ubuntu-local.sh /usr/local/bin/install-local.sh
+RUN chmod 755 /usr/local/bin/sesame-init.sh /usr/local/bin/post-install.sh \
+    && systemctl --global enable ssh-agent.service sesame-init.service
 
-# =============================================================================
-# Install open-sesame from GitHub Releases
-# =============================================================================
-RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-linux-${ARCH}.deb" -o /tmp/open-sesame.deb \
-    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-linux-${ARCH}.deb" -o /tmp/open-sesame-desktop.deb \
-    && apt-get update \
-    && apt-get install -y /tmp/open-sesame.deb /tmp/open-sesame-desktop.deb \
-    && rm -rf /var/lib/apt/lists/* /tmp/*.deb
+ENV HOME=/home/${USERNAME}
+ENV XDG_RUNTIME_DIR=/run/user/${USER_UID}
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus
+ENV SSH_AUTH_SOCK=/run/user/${USER_UID}/ssh-agent.sock
 
-# =============================================================================
-# Runtime environment for docker exec --user ubuntu
-# =============================================================================
-ENV HOME=/home/ubuntu
-ENV XDG_RUNTIME_DIR=/run/user/1000
-ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-ENV SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock
-
-WORKDIR /home/ubuntu
+WORKDIR /home/${USERNAME}
 STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/lib/systemd/systemd"]
+
+# =============================================================================
+# Source: base + binaries + units from builder (production image)
+# =============================================================================
+FROM base AS source
+
+COPY --from=builder /tmp/sesame /usr/bin/sesame
+COPY --from=builder /tmp/daemon-profile /usr/bin/daemon-profile
+COPY --from=builder /tmp/daemon-secrets /usr/bin/daemon-secrets
+COPY --from=builder /tmp/daemon-launcher /usr/bin/daemon-launcher
+COPY --from=builder /tmp/daemon-snippets /usr/bin/daemon-snippets
+COPY --from=builder /src/contrib/systemd/open-sesame-headless.target /usr/lib/systemd/user/
+COPY --from=builder /src/contrib/systemd/open-sesame-profile.service /usr/lib/systemd/user/
+COPY --from=builder /src/contrib/systemd/open-sesame-secrets.service /usr/lib/systemd/user/
+COPY --from=builder /src/contrib/systemd/open-sesame-launcher.service /usr/lib/systemd/user/
+COPY --from=builder /src/contrib/systemd/open-sesame-snippets.service /usr/lib/systemd/user/
+COPY --from=builder /src/contrib/systemd/user-preset/90-open-sesame.preset /usr/lib/systemd/user-preset/

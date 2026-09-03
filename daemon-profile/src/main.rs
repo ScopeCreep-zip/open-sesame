@@ -77,6 +77,39 @@ impl DaemonTracker {
     }
 }
 
+/// Reload the context engine from the live config.
+///
+/// Shared by the config watcher (reload_rx) and SIGHUP (systemctl reload) paths.
+/// Rebuilds activation rules, updates the default profile name, and refreshes
+/// the profile name list used by RPC handlers.
+fn reload_config(
+    live_config: &std::sync::RwLock<core_config::Config>,
+    install_ns: &uuid::Uuid,
+    context_engine: &mut ContextEngine,
+    default_profile_name: &mut TrustProfileName,
+    config_profile_names: &mut Vec<TrustProfileName>,
+) {
+    if let Ok(guard) = live_config.read() {
+        let new_default_name: TrustProfileName = guard.global.default_profile.clone();
+        let new_default_id = core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
+            install_ns,
+            format!("profile:{}", new_default_name).as_bytes(),
+        ));
+        let new_rules = context::build_activation_rules(&guard, new_default_id, install_ns);
+        *context_engine = ContextEngine::new(new_rules, new_default_id);
+        *default_profile_name = new_default_name;
+        *config_profile_names = guard
+            .profiles
+            .keys()
+            .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
+            .collect();
+        tracing::info!(
+            default_profile = %default_profile_name,
+            "context engine rebuilt from reloaded config"
+        );
+    }
+}
+
 /// PDS profile orchestrator daemon.
 #[derive(Parser, Debug)]
 #[command(
@@ -174,6 +207,13 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to bind IPC bus server")?;
     tracing::info!(path = %socket_path.display(), "IPC bus server bound (Noise IK encrypted)");
 
+    // -- SIGHUP handler: required for Type=notify-reload before first READY=1 --
+    // systemd verifies a SIGHUP handler exists when processing the initial
+    // READY=1 notification. Without this, systemd kills the process with
+    // SERVICE_FAILURE_PROTOCOL.
+    #[cfg(target_os = "linux")]
+    let mut sighup = sandbox::register_sighup();
+
     // -- Platform readiness (early): tell systemd we are alive before blocking on installation.toml --
     #[cfg(target_os = "linux")]
     platform_linux::systemd::notify_ready();
@@ -206,6 +246,8 @@ async fn main() -> anyhow::Result<()> {
                 _ = poll_interval.tick() => {
                     if let Ok(cfg) = core_config::load_installation() {
                         tracing::info!("installation.toml found, transitioning to full mode");
+                        #[cfg(target_os = "linux")]
+                        platform_linux::systemd::notify_reloading();
                         bus.unregister(&pre_init_id).await;
                         break cfg;
                     }
@@ -441,6 +483,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("daemon-profile ready");
 
+    // Signal systemd that the reload cycle (pre-install -> full mode) is complete.
+    // With Type=notify-reload, this second READY=1 transitions the service from
+    // reload-notify back to running, making SubState observable by post-install.sh.
+    #[cfg(target_os = "linux")]
+    platform_linux::systemd::notify_ready();
+
     // -- Watchdog timer: half the WatchdogSec=30 interval --
     let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(15));
 
@@ -606,28 +654,28 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Some(()) = reload_rx.recv() => {
-                tracing::info!("config reload detected, rebuilding context engine rules");
-                if let Ok(guard) = live_config.read() {
-                    let new_default_name: TrustProfileName = guard.global.default_profile.clone();
-                    let new_default_id = core_types::ProfileId::from_uuid(
-                        uuid::Uuid::new_v5(&install_ns, format!("profile:{}", new_default_name).as_bytes()),
-                    );
-                    let new_rules = context::build_activation_rules(&guard, new_default_id, &install_ns);
-                    context_engine = ContextEngine::new(new_rules, new_default_id);
-                    // Update the default_profile_name used by RPC handlers.
-                    default_profile_name = new_default_name;
-                    // Refresh config_profile_names on hot-reload so
-                    // `sesame profile list` reflects newly added/removed profiles.
-                    config_profile_names = guard
-                        .profiles
-                        .keys()
-                        .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
-                        .collect();
-                    tracing::info!(
-                        default_profile = %default_profile_name,
-                        "context engine rebuilt from reloaded config"
-                    );
-                }
+                tracing::info!("config reload detected");
+                reload_config(
+                    &live_config,
+                    &install_ns,
+                    &mut context_engine,
+                    &mut default_profile_name,
+                    &mut config_profile_names,
+                );
+            }
+            _ = sighup.recv() => {
+                // SIGHUP from systemctl reload or manual signal.
+                // Type=notify-reload protocol: RELOADING=1 -> work -> READY=1.
+                tracing::info!("SIGHUP received, triggering config reload");
+                platform_linux::systemd::notify_reloading();
+                reload_config(
+                    &live_config,
+                    &install_ns,
+                    &mut context_engine,
+                    &mut default_profile_name,
+                    &mut config_profile_names,
+                );
+                platform_linux::systemd::notify_ready();
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("SIGINT received");
