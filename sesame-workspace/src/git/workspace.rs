@@ -36,7 +36,7 @@ pub fn pull_ff_only(repo_dir: &Path) -> Result<(), WorkspaceError> {
         .find_remote("origin")
         .map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
 
-    let origin_url: Option<String> = remote.url().map(|u| u.to_string());
+    let origin_url: Option<String> = remote.url().map(ToString::to_string);
     // libgit2 does not read proxy env vars from its vendored HTTP transport.
     // ProxyOptions has no no_proxy field, so NO_PROXY is checked before
     // deciding whether to set an explicit proxy URL.
@@ -197,9 +197,9 @@ pub(crate) fn is_unborn(org_dir: &Path) -> bool {
 /// Construct `FetchOptions` using the shared proxy policy.
 ///
 /// Queries the policy for the target URL's scheme. When the policy
-/// returns Direct (NO_PROXY match), leaves proxy options at default
+/// returns Direct (`NO_PROXY` match), leaves proxy options at default
 /// (no proxy). When it returns a proxy URL, sets it explicitly.
-/// When no environment proxy exists, uses auto() for gitconfig
+/// When no environment proxy exists, uses `auto()` for gitconfig
 /// fallback.
 fn proxy_aware_fetch_options<'cb>(remote_url: Option<&str>) -> git2::FetchOptions<'cb> {
     let mut fetch_opts = git2::FetchOptions::new();
@@ -235,17 +235,16 @@ fn find_remote_default_branch(
     repo: &git2::Repository,
 ) -> Result<(git2::Commit<'_>, String), WorkspaceError> {
     // Try symbolic origin/HEAD first.
-    if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Ok(resolved) = head_ref.resolve() {
-            if let Some(name) = resolved.name() {
+    if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Ok(resolved) = head_ref.resolve()
+        && let Some(name) = resolved.name()
+    {
                 let branch_name = name
                     .strip_prefix("refs/remotes/origin/")
                     .unwrap_or(name)
                     .to_string();
-                if let Ok(commit) = resolved.peel_to_commit() {
-                    return Ok((commit, branch_name));
-                }
-            }
+        if let Ok(commit) = resolved.peel_to_commit() {
+            return Ok((commit, branch_name));
         }
     }
 
@@ -269,10 +268,10 @@ fn find_remote_default_branch(
             .strip_prefix("origin/")
             .unwrap_or(&name)
             .to_string();
-        if let Ok(reference) = branch.into_reference().resolve() {
-            if let Ok(commit) = reference.peel_to_commit() {
-                return Ok((commit, branch_name));
-            }
+        if let Ok(reference) = branch.into_reference().resolve()
+            && let Ok(commit) = reference.peel_to_commit()
+        {
+            return Ok((commit, branch_name));
         }
     }
 

@@ -48,27 +48,23 @@ fn apply_proxy_config(
 /// responds within the configured timeout.
 #[must_use]
 pub fn probe_remote(url: &str) -> bool {
-    let tmp = match tempfile::tempdir() {
-        Ok(t) => t,
-        Err(_) => return false,
+    let Ok(tmp) = tempfile::tempdir() else {
+        return false;
     };
-    let mut repo = match gix::init_bare(tmp.path()) {
-        Ok(r) => r,
-        Err(_) => return false,
+    let Ok(mut repo) = gix::init_bare(tmp.path()) else {
+        return false;
     };
 
     if apply_proxy_config(&mut repo, url).is_err() {
         return false;
     }
 
-    let remote = match repo.remote_at(url) {
-        Ok(r) => r,
-        Err(_) => return false,
+    let Ok(remote) = repo.remote_at(url) else {
+        return false;
     };
 
-    let connection = match remote.connect(gix::remote::Direction::Fetch) {
-        Ok(c) => c,
-        Err(_) => return false,
+    let Ok(connection) = remote.connect(gix::remote::Direction::Fetch) else {
+        return false;
     };
 
     // gix 0.72 may panic inside ref_map on connection failure

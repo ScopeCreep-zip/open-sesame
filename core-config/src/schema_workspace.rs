@@ -22,22 +22,17 @@ pub struct WorkspaceConfig {
 }
 
 /// Workspace auto-discovery behavior on clone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceAutoMode {
     /// Init workspace.git when org dir is new, inform when it exists
     /// and is behind, never modify an existing directory without a flag.
+    #[default]
     Auto,
     /// Always init or update workspace.git without asking.
     Always,
     /// Skip all workspace.git auto-discovery.
     Never,
-}
-
-impl Default for WorkspaceAutoMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Workspace directory settings.

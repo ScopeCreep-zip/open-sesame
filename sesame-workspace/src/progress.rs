@@ -15,6 +15,12 @@ pub struct Progress {
     active: AtomicBool,
 }
 
+impl Default for Progress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Progress {
     /// Create a new progress indicator. Detects whether stderr is a terminal.
     #[must_use]

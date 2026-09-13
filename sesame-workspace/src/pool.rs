@@ -21,11 +21,11 @@
 //!
 //! # Panic safety
 //!
-//! Each job is wrapped in [`std::panic::catch_unwind`] inside the worker
-//! loop. A panicking `inspect()` call produces an `Err(InspectError)` for
-//! that job; the worker continues processing subsequent jobs. This prevents
-//! [`std::thread::scope`] from discarding all collected results when a
-//! single repo triggers a panic in gitoxide.
+//! Each job is wrapped in [`std::panic::catch_unwind`] inside
+//! [`inspect_one_job`]. A panicking `inspect()` call produces an
+//! `Err(InspectError)` for that job; the worker continues processing
+//! subsequent jobs. This prevents [`std::thread::scope`] from discarding
+//! all collected results when a single repo triggers a panic in gitoxide.
 //!
 //! # Cancellation
 //!
@@ -70,11 +70,51 @@ impl std::fmt::Display for InspectError {
 impl std::error::Error for InspectError {}
 
 /// Estimate inspection cost from `.git/index` file size in KB.
+#[must_use]
 pub fn estimate_cost(path: &Path) -> u64 {
     let index_path = path.join(".git").join("index");
-    std::fs::metadata(&index_path)
-        .map(|m| m.len() / 1024)
-        .unwrap_or(100)
+    std::fs::metadata(&index_path).map_or(100, |m| m.len() / 1024)
+}
+
+/// Inspect a single job with panic recovery.
+///
+/// Wraps `crate::inspection::inspect` in `catch_unwind` so a panic
+/// in gitoxide for one repository produces an error result instead
+/// of killing the worker thread. Returns the inspection result or
+/// an error with the panic message.
+fn inspect_one_job(
+    job: &InspectJob,
+    cancel: &AtomicBool,
+) -> Result<InspectionResult, InspectError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(InspectionResult::skipped());
+    }
+
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::inspection::inspect(&job.path, &job.request)
+    })) {
+        Ok(Ok(insp)) => Ok(insp),
+        Ok(Err(e)) => Err(InspectError {
+            path: job.path.clone(),
+            message: format!("{e:#}"),
+        }),
+        Err(panic_payload) => {
+            let msg = panic_payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            tracing::error!(
+                path = %job.path.display(),
+                panic = %msg,
+                "inspection panicked"
+            );
+            Err(InspectError {
+                path: job.path.clone(),
+                message: format!("panic: {msg}"),
+            })
+        }
+    }
 }
 
 /// Run `jobs` across `num_workers` threads, returning results in completion order.
@@ -98,13 +138,12 @@ where
     let completed = AtomicUsize::new(0);
 
     // Sort descending by cost so most expensive repos dispatch first.
-    jobs.sort_unstable_by(|a, b| b.estimated_cost.cmp(&a.estimated_cost));
+    jobs.sort_unstable_by_key(|j| std::cmp::Reverse(j.estimated_cost));
 
     let (job_tx, job_rx): (Sender<InspectJob>, Receiver<InspectJob>) = bounded(num_workers);
     let (result_tx, result_rx): (Sender<InspectResult>, Receiver<InspectResult>) = bounded(total);
 
     std::thread::scope(|scope| {
-        // -- Spawn workers --------------------------------------------------
         for worker_id in 0..num_workers {
             let rx = job_rx.clone();
             let tx = result_tx.clone();
@@ -119,49 +158,13 @@ where
                     let start = std::time::Instant::now();
                     let job_index = job.index;
                     let job_path = job.path.clone();
+                    let repo_name = job.path.file_name()
+                        .map_or_else(|| "?".into(), |n| n.to_string_lossy().into_owned());
 
-                    let repo_name = job
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "?".into());
+                    let result = inspect_one_job(&job, cancel);
 
-                    let result = if cancel.load(Ordering::Relaxed) {
-                        Ok(InspectionResult::skipped())
-                    } else {
-                        // catch_unwind per job: a panic in inspect() for one
-                        // repo must not kill the worker or discard results
-                        // from other repos.
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            crate::inspection::inspect(&job.path, &job.request)
-                        })) {
-                            Ok(Ok(insp)) => Ok(insp),
-                            Ok(Err(e)) => Err(InspectError {
-                                path: job_path.clone(),
-                                message: format!("{e:#}"),
-                            }),
-                            Err(panic_payload) => {
-                                let msg = match panic_payload.downcast_ref::<&str>() {
-                                    Some(s) => (*s).to_string(),
-                                    None => match panic_payload.downcast_ref::<String>() {
-                                        Some(s) => s.clone(),
-                                        None => "unknown panic".to_string(),
-                                    },
-                                };
-                                tracing::error!(
-                                    path = %job_path.display(),
-                                    panic = %msg,
-                                    "inspection panicked"
-                                );
-                                Err(InspectError {
-                                    path: job_path.clone(),
-                                    message: format!("panic: {msg}"),
-                                })
-                            }
-                        }
-                    };
-
-                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis())
+                        .unwrap_or(u64::MAX);
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     on_complete(done, total, &repo_name, elapsed_ms);
 
@@ -174,16 +177,11 @@ where
                         );
                     }
 
-                    // If the result channel is disconnected (caller dropped
-                    // result_rx), stop processing -- nobody is listening.
-                    if tx
-                        .send(InspectResult {
-                            index: job_index,
-                            result,
-                            elapsed_ms,
-                        })
-                        .is_err()
-                    {
+                    if tx.send(InspectResult {
+                        index: job_index,
+                        result,
+                        elapsed_ms,
+                    }).is_err() {
                         tracing::debug!(worker_id, "result channel closed, worker exiting");
                         break;
                     }
@@ -194,23 +192,20 @@ where
         }
 
         // Drop worker-side channel endpoints so channels close when all
-        // workers finish. Without this, result_rx.iter() blocks forever
-        // waiting for a sender that will never send.
+        // workers finish.
         drop(job_rx);
         drop(result_tx);
 
-        // Feed jobs into channel. bounded(num_workers) means this blocks
-        // when all workers are busy, providing natural backpressure.
+        // Feed jobs into channel. bounded(num_workers) provides
+        // natural backpressure.
         for job in jobs {
             if job_tx.send(job).is_err() {
-                // All workers panicked or exited. Stop feeding.
                 tracing::warn!("all inspection workers exited, aborting job dispatch");
                 break;
             }
         }
-        drop(job_tx); // Signal no more jobs.
+        drop(job_tx);
 
-        // Collect results. iter() yields until all senders are dropped.
         let results: Vec<InspectResult> = result_rx.iter().collect();
 
         tracing::debug!(
@@ -259,7 +254,7 @@ mod tests {
             })
             .collect();
 
-        let cancel = AtomicBool::new(true); // pre-cancelled
+        let cancel = AtomicBool::new(true);
         let results = run_inspections(jobs, 2, &cancel, |_, _, _, _| {});
 
         assert_eq!(results.len(), 4);
@@ -298,7 +293,6 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
 
-        // Single worker so dispatch order = processing order
         let _ = run_inspections(jobs, 1, &cancel, move |_, _, name, _| {
             order_clone.lock().unwrap().push(name.to_string());
         });
@@ -307,5 +301,31 @@ mod tests {
         assert_eq!(order[0], "expensive");
         assert_eq!(order[1], "medium");
         assert_eq!(order[2], "cheap");
+    }
+
+    #[test]
+    fn inspect_one_job_cancelled() {
+        let job = InspectJob {
+            path: PathBuf::from("/tmp/fake"),
+            request: InspectionRequest::default(),
+            index: 0,
+            estimated_cost: 0,
+        };
+        let cancel = AtomicBool::new(true);
+        let result = inspect_one_job(&job, &cancel);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inspect_one_job_nonexistent_repo() {
+        let job = InspectJob {
+            path: PathBuf::from("/tmp/nonexistent-repo-for-test"),
+            request: InspectionRequest::all(),
+            index: 0,
+            estimated_cost: 0,
+        };
+        let cancel = AtomicBool::new(false);
+        let result = inspect_one_job(&job, &cancel);
+        assert!(result.is_err());
     }
 }

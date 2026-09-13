@@ -69,9 +69,8 @@ pub fn discover_workspaces(
             None => continue,
         };
 
-        let host = match GitHost::from_dir_name(&server_name) {
-            Some(h) => h,
-            None => continue,
+        let Some(host) = GitHost::from_dir_name(&server_name) else {
+            continue;
         };
 
         // Recurse into namespace directories below this server.
@@ -105,7 +104,7 @@ fn walk_namespace(
     results: &mut Vec<DiscoveredWorkspace>,
 ) -> Result<(), WorkspaceError> {
     let entries: Vec<std::fs::DirEntry> = match read_dir_safe(dir) {
-        Ok(iter) => iter.filter_map(|e| e.ok()).collect(),
+        Ok(iter) => iter.filter_map(Result::ok).collect(),
         Err(_) => return Ok(()),
     };
 
@@ -114,8 +113,7 @@ fn walk_namespace(
         .iter()
         .filter(|e| {
             e.file_type()
-                .map(|ft| ft.is_dir() && !ft.is_symlink())
-                .unwrap_or(false)
+                .is_ok_and(|ft| ft.is_dir() && !ft.is_symlink())
         })
         .filter(|e| e.file_name() != ".git")
         .map(|e| (e.file_name(), e.path()))
@@ -132,8 +130,8 @@ fn walk_namespace(
         if has_child_git {
             // This is a workspace root: a namespace-level directory
             // that contains .git AND has sibling repositories.
-            if !ns_segments.is_empty() {
-                if let Ok(ns) = NamespacePath::from_segments(
+            if !ns_segments.is_empty()
+                && let Ok(ns) = NamespacePath::from_segments(
                     ns_segments.to_vec(),
                 ) {
                     let coord = WorkspaceCoordinate::new(
@@ -149,14 +147,12 @@ fn walk_namespace(
                         coordinate: coord,
                         linked_profile: linked,
                     });
-                }
             }
 
             // Continue into children to discover sibling repos.
             for (name, child_path) in &child_dirs {
-                let name_str = match name.to_str() {
-                    Some(s) => s.to_string(),
-                    None => continue,
+                let Some(name_str) = name.to_str().map(ToString::to_string) else {
+                    continue;
                 };
                 let mut child_ns = ns_segments.to_vec();
                 child_ns.push(name_str);
@@ -217,23 +213,19 @@ fn record_repository(
     config: &WorkspaceConfig,
     results: &mut Vec<DiscoveredWorkspace>,
 ) {
-    let repo_name_str = match path.file_name().and_then(|n| n.to_str()) {
-        Some(s) => s,
-        None => return,
-    };
-
-    let ns = if parent_ns_segments.is_empty() {
+    let Some(repo_name_str) = path.file_name().and_then(|n| n.to_str()) else {
         return;
-    } else {
-        match NamespacePath::from_segments(parent_ns_segments.to_vec()) {
-            Ok(ns) => ns,
-            Err(_) => return,
-        }
     };
 
-    let repo = match RepositoryName::new(repo_name_str) {
-        Ok(r) => r,
-        Err(_) => return,
+    if parent_ns_segments.is_empty() {
+        return;
+    }
+    let Ok(ns) = NamespacePath::from_segments(parent_ns_segments.to_vec()) else {
+        return;
+    };
+
+    let Ok(repo) = RepositoryName::new(repo_name_str) else {
+        return;
     };
 
     let coord = WorkspaceCoordinate::new(

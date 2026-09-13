@@ -97,7 +97,7 @@ pub fn clone_workspace_git(
 ///
 /// Applies shared proxy policy through in-memory config overrides.
 /// This is the public API for injecting transport configuration
-/// into prepare_clone, since gix-transport's http::Options type is
+/// into `prepare_clone`, since gix-transport's `http::Options` type is
 /// not publicly accessible for direct construction.
 fn gix_clone(url: &str, target: &Path, depth: Option<u32>) -> Result<(), WorkspaceError> {
     let policy = crate::net::ProxyPolicy::from_env();

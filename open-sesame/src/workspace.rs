@@ -364,7 +364,12 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
                             }
                         }
-                    } else if mode == core_config::WorkspaceAutoMode::Auto && org_dir_exists {
+                    } else if mode == core_config::WorkspaceAutoMode::Auto
+                        && org_dir_exists
+                    {
+                        // Network probe is a side effect — keep it inside the
+                        // block body so the cost is visible when reading the
+                        // else-if chain.
                         if sesame_workspace::git::probe_remote(&ws_url) {
                             eprintln!(
                                 "Tip: workspace.git is available for this org.",
@@ -600,7 +605,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 }
 
                 let total = insp_start.elapsed();
-                timings.sort_by(|a, b| b.1.cmp(&a.1));
+                timings.sort_by_key(|t| std::cmp::Reverse(t.1));
                 tracing::info!(
                     repos = results.len(),
                     total_ms = total.as_millis() as u64,
@@ -708,11 +713,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                         col_def.map(|c| c.min_width).unwrap_or(10);
                                     let raw_len =
                                         raw.as_deref().unwrap_or("?").len();
-                                    let pad = if raw_len < min_w {
-                                        min_w - raw_len
-                                    } else {
-                                        0
-                                    };
+                                    let pad = min_w.saturating_sub(raw_len);
                                     format!("{styled}{:pad$}", "")
                                 })
                                 .collect::<Vec<_>>()

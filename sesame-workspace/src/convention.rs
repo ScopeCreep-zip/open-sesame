@@ -46,6 +46,11 @@ pub struct CloneInput {
 /// # Errors
 ///
 /// Returns `WorkspaceError::InvalidUrl` for unparseable input.
+///
+/// # Panics
+///
+/// Panics if the hardcoded placeholder repository name `"_placeholder"`
+/// fails validation, which cannot occur with the current value.
 pub fn parse_clone_input(
     input: &str,
     default_server: &str,
@@ -186,7 +191,7 @@ pub fn parse_url(url: &str) -> Result<WorkspaceCoordinate, WorkspaceError> {
 
 /// Structural components extracted from a workspace filesystem path.
 ///
-/// Does not determine WorkspaceKind. The caller assigns kind from
+/// Does not determine `WorkspaceKind`. The caller assigns kind from
 /// command context, configuration, and filesystem inspection.
 #[derive(Debug, Clone)]
 pub struct ParsedPath {
@@ -274,7 +279,7 @@ pub fn parse_path(
     let ns_end = components.len() - 1;
     let ns_segments: Vec<String> = components[2..ns_end]
         .iter()
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
 
     let namespace = NamespacePath::from_segments(ns_segments).map_err(|e| {
@@ -455,7 +460,7 @@ fn parse_https(url: &str) -> Result<ParsedComponents, WorkspaceError> {
         }),
         _ => Ok(ParsedComponents {
             host,
-            segments: parts[1..].iter().map(|s| s.to_string()).collect(),
+            segments: parts[1..].iter().map(ToString::to_string).collect(),
             org_only: false,
             transport: GitTransport::Https,
             port,
@@ -490,7 +495,7 @@ fn parse_scp(url: &str) -> Result<ParsedComponents, WorkspaceError> {
         .trim_end_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
 
     if segments.len() < 2 {
@@ -556,7 +561,7 @@ fn parse_ssh_scheme(url: &str) -> Result<ParsedComponents, WorkspaceError> {
         .trim_end_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
 
     if segments.len() < 2 {
@@ -581,7 +586,7 @@ fn split_host_port(input: &str) -> (String, Option<u16>) {
     if input.starts_with('[') {
         // Bracketed IPv6: [::1]:port or [::1]
         if let Some(close) = input.find(']') {
-            let host = input[..close + 1].to_string();
+            let host = input[..=close].to_string();
             let rest = &input[close + 1..];
             let port = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
             return (host, port);

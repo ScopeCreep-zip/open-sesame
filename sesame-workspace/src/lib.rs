@@ -32,7 +32,7 @@ pub use inspection::{
 ///
 /// Returns true for both .git directories (regular repositories)
 /// and .git files (git worktree pointers). On Linux, directory
-/// detection uses O_NOFOLLOW to prevent TOCTOU symlink replacement.
+/// detection uses `O_NOFOLLOW` to prevent TOCTOU symlink replacement.
 #[must_use]
 pub fn has_git_dir(path: &std::path::Path) -> bool {
     let git_path = path.join(".git");

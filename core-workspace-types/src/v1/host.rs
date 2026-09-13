@@ -1,8 +1,8 @@
 //! Git server host identity for workspace filesystem placement.
 //!
-//! A GitHost identifies a git service by hostname or IP address.
+//! A `GitHost` identifies a git service by hostname or IP address.
 //! Ports are not part of host identity because one hostname serves
-//! one git service regardless of port. Ports belong in RemoteEndpoint.
+//! one git service regardless of port. Ports belong in `RemoteEndpoint`.
 //!
 //! The filesystem encoding is bidirectional:
 //!   FQDN  -> lowercase hostname
@@ -26,7 +26,7 @@ const INVALID_HOST_CHARS: &[char] = &[
 ///
 /// Represents the server component of workspace filesystem placement.
 /// Does not carry port, transport, or user information. Those belong
-/// in RemoteEndpoint.
+/// in `RemoteEndpoint`.
 ///
 /// Equality is case-insensitive for FQDNs and canonical for IP
 /// addresses. Deserialization validates through the constructor.
@@ -41,7 +41,7 @@ pub enum GitHost {
 }
 
 impl GitHost {
-    /// Parse a host string into a GitHost.
+    /// Parse a host string into a `GitHost`.
     ///
     /// Accepts DNS hostnames, dotted-decimal IPv4, and bracketed or
     /// bare IPv6 addresses. Rejects empty input, interior whitespace,
@@ -141,7 +141,7 @@ impl GitHost {
         }
     }
 
-    /// Decode a filesystem directory name back into a GitHost.
+    /// Decode a filesystem directory name back into a `GitHost`.
     ///
     /// Reverses `as_dir_name`. Returns None if the input does not
     /// correspond to a valid encoded host.

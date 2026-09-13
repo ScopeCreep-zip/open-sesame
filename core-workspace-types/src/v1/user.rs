@@ -2,7 +2,7 @@
 //!
 //! Ensures the username is a single filesystem-safe component that
 //! cannot escape the workspace root directory via traversal or
-//! absolute path injection through Path::join.
+//! absolute path injection through `Path::join`.
 
 use std::fmt;
 

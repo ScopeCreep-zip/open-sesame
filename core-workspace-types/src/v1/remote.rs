@@ -14,7 +14,7 @@ use crate::v1::{GitHost, NamespacePath, RepositoryName};
 /// The identity of a git remote repository.
 ///
 /// Equality compares host (case-insensitive for FQDNs, canonical for
-/// IPs), namespace, and repository name. Two RemoteIdentity values
+/// IPs), namespace, and repository name. Two `RemoteIdentity` values
 /// representing the same repository via HTTPS and SSH are equal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RemoteIdentity {
@@ -58,7 +58,7 @@ impl RemoteIdentity {
 
     /// Render as an HTTPS clone URL on the default port.
     ///
-    /// For URLs with nonstandard ports, use RemoteEndpoint rendering.
+    /// For URLs with nonstandard ports, use `RemoteEndpoint` rendering.
     #[must_use]
     pub fn to_https_url(&self) -> String {
         let host_str = match &self.host {
@@ -70,7 +70,7 @@ impl RemoteIdentity {
 
     /// Render as an SCP-style SSH clone URL on the default port.
     ///
-    /// For URLs with nonstandard ports, use RemoteEndpoint rendering
+    /// For URLs with nonstandard ports, use `RemoteEndpoint` rendering
     /// which produces ssh:// syntax.
     #[must_use]
     pub fn to_ssh_url(&self) -> String {

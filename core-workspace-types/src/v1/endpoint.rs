@@ -1,6 +1,6 @@
 //! Remote endpoint: connection details for reaching a git repository.
 //!
-//! A RemoteEndpoint combines a RemoteIdentity (host + namespace + repo)
+//! A `RemoteEndpoint` combines a `RemoteIdentity` (host + namespace + repo)
 //! with transport-specific connection metadata: protocol, port, and
 //! SSH username. The identity determines workspace placement. The
 //! endpoint determines how to connect.

@@ -41,6 +41,10 @@ impl RepositoryName {
     /// Construct from a repository name string.
     ///
     /// Strips a trailing `.git` suffix before validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ValidationError` for empty, malformed, or unsafe input.
     pub fn new(input: &str) -> Result<Self, ValidationError> {
         let name = input
             .strip_suffix(".git")

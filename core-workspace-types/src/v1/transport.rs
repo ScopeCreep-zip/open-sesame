@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 /// Controls how shorthand inputs like `org/repo` are expanded into
 /// full URLs. Explicit URLs with a scheme or SCP syntax are never
 /// modified regardless of this setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GitTransport {
     /// Use HTTPS URLs: `https://server/namespace/repo`
+    #[default]
     Https,
     /// Use SSH URLs: `git@server:namespace/repo.git`
     ///
@@ -23,12 +24,6 @@ pub enum GitTransport {
     /// ports, `ssh://git@server:port/namespace/repo` is generated
     /// instead because SCP syntax does not support port specification.
     Ssh,
-}
-
-impl Default for GitTransport {
-    fn default() -> Self {
-        Self::Https
-    }
 }
 
 impl fmt::Display for GitTransport {

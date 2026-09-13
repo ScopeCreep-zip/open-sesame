@@ -76,7 +76,7 @@ pub fn extract_field(
         "commit" => inspection.and_then(|i| i.head_short.value().cloned()),
         "status" => inspection
             .and_then(|i| i.status.value())
-            .map(|s| s.to_string()),
+            .map(ToString::to_string),
         "profile" => ws.linked_profile.clone(),
         "server" => Some(ws.coordinate.host().to_string()),
         "org" => Some(ws.coordinate.namespace().to_string()),
@@ -87,7 +87,10 @@ pub fn extract_field(
 
 /// Parse a comma-separated column spec into validated column names.
 ///
-/// Returns an error listing valid columns if any name is unrecognized.
+/// # Errors
+///
+/// Returns an error listing valid columns if any name is unrecognized,
+/// or if the spec is empty.
 pub fn parse_columns(spec: &str) -> Result<Vec<&'static str>, String> {
     let mut result = Vec::new();
     for name in spec.split(',').map(str::trim) {
@@ -162,7 +165,7 @@ impl WorkspaceRecord {
             remote: inspection.and_then(|i| i.remote_url.value().cloned()),
             branch: inspection.and_then(|i| i.branch.value().cloned()),
             commit: inspection.and_then(|i| i.head_short.value().cloned()),
-            status: inspection.and_then(|i| i.status.value().map(|s| s.to_string())),
+            status: inspection.and_then(|i| i.status.value().map(ToString::to_string)),
         }
     }
 }

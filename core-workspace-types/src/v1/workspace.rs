@@ -50,7 +50,7 @@ impl WorkspaceKind {
 ///
 /// Combines a host, namespace path, and entity kind into a coordinate
 /// that computes filesystem paths. Does not carry transport, port, or
-/// user information. Those belong in RemoteEndpoint.
+/// user information. Those belong in `RemoteEndpoint`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCoordinate {
     host: GitHost,

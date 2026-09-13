@@ -1,6 +1,6 @@
 //! Centralized proxy policy resolution.
 //!
-//! Reads proxy and NO_PROXY environment variables once, then provides
+//! Reads proxy and `NO_PROXY` environment variables once, then provides
 //! target-aware proxy decisions for different transport adapters.
 //! Proxy credentials are redacted in Display and Debug output.
 
@@ -12,13 +12,13 @@ use std::fmt;
 /// URL to determine the appropriate proxy behavior.
 #[derive(Clone)]
 pub struct ProxyPolicy {
-    /// Proxy for HTTPS targets (from HTTPS_PROXY or https_proxy).
+    /// Proxy for HTTPS targets (from `HTTPS_PROXY` or `https_proxy`).
     https: Option<ProxyEndpoint>,
-    /// Proxy for HTTP targets (from HTTP_PROXY or http_proxy).
+    /// Proxy for HTTP targets (from `HTTP_PROXY` or `http_proxy`).
     http: Option<ProxyEndpoint>,
-    /// Fallback proxy for any scheme (from ALL_PROXY or all_proxy).
+    /// Fallback proxy for any scheme (from `ALL_PROXY` or `all_proxy`).
     all: Option<ProxyEndpoint>,
-    /// NO_PROXY rules parsed from environment.
+    /// `NO_PROXY` rules parsed from environment.
     no_proxy: NoProxyRules,
 }
 
@@ -54,9 +54,9 @@ impl fmt::Debug for ProxyEndpoint {
 
 /// The decision for a specific target URL.
 ///
-/// The Proxy variant contains a ProxyEndpoint whose Display/Debug
+/// The `Proxy` variant contains a `ProxyEndpoint` whose Display/Debug
 /// implementations redact credentials. Raw URL access is through
-/// ProxyEndpoint::url() for adapter configuration only.
+/// `ProxyEndpoint::url()` for adapter configuration only.
 #[derive(Debug, Clone)]
 pub enum ProxyDecision {
     /// Connect directly without a proxy.
@@ -68,7 +68,7 @@ pub enum ProxyDecision {
     NoEnvironmentProxy,
 }
 
-/// Parsed NO_PROXY rules.
+/// Parsed `NO_PROXY` rules.
 #[derive(Clone, Default)]
 struct NoProxyRules {
     entries: Vec<NoProxyEntry>,
@@ -84,8 +84,8 @@ enum NoProxyEntry {
 impl ProxyPolicy {
     /// Read proxy policy from the current environment.
     ///
-    /// Reads HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy,
-    /// ALL_PROXY, all_proxy, NO_PROXY, and no_proxy.
+    /// Reads `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`,
+    /// `ALL_PROXY`, `all_proxy`, `NO_PROXY`, and `no_proxy`.
     #[must_use]
     pub fn from_env() -> Self {
         let https = read_env_pair("HTTPS_PROXY", "https_proxy").map(|url| ProxyEndpoint { url });
@@ -106,12 +106,12 @@ impl ProxyPolicy {
     /// Determine the proxy decision for a target URL.
     ///
     /// Selects the proxy based on the target scheme:
-    ///   HTTPS targets check HTTPS_PROXY, then ALL_PROXY.
-    ///   HTTP targets check HTTP_PROXY, then ALL_PROXY.
-    ///   Other schemes (SSH, file) return NoEnvironmentProxy.
+    ///   HTTPS targets check `HTTPS_PROXY`, then `ALL_PROXY`.
+    ///   HTTP targets check `HTTP_PROXY`, then `ALL_PROXY`.
+    ///   Other schemes (SSH, file) return `NoEnvironmentProxy`.
     ///
-    /// If a proxy is found but the target host matches NO_PROXY,
-    /// returns Direct.
+    /// If a proxy is found but the target host matches `NO_PROXY`,
+    /// returns `Direct`.
     #[must_use]
     pub fn for_target(&self, target_url: &str) -> ProxyDecision {
         let scheme = if target_url.starts_with("https://") {
@@ -131,10 +131,10 @@ impl ProxyPolicy {
             return ProxyDecision::NoEnvironmentProxy;
         };
 
-        if let Some(host) = extract_host(target_url) {
-            if self.no_proxy.matches(host) {
-                return ProxyDecision::Direct;
-            }
+        if let Some(host) = extract_host(target_url)
+            && self.no_proxy.matches(host)
+        {
+            return ProxyDecision::Direct;
         }
 
         ProxyDecision::Proxy(endpoint.clone())
@@ -152,7 +152,7 @@ impl ProxyPolicy {
         self.http.as_ref()
     }
 
-    /// The ALL_PROXY fallback endpoint, if configured.
+    /// The `ALL_PROXY` fallback endpoint, if configured.
     #[must_use]
     pub fn all_proxy(&self) -> Option<&ProxyEndpoint> {
         self.all.as_ref()
@@ -170,7 +170,7 @@ impl ProxyPolicy {
         self.https.as_ref().or(self.http.as_ref()).or(self.all.as_ref())
     }
 
-    /// The raw NO_PROXY value, if set.
+    /// The raw `NO_PROXY` entry count.
     #[must_use]
     pub fn no_proxy_entry_count(&self) -> usize {
         self.no_proxy.entries.len()
@@ -258,7 +258,7 @@ fn redact_credentials(url: &str) -> String {
     url.to_string()
 }
 
-/// Extract the host portion from a URL for NO_PROXY matching.
+/// Extract the host portion from a URL for `NO_PROXY` matching.
 fn extract_host(url: &str) -> Option<&str> {
     if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
         let host_part = rest.split('/').next()?;
@@ -267,7 +267,7 @@ fn extract_host(url: &str) -> Option<&str> {
         // Strip :port suffix.
         if host.starts_with('[') {
             // IPv6 bracketed: [::1]:port
-            host.find(']').map(|end| &host[..end + 1])
+            host.find(']').map(|end| &host[..=end])
         } else {
             Some(host.split(':').next().unwrap_or(host))
         }

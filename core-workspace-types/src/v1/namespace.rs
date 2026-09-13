@@ -76,7 +76,7 @@ impl NamespacePath {
             }
         }
 
-        let owned: Vec<String> = segments.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = segments.iter().map(ToString::to_string).collect();
 
         for seg in &owned {
             validate_component("namespace segment", seg)?;
