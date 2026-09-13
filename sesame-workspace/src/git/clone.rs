@@ -141,7 +141,9 @@ fn gix_clone(url: &str, target: &Path, depth: Option<u32>) -> Result<(), Workspa
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let fetch_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        prepare.fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        prepare
+            .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)
     }));
     std::panic::set_hook(prev_hook);
 
