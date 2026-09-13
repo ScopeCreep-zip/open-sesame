@@ -71,7 +71,7 @@ impl Default for WorkspaceSettings {
         Self {
             root: std::path::PathBuf::from("/workspace"),
             user: WorkspaceUser::new("user").expect("hardcoded valid name"),
-            transport: GitTransport::Ssh,
+            transport: GitTransport::Https,
             workspace_repo: RepositoryName::new("workspace").expect("hardcoded valid name"),
             workspace_auto: WorkspaceAutoMode::default(),
             default_server: GitHost::new("github.com").expect("hardcoded valid hostname"),
@@ -172,7 +172,7 @@ mod tests {
         let ws = WorkspaceConfig::default();
         assert_eq!(ws.settings.root, std::path::PathBuf::from("/workspace"));
         assert_eq!(ws.settings.user.as_str(), "user");
-        assert_eq!(ws.settings.transport, GitTransport::Ssh);
+        assert_eq!(ws.settings.transport, GitTransport::Https);
         assert_eq!(ws.settings.workspace_auto, WorkspaceAutoMode::Auto);
         assert_eq!(ws.settings.default_server.to_string(), "github.com");
         assert_eq!(ws.settings.workspace_repo.as_str(), "workspace");
@@ -296,7 +296,7 @@ mod tests {
             workspace_auto = "auto"
         "#;
         let parsed: WorkspaceConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(parsed.settings.transport, GitTransport::Ssh);
+        assert_eq!(parsed.settings.transport, GitTransport::Https);
         assert_eq!(parsed.settings.default_server.to_string(), "github.com");
     }
 

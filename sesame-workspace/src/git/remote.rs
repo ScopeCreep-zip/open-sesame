@@ -65,9 +65,12 @@ pub fn probe_remote(url: &str) -> bool {
     };
 
     // gix 0.72 may panic inside ref_map on connection failure
-    // ("refmap always performs handshake"). catch_unwind converts
-    // the panic to a false return, matching probe_remote's contract.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // ("refmap always performs handshake"). Suppress the panic hook
+    // to prevent stack traces on stderr, then catch_unwind converts
+    // the panic to a false return.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         connection
             .ref_map(
                 gix::progress::Discard,
@@ -75,7 +78,9 @@ pub fn probe_remote(url: &str) -> bool {
             )
             .is_ok()
     }))
-    .unwrap_or(false)
+    .unwrap_or(false);
+    std::panic::set_hook(prev_hook);
+    result
 }
 
 /// Check if a local repository is behind its remote.

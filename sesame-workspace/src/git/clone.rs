@@ -135,9 +135,32 @@ fn gix_clone(url: &str, target: &Path, depth: Option<u32>) -> Result<(), Workspa
         prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(n));
     }
 
-    let (mut checkout, _outcome) = prepare
-        .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-        .map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
+    // gix 0.72 may panic inside fetch_then_checkout on connection
+    // failure ("refmap always performs handshake"). Suppress the
+    // panic hook to prevent stack traces on stderr.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let fetch_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prepare.fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+    }));
+    std::panic::set_hook(prev_hook);
+
+    let (mut checkout, _outcome) = match fetch_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => return Err(WorkspaceError::GitError(format!("{e}"))),
+        Err(panic_payload) => {
+            // Clean up the partially-created target directory.
+            let _ = std::fs::remove_dir_all(target);
+            let msg = panic_payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            return Err(WorkspaceError::GitError(format!(
+                "git transport failed (gix panic): {msg}"
+            )));
+        }
+    };
 
     checkout
         .main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)

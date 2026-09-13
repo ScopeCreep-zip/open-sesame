@@ -147,10 +147,6 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            if clone_input.display_url != url {
-                eprintln!("Resolved: {}", clone_input.display_url);
-            }
-
             let coord = &clone_input.coordinate;
 
             if !coord.kind().is_cloneable() && !project {
@@ -408,10 +404,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             };
 
             let result_path = if adopted {
-                println!(
-                    "\x1b[32mAdopted\x1b[0m existing repository: {}",
-                    target_path.display()
-                );
+                println!("{}", target_path.display());
+                eprintln!("Adopted existing repository");
                 target_path
             } else {
                 let rp = match coord.kind() {
@@ -436,11 +430,11 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
                 match coord.kind() {
                     WorkspaceKind::WorkspaceRepository(_) => {
-                        println!("Cloned workspace.git to org directory: {}", rp.display());
-                        println!("  Peer repos will be cloned as siblings inside this directory.");
+                        println!("{}", rp.display());
+                        eprintln!("Peer repos will be cloned as siblings inside this directory.");
                     }
                     _ => {
-                        println!("Cloned to: {}", rp.display());
+                        println!("{}", rp.display());
                     }
                 }
                 rp
