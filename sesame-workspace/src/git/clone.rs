@@ -3,48 +3,131 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use crate::{CloneTarget, WorkspaceError};
+use core_workspace_types::RemoteEndpoint;
 
-/// Clone a repository to its canonical path.
+use crate::WorkspaceError;
+
+/// Clone a repository to a target directory.
 ///
-/// For [`CloneTarget::WorkspaceGit`], handles the special case where the org
-/// directory may already exist with sibling repos. The `force` parameter
-/// controls whether existing files may be overwritten during workspace init.
+/// The target directory must not already exist. Parent directories
+/// are created as needed. The endpoint is rendered to a URL string
+/// for the gix transport layer.
 ///
 /// # Errors
 ///
-/// Returns `WorkspaceError::GitError` if the clone or checkout fails.
-pub fn clone_repo(
-    url: &str,
-    target: &CloneTarget,
+/// Returns `WorkspaceError::GitError` if the target exists or the
+/// clone fails.
+pub fn clone_to(
+    endpoint: &RemoteEndpoint,
+    target: &Path,
     depth: Option<u32>,
+) -> Result<PathBuf, WorkspaceError> {
+    if target.exists() {
+        return Err(WorkspaceError::GitError(format!(
+            "target directory already exists: {}",
+            target.display()
+        )));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    gix_clone(&endpoint.to_url(), target, depth)?;
+    Ok(target.to_path_buf())
+}
+
+/// Clone or update a workspace.git at an org-level directory.
+///
+/// Handles these lifecycle states:
+/// 1. Org dir absent: fresh clone.
+/// 2. Org dir has .git with commits: fast-forward pull.
+/// 3. Org dir has .git with unborn HEAD (failed prior init): requires
+///    `force` to remove the broken .git and re-initialize.
+/// 4. Org dir exists without .git: init-around-existing. Requires
+///    `force` if existing files would be overwritten.
+///
+/// # Errors
+///
+/// Returns `WorkspaceError::GitError` if the clone, pull, or init
+/// fails.
+pub fn clone_workspace_git(
+    endpoint: &RemoteEndpoint,
+    org_dir: &Path,
     force: bool,
 ) -> Result<PathBuf, WorkspaceError> {
-    match target {
-        CloneTarget::Regular(path) => {
-            if path.exists() {
+    let url = endpoint.to_url();
+
+    if !org_dir.exists() {
+        if let Some(parent) = org_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        gix_clone(&url, org_dir, None)?;
+        return Ok(org_dir.to_path_buf());
+    }
+
+    if crate::has_git_dir(org_dir) {
+        if super::workspace::is_unborn(org_dir) {
+            if !force {
                 return Err(WorkspaceError::GitError(format!(
-                    "target directory already exists: {}",
-                    path.display()
+                    "workspace at {} has a broken .git from a failed prior init.\n\
+                     Use --force to remove it and re-initialize.",
+                    org_dir.display(),
                 )));
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            gix_clone(url, path, depth)?;
-            Ok(path.clone())
-        }
-        CloneTarget::WorkspaceGit(org_dir) => {
-            clone_workspace_git(url, org_dir, force)?;
-            Ok(org_dir.clone())
+            tracing::warn!(
+                path = %org_dir.display(),
+                "removing broken workspace.git (unborn HEAD from failed prior init)"
+            );
+            std::fs::remove_dir_all(org_dir.join(".git"))?;
+        } else {
+            tracing::info!(path = %org_dir.display(), "workspace.git already exists, pulling");
+            super::workspace::pull_ff_only(org_dir)?;
+            return Ok(org_dir.to_path_buf());
         }
     }
+
+    tracing::info!(
+        path = %org_dir.display(),
+        "initializing workspace.git around existing content"
+    );
+    super::workspace::init_around_existing(&url, org_dir, force)?;
+    Ok(org_dir.to_path_buf())
 }
 
 /// Clone via gix with optional shallow depth.
+///
+/// Applies shared proxy policy through in-memory config overrides.
+/// This is the public API for injecting transport configuration
+/// into prepare_clone, since gix-transport's http::Options type is
+/// not publicly accessible for direct construction.
 fn gix_clone(url: &str, target: &Path, depth: Option<u32>) -> Result<(), WorkspaceError> {
+    let policy = crate::net::ProxyPolicy::from_env();
+    let decision = policy.for_target(url);
+
+    let mut overrides: Vec<String> = Vec::new();
+    match &decision {
+        crate::net::ProxyDecision::Proxy(endpoint) => {
+            tracing::debug!(proxy = %endpoint, "gix clone using proxy");
+            overrides.push(format!("http.proxy={}", endpoint.url()));
+        }
+        crate::net::ProxyDecision::Direct => {
+            tracing::debug!("gix clone direct (host in NO_PROXY)");
+            // Empty proxy string disables proxy in gix.
+            overrides.push("http.proxy=".into());
+        }
+        crate::net::ProxyDecision::NoEnvironmentProxy => {
+            // No override: gix reads http.proxy from gitconfig.
+        }
+    }
+
+    // Connect timeout and stall detection.
+    overrides.push("gitoxide.http.connectTimeout=10000".into());
+
     let mut prepare =
         gix::prepare_clone(url, target).map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
+
+    if !overrides.is_empty() {
+        prepare = prepare.with_in_memory_config_overrides(overrides);
+    }
 
     if let Some(d) = depth
         && let Some(n) = NonZeroU32::new(d)
@@ -61,48 +144,4 @@ fn gix_clone(url: &str, target: &Path, depth: Option<u32>) -> Result<(), Workspa
         .map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
 
     Ok(())
-}
-
-/// Workspace.git clone with lifecycle state handling:
-///
-/// 1. Org dir doesn't exist → fresh gix clone.
-/// 2. Org dir exists with `.git` and commits → pull via git2.
-/// 3. Org dir exists with `.git` but unborn HEAD (failed prior init) →
-///    requires `force` to remove broken `.git` and re-init.
-/// 4. Org dir exists without `.git` → git2 init-around-existing (may require
-///    `force` if existing files would be overwritten).
-fn clone_workspace_git(url: &str, org_dir: &Path, force: bool) -> Result<(), WorkspaceError> {
-    if !org_dir.exists() {
-        if let Some(parent) = org_dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        return gix_clone(url, org_dir, None);
-    }
-
-    if org_dir.join(".git").is_dir() {
-        if super::workspace::is_unborn(org_dir) {
-            if !force {
-                return Err(WorkspaceError::GitError(format!(
-                    "workspace at {} has a broken .git from a failed prior init.\n\
-                     Use --force to remove it and re-initialize.",
-                    org_dir.display(),
-                )));
-            }
-            tracing::warn!(
-                path = %org_dir.display(),
-                "removing broken workspace.git (unborn HEAD from failed prior init)"
-            );
-            std::fs::remove_dir_all(org_dir.join(".git"))?;
-            // Fall through to init_around_existing below.
-        } else {
-            tracing::info!(path = %org_dir.display(), "workspace.git already exists, pulling");
-            return super::workspace::pull_ff_only(org_dir);
-        }
-    }
-
-    tracing::info!(
-        path = %org_dir.display(),
-        "initializing workspace.git around existing content"
-    );
-    super::workspace::init_around_existing(url, org_dir, force)
 }

@@ -1,0 +1,18 @@
+[package]
+name = "core-workspace-types"
+description = "Validated workspace identity types: server authority, namespace path, repository name, transport, and remote identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde    = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+serde_json  = { workspace = true }
+
+[lints]
+workspace = true

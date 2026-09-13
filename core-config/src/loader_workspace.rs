@@ -2,19 +2,25 @@
 //!
 //! Handles reading and writing `~/.config/pds/workspaces.toml` with
 //! drop-in fragment merging from `~/.config/pds/workspaces.d/*.toml`.
+//!
+//! Fragments use `WorkspaceConfigFragment` with `Option` fields so
+//! only explicitly present values override the base configuration.
 
 use crate::loader::{atomic_write, config_dir};
+use crate::schema::WorkspaceConfigFragment;
 
 /// Load workspace configuration from `~/.config/pds/workspaces.toml`.
 ///
 /// Merges drop-in fragments from `~/.config/pds/workspaces.d/*.toml`
-/// (alphabetical order). Fragment links extend/override base links.
+/// in alphabetical order. Fragment links are additive. Fragment
+/// settings override only explicitly present fields.
 ///
 /// Returns a default config if the file does not exist.
 ///
 /// # Errors
 ///
-/// Returns an error string if the file exists but cannot be read or parsed.
+/// Returns an error string if the file exists but cannot be read or
+/// parsed, or if any drop-in fragment is malformed.
 pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String> {
     let path = config_dir().join("workspaces.toml");
     let mut config = if path.exists() {
@@ -25,7 +31,6 @@ pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String>
         crate::schema::WorkspaceConfig::default()
     };
 
-    // Merge drop-in fragments from workspaces.d/
     let dropin_dir = config_dir().join("workspaces.d");
     if dropin_dir.is_dir()
         && let Ok(entries) = std::fs::read_dir(&dropin_dir)
@@ -39,16 +44,10 @@ pub fn load_workspace_config() -> Result<crate::schema::WorkspaceConfig, String>
         for frag_path in fragments {
             let contents = std::fs::read_to_string(&frag_path)
                 .map_err(|e| format!("failed to read {}: {e}", frag_path.display()))?;
-            let fragment: crate::schema::WorkspaceConfig = toml::from_str(&contents)
+            let fragment: WorkspaceConfigFragment = toml::from_str(&contents)
                 .map_err(|e| format!("failed to parse {}: {e}", frag_path.display()))?;
+            config.settings.apply_override(&fragment.settings);
             config.links.extend(fragment.links);
-            let defaults = crate::schema::WorkspaceSettings::default();
-            if fragment.settings.root != defaults.root {
-                config.settings.root = fragment.settings.root;
-            }
-            if fragment.settings.user != defaults.user {
-                config.settings.user = fragment.settings.user;
-            }
         }
     }
 

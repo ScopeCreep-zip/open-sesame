@@ -11,10 +11,32 @@ pub struct GitHub {
 
 impl GitHub {
     pub fn new() -> Self {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .into();
+        let policy = crate::net::ProxyPolicy::from_env();
+        let decision = policy.for_target("https://api.github.com");
+
+        let mut builder = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)));
+
+        match &decision {
+            crate::net::ProxyDecision::Proxy(endpoint) => {
+                tracing::debug!(proxy = %endpoint, "forge API using proxy");
+                if let Ok(proxy) = ureq::Proxy::new(endpoint.url()) {
+                    builder = builder.proxy(Some(proxy));
+                }
+            }
+            crate::net::ProxyDecision::Direct => {
+                tracing::debug!("forge API direct (host in NO_PROXY)");
+                builder = builder.proxy(None);
+            }
+            crate::net::ProxyDecision::NoEnvironmentProxy => {
+                // Leave default: ureq reads env vars through
+                // Config::default(). This is the fallback for when
+                // our policy found nothing but ureq may find a
+                // proxy through its own resolution.
+            }
+        }
+
+        let agent = builder.build().into();
         // Optional auth: GITHUB_TOKEN env var for higher rate limits (5000/hr
         // vs 60/hr unauthenticated) and access to private repos.
         let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());

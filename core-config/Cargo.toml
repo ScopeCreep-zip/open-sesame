@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 core-types  = { workspace = true }
+core-workspace-types = { workspace = true }
 serde       = { workspace = true }
 toml        = { workspace = true }
 notify      = { workspace = true }

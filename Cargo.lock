@@ -894,6 +894,7 @@ name = "core-config"
 version = "1.16.5"
 dependencies = [
  "core-types",
+ "core-workspace-types",
  "dirs",
  "notify",
  "proptest",
@@ -1054,6 +1055,16 @@ dependencies = [
  "thiserror 2.0.20",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "core-workspace-types"
+version = "1.16.5"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1361,6 +1372,15 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
+]
 
 [[package]]
 name = "crossbeam-deque"
@@ -4803,6 +4823,7 @@ dependencies = [
  "core-memory",
  "core-profile",
  "core-types",
+ "core-workspace-types",
  "dialoguer",
  "dirs",
  "getrandom 0.2.17",
@@ -6040,6 +6061,8 @@ version = "1.16.5"
 dependencies = [
  "core-config",
  "core-types",
+ "core-workspace-types",
+ "crossbeam-channel",
  "dirs",
  "git2",
  "gix",

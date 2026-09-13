@@ -15,7 +15,7 @@ mod inspect;
 mod remote;
 mod workspace;
 
-pub use clone::clone_repo;
+pub use clone::{clone_to, clone_workspace_git};
 pub use inspect::{
     current_branch, head_commit_short, head_commit_summary, is_clean, is_git_repo,
     remote_tracking_commit_short, remote_url,

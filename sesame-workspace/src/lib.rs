@@ -12,12 +12,39 @@ pub mod config;
 pub mod convention;
 pub mod discover;
 pub mod forge;
+pub mod format;
 pub mod git;
+pub mod inspection;
+pub mod net;
 pub mod platform;
+pub mod pool;
+pub mod progress;
 
-pub use config::{ConfigProvenance, EffectiveWorkspaceConfig, resolve_workspace_profile};
-pub use convention::{CloneTarget, WorkspaceConvention};
+pub use config::{ConfigProvenance, EffectiveWorkspaceConfig, WorkspaceLayout, resolve_workspace_profile};
+pub use convention::{CloneInput, ParsedPath};
 pub use discover::DiscoveredWorkspace;
+pub use inspection::{
+    FieldState, InspectionFailure, InspectionFailureKind, InspectionRequest, InspectionResult,
+    RepoStatus,
+};
+
+/// Check for a .git entry at the given path.
+///
+/// Returns true for both .git directories (regular repositories)
+/// and .git files (git worktree pointers). On Linux, directory
+/// detection uses O_NOFOLLOW to prevent TOCTOU symlink replacement.
+#[must_use]
+pub fn has_git_dir(path: &std::path::Path) -> bool {
+    let git_path = path.join(".git");
+    #[cfg(target_os = "linux")]
+    {
+        platform::linux::is_git_dir_nofollow(path) || git_path.is_file()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        git_path.is_dir() || git_path.is_file()
+    }
+}
 
 /// Errors from workspace operations.
 #[derive(Debug, thiserror::Error)]
