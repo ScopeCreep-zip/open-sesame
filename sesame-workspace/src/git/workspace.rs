@@ -59,11 +59,9 @@ pub fn pull_ff_only(repo_dir: &Path) -> Result<(), WorkspaceError> {
         .ok_or_else(|| WorkspaceError::GitError("HEAD is detached".into()))?
         .to_string();
     let tracking_ref = format!("refs/remotes/origin/{local_branch_name}");
-    let tracking = repo
-        .find_reference(&tracking_ref)
-        .map_err(|e| WorkspaceError::GitError(format!(
-            "no upstream tracking ref {tracking_ref}: {e}"
-        )))?;
+    let tracking = repo.find_reference(&tracking_ref).map_err(|e| {
+        WorkspaceError::GitError(format!("no upstream tracking ref {tracking_ref}: {e}"))
+    })?;
     let fetch_commit = repo
         .reference_to_annotated_commit(&tracking)
         .map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
@@ -239,10 +237,10 @@ fn find_remote_default_branch(
         && let Ok(resolved) = head_ref.resolve()
         && let Some(name) = resolved.name()
     {
-                let branch_name = name
-                    .strip_prefix("refs/remotes/origin/")
-                    .unwrap_or(name)
-                    .to_string();
+        let branch_name = name
+            .strip_prefix("refs/remotes/origin/")
+            .unwrap_or(name)
+            .to_string();
         if let Ok(commit) = resolved.peel_to_commit() {
             return Ok((commit, branch_name));
         }
@@ -254,8 +252,7 @@ fn find_remote_default_branch(
         .map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
 
     for branch_result in branches {
-        let (branch, _) = branch_result
-            .map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
+        let (branch, _) = branch_result.map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
         let name = match branch.name() {
             Ok(Some(n)) => n.to_string(),
             _ => continue,
@@ -264,10 +261,7 @@ fn find_remote_default_branch(
         if name == "origin/HEAD" {
             continue;
         }
-        let branch_name = name
-            .strip_prefix("origin/")
-            .unwrap_or(&name)
-            .to_string();
+        let branch_name = name.strip_prefix("origin/").unwrap_or(&name).to_string();
         if let Ok(reference) = branch.into_reference().resolve()
             && let Ok(commit) = reference.peel_to_commit()
         {

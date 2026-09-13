@@ -167,7 +167,10 @@ impl ProxyPolicy {
     /// The first active proxy endpoint for diagnostic display.
     #[must_use]
     pub fn active_proxy(&self) -> Option<&ProxyEndpoint> {
-        self.https.as_ref().or(self.http.as_ref()).or(self.all.as_ref())
+        self.https
+            .as_ref()
+            .or(self.http.as_ref())
+            .or(self.all.as_ref())
     }
 
     /// The raw `NO_PROXY` entry count.
@@ -209,12 +212,8 @@ impl NoProxyRules {
             .filter(|s| !s.is_empty())
             .map(|entry| match entry {
                 "*" => NoProxyEntry::MatchAll,
-                e if e.starts_with("*.") => {
-                    NoProxyEntry::DomainSuffix(e[1..].to_ascii_lowercase())
-                }
-                e if e.starts_with('.') => {
-                    NoProxyEntry::DomainSuffix(e.to_ascii_lowercase())
-                }
+                e if e.starts_with("*.") => NoProxyEntry::DomainSuffix(e[1..].to_ascii_lowercase()),
+                e if e.starts_with('.') => NoProxyEntry::DomainSuffix(e.to_ascii_lowercase()),
                 e => NoProxyEntry::ExactHost(e.to_ascii_lowercase()),
             })
             .collect();
@@ -260,7 +259,10 @@ fn redact_credentials(url: &str) -> String {
 
 /// Extract the host portion from a URL for `NO_PROXY` matching.
 fn extract_host(url: &str) -> Option<&str> {
-    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         let host_part = rest.split('/').next()?;
         // Strip user@ prefix if present.
         let host = host_part.rsplit('@').next().unwrap_or(host_part);
@@ -304,17 +306,26 @@ mod tests {
 
     #[test]
     fn extract_host_https() {
-        assert_eq!(extract_host("https://github.com/org/repo"), Some("github.com"));
+        assert_eq!(
+            extract_host("https://github.com/org/repo"),
+            Some("github.com")
+        );
     }
 
     #[test]
     fn extract_host_https_with_port() {
-        assert_eq!(extract_host("https://git.example.com:8443/org"), Some("git.example.com"));
+        assert_eq!(
+            extract_host("https://git.example.com:8443/org"),
+            Some("git.example.com")
+        );
     }
 
     #[test]
     fn extract_host_https_with_user() {
-        assert_eq!(extract_host("https://user@github.com/org"), Some("github.com"));
+        assert_eq!(
+            extract_host("https://user@github.com/org"),
+            Some("github.com")
+        );
     }
 
     #[test]
@@ -373,8 +384,12 @@ mod tests {
     #[test]
     fn policy_https_target_uses_https_proxy() {
         let policy = ProxyPolicy {
-            https: Some(ProxyEndpoint { url: "http://https-proxy:8080".into() }),
-            http: Some(ProxyEndpoint { url: "http://http-proxy:8080".into() }),
+            https: Some(ProxyEndpoint {
+                url: "http://https-proxy:8080".into(),
+            }),
+            http: Some(ProxyEndpoint {
+                url: "http://http-proxy:8080".into(),
+            }),
             all: None,
             no_proxy: NoProxyRules::default(),
         };
@@ -387,8 +402,12 @@ mod tests {
     #[test]
     fn policy_http_target_uses_http_proxy() {
         let policy = ProxyPolicy {
-            https: Some(ProxyEndpoint { url: "http://https-proxy:8080".into() }),
-            http: Some(ProxyEndpoint { url: "http://http-proxy:8080".into() }),
+            https: Some(ProxyEndpoint {
+                url: "http://https-proxy:8080".into(),
+            }),
+            http: Some(ProxyEndpoint {
+                url: "http://http-proxy:8080".into(),
+            }),
             all: None,
             no_proxy: NoProxyRules::default(),
         };
@@ -403,7 +422,9 @@ mod tests {
         let policy = ProxyPolicy {
             https: None,
             http: None,
-            all: Some(ProxyEndpoint { url: "http://all-proxy:8080".into() }),
+            all: Some(ProxyEndpoint {
+                url: "http://all-proxy:8080".into(),
+            }),
             no_proxy: NoProxyRules::default(),
         };
         match policy.for_target("https://github.com/org") {
@@ -415,7 +436,9 @@ mod tests {
     #[test]
     fn policy_no_proxy_bypasses() {
         let policy = ProxyPolicy {
-            https: Some(ProxyEndpoint { url: "http://proxy:8080".into() }),
+            https: Some(ProxyEndpoint {
+                url: "http://proxy:8080".into(),
+            }),
             http: None,
             all: None,
             no_proxy: NoProxyRules::parse("github.com"),
@@ -429,7 +452,9 @@ mod tests {
     #[test]
     fn policy_ssh_returns_no_env_proxy() {
         let policy = ProxyPolicy {
-            https: Some(ProxyEndpoint { url: "http://proxy:8080".into() }),
+            https: Some(ProxyEndpoint {
+                url: "http://proxy:8080".into(),
+            }),
             http: None,
             all: None,
             no_proxy: NoProxyRules::default(),
@@ -466,8 +491,12 @@ mod tests {
     #[test]
     fn conflicting_values_detected() {
         let policy = ProxyPolicy {
-            https: Some(ProxyEndpoint { url: "http://a:8080".into() }),
-            http: Some(ProxyEndpoint { url: "http://b:8080".into() }),
+            https: Some(ProxyEndpoint {
+                url: "http://a:8080".into(),
+            }),
+            http: Some(ProxyEndpoint {
+                url: "http://b:8080".into(),
+            }),
             all: None,
             no_proxy: NoProxyRules::default(),
         };
@@ -477,8 +506,12 @@ mod tests {
     #[test]
     fn same_values_not_conflicting() {
         let policy = ProxyPolicy {
-            https: Some(ProxyEndpoint { url: "http://proxy:8080".into() }),
-            http: Some(ProxyEndpoint { url: "http://proxy:8080".into() }),
+            https: Some(ProxyEndpoint {
+                url: "http://proxy:8080".into(),
+            }),
+            http: Some(ProxyEndpoint {
+                url: "http://proxy:8080".into(),
+            }),
             all: None,
             no_proxy: NoProxyRules::default(),
         };

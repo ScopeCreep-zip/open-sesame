@@ -74,13 +74,7 @@ pub fn discover_workspaces(
         };
 
         // Recurse into namespace directories below this server.
-        walk_namespace(
-            &server_path,
-            &host,
-            &[],
-            config,
-            &mut results,
-        )?;
+        walk_namespace(&server_path, &host, &[], config, &mut results)?;
     }
 
     results.sort_by(|a, b| a.path.cmp(&b.path));
@@ -123,30 +117,21 @@ fn walk_namespace(
 
     if this_is_git_root {
         // Check if any children are also git roots.
-        let has_child_git = child_dirs.iter().any(|(_, p)| {
-            has_git_dir(p)
-        });
+        let has_child_git = child_dirs.iter().any(|(_, p)| has_git_dir(p));
 
         if has_child_git {
             // This is a workspace root: a namespace-level directory
             // that contains .git AND has sibling repositories.
             if !ns_segments.is_empty()
-                && let Ok(ns) = NamespacePath::from_segments(
-                    ns_segments.to_vec(),
-                ) {
-                    let coord = WorkspaceCoordinate::new(
-                        host.clone(),
-                        ns,
-                        WorkspaceKind::Organization,
-                    );
-                    let linked = crate::config::resolve_workspace_profile(
-                        config, dir,
-                    );
-                    results.push(DiscoveredWorkspace {
-                        path: dir.to_path_buf(),
-                        coordinate: coord,
-                        linked_profile: linked,
-                    });
+                && let Ok(ns) = NamespacePath::from_segments(ns_segments.to_vec())
+            {
+                let coord = WorkspaceCoordinate::new(host.clone(), ns, WorkspaceKind::Organization);
+                let linked = crate::config::resolve_workspace_profile(config, dir);
+                results.push(DiscoveredWorkspace {
+                    path: dir.to_path_buf(),
+                    coordinate: coord,
+                    linked_profile: linked,
+                });
             }
 
             // Continue into children to discover sibling repos.
@@ -159,19 +144,10 @@ fn walk_namespace(
 
                 if has_git_dir(child_path) {
                     // Child is a regular repository inside the workspace.
-                    record_repository(
-                        child_path,
-                        host,
-                        ns_segments,
-                        &child_ns,
-                        config,
-                        results,
-                    );
+                    record_repository(child_path, host, ns_segments, &child_ns, config, results);
                 } else {
                     // Child namespace directory, recurse deeper.
-                    walk_namespace(
-                        child_path, host, &child_ns, config, results,
-                    )?;
+                    walk_namespace(child_path, host, &child_ns, config, results)?;
                 }
             }
         } else {
@@ -183,9 +159,12 @@ fn walk_namespace(
                 return Ok(());
             }
             record_repository(
-                dir, host, &ns_segments[..ns_segments.len() - 1],
+                dir,
+                host,
+                &ns_segments[..ns_segments.len() - 1],
                 ns_segments,
-                config, results,
+                config,
+                results,
             );
         }
     } else {
@@ -228,11 +207,7 @@ fn record_repository(
         return;
     };
 
-    let coord = WorkspaceCoordinate::new(
-        host.clone(),
-        ns,
-        WorkspaceKind::Repository(repo),
-    );
+    let coord = WorkspaceCoordinate::new(host.clone(), ns, WorkspaceKind::Repository(repo));
     let linked = crate::config::resolve_workspace_profile(config, path);
     results.push(DiscoveredWorkspace {
         path: path.to_path_buf(),
@@ -243,14 +218,10 @@ fn record_repository(
 
 /// Read a directory, returning an error only for non-permission failures.
 /// Permission denied is treated as an empty directory.
-fn read_dir_safe(
-    path: &Path,
-) -> Result<std::fs::ReadDir, WorkspaceError> {
+fn read_dir_safe(path: &Path) -> Result<std::fs::ReadDir, WorkspaceError> {
     match std::fs::read_dir(path) {
         Ok(e) => Ok(e),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            Err(WorkspaceError::Io(e))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(WorkspaceError::Io(e)),
         Err(e) => Err(e.into()),
     }
 }
@@ -283,7 +254,11 @@ mod tests {
         assert_eq!(workspaces[0].path, repo);
         assert_eq!(workspaces[0].coordinate.namespace().root_segment(), "org");
         assert_eq!(
-            workspaces[0].coordinate.kind().repository_name().map(|r| r.as_str()),
+            workspaces[0]
+                .coordinate
+                .kind()
+                .repository_name()
+                .map(|r| r.as_str()),
             Some("repo")
         );
         assert!(workspaces[0].coordinate.kind().is_cloneable());
@@ -304,9 +279,16 @@ mod tests {
         let config = test_config(root);
         let workspaces = discover_workspaces(&config).unwrap();
         assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].coordinate.namespace().to_string(), "group/subgroup");
         assert_eq!(
-            workspaces[0].coordinate.kind().repository_name().map(|r| r.as_str()),
+            workspaces[0].coordinate.namespace().to_string(),
+            "group/subgroup"
+        );
+        assert_eq!(
+            workspaces[0]
+                .coordinate
+                .kind()
+                .repository_name()
+                .map(|r| r.as_str()),
             Some("project")
         );
     }
@@ -331,15 +313,29 @@ mod tests {
         let ws_root = workspaces.iter().find(|w| w.path == org).unwrap();
         assert!(!ws_root.coordinate.kind().is_cloneable());
 
-        let repo_a = workspaces.iter().find(|w| w.path == org.join("repo-a")).unwrap();
+        let repo_a = workspaces
+            .iter()
+            .find(|w| w.path == org.join("repo-a"))
+            .unwrap();
         assert_eq!(
-            repo_a.coordinate.kind().repository_name().map(|r| r.as_str()),
+            repo_a
+                .coordinate
+                .kind()
+                .repository_name()
+                .map(|r| r.as_str()),
             Some("repo-a")
         );
 
-        let repo_b = workspaces.iter().find(|w| w.path == org.join("repo-b")).unwrap();
+        let repo_b = workspaces
+            .iter()
+            .find(|w| w.path == org.join("repo-b"))
+            .unwrap();
         assert_eq!(
-            repo_b.coordinate.kind().repository_name().map(|r| r.as_str()),
+            repo_b
+                .coordinate
+                .kind()
+                .repository_name()
+                .map(|r| r.as_str()),
             Some("repo-b")
         );
     }
@@ -390,7 +386,11 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].coordinate.namespace().to_string(), "a/b/c/d");
         assert_eq!(
-            workspaces[0].coordinate.kind().repository_name().map(|r| r.as_str()),
+            workspaces[0]
+                .coordinate
+                .kind()
+                .repository_name()
+                .map(|r| r.as_str()),
             Some("project")
         );
     }
@@ -399,20 +399,13 @@ mod tests {
     fn ipv6_server_directory() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let repo = root
-            .join("user")
-            .join("_ipv6_--1")
-            .join("org")
-            .join("repo");
+        let repo = root.join("user").join("_ipv6_--1").join("org").join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
 
         let config = test_config(root);
         let workspaces = discover_workspaces(&config).unwrap();
         assert_eq!(workspaces.len(), 1);
-        assert!(matches!(
-            workspaces[0].coordinate.host(),
-            GitHost::Ipv6(_)
-        ));
+        assert!(matches!(workspaces[0].coordinate.host(), GitHost::Ipv6(_)));
     }
 
     #[test]

@@ -190,9 +190,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     );
                     if sesame_workspace::git::probe_remote(&ws_ep.to_url()) {
                         eprintln!("Setting up org workspace...");
-                        match sesame_workspace::git::clone_workspace_git(
-                            &ws_ep, &org_dir, force,
-                        ) {
+                        match sesame_workspace::git::clone_workspace_git(&ws_ep, &org_dir, force) {
                             Ok(p) => eprintln!("  Workspace initialized: {}", p.display()),
                             Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
                         }
@@ -276,7 +274,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 };
 
                 if mode != core_config::WorkspaceAutoMode::Never {
-                    let org_dir = layout.root
+                    let org_dir = layout
+                        .root
                         .join(layout.user.as_str())
                         .join(coord.host().as_dir_name())
                         .join(coord.namespace().as_path());
@@ -291,9 +290,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     let org_dir_exists = org_dir.exists();
 
                     if has_workspace_git {
-                        if workspace_update
-                            || mode == core_config::WorkspaceAutoMode::Always
-                        {
+                        if workspace_update || mode == core_config::WorkspaceAutoMode::Always {
                             eprintln!("Updating org workspace at {}...", org_dir.display());
                             match sesame_workspace::git::pull_ff_only(&org_dir) {
                                 Ok(()) => eprintln!("  Workspace updated."),
@@ -306,12 +303,11 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 .unwrap_or_else(|| "(unborn)".into());
                             let branch = sesame_workspace::git::current_branch(&org_dir)
                                 .unwrap_or_else(|_| "unknown".into());
-                            let tracking =
-                                sesame_workspace::git::remote_tracking_commit_short(
-                                    &org_dir, &branch,
-                                )
-                                .ok()
-                                .flatten();
+                            let tracking = sesame_workspace::git::remote_tracking_commit_short(
+                                &org_dir, &branch,
+                            )
+                            .ok()
+                            .flatten();
 
                             if let Some(ref remote_commit) = tracking
                                 && *remote_commit != local
@@ -337,8 +333,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
                             }
                         }
-                    } else if (workspace_init
-                        || mode == core_config::WorkspaceAutoMode::Always)
+                    } else if (workspace_init || mode == core_config::WorkspaceAutoMode::Always)
                         && org_dir_exists
                     {
                         if !force {
@@ -364,23 +359,17 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 Err(e) => eprintln!("  Warning: workspace.git setup failed: {e}"),
                             }
                         }
-                    } else if mode == core_config::WorkspaceAutoMode::Auto
-                        && org_dir_exists
-                    {
+                    } else if mode == core_config::WorkspaceAutoMode::Auto && org_dir_exists {
                         // Network probe is a side effect — keep it inside the
                         // block body so the cost is visible when reading the
                         // else-if chain.
                         if sesame_workspace::git::probe_remote(&ws_url) {
-                            eprintln!(
-                                "Tip: workspace.git is available for this org.",
-                            );
+                            eprintln!("Tip: workspace.git is available for this org.",);
                             eprintln!(
                                 "  Initialize with: sesame workspace clone \
                                  {url} --workspace-init",
                             );
-                            eprintln!(
-                                "  Or directly: sesame workspace clone {ws_url}",
-                            );
+                            eprintln!("  Or directly: sesame workspace clone {ws_url}",);
                         }
                     }
                 }
@@ -426,14 +415,12 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 target_path
             } else {
                 let rp = match coord.kind() {
-                    WorkspaceKind::Repository(_) => {
-                        sesame_workspace::git::clone_to(
-                            &clone_input.endpoint,
-                            &coord.canonical_path(&layout.root, &layout.user),
-                            depth,
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?
-                    }
+                    WorkspaceKind::Repository(_) => sesame_workspace::git::clone_to(
+                        &clone_input.endpoint,
+                        &coord.canonical_path(&layout.root, &layout.user),
+                        depth,
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
                     WorkspaceKind::WorkspaceRepository(_) => {
                         sesame_workspace::git::clone_workspace_git(
                             &clone_input.endpoint,
@@ -449,13 +436,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
                 match coord.kind() {
                     WorkspaceKind::WorkspaceRepository(_) => {
-                        println!(
-                            "Cloned workspace.git to org directory: {}",
-                            rp.display()
-                        );
-                        println!(
-                            "  Peer repos will be cloned as siblings inside this directory."
-                        );
+                        println!("Cloned workspace.git to org directory: {}", rp.display());
+                        println!("  Peer repos will be cloned as siblings inside this directory.");
                     }
                     _ => {
                         println!("Cloned to: {}", rp.display());
@@ -467,8 +449,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             if let Some(ref profile_name) = profile {
                 let _validated = TrustProfileName::try_from(profile_name.as_str())
                     .map_err(|e| anyhow::anyhow!("invalid profile name: {e}"))?;
-                let mut ws_config = core_config::load_workspace_config()
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let mut ws_config =
+                    core_config::load_workspace_config().map_err(|e| anyhow::anyhow!("{e}"))?;
                 sesame_workspace::config::add_link(
                     &mut ws_config,
                     &result_path.display().to_string(),
@@ -524,14 +506,10 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             // JSON uses a full inspection request for a stable schema.
             // Table uses a column-derived request for performance.
             let insp_request = match format {
-                WorkspaceListFormat::Json => {
-                    sesame_workspace::InspectionRequest::all()
-                }
+                WorkspaceListFormat::Json => sesame_workspace::InspectionRequest::all(),
                 WorkspaceListFormat::Table => {
                     let mut req =
-                        sesame_workspace::format::inspection_request_for_columns(
-                            &active_columns,
-                        );
+                        sesame_workspace::format::inspection_request_for_columns(&active_columns);
                     if dirty {
                         req.status = true;
                     }
@@ -598,10 +576,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                             );
                         }
                     }
-                    timings.push((
-                        workspaces[r.index].path.display().to_string(),
-                        r.elapsed_ms,
-                    ));
+                    timings.push((workspaces[r.index].path.display().to_string(), r.elapsed_ms));
                 }
 
                 let total = insp_start.elapsed();
@@ -613,11 +588,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     "workspace inspection complete"
                 );
                 for (path, ms) in timings.iter().take(15) {
-                    tracing::info!(
-                        ms,
-                        path = path.as_str(),
-                        "slowest repo"
-                    );
+                    tracing::info!(ms, path = path.as_str(), "slowest repo");
                 }
             }
 
@@ -654,8 +625,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
                     let mut total_repos = 0usize;
                     for ((srv, ns), entries) in &groups {
-                        let has_ws =
-                            entries.iter().any(|e| !e.coordinate.kind().is_cloneable());
+                        let has_ws = entries.iter().any(|e| !e.coordinate.kind().is_cloneable());
                         let ws_tag = if has_ws {
                             format!(" {}", "(workspace)".dimmed())
                         } else {
@@ -672,27 +642,18 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                             let insp = inspections.get(&ws.path);
                             let fields: Vec<Option<String>> = active_columns
                                 .iter()
-                                .map(|col| {
-                                    sesame_workspace::format::extract_field(ws, insp, col)
-                                })
+                                .map(|col| sesame_workspace::format::extract_field(ws, insp, col))
                                 .collect();
 
-                            let mut display_fields: Vec<String> =
-                                Vec::with_capacity(fields.len());
+                            let mut display_fields: Vec<String> = Vec::with_capacity(fields.len());
                             for (i, field) in fields.iter().enumerate() {
                                 let text = field.as_deref().unwrap_or("?");
                                 let styled = match active_columns[i] {
-                                    "status" if text == "clean" => {
-                                        text.green().to_string()
-                                    }
-                                    "status" if text == "unknown" => {
-                                        text.red().to_string()
-                                    }
+                                    "status" if text == "clean" => text.green().to_string(),
+                                    "status" if text == "unknown" => text.red().to_string(),
                                     "status" => text.yellow().to_string(),
                                     "commit" => text.dimmed().to_string(),
-                                    "profile"
-                                        if text != "?" && !text.is_empty() =>
-                                    {
+                                    "profile" if text != "?" && !text.is_empty() => {
                                         text.green().to_string()
                                     }
                                     _ => text.to_string(),
@@ -705,14 +666,11 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 .zip(display_fields.iter())
                                 .enumerate()
                                 .map(|(i, (raw, styled))| {
-                                    let col_def =
-                                        sesame_workspace::format::ALL_COLUMNS
-                                            .iter()
-                                            .find(|c| c.name == active_columns[i]);
-                                    let min_w =
-                                        col_def.map(|c| c.min_width).unwrap_or(10);
-                                    let raw_len =
-                                        raw.as_deref().unwrap_or("?").len();
+                                    let col_def = sesame_workspace::format::ALL_COLUMNS
+                                        .iter()
+                                        .find(|c| c.name == active_columns[i]);
+                                    let min_w = col_def.map(|c| c.min_width).unwrap_or(10);
+                                    let raw_len = raw.as_deref().unwrap_or("?").len();
                                     let pad = min_w.saturating_sub(raw_len);
                                     format!("{styled}{:pad$}", "")
                                 })
@@ -742,17 +700,14 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     );
                 }
                 WorkspaceListFormat::Json => {
-                    let records: Vec<sesame_workspace::format::WorkspaceRecord> =
-                        workspaces
-                            .iter()
-                            .filter(|ws| ws.coordinate.kind().is_cloneable())
-                            .map(|ws| {
-                                let insp = inspections.get(&ws.path);
-                                sesame_workspace::format::WorkspaceRecord::from_workspace(
-                                    ws, insp,
-                                )
-                            })
-                            .collect();
+                    let records: Vec<sesame_workspace::format::WorkspaceRecord> = workspaces
+                        .iter()
+                        .filter(|ws| ws.coordinate.kind().is_cloneable())
+                        .map(|ws| {
+                            let insp = inspections.get(&ws.path);
+                            sesame_workspace::format::WorkspaceRecord::from_workspace(ws, insp)
+                        })
+                        .collect();
                     println!("{}", serde_json::to_string_pretty(&records)?);
                 }
             }
@@ -779,23 +734,28 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
             println!("Workspace:  {}", path.display());
 
-            let remote_str = inspection.as_ref()
+            let remote_str = inspection
+                .as_ref()
                 .and_then(|i| i.remote_url.value().cloned())
                 .unwrap_or_else(|| "unknown".into());
             println!("Remote:     {remote_str}");
 
-            let branch_str = inspection.as_ref()
+            let branch_str = inspection
+                .as_ref()
                 .and_then(|i| i.branch.value().cloned())
                 .unwrap_or_else(|| "unknown".into());
             println!("Branch:     {branch_str}");
 
-            let head_short = inspection.as_ref()
+            let head_short = inspection
+                .as_ref()
                 .and_then(|i| i.head_short.value().cloned())
                 .unwrap_or_else(|| "(unborn)".into());
-            let head_summary = inspection.as_ref()
+            let head_summary = inspection
+                .as_ref()
                 .and_then(|i| i.head_summary.value().cloned())
                 .unwrap_or_default();
-            let upstream_short = inspection.as_ref()
+            let upstream_short = inspection
+                .as_ref()
                 .and_then(|i| i.upstream_short.value().cloned());
 
             print!("Commit:     {head_short}");
@@ -811,14 +771,11 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                         "behind".yellow(),
                     );
                 } else {
-                    println!(
-                        "Tracking:   {tracking} (origin/{branch_str}, up to date)"
-                    );
+                    println!("Tracking:   {tracking} (origin/{branch_str}, up to date)");
                 }
             }
 
-            let status = inspection.as_ref()
-                .and_then(|i| i.status.value().copied());
+            let status = inspection.as_ref().and_then(|i| i.status.value().copied());
             let status_str = match status {
                 Some(sesame_workspace::RepoStatus::Clean) => "clean".green().to_string(),
                 Some(sesame_workspace::RepoStatus::Dirty) => "dirty".yellow().to_string(),
@@ -840,7 +797,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             );
 
             if verbose {
-                let repo_display = parsed.terminal
+                let repo_display = parsed
+                    .terminal
                     .as_ref()
                     .map(|r| r.as_str().to_string())
                     .unwrap_or_else(|| "(namespace root)".into());
@@ -875,13 +833,8 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
             let mut config =
                 core_config::load_workspace_config().map_err(|e| anyhow::anyhow!("{e}"))?;
-            sesame_workspace::config::add_link(
-                &mut config,
-                &path.display().to_string(),
-                &profile,
-            );
-            core_config::save_workspace_config(&config)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sesame_workspace::config::add_link(&mut config, &path.display().to_string(), &profile);
+            core_config::save_workspace_config(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Linked {} -> profile \"{}\"", path.display(), profile);
             Ok(())
         }
@@ -892,8 +845,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 core_config::load_workspace_config().map_err(|e| anyhow::anyhow!("{e}"))?;
             let path_str = path.display().to_string();
             if sesame_workspace::config::remove_link(&mut config, &path_str) {
-                core_config::save_workspace_config(&config)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                core_config::save_workspace_config(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("Unlinked {}", path.display());
             } else {
                 println!("No link found for {}", path.display());
@@ -927,8 +879,7 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
 
             let client = connect().await?;
             let env_vars =
-                fetch_multi_profile_secrets(&client, &specs, secret_prefix.as_deref())
-                    .await?;
+                fetch_multi_profile_secrets(&client, &specs, secret_prefix.as_deref()).await?;
 
             let (bin, args, is_interactive) = if !command.is_empty() {
                 (command[0].clone(), command[1..].to_vec(), false)
@@ -973,15 +924,16 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
         WorkspaceCmd::Config(sub) => match sub {
             WorkspaceConfigCmd::Show { path } => {
                 let path = resolve_workspace_path(path)?;
-                let config = core_config::load_workspace_config()
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let config =
+                    core_config::load_workspace_config().map_err(|e| anyhow::anyhow!("{e}"))?;
                 let layout = sesame_workspace::WorkspaceLayout::resolve(&config);
 
-                let effective =
-                    sesame_workspace::config::resolve_effective_config(
-                        &config, &path, &layout.root,
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let effective = sesame_workspace::config::resolve_effective_config(
+                    &config,
+                    &path,
+                    &layout.root,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 println!("Workspace:      {}", path.display());
                 println!(

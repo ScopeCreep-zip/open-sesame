@@ -5,50 +5,31 @@
 pub enum ValidationError {
     /// The value is empty.
     #[error("{kind} is empty")]
-    Empty {
-        kind: &'static str,
-    },
+    Empty { kind: &'static str },
 
     /// The value contains a path traversal sequence.
     #[error("{kind} contains path traversal: {value}")]
-    PathTraversal {
-        kind: &'static str,
-        value: String,
-    },
+    PathTraversal { kind: &'static str, value: String },
 
     /// The value contains a path separator.
     #[error("{kind} contains path separator: {value}")]
-    PathSeparator {
-        kind: &'static str,
-        value: String,
-    },
+    PathSeparator { kind: &'static str, value: String },
 
     /// The value contains a null byte.
     #[error("{kind} contains null byte")]
-    NullByte {
-        kind: &'static str,
-    },
+    NullByte { kind: &'static str },
 
     /// The value starts with a dot.
     #[error("{kind} starts with dot: {value}")]
-    LeadingDot {
-        kind: &'static str,
-        value: String,
-    },
+    LeadingDot { kind: &'static str, value: String },
 
     /// The value exceeds the filesystem component length limit.
     #[error("{kind} exceeds 255 bytes: {len}")]
-    TooLong {
-        kind: &'static str,
-        len: usize,
-    },
+    TooLong { kind: &'static str, len: usize },
 
     /// The value has leading or trailing whitespace.
     #[error("{kind} has leading or trailing whitespace: '{value}'")]
-    Whitespace {
-        kind: &'static str,
-        value: String,
-    },
+    Whitespace { kind: &'static str, value: String },
 
     /// The namespace path has no segments.
     #[error("namespace path has no segments")]
@@ -56,15 +37,11 @@ pub enum ValidationError {
 
     /// A port number is invalid.
     #[error("invalid port number: {value}")]
-    InvalidPort {
-        value: String,
-    },
+    InvalidPort { value: String },
 
     /// The authority hostname is empty or invalid.
     #[error("invalid hostname: {value}")]
-    InvalidHostname {
-        value: String,
-    },
+    InvalidHostname { value: String },
 }
 
 /// Validate a single filesystem-safe component.

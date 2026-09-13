@@ -62,9 +62,11 @@ impl GitHost {
 
         // Bracketed IPv6: [::1] or [2001:db8::25]
         if input.starts_with('[') {
-            let close = input.find(']').ok_or_else(|| ValidationError::InvalidHostname {
-                value: input.into(),
-            })?;
+            let close = input
+                .find(']')
+                .ok_or_else(|| ValidationError::InvalidHostname {
+                    value: input.into(),
+                })?;
             // Nothing should follow the closing bracket in a host-only context.
             if close + 1 != input.len() {
                 return Err(ValidationError::InvalidHostname {
@@ -72,9 +74,12 @@ impl GitHost {
                 });
             }
             let addr_str = &input[1..close];
-            let addr: Ipv6Addr = addr_str.parse().map_err(|_| ValidationError::InvalidHostname {
-                value: input.into(),
-            })?;
+            let addr: Ipv6Addr =
+                addr_str
+                    .parse()
+                    .map_err(|_| ValidationError::InvalidHostname {
+                        value: input.into(),
+                    })?;
             return Ok(Self::Ipv6(addr));
         }
 

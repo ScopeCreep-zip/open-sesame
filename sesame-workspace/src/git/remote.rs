@@ -9,10 +9,7 @@ use std::path::Path;
 use crate::WorkspaceError;
 
 /// Apply proxy and timeout config overrides to a gix repository.
-fn apply_proxy_config(
-    repo: &mut gix::Repository,
-    target_url: &str,
-) -> Result<(), WorkspaceError> {
+fn apply_proxy_config(repo: &mut gix::Repository, target_url: &str) -> Result<(), WorkspaceError> {
     let policy = crate::net::ProxyPolicy::from_env();
     let decision = policy.for_target(target_url);
 

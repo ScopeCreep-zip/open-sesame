@@ -60,20 +60,15 @@ pub fn parse_clone_input(
     let resolved = resolve_url(input, default_server, transport == GitTransport::Ssh)?;
     let components = parse_components(&resolved)?;
 
-    let host = GitHost::new(&components.host).map_err(|e| {
-        WorkspaceError::PathValidation(format!("server: {e}"))
-    })?;
+    let host = GitHost::new(&components.host)
+        .map_err(|e| WorkspaceError::PathValidation(format!("server: {e}")))?;
 
     if components.org_only {
         let ns_path = components.segments.join("/");
-        let namespace = NamespacePath::new(&ns_path).map_err(|e| {
-            WorkspaceError::PathValidation(format!("namespace: {e}"))
-        })?;
-        let coord = WorkspaceCoordinate::new(
-            host.clone(),
-            namespace.clone(),
-            WorkspaceKind::Organization,
-        );
+        let namespace = NamespacePath::new(&ns_path)
+            .map_err(|e| WorkspaceError::PathValidation(format!("namespace: {e}")))?;
+        let coord =
+            WorkspaceCoordinate::new(host.clone(), namespace.clone(), WorkspaceKind::Organization);
         // Org-only endpoints always use HTTPS for forge API access.
         let identity = RemoteIdentity::new(
             host,
@@ -98,12 +93,10 @@ pub fn parse_clone_input(
     let repo_str = &components.segments[components.segments.len() - 1];
 
     let ns_path = ns_segments.join("/");
-    let namespace = NamespacePath::new(&ns_path).map_err(|e| {
-        WorkspaceError::PathValidation(format!("namespace: {e}"))
-    })?;
-    let repo = RepositoryName::new(repo_str).map_err(|e| {
-        WorkspaceError::PathValidation(format!("repository: {e}"))
-    })?;
+    let namespace = NamespacePath::new(&ns_path)
+        .map_err(|e| WorkspaceError::PathValidation(format!("namespace: {e}")))?;
+    let repo = RepositoryName::new(repo_str)
+        .map_err(|e| WorkspaceError::PathValidation(format!("repository: {e}")))?;
 
     // Reclassify as workspace repository when the name matches config.
     let kind = if repo.as_str() == workspace_repo.as_str() {
@@ -116,12 +109,9 @@ pub fn parse_clone_input(
 
     let identity = RemoteIdentity::new(host, namespace, repo);
     let endpoint = match components.transport {
-        GitTransport::Https => RemoteEndpoint::new(
-            identity,
-            GitTransport::Https,
-            components.port,
-            None,
-        ),
+        GitTransport::Https => {
+            RemoteEndpoint::new(identity, GitTransport::Https, components.port, None)
+        }
         GitTransport::Ssh => RemoteEndpoint::new(
             identity,
             GitTransport::Ssh,
@@ -149,15 +139,13 @@ pub fn parse_clone_input(
 pub fn parse_url(url: &str) -> Result<WorkspaceCoordinate, WorkspaceError> {
     let components = parse_components(url)?;
 
-    let host = GitHost::new(&components.host).map_err(|e| {
-        WorkspaceError::PathValidation(format!("server: {e}"))
-    })?;
+    let host = GitHost::new(&components.host)
+        .map_err(|e| WorkspaceError::PathValidation(format!("server: {e}")))?;
 
     if components.org_only {
         let ns_path = components.segments.join("/");
-        let namespace = NamespacePath::new(&ns_path).map_err(|e| {
-            WorkspaceError::PathValidation(format!("namespace: {e}"))
-        })?;
+        let namespace = NamespacePath::new(&ns_path)
+            .map_err(|e| WorkspaceError::PathValidation(format!("namespace: {e}")))?;
         return Ok(WorkspaceCoordinate::new(
             host,
             namespace,
@@ -175,12 +163,10 @@ pub fn parse_url(url: &str) -> Result<WorkspaceCoordinate, WorkspaceError> {
     let repo_str = &components.segments[components.segments.len() - 1];
 
     let ns_path = ns_segments.join("/");
-    let namespace = NamespacePath::new(&ns_path).map_err(|e| {
-        WorkspaceError::PathValidation(format!("namespace: {e}"))
-    })?;
-    let repo = RepositoryName::new(repo_str).map_err(|e| {
-        WorkspaceError::PathValidation(format!("repository: {e}"))
-    })?;
+    let namespace = NamespacePath::new(&ns_path)
+        .map_err(|e| WorkspaceError::PathValidation(format!("namespace: {e}")))?;
+    let repo = RepositoryName::new(repo_str)
+        .map_err(|e| WorkspaceError::PathValidation(format!("repository: {e}")))?;
 
     Ok(WorkspaceCoordinate::new(
         host,
@@ -216,19 +202,12 @@ pub struct ParsedPath {
 ///
 /// Returns an error if the path is outside the workspace root, too
 /// shallow, contains non-UTF-8 components, or fails canonicalization.
-pub fn parse_path(
-    root: &Path,
-    path: &Path,
-) -> Result<ParsedPath, WorkspaceError> {
+pub fn parse_path(root: &Path, path: &Path) -> Result<ParsedPath, WorkspaceError> {
     let canonical = std::fs::canonicalize(path).map_err(|e| {
-        WorkspaceError::PathValidation(format!(
-            "cannot canonicalize {}: {e}", path.display()
-        ))
+        WorkspaceError::PathValidation(format!("cannot canonicalize {}: {e}", path.display()))
     })?;
     let canonical_root = std::fs::canonicalize(root).map_err(|e| {
-        WorkspaceError::PathValidation(format!(
-            "cannot canonicalize root {}: {e}", root.display()
-        ))
+        WorkspaceError::PathValidation(format!("cannot canonicalize root {}: {e}", root.display()))
     })?;
 
     let rel = canonical
@@ -257,16 +236,13 @@ pub fn parse_path(
     }
 
     let host = GitHost::from_dir_name(components[1]).ok_or_else(|| {
-        WorkspaceError::PathValidation(format!(
-            "cannot decode server directory: {}", components[1]
-        ))
+        WorkspaceError::PathValidation(format!("cannot decode server directory: {}", components[1]))
     })?;
 
     // Exactly [user, server, ns]: namespace-level path, no terminal.
     if components.len() == 3 {
-        let namespace = NamespacePath::new(components[2]).map_err(|e| {
-            WorkspaceError::PathValidation(format!("namespace: {e}"))
-        })?;
+        let namespace = NamespacePath::new(components[2])
+            .map_err(|e| WorkspaceError::PathValidation(format!("namespace: {e}")))?;
         return Ok(ParsedPath {
             host,
             namespace,
@@ -282,13 +258,11 @@ pub fn parse_path(
         .map(ToString::to_string)
         .collect();
 
-    let namespace = NamespacePath::from_segments(ns_segments).map_err(|e| {
-        WorkspaceError::PathValidation(format!("namespace: {e}"))
-    })?;
+    let namespace = NamespacePath::from_segments(ns_segments)
+        .map_err(|e| WorkspaceError::PathValidation(format!("namespace: {e}")))?;
 
-    let terminal = RepositoryName::new(components[ns_end]).map_err(|e| {
-        WorkspaceError::PathValidation(format!("terminal component: {e}"))
-    })?;
+    let terminal = RepositoryName::new(components[ns_end])
+        .map_err(|e| WorkspaceError::PathValidation(format!("terminal component: {e}")))?;
 
     Ok(ParsedPath {
         host,
@@ -316,19 +290,14 @@ pub fn is_inside_workspace_git(path: &Path) -> bool {
 /// This is an internal step used by `parse_clone_input`. The resolved
 /// URL is immediately parsed into typed components; the string does
 /// not escape to the orchestration layer.
-fn resolve_url(
-    input: &str,
-    default_server: &str,
-    use_ssh: bool,
-) -> Result<String, WorkspaceError> {
+fn resolve_url(input: &str, default_server: &str, use_ssh: bool) -> Result<String, WorkspaceError> {
     let input = input.trim().trim_end_matches('/');
 
     if input.is_empty() {
         return Err(WorkspaceError::InvalidUrl("empty URL".into()));
     }
 
-    if input.starts_with("https://") || input.starts_with("http://")
-        || input.starts_with("ssh://")
+    if input.starts_with("https://") || input.starts_with("http://") || input.starts_with("ssh://")
     {
         return Ok(input.to_string());
     }
@@ -338,9 +307,7 @@ fn resolve_url(
     }
 
     if input.contains('\0') {
-        return Err(WorkspaceError::InvalidUrl(
-            "URL contains null bytes".into(),
-        ));
+        return Err(WorkspaceError::InvalidUrl("URL contains null bytes".into()));
     }
 
     let segments: Vec<&str> = input.split('/').collect();
@@ -530,11 +497,7 @@ fn parse_ssh_scheme(url: &str) -> Result<ParsedComponents, WorkspaceError> {
         let user = without_scheme[..at_pos].to_string();
         let after_at = &without_scheme[at_pos + 1..];
         match after_at.find('/') {
-            Some(slash) => (
-                Some(user),
-                &after_at[..slash],
-                &after_at[slash + 1..],
-            ),
+            Some(slash) => (Some(user), &after_at[..slash], &after_at[slash + 1..]),
             None => {
                 return Err(WorkspaceError::InvalidUrl(format!(
                     "ssh:// URL must have a path: {url}"
@@ -630,7 +593,10 @@ mod tests {
     #[test]
     fn parse_https_git_suffix_stripped() {
         let coord = parse_url("https://github.com/org/repo.git").unwrap();
-        assert_eq!(coord.kind().repository_name().map(|r| r.as_str()), Some("repo"));
+        assert_eq!(
+            coord.kind().repository_name().map(|r| r.as_str()),
+            Some("repo")
+        );
     }
 
     #[test]
@@ -649,14 +615,20 @@ mod tests {
     fn parse_scp_url() {
         let coord = parse_url("git@github.com:braincraftio/k9.git").unwrap();
         assert_eq!(coord.host().to_string(), "github.com");
-        assert_eq!(coord.kind().repository_name().map(|r| r.as_str()), Some("k9"));
+        assert_eq!(
+            coord.kind().repository_name().map(|r| r.as_str()),
+            Some("k9")
+        );
     }
 
     #[test]
     fn parse_ssh_scheme_url() {
         let coord = parse_url("ssh://git@github.com/org/repo.git").unwrap();
         assert_eq!(coord.host().to_string(), "github.com");
-        assert_eq!(coord.kind().repository_name().map(|r| r.as_str()), Some("repo"));
+        assert_eq!(
+            coord.kind().repository_name().map(|r| r.as_str()),
+            Some("repo")
+        );
     }
 
     #[test]
@@ -669,7 +641,10 @@ mod tests {
     fn parse_nested_namespace() {
         let coord = parse_url("https://gitlab.com/group/subgroup/project").unwrap();
         assert_eq!(coord.namespace().to_string(), "group/subgroup");
-        assert_eq!(coord.kind().repository_name().map(|r| r.as_str()), Some("project"));
+        assert_eq!(
+            coord.kind().repository_name().map(|r| r.as_str()),
+            Some("project")
+        );
     }
 
     #[test]
@@ -727,12 +702,20 @@ mod tests {
     fn clone_input_https_shorthand() {
         let ws_repo = RepositoryName::new("workspace").unwrap();
         let input = parse_clone_input(
-            "braincraftio/konductor", "github.com", GitTransport::Https, &ws_repo,
-        ).unwrap();
+            "braincraftio/konductor",
+            "github.com",
+            GitTransport::Https,
+            &ws_repo,
+        )
+        .unwrap();
         assert_eq!(input.endpoint.transport(), GitTransport::Https);
         assert_eq!(input.coordinate.host().to_string(), "github.com");
         assert_eq!(
-            input.coordinate.kind().repository_name().map(|r| r.as_str()),
+            input
+                .coordinate
+                .kind()
+                .repository_name()
+                .map(|r| r.as_str()),
             Some("konductor")
         );
         assert!(input.coordinate.kind().is_cloneable());
@@ -742,8 +725,12 @@ mod tests {
     fn clone_input_ssh_shorthand() {
         let ws_repo = RepositoryName::new("workspace").unwrap();
         let input = parse_clone_input(
-            "braincraftio/konductor", "github.com", GitTransport::Ssh, &ws_repo,
-        ).unwrap();
+            "braincraftio/konductor",
+            "github.com",
+            GitTransport::Ssh,
+            &ws_repo,
+        )
+        .unwrap();
         assert_eq!(input.endpoint.transport(), GitTransport::Ssh);
         assert!(input.endpoint.to_url().contains("git@"));
     }
@@ -756,7 +743,8 @@ mod tests {
             "github.com",
             GitTransport::Https,
             &ws_repo,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(
             input.coordinate.kind(),
             WorkspaceKind::WorkspaceRepository(_)
@@ -771,7 +759,8 @@ mod tests {
             "github.com",
             GitTransport::Https,
             &ws_repo,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(
             input.coordinate.kind(),
             WorkspaceKind::Repository(_)
@@ -786,7 +775,8 @@ mod tests {
             "github.com",
             GitTransport::Https,
             &ws_repo,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!input.coordinate.kind().is_cloneable());
     }
 
@@ -798,7 +788,8 @@ mod tests {
             "github.com",
             GitTransport::Https,
             &ws_repo,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(input.endpoint.transport(), GitTransport::Ssh);
         assert_eq!(input.endpoint.port(), Some(2222));
     }
@@ -807,9 +798,16 @@ mod tests {
     fn clone_input_display_url_matches_resolved() {
         let ws_repo = RepositoryName::new("workspace").unwrap();
         let input = parse_clone_input(
-            "braincraftio/konductor", "github.com", GitTransport::Https, &ws_repo,
-        ).unwrap();
-        assert_eq!(input.display_url, "https://github.com/braincraftio/konductor");
+            "braincraftio/konductor",
+            "github.com",
+            GitTransport::Https,
+            &ws_repo,
+        )
+        .unwrap();
+        assert_eq!(
+            input.display_url,
+            "https://github.com/braincraftio/konductor"
+        );
     }
 
     // parse_path tests

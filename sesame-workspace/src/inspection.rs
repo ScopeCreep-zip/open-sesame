@@ -281,12 +281,7 @@ trait FieldInspector {
     ///
     /// `path` is provided for diagnostic logging only. `result` may
     /// contain values from previously-run inspectors.
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        path: &Path,
-        result: &mut InspectionResult,
-    );
+    fn inspect(&self, repo: &gix::Repository, path: &Path, result: &mut InspectionResult);
 }
 
 /// Inspector registry. Ordered by dependency: inspectors that read
@@ -305,8 +300,8 @@ const INSPECTORS: &[&dyn FieldInspector] = &[
     &HeadInspector,
     &HeadSummaryInspector,
     &StatusInspector,
-    &UpstreamInspector,      // depends on branch
-    &AheadBehindInspector,   // depends on head, upstream
+    &UpstreamInspector,    // depends on branch
+    &AheadBehindInspector, // depends on head, upstream
 ];
 
 // ============================================================================
@@ -316,14 +311,11 @@ const INSPECTORS: &[&dyn FieldInspector] = &[
 struct RemoteInspector;
 
 impl FieldInspector for RemoteInspector {
-    fn id(&self) -> InspectorId { InspectorId::Remote }
+    fn id(&self) -> InspectorId {
+        InspectorId::Remote
+    }
 
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        _path: &Path,
-        result: &mut InspectionResult,
-    ) {
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
         result.remote_url = match repo.find_remote("origin") {
             Ok(remote) => match remote.url(gix::remote::Direction::Fetch) {
                 Some(url) => FieldState::Available(url.to_bstring().to_string()),
@@ -337,14 +329,11 @@ impl FieldInspector for RemoteInspector {
 struct BranchInspector;
 
 impl FieldInspector for BranchInspector {
-    fn id(&self) -> InspectorId { InspectorId::Branch }
+    fn id(&self) -> InspectorId {
+        InspectorId::Branch
+    }
 
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        _path: &Path,
-        result: &mut InspectionResult,
-    ) {
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
         result.branch = match repo.head_name() {
             Ok(Some(name)) => FieldState::Available(name.shorten().to_string()),
             Ok(None) => FieldState::Absent,
@@ -359,14 +348,11 @@ impl FieldInspector for BranchInspector {
 struct HeadInspector;
 
 impl FieldInspector for HeadInspector {
-    fn id(&self) -> InspectorId { InspectorId::Head }
+    fn id(&self) -> InspectorId {
+        InspectorId::Head
+    }
 
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        _path: &Path,
-        result: &mut InspectionResult,
-    ) {
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
         result.head_short = match repo.head() {
             Ok(head) => match head.id() {
                 Some(id) => FieldState::Available(id.to_hex_with_len(7).to_string()),
@@ -383,14 +369,11 @@ impl FieldInspector for HeadInspector {
 struct HeadSummaryInspector;
 
 impl FieldInspector for HeadSummaryInspector {
-    fn id(&self) -> InspectorId { InspectorId::HeadSummary }
+    fn id(&self) -> InspectorId {
+        InspectorId::HeadSummary
+    }
 
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        _path: &Path,
-        result: &mut InspectionResult,
-    ) {
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
         result.head_summary = match repo.head() {
             Ok(head) => match head.id() {
                 Some(id) => match id.object() {
@@ -427,14 +410,11 @@ impl FieldInspector for HeadSummaryInspector {
 struct StatusInspector;
 
 impl FieldInspector for StatusInspector {
-    fn id(&self) -> InspectorId { InspectorId::Status }
+    fn id(&self) -> InspectorId {
+        InspectorId::Status
+    }
 
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        path: &Path,
-        result: &mut InspectionResult,
-    ) {
+    fn inspect(&self, repo: &gix::Repository, path: &Path, result: &mut InspectionResult) {
         result.status = check_status(repo, path);
     }
 }
@@ -442,22 +422,20 @@ impl FieldInspector for StatusInspector {
 struct UpstreamInspector;
 
 impl FieldInspector for UpstreamInspector {
-    fn id(&self) -> InspectorId { InspectorId::Upstream }
+    fn id(&self) -> InspectorId {
+        InspectorId::Upstream
+    }
 
     /// Reads `result.branch` to construct the tracking ref name.
-    fn inspect(
-        &self,
-        repo: &gix::Repository,
-        _path: &Path,
-        result: &mut InspectionResult,
-    ) {
-        let branch_name = result.branch.value().cloned()
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
+        let branch_name = result
+            .branch
+            .value()
+            .cloned()
             .unwrap_or_else(|| "main".into());
         let refname = format!("refs/remotes/origin/{branch_name}");
         result.upstream_short = match repo.find_reference(&refname) {
-            Ok(reference) => {
-                FieldState::Available(reference.id().to_hex_with_len(7).to_string())
-            }
+            Ok(reference) => FieldState::Available(reference.id().to_hex_with_len(7).to_string()),
             Err(_) => FieldState::Absent,
         };
     }
@@ -466,17 +444,14 @@ impl FieldInspector for UpstreamInspector {
 struct AheadBehindInspector;
 
 impl FieldInspector for AheadBehindInspector {
-    fn id(&self) -> InspectorId { InspectorId::AheadBehind }
+    fn id(&self) -> InspectorId {
+        InspectorId::AheadBehind
+    }
 
     /// Reads `result.head_short` and `result.upstream_short` to
     /// determine whether computation is possible. Full graph
     /// traversal is not yet implemented.
-    fn inspect(
-        &self,
-        _repo: &gix::Repository,
-        _path: &Path,
-        result: &mut InspectionResult,
-    ) {
+    fn inspect(&self, _repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
         // Requires both head and upstream to be available.
         // Full implementation needs symmetric difference of the
         // commit graphs. Report absent rather than fabricate values.

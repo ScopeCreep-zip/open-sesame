@@ -46,10 +46,7 @@ impl RepositoryName {
     ///
     /// Returns `ValidationError` for empty, malformed, or unsafe input.
     pub fn new(input: &str) -> Result<Self, ValidationError> {
-        let name = input
-            .strip_suffix(".git")
-            .unwrap_or(input)
-            .to_string();
+        let name = input.strip_suffix(".git").unwrap_or(input).to_string();
 
         validate_component("repository name", &name)?;
 

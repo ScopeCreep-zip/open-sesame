@@ -33,7 +33,7 @@
 //! before starting each job (not mid-repo). In-flight status checks run to
 //! completion. Worst-case overshoot is one repo's status time.
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -158,13 +158,14 @@ where
                     let start = std::time::Instant::now();
                     let job_index = job.index;
                     let job_path = job.path.clone();
-                    let repo_name = job.path.file_name()
+                    let repo_name = job
+                        .path
+                        .file_name()
                         .map_or_else(|| "?".into(), |n| n.to_string_lossy().into_owned());
 
                     let result = inspect_one_job(&job, cancel);
 
-                    let elapsed_ms = u64::try_from(start.elapsed().as_millis())
-                        .unwrap_or(u64::MAX);
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     on_complete(done, total, &repo_name, elapsed_ms);
 
@@ -177,11 +178,14 @@ where
                         );
                     }
 
-                    if tx.send(InspectResult {
-                        index: job_index,
-                        result,
-                        elapsed_ms,
-                    }).is_err() {
+                    if tx
+                        .send(InspectResult {
+                            index: job_index,
+                            result,
+                            elapsed_ms,
+                        })
+                        .is_err()
+                    {
                         tracing::debug!(worker_id, "result channel closed, worker exiting");
                         break;
                     }

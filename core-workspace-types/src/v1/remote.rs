@@ -26,11 +26,7 @@ pub struct RemoteIdentity {
 impl RemoteIdentity {
     /// Construct a remote identity from validated components.
     #[must_use]
-    pub fn new(
-        host: GitHost,
-        namespace: NamespacePath,
-        repository: RepositoryName,
-    ) -> Self {
+    pub fn new(host: GitHost, namespace: NamespacePath, repository: RepositoryName) -> Self {
         Self {
             host,
             namespace,
@@ -159,10 +155,7 @@ mod tests {
             NamespacePath::new("group/subgroup").unwrap(),
             RepositoryName::new("project").unwrap(),
         );
-        assert_eq!(
-            r.to_ssh_url(),
-            "git@gitlab.com:group/subgroup/project.git"
-        );
+        assert_eq!(r.to_ssh_url(), "git@gitlab.com:group/subgroup/project.git");
     }
 
     #[test]
@@ -172,10 +165,7 @@ mod tests {
             NamespacePath::new("org").unwrap(),
             RepositoryName::new("repo").unwrap(),
         );
-        assert_eq!(
-            r.to_https_url(),
-            "https://[2001:db8::25]/org/repo"
-        );
+        assert_eq!(r.to_https_url(), "https://[2001:db8::25]/org/repo");
     }
 
     #[test]
@@ -185,10 +175,7 @@ mod tests {
             NamespacePath::new("org").unwrap(),
             RepositoryName::new("repo").unwrap(),
         );
-        assert_eq!(
-            r.to_ssh_url(),
-            "git@[::1]:org/repo.git"
-        );
+        assert_eq!(r.to_ssh_url(), "git@[::1]:org/repo.git");
     }
 
     #[test]
@@ -198,10 +185,7 @@ mod tests {
             NamespacePath::new("eng").unwrap(),
             RepositoryName::new("compiler").unwrap(),
         );
-        assert_eq!(
-            r.to_https_url(),
-            "https://192.0.2.40/eng/compiler"
-        );
+        assert_eq!(r.to_https_url(), "https://192.0.2.40/eng/compiler");
     }
 
     #[test]

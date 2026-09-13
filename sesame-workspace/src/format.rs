@@ -24,14 +24,54 @@ pub struct Column {
 
 /// All available columns in display order.
 pub const ALL_COLUMNS: &[Column] = &[
-    Column { name: "name",    header: "NAME",    min_width: 20, requires_inspection: false },
-    Column { name: "branch",  header: "BRANCH",  min_width: 14, requires_inspection: true },
-    Column { name: "commit",  header: "COMMIT",  min_width: 7,  requires_inspection: true },
-    Column { name: "status",  header: "STATUS",  min_width: 7,  requires_inspection: true },
-    Column { name: "profile", header: "PROFILE", min_width: 8,  requires_inspection: false },
-    Column { name: "server",  header: "SERVER",  min_width: 10, requires_inspection: false },
-    Column { name: "org",     header: "ORG",     min_width: 10, requires_inspection: false },
-    Column { name: "remote",  header: "REMOTE",  min_width: 30, requires_inspection: true },
+    Column {
+        name: "name",
+        header: "NAME",
+        min_width: 20,
+        requires_inspection: false,
+    },
+    Column {
+        name: "branch",
+        header: "BRANCH",
+        min_width: 14,
+        requires_inspection: true,
+    },
+    Column {
+        name: "commit",
+        header: "COMMIT",
+        min_width: 7,
+        requires_inspection: true,
+    },
+    Column {
+        name: "status",
+        header: "STATUS",
+        min_width: 7,
+        requires_inspection: true,
+    },
+    Column {
+        name: "profile",
+        header: "PROFILE",
+        min_width: 8,
+        requires_inspection: false,
+    },
+    Column {
+        name: "server",
+        header: "SERVER",
+        min_width: 10,
+        requires_inspection: false,
+    },
+    Column {
+        name: "org",
+        header: "ORG",
+        min_width: 10,
+        requires_inspection: false,
+    },
+    Column {
+        name: "remote",
+        header: "REMOTE",
+        min_width: 30,
+        requires_inspection: true,
+    },
 ];
 
 /// Default column set for interactive table output.
@@ -71,7 +111,11 @@ pub fn extract_field(
     column: &str,
 ) -> Option<String> {
     match column {
-        "name" => ws.coordinate.kind().repository_name().map(|r| r.as_str().to_string()),
+        "name" => ws
+            .coordinate
+            .kind()
+            .repository_name()
+            .map(|r| r.as_str().to_string()),
         "branch" => inspection.and_then(|i| i.branch.value().cloned()),
         "commit" => inspection.and_then(|i| i.head_short.value().cloned()),
         "status" => inspection
@@ -142,10 +186,7 @@ pub struct WorkspaceRecord {
 impl WorkspaceRecord {
     /// Build a record from discovery and optional inspection results.
     #[must_use]
-    pub fn from_workspace(
-        ws: &DiscoveredWorkspace,
-        inspection: Option<&InspectionResult>,
-    ) -> Self {
+    pub fn from_workspace(ws: &DiscoveredWorkspace, inspection: Option<&InspectionResult>) -> Self {
         let kind_str = if ws.coordinate.kind().is_cloneable() {
             "repository"
         } else {
@@ -231,7 +272,9 @@ mod tests {
     }
 
     fn test_workspace() -> DiscoveredWorkspace {
-        use core_workspace_types::{GitHost, NamespacePath, RepositoryName, WorkspaceCoordinate, WorkspaceKind};
+        use core_workspace_types::{
+            GitHost, NamespacePath, RepositoryName, WorkspaceCoordinate, WorkspaceKind,
+        };
         DiscoveredWorkspace {
             path: std::path::PathBuf::from("/workspace/user/github.com/org/repo"),
             coordinate: WorkspaceCoordinate::new(
@@ -266,7 +309,10 @@ mod tests {
     fn extract_branch_with_inspection() {
         let ws = test_workspace();
         let insp = test_inspection();
-        assert_eq!(extract_field(&ws, Some(&insp), "branch"), Some("main".into()));
+        assert_eq!(
+            extract_field(&ws, Some(&insp), "branch"),
+            Some("main".into())
+        );
     }
 
     #[test]
@@ -279,7 +325,10 @@ mod tests {
     fn extract_status() {
         let ws = test_workspace();
         let insp = test_inspection();
-        assert_eq!(extract_field(&ws, Some(&insp), "status"), Some("clean".into()));
+        assert_eq!(
+            extract_field(&ws, Some(&insp), "status"),
+            Some("clean".into())
+        );
     }
 
     #[test]
@@ -298,7 +347,10 @@ mod tests {
     #[test]
     fn extract_server() {
         let ws = test_workspace();
-        assert_eq!(extract_field(&ws, None, "server"), Some("github.com".into()));
+        assert_eq!(
+            extract_field(&ws, None, "server"),
+            Some("github.com".into())
+        );
     }
 
     #[test]

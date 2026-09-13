@@ -20,7 +20,9 @@ pub mod platform;
 pub mod pool;
 pub mod progress;
 
-pub use config::{ConfigProvenance, EffectiveWorkspaceConfig, WorkspaceLayout, resolve_workspace_profile};
+pub use config::{
+    ConfigProvenance, EffectiveWorkspaceConfig, WorkspaceLayout, resolve_workspace_profile,
+};
 pub use convention::{CloneInput, ParsedPath};
 pub use discover::DiscoveredWorkspace;
 pub use inspection::{

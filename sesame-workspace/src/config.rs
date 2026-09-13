@@ -41,7 +41,6 @@ impl WorkspaceLayout {
     }
 }
 
-
 /// Resolve the linked profile for a workspace path.
 ///
 /// Resolution order:

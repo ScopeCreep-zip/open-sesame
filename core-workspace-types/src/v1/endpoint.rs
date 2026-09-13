@@ -145,12 +145,7 @@ mod tests {
 
     #[test]
     fn https_custom_port() {
-        let ep = RemoteEndpoint::new(
-            github_identity(),
-            GitTransport::Https,
-            Some(8443),
-            None,
-        );
+        let ep = RemoteEndpoint::new(github_identity(), GitTransport::Https, Some(8443), None);
         assert_eq!(
             ep.to_url(),
             "https://github.com:8443/braincraftio/konductor"
@@ -160,10 +155,7 @@ mod tests {
     #[test]
     fn ssh_default_port() {
         let ep = RemoteEndpoint::ssh(github_identity());
-        assert_eq!(
-            ep.to_url(),
-            "git@github.com:braincraftio/konductor.git"
-        );
+        assert_eq!(ep.to_url(), "git@github.com:braincraftio/konductor.git");
     }
 
     #[test]
@@ -188,10 +180,7 @@ mod tests {
             None,
             Some("deploy".into()),
         );
-        assert_eq!(
-            ep.to_url(),
-            "deploy@github.com:braincraftio/konductor.git"
-        );
+        assert_eq!(ep.to_url(), "deploy@github.com:braincraftio/konductor.git");
     }
 
     #[test]
@@ -224,10 +213,7 @@ mod tests {
             RepositoryName::new("project").unwrap(),
         );
         let ep = RemoteEndpoint::https(id);
-        assert_eq!(
-            ep.to_url(),
-            "https://gitlab.com/group/subgroup/project"
-        );
+        assert_eq!(ep.to_url(), "https://gitlab.com/group/subgroup/project");
     }
 
     #[test]
@@ -238,10 +224,7 @@ mod tests {
             RepositoryName::new("project").unwrap(),
         );
         let ep = RemoteEndpoint::ssh(id);
-        assert_eq!(
-            ep.to_url(),
-            "git@gitlab.com:group/subgroup/project.git"
-        );
+        assert_eq!(ep.to_url(), "git@gitlab.com:group/subgroup/project.git");
     }
 
     #[test]

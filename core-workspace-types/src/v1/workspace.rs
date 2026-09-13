@@ -243,10 +243,7 @@ mod tests {
 
     #[test]
     fn display_organization() {
-        assert_eq!(
-            github_org().to_string(),
-            "github.com/braincraftio"
-        );
+        assert_eq!(github_org().to_string(), "github.com/braincraftio");
     }
 
     #[test]

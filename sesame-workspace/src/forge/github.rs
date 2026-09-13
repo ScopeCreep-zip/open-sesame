@@ -14,8 +14,8 @@ impl GitHub {
         let policy = crate::net::ProxyPolicy::from_env();
         let decision = policy.for_target("https://api.github.com");
 
-        let mut builder = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)));
+        let mut builder =
+            ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30)));
 
         match &decision {
             crate::net::ProxyDecision::Proxy(endpoint) => {
