@@ -22,7 +22,7 @@
 //! # Panic safety
 //!
 //! Each job is wrapped in [`std::panic::catch_unwind`] inside
-//! [`inspect_one_job`]. A panicking `inspect()` call produces an
+//! `inspect_one_job`. A panicking `inspect()` call produces an
 //! `Err(InspectError)` for that job; the worker continues processing
 //! subsequent jobs. This prevents [`std::thread::scope`] from discarding
 //! all collected results when a single repo triggers a panic in gitoxide.

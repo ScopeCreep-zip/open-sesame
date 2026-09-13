@@ -11,11 +11,11 @@
 //!
 //! # Architecture
 //!
-//! Each metadata field is a struct implementing [`FieldInspector`].
+//! Each metadata field is a struct implementing `FieldInspector`.
 //! The [`inspect`] function opens the repository once, then runs
 //! each requested inspector in dependency order against the shared
 //! handle. Adding a new field requires one struct, one trait impl,
-//! and one entry in [`INSPECTORS`]. The `inspect` function does not
+//! and one entry in `INSPECTORS`. The `inspect` function does not
 //! change.
 
 use std::fmt;
@@ -467,7 +467,7 @@ impl FieldInspector for AheadBehindInspector {
 /// requested metadata fields.
 ///
 /// Opens the repository once via gix, then runs each requested
-/// [`FieldInspector`] in dependency order against the shared handle.
+/// `FieldInspector` in dependency order against the shared handle.
 /// The request is expanded to include implicit dependencies before
 /// inspection begins.
 ///
