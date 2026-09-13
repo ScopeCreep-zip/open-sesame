@@ -1,0 +1,24 @@
+# Open Sesame container verification environment
+#
+# 3 distro flavors x install profiles (repo, local, source for ubuntu).
+# Each container runs systemd as PID 1 with full user manager, ssh-agent,
+# and sesame-init for non-interactive vault creation.
+#
+# Usage:
+#   docker compose up -d arch-repo        # start one service
+#   docker compose up -d                  # start all services
+#   docker compose down -v                # stop all + remove volumes
+#
+# Package installation happens via docker exec after container start.
+# Repo profiles install open-sesame (headless). Desktop requires a Wayland
+# compositor and /dev/input; add open-sesame-desktop via docker exec when needed.
+# See mise tasks: test:docker:{ubuntu,fedora,arch}:{repo,local} and test:docker:ubuntu:source
+
+include:
+  - path: .config/docker/compose/ubuntu-repo.yml
+  - path: .config/docker/compose/ubuntu-local.yml
+  - path: .config/docker/compose/ubuntu-source.yml
+  - path: .config/docker/compose/fedora-repo.yml
+  - path: .config/docker/compose/fedora-local.yml
+  - path: .config/docker/compose/arch-repo.yml
+  - path: .config/docker/compose/arch-local.yml

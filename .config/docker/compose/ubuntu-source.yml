@@ -1,0 +1,32 @@
+# Ubuntu -- headless from source
+#
+# mise run test:docker:ubuntu:source
+
+services:
+  ubuntu-source:
+    build:
+      context: ../../..
+      dockerfile: .config/docker/Dockerfile.ubuntu
+      target: source
+    container_name: open-sesame-ubuntu-source
+    hostname: ubuntu-source
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - ubuntu-source-config:/home/ubuntu/.config/pds
+      - ubuntu-source-cache:/home/ubuntu/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+volumes:
+  ubuntu-source-config:
+    driver: local
+  ubuntu-source-cache:
+    driver: local

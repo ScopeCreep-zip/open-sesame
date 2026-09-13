@@ -344,6 +344,20 @@ pub(crate) enum WorkspaceCmd {
         #[arg(short, long)]
         profile: Option<String>,
 
+        /// Filter by repository name (substring match).
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Show only dirty (uncommitted changes) repositories.
+        #[arg(long)]
+        dirty: bool,
+
+        /// Columns to display (comma-separated).
+        /// Available: name,branch,commit,status,profile,server,org,remote.
+        /// Default: name,branch,commit,status,profile.
+        #[arg(short = 'o', long)]
+        columns: Option<String>,
+
         /// Output format.
         #[arg(short, long, default_value = "table")]
         format: WorkspaceListFormat,

@@ -1,6 +1,8 @@
-# %postinst for open-sesame-desktop — deb
+# %postinst for open-sesame-desktop -- deb
 case "$1" in
     configure)
+        sesame_require_systemd
+
         systemctl --global enable \
             open-sesame-wm.service \
             open-sesame-clipboard.service \
@@ -8,28 +10,16 @@ case "$1" in
             open-sesame-desktop.target \
             2>/dev/null || true
 
-        reload_user_managers
-
-        for uid in $(active_user_uids); do
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                restart open-sesame-wm.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                restart open-sesame-clipboard.service 2>/dev/null || true
-            SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" systemctl --user -M "$uid@" \
-                restart open-sesame-input.service 2>/dev/null || true
+        for uid in $(sesame_active_user_uids); do
+            sesame_user_systemctl "$uid" daemon-reload
+            sesame_user_systemctl "$uid" restart open-sesame-wm.service
+            sesame_user_systemctl "$uid" restart open-sesame-clipboard.service
+            sesame_user_systemctl "$uid" restart open-sesame-input.service
         done
 
         echo ""
-        echo "open-sesame-desktop installed!"
-        echo "  Desktop daemons enabled: window manager, clipboard, input"
-        echo ""
-        echo "Verify services:"
-        echo "  sesame status"
-        echo "  systemctl --user list-units 'open-sesame-*'"
-        echo ""
-        echo "NOTE: daemon-input requires 'input' group membership for keyboard capture."
-        echo "  sudo usermod -aG input \$USER"
-        echo "  (logout and login required)"
+        echo ":: open-sesame-desktop installed"
+        echo "   Enable services: systemctl --user enable --now open-sesame-desktop.target"
         echo ""
         #DEBHELPER#
         ;;

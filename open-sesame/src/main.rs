@@ -34,6 +34,18 @@ use cli::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Initialize tracing subscriber for CLI commands.
+    // Controlled by RUST_LOG env var (default: off for CLI, info for daemons).
+    // Enables tracing instrumentation in workspace inspection, IPC, etc.
+    if std::env::var("RUST_LOG").is_ok() {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+
     let cli = Cli::parse();
 
     if let Err(e) = run(cli).await {
@@ -189,7 +201,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             include_forks,
             include_archived,
         } => {
-            // Top-level clone delegates to workspace clone with sane defaults.
             workspace::cmd_workspace(WorkspaceCmd::Clone {
                 url,
                 depth,

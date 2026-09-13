@@ -1,0 +1,32 @@
+# Arch -- install from GitHub Pages pacman repository
+#
+# docker compose up -d arch-repo
+# docker exec --user arch open-sesame-arch-repo sesame status --doctor --exit-code
+
+services:
+  arch-repo:
+    build:
+      context: ../../..
+      dockerfile: .config/docker/Dockerfile.arch
+    container_name: open-sesame-arch-repo
+    hostname: arch-repo
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - arch-repo-config:/home/arch/.config/pds
+      - arch-repo-cache:/home/arch/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+volumes:
+  arch-repo-config:
+    driver: local
+  arch-repo-cache:
+    driver: local

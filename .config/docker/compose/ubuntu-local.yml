@@ -1,0 +1,35 @@
+# Ubuntu -- install from locally prebuilt .deb packages
+#
+# Requires: mise run build:deb (produces target/debian/*.deb)
+#
+# docker compose up -d ubuntu-local
+# docker exec --user ubuntu open-sesame-ubuntu-local sesame status --doctor --exit-code
+
+services:
+  ubuntu-local:
+    build:
+      context: ../../..
+      dockerfile: .config/docker/Dockerfile.ubuntu
+    container_name: open-sesame-ubuntu-local
+    hostname: ubuntu-local
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - ../../../target/debian:/packages:ro
+      - ubuntu-local-config:/home/ubuntu/.config/pds
+      - ubuntu-local-cache:/home/ubuntu/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+volumes:
+  ubuntu-local-config:
+    driver: local
+  ubuntu-local-cache:
+    driver: local

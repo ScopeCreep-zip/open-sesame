@@ -1,0 +1,20 @@
+[Unit]
+Description=Open Sesame identity initialization (first boot only)
+After=ssh-agent.service open-sesame-profile.service
+Requires=ssh-agent.service
+ConditionPathExists=/usr/bin/sesame
+ConditionPathExists=!%h/.config/pds/installation.toml
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=oneshot
+Environment=SSH_AUTH_SOCK=%t/ssh-agent.sock
+ExecStart=/usr/local/bin/sesame-init.sh
+RemainAfterExit=yes
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

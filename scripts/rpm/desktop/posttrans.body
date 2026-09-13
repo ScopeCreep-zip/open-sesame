@@ -1,4 +1,7 @@
-# %posttrans scriptlet for open-sesame-desktop
+# %posttrans for open-sesame-desktop
+# Two-phase restart: mark units, then file triggers call enqueue-marked.
+
+sesame_require_systemd
 
 if [ -x /usr/lib/systemd/systemd-update-helper ]; then
     /usr/lib/systemd/systemd-update-helper mark-restart-user-units \

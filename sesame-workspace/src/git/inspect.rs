@@ -4,19 +4,25 @@ use std::path::Path;
 
 use crate::WorkspaceError;
 
-/// Check if a path is a git repository.
+/// Check if a path contains a git repository.
+///
+/// Returns true if the path has a .git directory (checked without
+/// following symlinks on Linux) or a .git file (git worktree pointer).
 #[must_use]
 pub fn is_git_repo(path: &Path) -> bool {
-    path.join(".git").exists()
+    crate::has_git_dir(path) || path.join(".git").is_file()
 }
 
 /// Get the remote URL for a git repository (origin).
+///
+/// Returns `Ok(None)` if the path does not contain a git repository
+/// or if the repository has no origin remote configured.
 ///
 /// # Errors
 ///
 /// Returns `WorkspaceError::GitError` if the repository cannot be opened.
 pub fn remote_url(path: &Path) -> Result<Option<String>, WorkspaceError> {
-    if !path.join(".git").is_dir() && !path.join(".git").is_file() {
+    if !is_git_repo(path) {
         return Ok(None);
     }
 

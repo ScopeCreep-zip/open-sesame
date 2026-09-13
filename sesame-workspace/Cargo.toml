@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 core-config.workspace = true
 core-types.workspace = true
+core-workspace-types.workspace = true
 serde.workspace = true
 toml.workspace = true
 dirs.workspace = true
@@ -18,6 +19,7 @@ git2.workspace = true
 ureq.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+crossbeam-channel.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }

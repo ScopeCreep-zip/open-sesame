@@ -16,7 +16,10 @@ pub use crate::schema_installation::{InstallationConfig, MachineBindingConfig, O
 pub use crate::schema_peripheral::{AuditConfig, ClipboardConfig, InputConfig, LauncherConfig};
 pub use crate::schema_secrets::{AuthConfig, SecretsConfig};
 pub use crate::schema_wm::{LaunchProfile, WmConfig, WmKeyBinding};
-pub use crate::schema_workspace::{LocalSesameConfig, WorkspaceConfig, WorkspaceSettings};
+pub use crate::schema_workspace::{
+    LocalSesameConfig, WorkspaceAutoMode, WorkspaceConfig, WorkspaceConfigFragment,
+    WorkspaceSettings, WorkspaceSettingsOverride,
+};
 
 /// Top-level PDS configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

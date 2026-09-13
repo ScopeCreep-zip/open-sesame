@@ -1,7 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-export SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock
+# SSH_AUTH_SOCK is set by either:
+#   - sesame-init.service Environment=SSH_AUTH_SOCK=%t/ssh-agent.sock (systemd path)
+#   - Dockerfile ENV SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock (docker exec path)
+: "${SSH_AUTH_SOCK:?SSH_AUTH_SOCK must be set by the systemd unit or Docker ENV}"
+export SSH_AUTH_SOCK
 
 echo "Waiting for daemon-profile..."
 MAX_WAIT=30

@@ -10,24 +10,35 @@ use core_config::{LocalSesameConfig, WorkspaceConfig};
 
 use crate::WorkspaceError;
 
-/// Resolve the workspace root directory.
+/// Resolved workspace layout: root directory and username.
 ///
-/// Priority (highest to lowest):
-/// 1. `SESAME_WORKSPACE_ROOT` env var
-/// 2. `config.settings.root`
-/// 3. Default `/workspace`
-#[must_use]
-pub fn resolve_root(config: &WorkspaceConfig) -> PathBuf {
-    if let Ok(env_root) = std::env::var("SESAME_WORKSPACE_ROOT") {
-        return PathBuf::from(env_root);
-    }
-    config.settings.root.clone()
+/// Constructed once from configuration and environment, then passed
+/// to every operation that needs workspace path construction.
+/// Environment variable resolution happens here, nowhere else.
+#[derive(Debug, Clone)]
+pub struct WorkspaceLayout {
+    pub root: PathBuf,
+    pub user: core_workspace_types::WorkspaceUser,
 }
 
-/// Resolve the username for workspace path construction.
-#[must_use]
-pub fn resolve_user(config: &WorkspaceConfig) -> String {
-    config.settings.user.clone()
+impl WorkspaceLayout {
+    /// Resolve the workspace layout from configuration and environment.
+    ///
+    /// Environment precedence for root:
+    /// 1. `SESAME_WORKSPACE_ROOT` env var
+    /// 2. `config.settings.root`
+    #[must_use]
+    pub fn resolve(config: &WorkspaceConfig) -> Self {
+        let root = if let Ok(env_root) = std::env::var("SESAME_WORKSPACE_ROOT") {
+            PathBuf::from(env_root)
+        } else {
+            config.settings.root.clone()
+        };
+        Self {
+            root,
+            user: config.settings.user.clone(),
+        }
+    }
 }
 
 /// Resolve the linked profile for a workspace path.
@@ -142,12 +153,12 @@ pub fn resolve_effective_config(
     }
 
     // Layer 2: Workspace .sesame.toml (org-level dir)
-    let conv = crate::convention::parse_path(root, path).ok();
-    if let Some(ref conv) = conv {
+    let parsed = crate::convention::parse_path(root, path).ok();
+    if let Some(ref parsed) = parsed {
         let workspace_dir = root
-            .join(&user_config.settings.user)
-            .join(&conv.server)
-            .join(&conv.org);
+            .join(user_config.settings.user.as_str())
+            .join(parsed.host.as_dir_name())
+            .join(parsed.namespace.as_path());
         if let Some(ws_config) = load_local_config(&workspace_dir)? {
             if let Some(ref p) = ws_config.profile {
                 result.profile = Some(p.clone());
@@ -244,7 +255,7 @@ mod tests {
     fn config_toml_roundtrip() {
         let mut config = WorkspaceConfig::default();
         config.settings.root = PathBuf::from("/mnt/workspace");
-        config.settings.user = "testuser".into();
+        config.settings.user = core_workspace_types::WorkspaceUser::new("testuser").unwrap();
         add_link(
             &mut config,
             "/mnt/workspace/testuser/github.com/org",
@@ -254,7 +265,7 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: WorkspaceConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.settings.root, PathBuf::from("/mnt/workspace"));
-        assert_eq!(parsed.settings.user, "testuser");
+        assert_eq!(parsed.settings.user.as_str(), "testuser");
         assert_eq!(
             parsed.links["/mnt/workspace/testuser/github.com/org"],
             "work"
@@ -308,7 +319,7 @@ mod tests {
 
         let mut user_config = WorkspaceConfig::default();
         user_config.settings.root = root.to_path_buf();
-        user_config.settings.user = "user".into();
+        user_config.settings.user = core_workspace_types::WorkspaceUser::new("user").unwrap();
         user_config
             .links
             .insert(repo_dir.display().to_string(), "user-link-profile".into());
@@ -336,7 +347,7 @@ mod tests {
 
         let mut user_config = WorkspaceConfig::default();
         user_config.settings.root = root.to_path_buf();
-        user_config.settings.user = "user".into();
+        user_config.settings.user = core_workspace_types::WorkspaceUser::new("user").unwrap();
         user_config
             .links
             .insert(repo_dir.display().to_string(), "linked-profile".into());

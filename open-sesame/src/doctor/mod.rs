@@ -5,6 +5,7 @@
 
 mod daemon;
 mod memory;
+mod network;
 mod platform;
 mod sandbox;
 
@@ -44,7 +45,7 @@ impl std::fmt::Display for Status {
 }
 
 /// Known check categories.
-const ALL_CATEGORIES: &[&str] = &["daemon", "memory", "sandbox", "platform"];
+const ALL_CATEGORIES: &[&str] = &["daemon", "memory", "network", "sandbox", "platform"];
 
 /// Run diagnostic checks and produce output.
 pub fn cmd_doctor(
@@ -65,6 +66,7 @@ pub fn cmd_doctor(
         match *cat {
             "daemon" => checks.extend(daemon::checks()),
             "memory" => checks.extend(memory::checks()),
+            "network" => checks.extend(network::checks()),
             "sandbox" => checks.extend(sandbox::checks()),
             "platform" => checks.extend(platform::checks()),
             other => {

@@ -1,15 +1,21 @@
-# Open Sesame Arch Linux install verification — archlinux:latest with systemd
+# check=skip=SecretsUsedInArgOrEnv
+# Open Sesame base environment -- Arch Linux with systemd
 #
 # x86_64 only (official archlinux image does not support aarch64).
 #
-# Shell:  docker exec -it --user testuser open-sesame-arch bash
-# Verify: docker exec --user testuser open-sesame-arch sesame --version
-# Status: docker exec --user testuser open-sesame-arch sesame status
+# Base image only. Package installation happens via docker exec after
+# the container is running. See compose profiles for install methods:
+#   source: cargo build from mounted repo
+#   local:  pacman -U from mounted prebuilt packages
+#   repo:   pacman -Syu from GitHub Pages pacman repository
+#
+# Shell:  docker exec -it --user arch open-sesame-arch bash
+# Verify: docker exec --user arch open-sesame-arch sesame status --doctor --exit-code
 
 FROM archlinux:latest
 
-ARG VERSION
-ARG ARCH=x86_64
+ARG USERNAME=arch
+ARG USER_UID=1000
 
 # =============================================================================
 # System packages
@@ -24,6 +30,7 @@ RUN pacman -Syu --noconfirm \
 
 # =============================================================================
 # systemd configuration for container environment
+# Note: systemd-logind is NOT masked -- required for pam_systemd
 # =============================================================================
 RUN systemctl mask \
     getty.target \
@@ -48,49 +55,45 @@ RUN systemctl set-default multi-user.target
 COPY .config/docker/data/common/etc/pam.d/systemd-user /etc/pam.d/systemd-user
 
 # =============================================================================
-# Create testuser with linger
+# Create user with linger
 # =============================================================================
-RUN useradd -m -s /bin/bash -u 1000 -G wheel testuser \
-    && echo "testuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/testuser \
-    && chmod 0440 /etc/sudoers.d/testuser
+RUN useradd -m -s /bin/bash -u ${USER_UID} -G wheel ${USERNAME} \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} \
+    && chmod 0440 /etc/sudoers.d/${USERNAME}
 
 RUN mkdir -p \
-      /home/testuser/.config/pds \
-      /home/testuser/.cache/open-sesame \
-      /home/testuser/.ssh \
-    && chown -R testuser:testuser /home/testuser \
+      /home/${USERNAME}/.config/pds \
+      /home/${USERNAME}/.cache/open-sesame \
+      /home/${USERNAME}/.ssh \
+    && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME} \
     && mkdir -p /var/lib/systemd/linger \
-    && touch /var/lib/systemd/linger/testuser
+    && touch /var/lib/systemd/linger/${USERNAME}
 
 # =============================================================================
-# SSH agent and sesame-init services
-# Uses Fedora's per-distro systemd units (both use 'testuser' at UID 1000).
-# sesame-init.sh is shared across all distros from data/common/.
+# Initialize pacman keyring (required for signed repo installs)
 # =============================================================================
-COPY .config/docker/data/fedora/etc/systemd/system/ssh-agent.service /etc/systemd/system/ssh-agent.service
-COPY .config/docker/data/fedora/etc/systemd/system/sesame-init.service /etc/systemd/system/sesame-init.service
+RUN pacman-key --init
+
+# =============================================================================
+# Container-specific user units (ssh-agent, sesame-init)
+# =============================================================================
+COPY .config/docker/data/common/etc/systemd/user/ssh-agent.service /usr/lib/systemd/user/ssh-agent.service
+COPY .config/docker/data/common/etc/systemd/user/sesame-init.service /usr/lib/systemd/user/sesame-init.service
 COPY .config/docker/data/common/usr/local/bin/sesame-init.sh /usr/local/bin/sesame-init.sh
-RUN chmod 755 /usr/local/bin/sesame-init.sh \
-    && mkdir -p /run/user/1000 \
-    && chown testuser:testuser /run/user/1000 \
-    && systemctl enable ssh-agent.service sesame-init.service
-
-# =============================================================================
-# Install open-sesame from GitHub Releases (.pkg.tar.zst)
-# =============================================================================
-RUN curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-bin-${VERSION}-1-${ARCH}.pkg.tar.zst" -o /tmp/open-sesame.pkg.tar.zst \
-    && curl -fsSL "https://github.com/ScopeCreep-zip/open-sesame/releases/download/v${VERSION}/open-sesame-desktop-bin-${VERSION}-1-${ARCH}.pkg.tar.zst" -o /tmp/open-sesame-desktop.pkg.tar.zst \
-    && pacman -U --noconfirm /tmp/open-sesame.pkg.tar.zst /tmp/open-sesame-desktop.pkg.tar.zst \
-    && rm /tmp/*.pkg.tar.zst
+COPY scripts/docker/post-install.sh /usr/local/bin/post-install.sh
+COPY scripts/docker/install-arch-repo.sh /usr/local/bin/install-repo.sh
+COPY scripts/docker/install-arch-local.sh /usr/local/bin/install-local.sh
+RUN chmod 755 /usr/local/bin/sesame-init.sh /usr/local/bin/post-install.sh \
+    && systemctl --global enable ssh-agent.service sesame-init.service
 
 # =============================================================================
 # Runtime environment
 # =============================================================================
-ENV HOME=/home/testuser
-ENV XDG_RUNTIME_DIR=/run/user/1000
-ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-ENV SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock
+ENV HOME=/home/${USERNAME}
+ENV XDG_RUNTIME_DIR=/run/user/${USER_UID}
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_UID}/bus
+ENV SSH_AUTH_SOCK=/run/user/${USER_UID}/ssh-agent.sock
 
-WORKDIR /home/testuser
+WORKDIR /home/${USERNAME}
 STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/lib/systemd/systemd"]

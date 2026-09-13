@@ -18,6 +18,27 @@ pub(crate) async fn sigterm() {
     }
 }
 
+/// Register a SIGHUP handler (required for Type=notify-reload).
+///
+/// systemd verifies a SIGHUP handler is installed before the first READY=1
+/// notification. Without it, systemd aborts the service startup with
+/// SERVICE_FAILURE_PROTOCOL. The handler must be registered before
+/// `notify_ready()` is called.
+///
+/// For daemon-profile's self-initiated reload pattern (config watcher detects
+/// installation.toml, sends RELOADING=1/READY=1 without systemd sending
+/// SIGHUP), the handler consumes and discards any SIGHUP that systemd might
+/// send via `systemctl reload`. The actual reload logic is driven by the
+/// config watcher, not by SIGHUP.
+///
+/// Returns the signal stream so the caller can select! on it in the event
+/// loop if needed.
+#[cfg(unix)]
+pub(crate) fn register_sighup() -> tokio::signal::unix::Signal {
+    use tokio::signal::unix::{SignalKind, signal};
+    signal(SignalKind::hangup()).expect("failed to register SIGHUP handler")
+}
+
 /// Apply Landlock + seccomp sandbox (Linux only).
 ///
 /// Ensures all Landlock target directories exist before opening PathFd handles.

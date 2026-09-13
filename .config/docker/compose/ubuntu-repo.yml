@@ -1,0 +1,32 @@
+# Ubuntu -- install from GitHub Pages APT repository
+#
+# docker compose up -d ubuntu-repo
+# docker exec --user ubuntu open-sesame-ubuntu-repo sesame status --doctor --exit-code
+
+services:
+  ubuntu-repo:
+    build:
+      context: ../../..
+      dockerfile: .config/docker/Dockerfile.ubuntu
+    container_name: open-sesame-ubuntu-repo
+    hostname: ubuntu-repo
+    init: false
+    restart: unless-stopped
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 15s
+    privileged: true
+    environment:
+      container: docker
+    volumes:
+      - ubuntu-repo-config:/home/ubuntu/.config/pds
+      - ubuntu-repo-cache:/home/ubuntu/.cache/open-sesame
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:exec,mode=755
+      - /tmp:exec,mode=1777
+
+volumes:
+  ubuntu-repo-config:
+    driver: local
+  ubuntu-repo-cache:
+    driver: local
