@@ -80,8 +80,8 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
     outputHashes = {
       # Required by Cargo.lock even though headless doesn't build these crates.
-      "cosmic-client-toolkit-0.2.0" = "sha256-hqsOzu0mlkE2jtgL5HvbT9vtOKiMSniNwV+xk4UzTkc=";
-      "cosmic-protocols-0.2.0" = "sha256-hqsOzu0mlkE2jtgL5HvbT9vtOKiMSniNwV+xk4UzTkc=";
+      "cosmic-client-toolkit-0.2.0" = "sha256-FL2YkCVrJ6JWUGMDg+jJJa51oar/PWDfgPgCyjcv6gk=";
+      "cosmic-protocols-0.2.0" = "sha256-FL2YkCVrJ6JWUGMDg+jJJa51oar/PWDfgPgCyjcv6gk=";
       "atomicwrites-0.4.2" = "sha256-QZSuGPrJXh+svMeFWqAXoqZQxLq/WfIiamqvjJNVhxA=";
       "cosmic-theme-1.0.0" = "sha256-xO92nOzovgOnzvPshIDImlzpCB6W7pLGVzhxN4D9O/k=";
       "smithay-clipboard-0.8.0" = "sha256-GojAFRbhJcP0Rpr+v9WOivgW9x38PZdeBWTbMhkDB3A=";
