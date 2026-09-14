@@ -109,6 +109,9 @@ nucleo          = { git = "https://github.com/helix-editor/nucleo.git", rev = "4
 # -- Parallel workspace inspection --
 crossbeam-channel   = "0.5"
 
+# -- Parallel filesystem traversal (disk usage) --
+dua-core            = "4"
+
 # -- Config --
 notify          = "8"
 dirs            = "6"

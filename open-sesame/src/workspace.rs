@@ -464,9 +464,17 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             profile,
             repo,
             dirty,
+            stale,
             columns,
             format,
         } => {
+            let stale_seconds = match &stale {
+                Some(s) => Some(
+                    sesame_workspace::parse_stale_duration(s)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                ),
+                None => None,
+            };
             let config =
                 core_config::load_workspace_config().map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut workspaces = sesame_workspace::discover::discover_workspaces(&config)
@@ -507,6 +515,9 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                     if dirty {
                         req.status = true;
                     }
+                    if stale_seconds.is_some() {
+                        req.head_date = true;
+                    }
                     req
                 }
             };
@@ -519,7 +530,9 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
             let needs_insp = match format {
                 WorkspaceListFormat::Json => true,
                 WorkspaceListFormat::Table => {
-                    sesame_workspace::format::needs_inspection(&active_columns) || dirty
+                    sesame_workspace::format::needs_inspection(&active_columns)
+                        || dirty
+                        || stale_seconds.is_some()
                 }
             };
 
@@ -598,6 +611,26 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                 });
             }
 
+            if let Some(threshold) = stale_seconds {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                workspaces.retain(|w| {
+                    if !w.coordinate.kind().is_cloneable() {
+                        return false;
+                    }
+                    inspections
+                        .get(&w.path)
+                        .and_then(|i| i.head_date.value().copied())
+                        .is_some_and(|epoch| {
+                            #[allow(clippy::cast_sign_loss)]
+                            let age = now.saturating_sub(epoch as u64);
+                            age > threshold
+                        })
+                });
+            }
+
             match format {
                 WorkspaceListFormat::Table => {
                     if workspaces.is_empty() {
@@ -634,22 +667,54 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                             total_repos += 1;
 
                             let insp = inspections.get(&ws.path);
-                            let fields: Vec<Option<String>> = active_columns
+                            let fields: Vec<sesame_workspace::format::FieldValue> = active_columns
                                 .iter()
                                 .map(|col| sesame_workspace::format::extract_field(ws, insp, col))
                                 .collect();
 
+                            let now_secs = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs());
+
                             let mut display_fields: Vec<String> = Vec::with_capacity(fields.len());
                             for (i, field) in fields.iter().enumerate() {
-                                let text = field.as_deref().unwrap_or("?");
+                                let text = field.display();
                                 let styled = match active_columns[i] {
                                     "status" if text == "clean" => text.green().to_string(),
-                                    "status" if text == "unknown" => text.red().to_string(),
-                                    "status" => text.yellow().to_string(),
+                                    "status" if text == "dirty" => text.yellow().to_string(),
+                                    "status" if text == "!" => text.red().to_string(),
                                     "commit" => text.dimmed().to_string(),
-                                    "profile" if text != "?" && !text.is_empty() => {
-                                        text.green().to_string()
+                                    "last_commit" => {
+                                        let age = insp
+                                            .and_then(|i| i.head_date.value().copied())
+                                            .map(|e| {
+                                                #[allow(clippy::cast_sign_loss)]
+                                                now_secs.saturating_sub(e as u64)
+                                            });
+                                        match age {
+                                            Some(s) if s > 90 * 86400 => text.red().to_string(),
+                                            Some(s) if s > 7 * 86400 => text.yellow().to_string(),
+                                            Some(_) => text.green().to_string(),
+                                            None => text.dimmed().to_string(),
+                                        }
                                     }
+                                    "upstream_date" => {
+                                        let age = insp
+                                            .and_then(|i| i.upstream_date.value().copied())
+                                            .map(|e| {
+                                                #[allow(clippy::cast_sign_loss)]
+                                                now_secs.saturating_sub(e as u64)
+                                            });
+                                        match age {
+                                            Some(s) if s > 90 * 86400 => text.red().to_string(),
+                                            Some(s) if s > 7 * 86400 => text.yellow().to_string(),
+                                            Some(_) => text.green().to_string(),
+                                            None => text.dimmed().to_string(),
+                                        }
+                                    }
+                                    "profile" if !text.is_empty() => text.green().to_string(),
+                                    _ if text == "!" => text.red().to_string(),
+                                    _ if text == "-" => text.dimmed().to_string(),
                                     _ => text.to_string(),
                                 };
                                 display_fields.push(styled);
@@ -659,12 +724,12 @@ pub(crate) async fn cmd_workspace(cmd: WorkspaceCmd) -> anyhow::Result<()> {
                                 .iter()
                                 .zip(display_fields.iter())
                                 .enumerate()
-                                .map(|(i, (raw, styled))| {
+                                .map(|(i, (fv, styled))| {
                                     let col_def = sesame_workspace::format::ALL_COLUMNS
                                         .iter()
                                         .find(|c| c.name == active_columns[i]);
-                                    let min_w = col_def.map(|c| c.min_width).unwrap_or(10);
-                                    let raw_len = raw.as_deref().unwrap_or("?").len();
+                                    let min_w = col_def.map_or(10, |c| c.min_width);
+                                    let raw_len = fv.display().len();
                                     let pad = min_w.saturating_sub(raw_len);
                                     format!("{styled}{:pad$}", "")
                                 })

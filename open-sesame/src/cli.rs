@@ -352,9 +352,17 @@ pub(crate) enum WorkspaceCmd {
         #[arg(long)]
         dirty: bool,
 
+        /// Show only repos with local HEAD older than duration.
+        /// Accepts: Nd (days), Nw (weeks), Nm (months), Ny (years).
+        /// Example: --stale 30d
+        #[arg(long)]
+        stale: Option<String>,
+
         /// Columns to display (comma-separated).
-        /// Available: name,branch,commit,status,profile,server,org,remote.
-        /// Default: name,branch,commit,status,profile.
+        ///
+        /// Default: name,branch,commit,profile
+        ///
+        /// Available: name,branch,commit,status,size,git_size,files,last_commit,upstream_date,profile,server,org,remote
         #[arg(short = 'o', long)]
         columns: Option<String>,
 

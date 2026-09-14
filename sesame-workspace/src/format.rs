@@ -7,7 +7,7 @@
 //! metadata. This module combines both into field values for display.
 
 use crate::discover::DiscoveredWorkspace;
-use crate::inspection::InspectionResult;
+use crate::inspection::{InspectionResult, format_bytes, format_relative_time};
 
 /// A named column definition for workspace list output.
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +49,36 @@ pub const ALL_COLUMNS: &[Column] = &[
         requires_inspection: true,
     },
     Column {
+        name: "size",
+        header: "SIZE",
+        min_width: 9,
+        requires_inspection: true,
+    },
+    Column {
+        name: "git_size",
+        header: "GIT",
+        min_width: 9,
+        requires_inspection: true,
+    },
+    Column {
+        name: "files",
+        header: "FILES",
+        min_width: 7,
+        requires_inspection: true,
+    },
+    Column {
+        name: "last_commit",
+        header: "LAST",
+        min_width: 6,
+        requires_inspection: true,
+    },
+    Column {
+        name: "upstream_date",
+        header: "UPSTREAM",
+        min_width: 6,
+        requires_inspection: true,
+    },
+    Column {
         name: "profile",
         header: "PROFILE",
         min_width: 8,
@@ -76,9 +106,9 @@ pub const ALL_COLUMNS: &[Column] = &[
 
 /// Default column set for interactive table output.
 ///
-/// Does not include status because it requires a full working tree
-/// walk per repository. Use `--columns name,branch,commit,status`
-/// to include it explicitly.
+/// Does not include status or disk usage because they require a full
+/// working tree walk per repository. Use `--columns` to include them
+/// explicitly.
 pub const DEFAULT_COLUMNS: &[&str] = &["name", "branch", "commit", "profile"];
 
 /// Determine what inspection fields the selected columns need.
@@ -91,41 +121,135 @@ pub fn inspection_request_for_columns(columns: &[&str]) -> crate::inspection::In
             "commit" => req.head = true,
             "status" => req.status = true,
             "remote" => req.remote = true,
+            "size" | "git_size" | "files" => req.disk_usage = true,
+            "last_commit" => {
+                req.head_date = true;
+                req.head = true;
+            }
+            "upstream_date" => req.upstream_date = true,
             _ => {}
         }
     }
     req
 }
 
+/// The result of extracting a field value for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    /// The field has a displayable value.
+    Present(String),
+    /// The field is legitimately empty (e.g. no profile linked).
+    Empty,
+    /// The field is legitimately absent (e.g. unborn HEAD, no
+    /// upstream tracking ref). Display as `-`.
+    Absent,
+    /// The field could not be read (inspection failed or data
+    /// unavailable). Display as `!`.
+    Failed,
+}
+
+impl FieldValue {
+    /// The display string for table output.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        match self {
+            Self::Present(s) => s,
+            Self::Empty => "",
+            Self::Absent => "-",
+            Self::Failed => "!",
+        }
+    }
+
+    /// The raw string for column width calculation and JSON.
+    /// Returns `None` for empty/absent/failed.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Present(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
 /// Extract a field value from a discovered workspace and its
 /// inspection result.
 ///
 /// Discovery fields (name, profile, server, org) come from
-/// `DiscoveredWorkspace`. Inspection fields (branch, commit, status,
-/// remote) come from `InspectionResult`. Missing inspection data
-/// produces `None`.
+/// `DiscoveredWorkspace`. Inspection fields (branch, commit,
+/// status, remote, size, `git_size`, files, `last_commit`,
+/// `upstream_date`) come from `InspectionResult`.
+///
+/// Returns a `FieldValue` that distinguishes present values
+/// from empty, absent, and failed states for appropriate
+/// rendering.
 #[must_use]
 pub fn extract_field(
     ws: &DiscoveredWorkspace,
     inspection: Option<&InspectionResult>,
     column: &str,
-) -> Option<String> {
+) -> FieldValue {
+    use crate::inspection::FieldState;
+
+    /// Convert a `FieldState<String>` to a `FieldValue`.
+    fn string_field(state: &FieldState<String>) -> FieldValue {
+        match state {
+            FieldState::Available(v) => FieldValue::Present(v.clone()),
+            FieldState::Absent | FieldState::NotRequested => FieldValue::Absent,
+            FieldState::Failed(_) => FieldValue::Failed,
+        }
+    }
+
     match column {
-        "name" => ws
-            .coordinate
-            .kind()
-            .repository_name()
-            .map(|r| r.as_str().to_string()),
-        "branch" => inspection.and_then(|i| i.branch.value().cloned()),
-        "commit" => inspection.and_then(|i| i.head_short.value().cloned()),
-        "status" => inspection
-            .and_then(|i| i.status.value())
-            .map(ToString::to_string),
-        "profile" => ws.linked_profile.clone(),
-        "server" => Some(ws.coordinate.host().to_string()),
-        "org" => Some(ws.coordinate.namespace().to_string()),
-        "remote" => inspection.and_then(|i| i.remote_url.value().cloned()),
-        _ => None,
+        "name" => match ws.coordinate.kind().repository_name() {
+            Some(r) => FieldValue::Present(r.as_str().to_string()),
+            None => FieldValue::Absent,
+        },
+        "branch" => match inspection {
+            Some(i) => string_field(&i.branch),
+            None => FieldValue::Absent,
+        },
+        "commit" => match inspection {
+            Some(i) => string_field(&i.head_short),
+            None => FieldValue::Absent,
+        },
+        "status" => match inspection.and_then(|i| i.status.value()) {
+            Some(s) => FieldValue::Present(s.to_string()),
+            None => match inspection {
+                Some(i) if matches!(i.status, FieldState::Failed(_)) => FieldValue::Failed,
+                _ => FieldValue::Absent,
+            },
+        },
+        "size" => match inspection.and_then(|i| i.disk_usage.value()) {
+            Some(du) => FieldValue::Present(format_bytes(du.total_bytes)),
+            None => FieldValue::Absent,
+        },
+        "git_size" => match inspection.and_then(|i| i.disk_usage.value()) {
+            Some(du) => FieldValue::Present(format_bytes(du.git_bytes)),
+            None => FieldValue::Absent,
+        },
+        "files" => match inspection.and_then(|i| i.disk_usage.value()) {
+            Some(du) => FieldValue::Present(du.file_count.to_string()),
+            None => FieldValue::Absent,
+        },
+        "last_commit" => match inspection.and_then(|i| i.head_date.value().copied()) {
+            Some(epoch) => FieldValue::Present(format_relative_time(epoch)),
+            None => FieldValue::Absent,
+        },
+        "upstream_date" => match inspection.and_then(|i| i.upstream_date.value().copied()) {
+            Some(epoch) => FieldValue::Present(format_relative_time(epoch)),
+            None => FieldValue::Absent,
+        },
+        "profile" => match &ws.linked_profile {
+            Some(p) => FieldValue::Present(p.clone()),
+            None => FieldValue::Empty,
+        },
+        "server" => FieldValue::Present(ws.coordinate.host().to_string()),
+        "org" => FieldValue::Present(ws.coordinate.namespace().to_string()),
+        "remote" => match inspection {
+            Some(i) => string_field(&i.remote_url),
+            None => FieldValue::Absent,
+        },
+        _ => FieldValue::Absent,
     }
 }
 
@@ -162,6 +286,9 @@ pub fn parse_columns(spec: &str) -> Result<Vec<&'static str>, String> {
 /// This struct defines the machine-readable output schema. Fields use
 /// `Option` to produce JSON `null` for absent values. The schema is
 /// independent of table column selection.
+///
+/// Disk usage fields emit raw bytes as integers for machine
+/// consumption. Table output uses `format_bytes` for human display.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkspaceRecord {
     pub path: String,
@@ -181,6 +308,16 @@ pub struct WorkspaceRecord {
     pub commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_date_epoch: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_date_epoch: Option<i64>,
 }
 
 impl WorkspaceRecord {
@@ -192,6 +329,7 @@ impl WorkspaceRecord {
         } else {
             "organization"
         };
+        let du = inspection.and_then(|i| i.disk_usage.value());
         Self {
             path: ws.path.display().to_string(),
             server: ws.coordinate.host().to_string(),
@@ -207,6 +345,11 @@ impl WorkspaceRecord {
             branch: inspection.and_then(|i| i.branch.value().cloned()),
             commit: inspection.and_then(|i| i.head_short.value().cloned()),
             status: inspection.and_then(|i| i.status.value().map(ToString::to_string)),
+            size_bytes: du.map(|d| d.total_bytes),
+            git_size_bytes: du.map(|d| d.git_bytes),
+            file_count: du.map(|d| d.file_count),
+            head_date_epoch: inspection.and_then(|i| i.head_date.value().copied()),
+            upstream_date_epoch: inspection.and_then(|i| i.upstream_date.value().copied()),
         }
     }
 }
@@ -230,6 +373,12 @@ mod tests {
     fn parse_columns_valid() {
         let cols = parse_columns("name,branch,commit").unwrap();
         assert_eq!(cols, vec!["name", "branch", "commit"]);
+    }
+
+    #[test]
+    fn parse_columns_with_disk_usage() {
+        let cols = parse_columns("name,size,git_size,files").unwrap();
+        assert_eq!(cols, vec!["name", "size", "git_size", "files"]);
     }
 
     #[test]
@@ -257,6 +406,14 @@ mod tests {
     }
 
     #[test]
+    fn needs_inspection_detects_disk_usage_columns() {
+        assert!(needs_inspection(&["size"]));
+        assert!(needs_inspection(&["git_size"]));
+        assert!(needs_inspection(&["files"]));
+        assert!(needs_inspection(&["name", "files"]));
+    }
+
+    #[test]
     fn default_columns_all_valid() {
         for col in DEFAULT_COLUMNS {
             assert!(
@@ -269,6 +426,13 @@ mod tests {
     #[test]
     fn default_columns_do_not_include_status() {
         assert!(!DEFAULT_COLUMNS.contains(&"status"));
+    }
+
+    #[test]
+    fn default_columns_do_not_include_disk_usage() {
+        assert!(!DEFAULT_COLUMNS.contains(&"size"));
+        assert!(!DEFAULT_COLUMNS.contains(&"git_size"));
+        assert!(!DEFAULT_COLUMNS.contains(&"files"));
     }
 
     fn test_workspace() -> DiscoveredWorkspace {
@@ -287,7 +451,7 @@ mod tests {
     }
 
     fn test_inspection() -> InspectionResult {
-        use crate::inspection::FieldState;
+        use crate::inspection::{DiskUsage, FieldState};
         InspectionResult {
             remote_url: FieldState::Available("https://github.com/org/repo".into()),
             branch: FieldState::Available("main".into()),
@@ -296,61 +460,90 @@ mod tests {
             status: FieldState::Available(crate::inspection::RepoStatus::Clean),
             upstream_short: FieldState::NotRequested,
             ahead_behind: FieldState::NotRequested,
+            disk_usage: FieldState::Available(DiskUsage {
+                total_bytes: 1_073_741_824, // 1 GiB
+                git_bytes: 536_870_912,     // 512 MiB
+                file_count: 12_345,
+            }),
+            head_date: FieldState::Available(1_725_321_600), // 2024-09-03
+            upstream_date: FieldState::Available(1_725_148_800), // 2024-09-01
         }
+    }
+
+    fn p(s: &str) -> FieldValue {
+        FieldValue::Present(s.into())
     }
 
     #[test]
     fn extract_name() {
         let ws = test_workspace();
-        assert_eq!(extract_field(&ws, None, "name"), Some("repo".into()));
+        assert_eq!(extract_field(&ws, None, "name"), p("repo"));
     }
 
     #[test]
     fn extract_branch_with_inspection() {
         let ws = test_workspace();
         let insp = test_inspection();
-        assert_eq!(
-            extract_field(&ws, Some(&insp), "branch"),
-            Some("main".into())
-        );
+        assert_eq!(extract_field(&ws, Some(&insp), "branch"), p("main"));
     }
 
     #[test]
     fn extract_branch_without_inspection() {
         let ws = test_workspace();
-        assert_eq!(extract_field(&ws, None, "branch"), None);
+        assert_eq!(extract_field(&ws, None, "branch"), FieldValue::Absent);
     }
 
     #[test]
     fn extract_status() {
         let ws = test_workspace();
         let insp = test_inspection();
-        assert_eq!(
-            extract_field(&ws, Some(&insp), "status"),
-            Some("clean".into())
-        );
+        assert_eq!(extract_field(&ws, Some(&insp), "status"), p("clean"));
+    }
+
+    #[test]
+    fn extract_size() {
+        let ws = test_workspace();
+        let insp = test_inspection();
+        assert_eq!(extract_field(&ws, Some(&insp), "size"), p("1.0 GiB"));
+    }
+
+    #[test]
+    fn extract_git_size() {
+        let ws = test_workspace();
+        let insp = test_inspection();
+        assert_eq!(extract_field(&ws, Some(&insp), "git_size"), p("512.0 MiB"));
+    }
+
+    #[test]
+    fn extract_files() {
+        let ws = test_workspace();
+        let insp = test_inspection();
+        assert_eq!(extract_field(&ws, Some(&insp), "files"), p("12345"));
+    }
+
+    #[test]
+    fn extract_size_without_inspection() {
+        let ws = test_workspace();
+        assert_eq!(extract_field(&ws, None, "size"), FieldValue::Absent);
     }
 
     #[test]
     fn extract_profile() {
         let ws = test_workspace();
-        assert_eq!(extract_field(&ws, None, "profile"), Some("work".into()));
+        assert_eq!(extract_field(&ws, None, "profile"), p("work"));
     }
 
     #[test]
-    fn extract_profile_absent() {
+    fn extract_profile_not_linked() {
         let mut ws = test_workspace();
         ws.linked_profile = None;
-        assert_eq!(extract_field(&ws, None, "profile"), None);
+        assert_eq!(extract_field(&ws, None, "profile"), FieldValue::Empty);
     }
 
     #[test]
     fn extract_server() {
         let ws = test_workspace();
-        assert_eq!(
-            extract_field(&ws, None, "server"),
-            Some("github.com".into())
-        );
+        assert_eq!(extract_field(&ws, None, "server"), p("github.com"));
     }
 
     #[test]
@@ -359,18 +552,18 @@ mod tests {
         let insp = test_inspection();
         assert_eq!(
             extract_field(&ws, Some(&insp), "remote"),
-            Some("https://github.com/org/repo".into())
+            p("https://github.com/org/repo")
         );
     }
 
     #[test]
     fn extract_unknown_column() {
         let ws = test_workspace();
-        assert_eq!(extract_field(&ws, None, "nonexistent"), None);
+        assert_eq!(extract_field(&ws, None, "nonexistent"), FieldValue::Absent);
     }
 
     #[test]
-    fn extract_org_name_is_none() {
+    fn extract_org_name_is_absent() {
         use core_workspace_types::{GitHost, NamespacePath, WorkspaceCoordinate, WorkspaceKind};
         let ws = DiscoveredWorkspace {
             path: std::path::PathBuf::from("/workspace/user/github.com/org"),
@@ -381,7 +574,30 @@ mod tests {
             ),
             linked_profile: None,
         };
-        assert_eq!(extract_field(&ws, None, "name"), None);
+        assert_eq!(extract_field(&ws, None, "name"), FieldValue::Absent);
+    }
+
+    #[test]
+    fn extract_last_commit() {
+        let ws = test_workspace();
+        let insp = test_inspection();
+        let val = extract_field(&ws, Some(&insp), "last_commit");
+        // Should be a relative time string, not empty.
+        assert!(matches!(val, FieldValue::Present(_)));
+    }
+
+    #[test]
+    fn extract_upstream_date() {
+        let ws = test_workspace();
+        let insp = test_inspection();
+        let val = extract_field(&ws, Some(&insp), "upstream_date");
+        assert!(matches!(val, FieldValue::Present(_)));
+    }
+
+    #[test]
+    fn extract_last_commit_without_inspection() {
+        let ws = test_workspace();
+        assert_eq!(extract_field(&ws, None, "last_commit"), FieldValue::Absent);
     }
 
     #[test]
@@ -391,6 +607,21 @@ mod tests {
         assert!(req.status);
         assert!(req.remote);
         assert!(!req.head);
+        assert!(!req.disk_usage);
+    }
+
+    #[test]
+    fn inspection_request_maps_disk_usage_columns() {
+        let req = inspection_request_for_columns(&["name", "size", "git_size", "files"]);
+        assert!(req.disk_usage);
+        assert!(!req.branch);
+        assert!(!req.status);
+    }
+
+    #[test]
+    fn inspection_request_single_disk_column_enables_disk_usage() {
+        let req = inspection_request_for_columns(&["files"]);
+        assert!(req.disk_usage);
     }
 
     #[test]
@@ -400,6 +631,7 @@ mod tests {
         assert!(!req.head);
         assert!(!req.status);
         assert!(!req.remote);
+        assert!(!req.disk_usage);
     }
 
     #[test]
@@ -411,11 +643,13 @@ mod tests {
         assert_eq!(json["repo"], "repo");
         assert_eq!(json["kind"], "repository");
         assert_eq!(json["profile"], "work");
-        // Inspection fields absent without inspection data.
         assert!(json.get("branch").is_none());
         assert!(json.get("commit").is_none());
         assert!(json.get("status").is_none());
         assert!(json.get("remote").is_none());
+        assert!(json.get("size_bytes").is_none());
+        assert!(json.get("git_size_bytes").is_none());
+        assert!(json.get("file_count").is_none());
     }
 
     #[test]
@@ -428,6 +662,9 @@ mod tests {
         assert_eq!(json["commit"], "abc1234");
         assert_eq!(json["status"], "clean");
         assert_eq!(json["remote"], "https://github.com/org/repo");
+        assert_eq!(json["size_bytes"], 1_073_741_824);
+        assert_eq!(json["git_size_bytes"], 536_870_912);
+        assert_eq!(json["file_count"], 12_345);
     }
 
     #[test]
