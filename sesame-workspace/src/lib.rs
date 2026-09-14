@@ -26,8 +26,8 @@ pub use config::{
 pub use convention::{CloneInput, ParsedPath};
 pub use discover::DiscoveredWorkspace;
 pub use inspection::{
-    FieldState, InspectionFailure, InspectionFailureKind, InspectionRequest, InspectionResult,
-    RepoStatus,
+    DiskUsage, FieldState, InspectionFailure, InspectionFailureKind, InspectionRequest,
+    InspectionResult, RepoStatus, format_bytes,
 };
 
 /// Check for a .git entry at the given path.

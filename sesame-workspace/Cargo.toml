@@ -20,6 +20,7 @@ ureq.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 crossbeam-channel.workspace = true
+dua-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }

@@ -353,8 +353,8 @@ pub(crate) enum WorkspaceCmd {
         dirty: bool,
 
         /// Columns to display (comma-separated).
-        /// Available: name,branch,commit,status,profile,server,org,remote.
-        /// Default: name,branch,commit,status,profile.
+        /// Default: name,branch,commit,profile.
+        /// Available: name,branch,commit,status,size,git_size,files,profile,server,org,remote.
         #[arg(short = 'o', long)]
         columns: Option<String>,
 

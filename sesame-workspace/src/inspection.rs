@@ -97,6 +97,8 @@ pub enum InspectionFailureKind {
     UpstreamRead,
     /// Could not traverse the commit graph.
     GraphTraversal,
+    /// Could not compute disk usage.
+    DiskUsage,
 }
 
 impl fmt::Display for InspectionFailureKind {
@@ -108,6 +110,7 @@ impl fmt::Display for InspectionFailureKind {
             Self::StatusRead => write!(f, "status read"),
             Self::UpstreamRead => write!(f, "upstream read"),
             Self::GraphTraversal => write!(f, "graph traversal"),
+            Self::DiskUsage => write!(f, "disk usage"),
         }
     }
 }
@@ -133,6 +136,26 @@ impl fmt::Display for RepoStatus {
 }
 
 // ============================================================================
+// DiskUsage
+// ============================================================================
+
+/// Disk usage breakdown for a repository.
+///
+/// Computed via parallel filesystem traversal using `dua-core`.
+/// All values are in bytes. The walker uses apparent size (logical
+/// file length) for cross-platform consistency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskUsage {
+    /// Total bytes across all files in the repository.
+    pub total_bytes: u64,
+    /// Bytes consumed by the `.git` directory (object store, refs,
+    /// index, hooks, etc.).
+    pub git_bytes: u64,
+    /// Total number of files (not directories) in the repository.
+    pub file_count: u64,
+}
+
+// ============================================================================
 // InspectionRequest
 // ============================================================================
 
@@ -150,6 +173,7 @@ pub struct InspectionRequest {
     pub status: bool,
     pub upstream: bool,
     pub ahead_behind: bool,
+    pub disk_usage: bool,
 }
 
 impl InspectionRequest {
@@ -164,6 +188,7 @@ impl InspectionRequest {
             status: true,
             upstream: true,
             ahead_behind: true,
+            disk_usage: true,
         }
     }
 
@@ -191,6 +216,7 @@ impl InspectionRequest {
             InspectorId::Status => self.status,
             InspectorId::Upstream => self.upstream,
             InspectorId::AheadBehind => self.ahead_behind,
+            InspectorId::DiskUsage => self.disk_usage,
         }
     }
 }
@@ -212,6 +238,7 @@ pub struct InspectionResult {
     pub status: FieldState<RepoStatus>,
     pub upstream_short: FieldState<String>,
     pub ahead_behind: FieldState<(usize, usize)>,
+    pub disk_usage: FieldState<DiskUsage>,
 }
 
 impl InspectionResult {
@@ -232,7 +259,8 @@ impl InspectionResult {
             head_summary: FieldState::Failed(failure.clone()),
             status: FieldState::Failed(failure.clone()),
             upstream_short: FieldState::Failed(failure.clone()),
-            ahead_behind: FieldState::Failed(failure),
+            ahead_behind: FieldState::Failed(failure.clone()),
+            disk_usage: FieldState::Failed(failure),
         }
     }
 }
@@ -247,6 +275,7 @@ impl Default for InspectionResult {
             status: FieldState::NotRequested,
             upstream_short: FieldState::NotRequested,
             ahead_behind: FieldState::NotRequested,
+            disk_usage: FieldState::NotRequested,
         }
     }
 }
@@ -265,6 +294,7 @@ enum InspectorId {
     Status,
     Upstream,
     AheadBehind,
+    DiskUsage,
 }
 
 /// A single metadata field inspector.
@@ -302,6 +332,7 @@ const INSPECTORS: &[&dyn FieldInspector] = &[
     &StatusInspector,
     &UpstreamInspector,    // depends on branch
     &AheadBehindInspector, // depends on head, upstream
+    &DiskUsageInspector,   // independent, runs last (most expensive)
 ];
 
 // ============================================================================
@@ -452,10 +483,76 @@ impl FieldInspector for AheadBehindInspector {
     /// determine whether computation is possible. Full graph
     /// traversal is not yet implemented.
     fn inspect(&self, _repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        // Requires both head and upstream to be available.
-        // Full implementation needs symmetric difference of the
-        // commit graphs. Report absent rather than fabricate values.
         result.ahead_behind = FieldState::Absent;
+    }
+}
+
+struct DiskUsageInspector;
+
+impl FieldInspector for DiskUsageInspector {
+    fn id(&self) -> InspectorId {
+        InspectorId::DiskUsage
+    }
+
+    /// Compute disk usage via `dua-core` parallel filesystem traversal.
+    ///
+    /// Uses `threads: 1` because each inspector already runs inside a
+    /// pool worker — the cross-repo parallelism is handled by the pool,
+    /// intra-repo parallelism would oversubscribe.
+    ///
+    /// Walks the entire repo directory once. Entries under `.git/` are
+    /// summed separately into `git_bytes`. Non-directory entries are
+    /// counted in `file_count`.
+    fn inspect(&self, _repo: &gix::Repository, path: &Path, result: &mut InspectionResult) {
+        let start = std::time::Instant::now();
+
+        let git_dir = path.join(".git");
+        let mut total_bytes: u64 = 0;
+        let mut git_bytes: u64 = 0;
+        let mut file_count: u64 = 0;
+
+        for entry in dua_core::walk(
+            path,
+            1, // single-threaded: pool provides cross-repo parallelism
+            dua_core::Order::Completion,
+            dua_core::Options::default(),
+            |_| true,
+        ) {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            if entry.file_type.is_dir() {
+                continue;
+            }
+            let size = entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.as_ref().ok())
+                .map_or(0, dua_core::Metadata::len);
+            total_bytes = total_bytes.saturating_add(size);
+            file_count += 1;
+
+            if entry.path().starts_with(&git_dir) {
+                git_bytes = git_bytes.saturating_add(size);
+            }
+        }
+
+        let elapsed_ms = start.elapsed().as_millis();
+        if elapsed_ms > 500 {
+            tracing::debug!(
+                path = %path.display(),
+                elapsed_ms,
+                total_bytes,
+                file_count,
+                "slow disk usage walk"
+            );
+        }
+
+        result.disk_usage = FieldState::Available(DiskUsage {
+            total_bytes,
+            git_bytes,
+            file_count,
+        });
     }
 }
 
@@ -589,6 +686,36 @@ fn check_status_gix(repo: &gix::Repository) -> FieldState<RepoStatus> {
 }
 
 // ============================================================================
+// Human-readable byte formatting
+// ============================================================================
+
+/// Format a byte count as a human-readable string.
+///
+/// Uses binary units (KiB, MiB, GiB, TiB) with one decimal place.
+/// Values under 1 KiB are shown as whole bytes.
+#[must_use]
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const TIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
+
+    #[allow(clippy::cast_precision_loss)] // display-only; sub-byte precision is irrelevant
+    let b = bytes as f64;
+    if b >= TIB {
+        format!("{:.1} TiB", b / TIB)
+    } else if b >= GIB {
+        format!("{:.1} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -605,6 +732,10 @@ mod tests {
         assert_eq!(result.branch.value(), Some(&"main".to_string()));
         assert!(matches!(result.head_short, FieldState::Absent));
         assert_eq!(result.status.value(), Some(&RepoStatus::Clean));
+        // Fresh repo has .git directory structure but no working tree files.
+        let du = result.disk_usage.value().expect("disk_usage requested");
+        assert!(du.total_bytes > 0, "even empty repo has .git internals");
+        assert_eq!(du.git_bytes, du.total_bytes, "no working tree files yet");
     }
 
     #[test]
@@ -620,6 +751,7 @@ mod tests {
         assert!(matches!(result.remote_url, FieldState::NotRequested));
         assert!(matches!(result.head_short, FieldState::NotRequested));
         assert!(matches!(result.status, FieldState::NotRequested));
+        assert!(matches!(result.disk_usage, FieldState::NotRequested));
     }
 
     #[test]
@@ -640,6 +772,7 @@ mod tests {
         assert_eq!(result.status.value(), Some(&RepoStatus::Clean));
         assert!(matches!(result.branch, FieldState::NotRequested));
         assert!(matches!(result.remote_url, FieldState::NotRequested));
+        assert!(matches!(result.disk_usage, FieldState::NotRequested));
     }
 
     #[test]
@@ -650,13 +783,10 @@ mod tests {
             upstream: true,
             ..Default::default()
         };
-        // expanded() should set branch = true
         let expanded = request.expanded();
         assert!(expanded.branch);
         let result = inspect(dir.path(), &request).unwrap();
-        // branch populated by dependency expansion
         assert!(result.branch.is_available());
-        // upstream absent because no remote tracking ref exists
         assert!(matches!(result.upstream_short, FieldState::Absent));
     }
 
@@ -673,10 +803,52 @@ mod tests {
     }
 
     #[test]
+    fn inspect_disk_usage_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let _repo = gix::init(dir.path()).unwrap();
+        // Create a working tree file.
+        std::fs::write(dir.path().join("hello.txt"), "hello world").unwrap();
+        let request = InspectionRequest {
+            disk_usage: true,
+            ..Default::default()
+        };
+        let result = inspect(dir.path(), &request).unwrap();
+        let du = result.disk_usage.value().expect("disk_usage requested");
+        assert!(
+            du.total_bytes > du.git_bytes,
+            "working tree file adds bytes"
+        );
+        assert!(du.file_count > 0);
+        assert!(matches!(result.branch, FieldState::NotRequested));
+        assert!(matches!(result.status, FieldState::NotRequested));
+    }
+
+    #[test]
+    fn inspect_disk_usage_separates_git_from_working_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let _repo = gix::init(dir.path()).unwrap();
+        let payload = vec![0u8; 4096];
+        std::fs::write(dir.path().join("data.bin"), &payload).unwrap();
+        let request = InspectionRequest {
+            disk_usage: true,
+            ..Default::default()
+        };
+        let result = inspect(dir.path(), &request).unwrap();
+        let du = result.disk_usage.value().unwrap();
+        assert!(
+            du.total_bytes >= 4096,
+            "total includes working tree file: {}",
+            du.total_bytes
+        );
+        assert!(
+            du.total_bytes - du.git_bytes >= 4096,
+            "working tree bytes = total - git = {}",
+            du.total_bytes - du.git_bytes
+        );
+    }
+
+    #[test]
     fn inspectors_cover_all_ids() {
-        // Every InspectorId variant has a corresponding inspector in
-        // the registry. This test prevents adding an ID without an
-        // inspector.
         let registered: Vec<InspectorId> = INSPECTORS.iter().map(|i| i.id()).collect();
         assert!(registered.contains(&InspectorId::Remote));
         assert!(registered.contains(&InspectorId::Branch));
@@ -685,7 +857,7 @@ mod tests {
         assert!(registered.contains(&InspectorId::Status));
         assert!(registered.contains(&InspectorId::Upstream));
         assert!(registered.contains(&InspectorId::AheadBehind));
-        // No duplicates.
+        assert!(registered.contains(&InspectorId::DiskUsage));
         let mut deduped = registered.clone();
         deduped.sort_by_key(|id| *id as u8);
         deduped.dedup();
@@ -739,5 +911,16 @@ mod tests {
         };
         let expanded = req.expanded();
         assert!(expanded.branch);
+    }
+
+    #[test]
+    fn format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
+        assert_eq!(format_bytes(1_099_511_627_776), "1.0 TiB");
+        assert_eq!(format_bytes(1_536), "1.5 KiB");
     }
 }
