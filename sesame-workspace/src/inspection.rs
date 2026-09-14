@@ -174,6 +174,8 @@ pub struct InspectionRequest {
     pub upstream: bool,
     pub ahead_behind: bool,
     pub disk_usage: bool,
+    pub head_date: bool,
+    pub upstream_date: bool,
 }
 
 impl InspectionRequest {
@@ -189,6 +191,8 @@ impl InspectionRequest {
             upstream: true,
             ahead_behind: true,
             disk_usage: true,
+            head_date: true,
+            upstream_date: true,
         }
     }
 
@@ -200,7 +204,7 @@ impl InspectionRequest {
             r.head = true;
             r.upstream = true;
         }
-        if r.upstream {
+        if r.upstream || r.upstream_date {
             r.branch = true;
         }
         r
@@ -217,6 +221,8 @@ impl InspectionRequest {
             InspectorId::Upstream => self.upstream,
             InspectorId::AheadBehind => self.ahead_behind,
             InspectorId::DiskUsage => self.disk_usage,
+            InspectorId::HeadDate => self.head_date,
+            InspectorId::UpstreamDate => self.upstream_date,
         }
     }
 }
@@ -239,6 +245,8 @@ pub struct InspectionResult {
     pub upstream_short: FieldState<String>,
     pub ahead_behind: FieldState<(usize, usize)>,
     pub disk_usage: FieldState<DiskUsage>,
+    pub head_date: FieldState<i64>,
+    pub upstream_date: FieldState<i64>,
 }
 
 impl InspectionResult {
@@ -260,7 +268,9 @@ impl InspectionResult {
             status: FieldState::Failed(failure.clone()),
             upstream_short: FieldState::Failed(failure.clone()),
             ahead_behind: FieldState::Failed(failure.clone()),
-            disk_usage: FieldState::Failed(failure),
+            disk_usage: FieldState::Failed(failure.clone()),
+            head_date: FieldState::Failed(failure.clone()),
+            upstream_date: FieldState::Failed(failure),
         }
     }
 }
@@ -276,6 +286,8 @@ impl Default for InspectionResult {
             upstream_short: FieldState::NotRequested,
             ahead_behind: FieldState::NotRequested,
             disk_usage: FieldState::NotRequested,
+            head_date: FieldState::NotRequested,
+            upstream_date: FieldState::NotRequested,
         }
     }
 }
@@ -295,6 +307,8 @@ enum InspectorId {
     Upstream,
     AheadBehind,
     DiskUsage,
+    HeadDate,
+    UpstreamDate,
 }
 
 /// A single metadata field inspector.
@@ -330,9 +344,11 @@ const INSPECTORS: &[&dyn FieldInspector] = &[
     &HeadInspector,
     &HeadSummaryInspector,
     &StatusInspector,
-    &UpstreamInspector,    // depends on branch
-    &AheadBehindInspector, // depends on head, upstream
-    &DiskUsageInspector,   // independent, runs last (most expensive)
+    &UpstreamInspector,     // depends on branch
+    &AheadBehindInspector,  // depends on head, upstream
+    &HeadDateInspector,     // independent
+    &UpstreamDateInspector, // depends on branch
+    &DiskUsageInspector,    // independent, runs last (most expensive)
 ];
 
 // ============================================================================
@@ -484,6 +500,87 @@ impl FieldInspector for AheadBehindInspector {
     /// traversal is not yet implemented.
     fn inspect(&self, _repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
         result.ahead_behind = FieldState::Absent;
+    }
+}
+
+struct HeadDateInspector;
+
+impl FieldInspector for HeadDateInspector {
+    fn id(&self) -> InspectorId {
+        InspectorId::HeadDate
+    }
+
+    /// Extract the committer timestamp from the local HEAD commit.
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
+        result.head_date = match repo.head() {
+            Ok(head) => match head.id() {
+                Some(id) => match id.object() {
+                    Ok(obj) => match obj.try_into_commit() {
+                        Ok(commit) => match commit.time() {
+                            Ok(time) => FieldState::Available(time.seconds),
+                            Err(e) => FieldState::Failed(InspectionFailure {
+                                kind: InspectionFailureKind::HeadRead,
+                                message: e.to_string(),
+                            }),
+                        },
+                        Err(e) => FieldState::Failed(InspectionFailure {
+                            kind: InspectionFailureKind::HeadRead,
+                            message: e.to_string(),
+                        }),
+                    },
+                    Err(e) => FieldState::Failed(InspectionFailure {
+                        kind: InspectionFailureKind::HeadRead,
+                        message: e.to_string(),
+                    }),
+                },
+                None => FieldState::Absent,
+            },
+            Err(e) => FieldState::Failed(InspectionFailure {
+                kind: InspectionFailureKind::HeadRead,
+                message: e.to_string(),
+            }),
+        };
+    }
+}
+
+struct UpstreamDateInspector;
+
+impl FieldInspector for UpstreamDateInspector {
+    fn id(&self) -> InspectorId {
+        InspectorId::UpstreamDate
+    }
+
+    /// Extract the committer timestamp from the upstream tracking
+    /// branch HEAD. Reads `result.branch` for the tracking ref name.
+    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
+        let branch_name = result
+            .branch
+            .value()
+            .cloned()
+            .unwrap_or_else(|| "main".into());
+        let refname = format!("refs/remotes/origin/{branch_name}");
+        result.upstream_date = match repo.find_reference(&refname) {
+            Ok(reference) => match reference.id().object() {
+                Ok(obj) => match obj.try_into_commit() {
+                    Ok(commit) => match commit.time() {
+                        Ok(time) => FieldState::Available(time.seconds),
+                        Err(e) => FieldState::Failed(InspectionFailure {
+                            kind: InspectionFailureKind::UpstreamRead,
+                            message: e.to_string(),
+                        }),
+                    },
+                    Err(e) => FieldState::Failed(InspectionFailure {
+                        kind: InspectionFailureKind::UpstreamRead,
+                        message: e.to_string(),
+                    }),
+                },
+                Err(e) => FieldState::Failed(InspectionFailure {
+                    kind: InspectionFailureKind::UpstreamRead,
+                    message: e.to_string(),
+                }),
+            },
+            Err(_) => FieldState::Absent,
+        };
     }
 }
 
@@ -716,6 +813,86 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 // ============================================================================
+// Relative time formatting
+// ============================================================================
+
+/// Format a unix epoch timestamp as a relative age string.
+///
+/// Computes the difference between the given timestamp and the
+/// current system time. Returns compact human-readable durations:
+/// `3m`, `5h`, `2d`, `1w`, `3mo`, `1y`.
+///
+/// Returns `"future"` for timestamps ahead of now, `"now"` for
+/// ages under one minute.
+#[must_use]
+pub fn format_relative_time(epoch_secs: i64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 3600;
+    const DAY: u64 = 86400;
+    const WEEK: u64 = 7 * DAY;
+    const MONTH: u64 = 30 * DAY;
+    const YEAR: u64 = 365 * DAY;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+
+    #[allow(clippy::cast_sign_loss)]
+    let epoch = epoch_secs as u64;
+    if epoch > now {
+        return "future".into();
+    }
+    let age = now - epoch;
+
+    if age < MINUTE {
+        "now".into()
+    } else if age < HOUR {
+        format!("{}m", age / MINUTE)
+    } else if age < DAY {
+        format!("{}h", age / HOUR)
+    } else if age < WEEK {
+        format!("{}d", age / DAY)
+    } else if age < MONTH {
+        format!("{}w", age / WEEK)
+    } else if age < YEAR {
+        format!("{}m", age / MONTH)
+    } else {
+        format!("{}y", age / YEAR)
+    }
+}
+
+/// Parse a human-readable duration string into seconds.
+///
+/// Accepts: `Nd` (days), `Nw` (weeks), `Nm` (months, 30d),
+/// `Ny` (years, 365d). Returns an error for unrecognized formats.
+///
+/// # Errors
+///
+/// Returns an error string if the format is not recognized or
+/// the numeric portion cannot be parsed.
+pub fn parse_stale_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix('y') {
+        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
+        Ok(n * 365 * 86400)
+    } else if let Some(n) = s.strip_suffix('m') {
+        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
+        Ok(n * 30 * 86400)
+    } else if let Some(n) = s.strip_suffix('w') {
+        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
+        Ok(n * 7 * 86400)
+    } else if let Some(n) = s.strip_suffix('d') {
+        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
+        Ok(n * 86400)
+    } else {
+        Err(format!(
+            "unrecognized duration: {s}\n\
+             accepted: Nd (days), Nw (weeks), Nm (months), Ny (years)"
+        ))
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -911,6 +1088,83 @@ mod tests {
         };
         let expanded = req.expanded();
         assert!(expanded.branch);
+    }
+
+    #[test]
+    fn inspect_head_date_on_fresh_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let _repo = gix::init(dir.path()).unwrap();
+        let request = InspectionRequest {
+            head_date: true,
+            ..Default::default()
+        };
+        let result = inspect(dir.path(), &request).unwrap();
+        // Fresh repo has no commits, so head_date is Absent.
+        assert!(matches!(result.head_date, FieldState::Absent));
+    }
+
+    #[test]
+    fn inspect_upstream_date_expands_branch() {
+        let request = InspectionRequest {
+            upstream_date: true,
+            ..Default::default()
+        };
+        let expanded = request.expanded();
+        assert!(expanded.branch);
+    }
+
+    #[test]
+    fn parse_stale_duration_days() {
+        assert_eq!(parse_stale_duration("7d").unwrap(), 7 * 86400);
+        assert_eq!(parse_stale_duration("30d").unwrap(), 30 * 86400);
+    }
+
+    #[test]
+    fn parse_stale_duration_weeks() {
+        assert_eq!(parse_stale_duration("2w").unwrap(), 14 * 86400);
+    }
+
+    #[test]
+    fn parse_stale_duration_months() {
+        assert_eq!(parse_stale_duration("3m").unwrap(), 90 * 86400);
+    }
+
+    #[test]
+    fn parse_stale_duration_years() {
+        assert_eq!(parse_stale_duration("1y").unwrap(), 365 * 86400);
+    }
+
+    #[test]
+    fn parse_stale_duration_rejects_invalid() {
+        assert!(parse_stale_duration("abc").is_err());
+        assert!(parse_stale_duration("").is_err());
+        assert!(parse_stale_duration("7x").is_err());
+    }
+
+    #[test]
+    fn format_relative_time_recent() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        #[allow(clippy::cast_possible_wrap)]
+        let epoch = now as i64;
+        assert_eq!(format_relative_time(epoch), "now");
+        assert_eq!(format_relative_time(epoch - 30), "now");
+        assert_eq!(format_relative_time(epoch - 120), "2m");
+        assert_eq!(format_relative_time(epoch - 7200), "2h");
+        assert_eq!(format_relative_time(epoch - 172800), "2d");
+    }
+
+    #[test]
+    fn format_relative_time_future() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        #[allow(clippy::cast_possible_wrap)]
+        let future = (now + 3600) as i64;
+        assert_eq!(format_relative_time(future), "future");
     }
 
     #[test]
