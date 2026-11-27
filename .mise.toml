@@ -4,8 +4,8 @@
 
 # Local dev tools provided by nix flake devshell (flake.nix devShells.default),
 # including mise itself and the QA tools (taplo, markdownlint-cli2, lychee,
-# shellcheck, shfmt, actionlint, cargo-deny); the CI `qa` job runs `ci:qa`
-# inside it.
+# shellcheck, shfmt, actionlint, cargo-deny, mdbook); the CI `qa` and
+# documentation jobs (`ci:qa`, `ci:docs`, `ci:docs:all`) run inside it.
 # CI-only tools below: the other GitHub Actions jobs install these via mise-action.
 # Local dev: `direnv allow` loads the devshell with all deps including cargo-deb.
 [tools]
@@ -816,11 +816,10 @@ description = "CI QA job (TOML, Markdown, links, shell, workflows, dependencies)
 depends = ["qa:toml", "qa:markdown", "qa:links", "qa:shell", "qa:actions", "qa:deps"]
 
 [tasks."ci:docs"]
-description = "CI documentation job (rustdoc + man + completions + mdbook)"
+description = "CI documentation job (rustdoc + man + completions + mdbook); tools come from the nix devshell"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 mise run cargo:doc
 mise run docs:man
 mise run docs:completions
@@ -1004,11 +1003,10 @@ export VERSION SHA256SUMS=SHA256SUMS.txt PKGBUILD_DIR=aur/open-sesame-bin
 """
 
 [tasks."ci:docs:all"]
-description = "CI generate all documentation for release"
+description = "CI generate all documentation for release; tools come from the nix devshell"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 cargo xtask all
 """
 
