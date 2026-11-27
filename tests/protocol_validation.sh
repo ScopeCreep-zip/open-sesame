@@ -142,11 +142,39 @@ if ((CLIPBOARD)); then
     done
 fi
 
+# -- Recorded environment -----------------------------------------------------
+
+# The user namespace and capabilities process $1 runs with: a unit's
+# sandboxing in a user manager sets up a user namespace (implied
+# PrivateUsers=), and what the unit may apply (a CapabilityBoundingSet=, a
+# mount namespace) depends on the capabilities it holds in it.
+caps_of() {
+    local pid=$1
+    printf 'userns=%s uid_map=[%s] CapBnd=%s CapEff=%s NoNewPrivs=%s' \
+        "$(readlink "/proc/$pid/ns/user" 2>/dev/null || echo '?')" \
+        "$(tr -s ' ' <"/proc/$pid/uid_map" 2>/dev/null | sed 's/^ //' | paste -sd';' -)" \
+        "$(awk '/^CapBnd:/ {print $2}' "/proc/$pid/status" 2>/dev/null)" \
+        "$(awk '/^CapEff:/ {print $2}' "/proc/$pid/status" 2>/dev/null)" \
+        "$(awk '/^NoNewPrivs:/ {print $2}' "/proc/$pid/status" 2>/dev/null)"
+}
+export -f caps_of
+
+# The host's policy for unprivileged user namespaces, each sysctl or
+# "absent" where the kernel has none.
+userns_policy() {
+    local sysctl
+    for sysctl in kernel/apparmor_restrict_unprivileged_userns kernel/unprivileged_userns_clone \
+        user/max_user_namespaces; do
+        printf '%s=%s ' "${sysctl##*/}" "$(cat "/proc/sys/$sysctl" 2>/dev/null || echo absent)"
+    done
+}
+MANAGER_PID=$(host "$HOST_SYSTEMCTL" show "user@$(id -u).service" --property=MainPID --value)
+
 # -- Isolated root ------------------------------------------------------------
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sesame-lifecycle.XXXXXX")
 RUNTIME=$HOST_RUNTIME/pds-lifecycle-$$
-mkdir -p "$ROOT"/{home,config,cache,data,log,pids,units,bin} "$RUNTIME"
+mkdir -p "$ROOT"/{home,config,cache,data,log,pids,units,caps,bin} "$RUNTIME"
 chmod 700 "$RUNTIME"
 STARTED=$(date '+%Y-%m-%d %H:%M:%S')
 
@@ -285,6 +313,7 @@ spawn() {
   pid=$(host "$HOST_SYSTEMCTL" --user show --property=MainPID --value "$unit")
   [[ "$pid" != 0 ]] || fail "$daemon is not running (journalctl --user -u $unit)"
   echo "$pid" >"$LIFECYCLE_ROOT/pids/$daemon"
+  caps_of "$pid" >"$LIFECYCLE_ROOT/caps/$daemon"
 }
 start() {
   local daemon
@@ -406,6 +435,10 @@ echo "========================================"
 echo " Open Sesame lifecycle validation"
 echo " binaries: $BIN"
 echo " root:     $ROOT"
+echo " kernel:   $(uname -r)"
+echo " systemd:  $(host "$HOST_SYSTEMCTL" --version | head -n 1)"
+echo " userns:   $(userns_policy)"
+echo " manager:  pid $MANAGER_PID $(caps_of "$MANAGER_PID")"
 echo "========================================"
 
 sesame_run status --doctor platform --output json
@@ -426,6 +459,13 @@ for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
         pass "L-03: $daemon is running"
     else
         fail "L-03: $daemon is running" "$(log_tail "$daemon")"
+    fi
+done
+# Each started daemon's user namespace and capabilities, as recorded when
+# it became ready (beside the manager's, in the header).
+for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
+    if [[ -e "$ROOT/caps/$daemon" ]]; then
+        echo "INFO: $daemon $(<"$ROOT/caps/$daemon")"
     fi
 done
 
