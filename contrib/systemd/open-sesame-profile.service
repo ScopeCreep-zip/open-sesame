@@ -26,9 +26,14 @@ RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native
 InaccessiblePaths=-%t/bus
 
+# Owner-only, as the daemons keep them; systemd's default (0755) differs
+# from an existing directory's 0700 and is logged on every start.
 ConfigurationDirectory=pds
+ConfigurationDirectoryMode=0700
 CacheDirectory=open-sesame
+CacheDirectoryMode=0700
 RuntimeDirectory=pds
+RuntimeDirectoryMode=0700
 ReadWritePaths=%E/pds
 ReadWritePaths=%C/open-sesame
 

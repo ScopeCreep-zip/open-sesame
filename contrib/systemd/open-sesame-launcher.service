@@ -23,16 +23,22 @@ WatchdogSec=30
 # when ProtectSystem=strict is set here.
 NoNewPrivileges=yes
 
-# Kernel control plane — safe to inherit, no user app needs these.
-ProtectClock=yes
+# Kernel control plane, through the mount namespace (read-only /proc/sys
+# and cgroup tree), inherited by launched applications.
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
 LockPersonality=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
-CapabilityBoundingSet=
+# Nothing that drops the capability bounding set: CapabilityBoundingSet=,
+# ProtectClock= (CAP_SYS_TIME, CAP_WAKE_ALARM), ProtectKernelModules=
+# (CAP_SYS_MODULE), ProtectKernelLogs= (CAP_SYSLOG). A user manager drops
+# them only with CAP_SETPCAP in the service's user namespace, which a
+# kernel.apparmor_restrict_unprivileged_userns=1 host (Ubuntu 24.04's
+# default) denies, failing the start with 218/CAPABILITIES; the bounding
+# set would also bind every application launched. The service holds no
+# capability in the initial user namespace to drop, and runs with
+# NoNewPrivileges=yes.
 
 # Children spawned via systemd-run --scope survive launcher restarts.
 KillMode=process

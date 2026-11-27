@@ -51,11 +51,12 @@
 #     `ExecStart` (this tree's binary runs) and `Restart`/`RestartSec` (a
 #     crash fails the check rather than restarting). The `*Directory=`
 #     settings would resolve to the user's own XDG directories; the
-#     stand-in creates their isolated equivalents as systemd would (mode
-#     0755) and grants them writable in the service's namespace
-#     (`ReadWritePaths`), as systemd does. systemd returns from a start
-#     once the daemon has sent `READY=1`; a daemon that exits first fails
-#     the start. Its output goes to the journal.
+#     stand-in creates their isolated equivalents as systemd would (with
+#     the unit's `*DirectoryMode=`, 0755 without one) and grants them
+#     writable in the service's namespace (`ReadWritePaths`), as systemd
+#     does. systemd returns from a start once the daemon has sent
+#     `READY=1`; a daemon that exits first fails the start. Its output
+#     goes to the journal.
 #   - Passwords are piped: every `sesame` prompt reads piped stdin.
 #   - daemon-clipboard connects to the session's compositor and records
 #     the selection current at its start into the isolated history, which
@@ -257,10 +258,11 @@ active() {
 # --property arguments, one per line, with the specifiers %t, %E, %C, and
 # %h as the isolated runtime, configuration, cache, and home directories.
 # The *Directory= settings are created here instead, under the isolated
-# XDG directories, as systemd creates them (0755), and granted writable
-# inside the service's namespace, as systemd grants them.
+# XDG directories, with the unit's *DirectoryMode= (systemd's default 0755
+# without one), and granted writable inside the service's namespace, as
+# systemd grants them.
 properties() {
-  local unit=$LIFECYCLE_UNITS/open-sesame-${1#daemon-}.service line key value section=""
+  local unit=$LIFECYCLE_UNITS/open-sesame-${1#daemon-}.service line key value mode section=""
   [[ -f "$unit" ]] || fail "no unit $unit"
   while IFS= read -r line || [[ -n "$line" ]]; do
     case $line in
@@ -277,14 +279,16 @@ properties() {
     [[ $value != *%* ]] || fail "unknown specifier in $unit: $line"
     case $key in
     ExecStart | Restart | RestartSec) continue ;;
+    ConfigurationDirectoryMode | CacheDirectoryMode | RuntimeDirectoryMode) continue ;;
     ConfigurationDirectory) value=$XDG_CONFIG_HOME/$value ;;
     CacheDirectory) value=$XDG_CACHE_HOME/$value ;;
     RuntimeDirectory) value=$XDG_RUNTIME_DIR/$value ;;
-    *Directory) fail "unhandled $key in $unit" ;;
+    *Directory | *DirectoryMode) fail "unhandled $key in $unit" ;;
     esac
     case $key in
     ConfigurationDirectory | CacheDirectory | RuntimeDirectory)
-      install -d -m 0755 "$value"
+      mode=$(sed -n "s/^${key}Mode=//p" "$unit" | tail -n 1)
+      install -d -m "${mode:-0755}" "$value"
       key=ReadWritePaths
       ;;
     esac
