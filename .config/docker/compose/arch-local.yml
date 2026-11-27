@@ -1,10 +1,10 @@
 # Arch -- install from locally prebuilt .pkg.tar.zst packages
 #
-# Requires: mise run build:arch (produces *.tar.gz at repo root)
-#           then mise run test:arch:pkg to build .pkg.tar.zst
+# Packages: $SESAME_PACKAGES, default target/arch (mise run test:arch:pkg,
+# which builds them from the mise run build:arch tarballs)
 #
-# docker compose up -d arch-local
-# docker exec --user arch open-sesame-arch-local sesame status --doctor --exit-code
+# mise run test:docker:arch:local
+# scripts/docker/verify-install.sh arch local <DIR>
 
 services:
   arch-local:
@@ -21,7 +21,7 @@ services:
     environment:
       container: docker
     volumes:
-      - ../../..:/packages:ro
+      - ${SESAME_PACKAGES:-../../../target/arch}:/packages:ro
       - arch-local-config:/home/arch/.config/pds
       - arch-local-cache:/home/arch/.cache/open-sesame
     tmpfs:

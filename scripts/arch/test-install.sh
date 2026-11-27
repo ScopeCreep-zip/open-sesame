@@ -9,6 +9,9 @@
 # Expects tarballs at repo root (produced by mise run build:arch):
 #   open-sesame-v<VERSION>-x86_64.tar.gz
 #   open-sesame-desktop-v<VERSION>-x86_64.tar.gz
+#
+# The built packages are written to target/arch/, owned by the invoking
+# user, for scripts/docker/verify-install.sh arch local target/arch.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -34,9 +37,12 @@ if [ ! -f /etc/arch-release ]; then
     echo "  VERSION=${VERSION}"
     echo "  headless: $(basename "${HEADLESS_TAR}")"
     echo "  desktop:  $(basename "${DESKTOP_TAR}")"
+    mkdir -p "${ROOT}/target/arch"
     exec docker run --rm \
         -e "VERSION=${VERSION}" \
+        -e "OUT_OWNER=$(id -u):$(id -g)" \
         -v "${ROOT}:/src:ro" \
+        -v "${ROOT}/target/arch:/out" \
         -v "${HEADLESS_TAR}:/tarballs/headless.tar.gz:ro" \
         -v "${DESKTOP_TAR}:/tarballs/desktop.tar.gz:ro" \
         archlinux:base-devel /src/scripts/arch/test-install.sh
@@ -84,6 +90,12 @@ su builder -c "CARCH=x86_64 PKGEXT='.pkg.tar.zst' makepkg --nodeps --force" 2>&1
 echo ""
 echo "=== Built packages ==="
 ls -la ./*.pkg.tar.zst
+
+if [ -d /out ]; then
+    rm -f /out/*.pkg.tar.zst
+    cp ./*.pkg.tar.zst /out/
+    chown "${OUT_OWNER:?OUT_OWNER must be set with /out}" /out/*.pkg.tar.zst
+fi
 
 # ── Install packages ─────────────────────────────────────────────────────────
 echo ""

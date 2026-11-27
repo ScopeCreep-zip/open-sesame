@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 # install-fedora-local.sh -- install open-sesame from locally built .rpm packages.
-# Packages mounted at /packages/ from target/x86_64-.../generate-rpm/ via compose volume.
+# Packages mounted at /packages/ via compose volume (SESAME_PACKAGES).
 # Runs as root inside the fedora container via docker exec.
+#
+# The headless package is chosen by its header (Name open-sesame, this
+# machine's architecture), so cargo-generate-rpm's file names and the
+# release's renamed artifacts both install; anything other than exactly one
+# match is an error.
 set -euo pipefail
 
-# Shell glob expansion, not dnf pattern matching.
+ARCH=$(uname -m)
 shopt -s nullglob
-rpms=(/packages/open-sesame-[0-9]*.rpm)
-if [ ${#rpms[@]} -eq 0 ]; then
-    echo "ERROR: no open-sesame RPM found in /packages/" >&2
+matches=()
+for rpm in /packages/*.rpm; do
+    if [[ $(rpm -qp --queryformat '%{NAME} %{ARCH}' "$rpm") == "open-sesame $ARCH" ]]; then
+        matches+=("$rpm")
+    fi
+done
+if ((${#matches[@]} != 1)); then
+    echo "ERROR: expected one open-sesame ${ARCH} RPM in /packages, found ${#matches[@]}: ${matches[*]}" >&2
     ls -la /packages/ >&2
     exit 1
 fi
-dnf install -y "${rpms[@]}"
+dnf install -y "${matches[0]}"

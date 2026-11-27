@@ -175,8 +175,12 @@ reachable, an abstract socket outside the domain is refused where `Scopes` is en
 `apply_landlock` returns is the one the kernel's gaps predict, and `socket(AF_INET)` kills the
 process while `AF_UNIX` is admitted. A table test checks that the protections name every requested
 right exactly once. `tests/protocol_validation.sh` runs every daemon of a build through its
-lifecycle under an isolated root, checks that each reports the enforcement the doctor predicts,
-and fails on any seccomp kill the kernel records for them.
+lifecycle under an isolated root, each as a transient user service under the `[Service]`
+sandboxing of its shipped unit (the read-only mounts included), checks that each reports the
+enforcement the doctor predicts, and fails on any seccomp kill the kernel records for them. CI
+installs the built `.deb`, `.rpm`, and `.pkg.tar.zst` in their distributions' systemd containers
+(`scripts/docker/verify-install.sh`) and fails unless every headless daemon runs under its
+installed unit; no release is tagged or published otherwise.
 
 ## systemd Unit Hardening
 

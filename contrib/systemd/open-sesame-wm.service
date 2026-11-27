@@ -28,8 +28,10 @@ SystemCallArchitectures=native
 InaccessiblePaths=-%t/bus
 
 ReadWritePaths=%t/pds
-ReadWritePaths=%h/.cache/open-sesame
-ReadWritePaths=%h/.cache/fontconfig
+ReadWritePaths=%C/open-sesame
+# Fontconfig's cache: optional ("-"), since nothing creates it on a fresh
+# account; without it fontconfig works uncached.
+ReadWritePaths=-%C/fontconfig
 
 # Resource limits
 LimitNOFILE=4096
@@ -39,7 +41,7 @@ MemoryMax=128M
 
 # Environment
 Environment=RUST_LOG=info
-EnvironmentFile=-%h/.config/pds/ssh-agent.env
+EnvironmentFile=-%E/pds/ssh-agent.env
 
 [Install]
 WantedBy=open-sesame-desktop.target

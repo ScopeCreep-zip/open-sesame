@@ -6,7 +6,7 @@ Open Sesame uses four GitHub Actions workflows for testing, documentation, relea
 
 | Workflow | File | Triggers | Purpose |
 | --- | --- | --- | --- |
-| Test | `test.yml` | Push to main/master, PRs | Format check, clippy, tests, and debug build on dual architectures; QA checks; PKGBUILD lint |
+| Test | `test.yml` | Push to main/master, PRs | Format check, clippy, tests, and debug build on dual architectures; QA checks; package install in systemd containers; lifecycle under the shipped units; PKGBUILD lint |
 | Docs | `docs.yml` | Push to main/master, PRs | Build rustdoc and mdBook |
 | Release | `release.yml` | Push to main, manual dispatch | Semantic-release, build, attest, publish |
 | Nix | `nix.yml` | Called by release.yml, PRs | Build Nix packages and push to Cachix |
@@ -59,14 +59,42 @@ fresh runner has trusted nothing.
 The `lint-pkgbuild` job runs `scripts/arch/lint-pkgbuild.sh` (namcap) in an
 `archlinux:base-devel` container.
 
+### Install Job
+
+The `install` job builds each amd64 package as the release builds it (`ci:build:deb`,
+`ci:build:rpm`, `ci:build:arch`) and runs `scripts/docker/verify-install.sh` on it: the
+distribution's compose service (`ubuntu-local`, `fedora-local`, `arch-local`; systemd as PID 1, a
+lingering user) installs the headless package, and `scripts/docker/post-install.sh` starts
+`open-sesame-headless.target` and `sesame-init.service`. The job fails unless every headless daemon
+is active under its installed unit, the default vault is unlocked, and no doctor check fails
+(`sesame status --doctor --exit-code` exit 1; warnings, exit 2, are reported and accepted). On
+failure the container's system and user journals are printed. The release workflow runs only after
+this workflow succeeds, so no version is tagged whose packages do not start.
+
+### Nix Job
+
+The `nix` job runs `mise run test:nix` (`nix flake check`) in the flake devshell: the flake is
+evaluated, both packages are built, and `checks.x86_64-linux.home-manager-module` checks the Home
+Manager module against the units the packages ship (see [Nix Packaging](../packaging/nix.md)).
+
+### Lifecycle Job
+
+The `lifecycle` job runs `tests/protocol_validation.sh` (`mise run test:lifecycle`, in the flake
+devshell) on `ubuntu-24.04`: every daemon runs as a transient service of the runner user's service
+manager (started by `loginctl enable-linger`) under the `[Service]` sandboxing of its shipped unit,
+against a headless sway (`WLR_BACKENDS=headless`), on the runner's own kernel. A daemon that fails
+to start under its unit fails the job. The lefthook pre-push hook runs the same task; it needs a
+Wayland session and the user's service manager, and exits 2 without them.
+
 ## docs.yml
 
 The docs workflow runs on pushes and PRs to `main`/`master`. It runs on `ubuntu-latest` (single
 architecture).
 
 1. Checks out the repository.
-2. Installs Rust via mise with caching.
-3. Runs `mise run ci:docs` to build documentation.
+2. Installs Nix and the `scopecreep-zip` Cachix cache.
+3. Runs `mise run ci:docs` in the flake devshell, which provides the toolchain, the system
+   libraries, and mdbook.
 
 This workflow validates that documentation builds succeed but does not deploy. Deployment occurs in
 the release workflow's `build-docs` and `publish` jobs.
@@ -89,16 +117,19 @@ The workflow declares the following permissions:
 ### Job Dependency Graph
 
 ```text
-semantic-release ──┬──► build (amd64)  ──┬──► attest
-                   ├──► build (arm64)  ──┤
-                   │                     └──► upload-assets
+semantic-release ──┬──► build / build-rpm / build-arch ──┬──► attest
+                   │                                    ├──► verify-packages ──┐
+                   │                                    └──────────────────────┴──► upload-assets
                    ├──► nix-cache
                    ├──► build-docs
                    │
-                   └──► [build + upload-assets + build-docs] ──► publish ──► cleanup
+                   └──► [builds + verify-packages + upload-assets + build-docs] ──► publish ──► cleanup
 ```
 
-All jobs after `semantic-release` are gated on `new_release == 'true'`.
+All jobs after `semantic-release` are gated on `new_release == 'true'`. `verify-packages` installs
+the release's own amd64 `.deb`, `.rpm`, and `.pkg.tar.zst` artifacts with
+`scripts/docker/verify-install.sh`, as the Test workflow's `install` job does; `upload-assets` and
+`publish` depend on it, so no asset or repository is published for a package that does not start.
 
 ### Build Job
 

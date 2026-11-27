@@ -110,5 +110,45 @@ for i in $(seq 1 15); do
     sleep 1
 done
 
+# Every daemon of the headless target running under its installed unit: a
+# daemon that fails at startup (its unit's sandbox included) fails here,
+# whatever daemon-profile alone reports.
+echo "Verifying the headless daemons..."
+failed=0
+for unit in open-sesame-profile open-sesame-secrets open-sesame-launcher open-sesame-snippets; do
+    state=$(systemctl --user is-active "${unit}.service" 2>/dev/null || true)
+    echo "  ${unit}: ${state}"
+    if [ "$state" != "active" ]; then
+        failed=1
+        journalctl --user -u "${unit}.service" --no-pager -n 30 2>&1 || true
+    fi
+done
+if [ "$failed" -ne 0 ]; then
+    echo "ERROR: a headless daemon is not running" >&2
+    exit 1
+fi
+
+# sesame-init's outcome: the default vault created and unlocked.
+echo "Verifying the default vault is unlocked..."
+status_out=$(sesame status 2>&1) || true
+echo "$status_out"
+if ! grep -Eq '^ *default +unlocked' <<<"$status_out"; then
+    echo "ERROR: the default vault is not unlocked after sesame-init" >&2
+    journalctl --user -u sesame-init.service --no-pager -n 50 2>&1 || true
+    exit 1
+fi
+
+# The doctor's verdict: a failed check fails the install; a warning (a
+# kernel below the Landlock ABI the sandbox requests, no compositor in a
+# container) is reported and accepted.
 echo "=== Verification ==="
-sesame status --doctor --output=json
+doctor=0
+sesame status --doctor --output=json --exit-code || doctor=$?
+case "$doctor" in
+0) ;;
+2) echo "doctor: warnings reported (accepted)" ;;
+*)
+    echo "ERROR: a doctor check failed (exit ${doctor})" >&2
+    exit 1
+    ;;
+esac

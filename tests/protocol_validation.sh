@@ -30,7 +30,9 @@
 #   - `journalctl -k` readable by the user (the `systemd-journal` or `adm`
 #     group): a seccomp kill is read from the kernel's audit record.
 #   - `jq`: the doctor's report is JSON.
-#   - `socat`: each daemon's notify socket (sd_notify(3)) is received with it.
+#   - The user's systemd service manager (`systemd-run --user`): each
+#     daemon runs as a transient service under its shipped unit's
+#     sandboxing.
 #
 # How it isolates:
 #   - Every location the layout derives (`core_layout::Environment`) is set
@@ -38,12 +40,22 @@
 #     `/run/user/$UID/pds-lifecycle-<pid>`, short enough for a socket path
 #     (108 bytes) and apart from the user's `pds/`.
 #   - `sesame init` starts the daemons with `systemctl --user`: a stand-in
-#     `systemctl` first on `PATH` answers exactly those calls by starting
-#     the binaries under the root, and fails on any other call. As with
-#     systemd, starting a target whose daemons run is a no-op, and a start
-#     returns once every started daemon has sent `READY=1` to its
-#     `NOTIFY_SOCKET` (the units are `Type=notify`); a daemon that exits
-#     first, or is not ready within 30 s, fails the start.
+#     `systemctl` first on `PATH` answers exactly those calls, and fails on
+#     any other. It starts each daemon as a transient user service
+#     (`systemd-run --user`) under the `[Service]` settings of its unit in
+#     `contrib/systemd`, the units the packages ship: `ProtectSystem`,
+#     `ProtectHome`, `ReadWritePaths`, `InaccessiblePaths`, the address
+#     families, limits, `Type=notify` readiness, and the rest, with `%t`,
+#     `%E`, `%C`, and `%h` as the isolated runtime, configuration, cache,
+#     and home directories (any other specifier fails). Left out are
+#     `ExecStart` (this tree's binary runs) and `Restart`/`RestartSec` (a
+#     crash fails the check rather than restarting). The `*Directory=`
+#     settings would resolve to the user's own XDG directories; the
+#     stand-in creates their isolated equivalents as systemd would (mode
+#     0755) and grants them writable in the service's namespace
+#     (`ReadWritePaths`), as systemd does. systemd returns from a start
+#     once the daemon has sent `READY=1`; a daemon that exits first fails
+#     the start. Its output goes to the journal.
 #   - Passwords are piped: every `sesame` prompt reads piped stdin.
 #   - daemon-clipboard connects to the session's compositor and records
 #     the selection current at its start into the isolated history, which
@@ -104,7 +116,7 @@ for binary in sesame "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
     [[ -x "$BIN/$binary" ]] || require "$BIN/$binary is missing (cargo build --workspace --bins)"
 done
 command -v jq >/dev/null || require "jq is not on PATH"
-command -v socat >/dev/null || require "socat is not on PATH"
+UNITS=$(cd -- "$SCRIPT_DIR/../contrib/systemd" && pwd)
 
 HOST_RUNTIME=/run/user/$(id -u)
 [[ -d "$HOST_RUNTIME" ]] || require "no session runtime directory $HOST_RUNTIME"
@@ -118,6 +130,12 @@ esac
 # Host tools run without a development shell's library path.
 host() { env -u LD_LIBRARY_PATH "$@"; }
 host journalctl -k -n 1 --no-pager >/dev/null 2>&1 || require "journalctl -k is not readable"
+# The host's own systemctl and systemd-run, before the stand-in shadows
+# systemctl on PATH.
+HOST_SYSTEMCTL=$(command -v systemctl) || require "systemctl is not on PATH"
+HOST_SYSTEMD_RUN=$(command -v systemd-run) || require "systemd-run is not on PATH"
+host "$HOST_SYSTEMCTL" --user show-environment >/dev/null 2>&1 \
+    || require "no user service manager (systemctl --user)"
 if ((CLIPBOARD)); then
     for tool in wl-copy wl-paste; do
         host sh -c "command -v $tool" >/dev/null || require "--clipboard needs $tool (wl-clipboard)"
@@ -128,7 +146,7 @@ fi
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sesame-lifecycle.XXXXXX")
 RUNTIME=$HOST_RUNTIME/pds-lifecycle-$$
-mkdir -p "$ROOT"/{home,config,cache,data,log,pids,notify,bin} "$RUNTIME"
+mkdir -p "$ROOT"/{home,config,cache,data,log,pids,units,bin} "$RUNTIME"
 chmod 700 "$RUNTIME"
 STARTED=$(date '+%Y-%m-%d %H:%M:%S')
 
@@ -156,10 +174,14 @@ stop_daemons() {
 
 cleanup() {
     stop_daemons
-    # The notify listeners outlive their daemons, which notify until they exit.
-    local listener
-    for listener in "$ROOT"/notify/*.pid; do
-        [[ -e "$listener" ]] && kill -TERM "$(<"$listener")" 2>/dev/null || true
+    # Every transient service of this run, stopped and its journal kept
+    # with the root.
+    local units daemon
+    for units in "$ROOT"/units/*; do
+        [[ -e "$units" ]] || continue
+        daemon=$(basename "$units")
+        log_of "$daemon" >"$ROOT/log/$daemon.log" || true
+        xargs -r env -u LD_LIBRARY_PATH "$HOST_SYSTEMCTL" --user stop <"$units" 2>/dev/null || true
     done
     rm -rf "$RUNTIME"
     if ((KEEP)); then
@@ -179,17 +201,22 @@ export WAYLAND_DISPLAY=$WAYLAND_SOCKET
 export XDG_SESSION_TYPE=wayland
 export PDS_LOG_FORMAT=pretty
 unset NOTIFY_SOCKET DBUS_SYSTEM_BUS_ADDRESS
-export LIFECYCLE_ROOT=$ROOT LIFECYCLE_BIN=$BIN
+export LIFECYCLE_ROOT=$ROOT LIFECYCLE_BIN=$BIN LIFECYCLE_UNITS=$UNITS LIFECYCLE_ID=$$
+export LIFECYCLE_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+export HOST_SYSTEMCTL HOST_SYSTEMD_RUN
 export PATH="$ROOT/bin:$BIN:$PATH"
 
 # The systemctl stand-in: the calls `sesame init` makes, answered by
-# starting this tree's daemons under the root. A target is active while
-# every one of its daemons runs; starting an active target is a no-op.
+# starting this tree's daemons as transient user services under their
+# shipped units' sandboxing. A target is active while every one of its
+# daemons runs; starting an active target is a no-op.
 cat >"$ROOT/bin/systemctl" <<'STANDIN'
 #!/usr/bin/env bash
 set -euo pipefail
 HEADLESS=(daemon-profile daemon-secrets daemon-launcher daemon-snippets)
 DESKTOP=(daemon-wm daemon-clipboard daemon-input)
+host() { env -u LD_LIBRARY_PATH "$@"; }
+fail() { echo "systemctl stand-in: $*" >&2; exit 1; }
 running() {
   local pidfile=$LIFECYCLE_ROOT/pids/$1
   [[ -e "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
@@ -198,45 +225,72 @@ active() {
   local daemon
   for daemon in "$@"; do running "$daemon" || return 1; done
 }
-NOTIFY_DIR=$XDG_RUNTIME_DIR/systemd
-# Start daemon $1 with a notify socket whose datagrams are appended to
-# notify/$1: the listener runs for the daemon's lifetime, as systemd's does.
-spawn() {
-  local daemon=$1 socket=$NOTIFY_DIR/$1.notify received=$LIFECYCLE_ROOT/notify/$1
-  if [[ -e "$received.pid" ]]; then
-    kill -TERM "$(<"$received.pid")" 2>/dev/null || true
-  fi
-  : >"$received"
-  setsid socat -u "UNIX-RECV:$socket,unlink-early" "OPEN:$received,append" </dev/null >/dev/null 2>&1 &
-  echo "$!" >"$received.pid"
-  for _ in $(seq 100); do
-    [[ -S "$socket" ]] && break
-    sleep 0.05
-  done
-  [[ -S "$socket" ]] || { echo "systemctl stand-in: no notify socket for $daemon" >&2; exit 1; }
-  NOTIFY_SOCKET=$socket setsid "$LIFECYCLE_BIN/$daemon" >>"$LIFECYCLE_ROOT/log/$daemon.log" 2>&1 </dev/null &
-  echo "$!" >"$LIFECYCLE_ROOT/pids/$daemon"
+# The [Service] settings of daemon $1's shipped unit as systemd-run
+# --property arguments, one per line, with the specifiers %t, %E, %C, and
+# %h as the isolated runtime, configuration, cache, and home directories.
+# The *Directory= settings are created here instead, under the isolated
+# XDG directories, as systemd creates them (0755), and granted writable
+# inside the service's namespace, as systemd grants them.
+properties() {
+  local unit=$LIFECYCLE_UNITS/open-sesame-${1#daemon-}.service line key value section=""
+  [[ -f "$unit" ]] || fail "no unit $unit"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case $line in
+    "" | "#"*) continue ;;
+    "["*) section=$line; continue ;;
+    esac
+    [[ $section == "[Service]" ]] || continue
+    key=${line%%=*}
+    value=${line#*=}
+    value=${value//%t/$XDG_RUNTIME_DIR}
+    value=${value//%E/$XDG_CONFIG_HOME}
+    value=${value//%C/$XDG_CACHE_HOME}
+    value=${value//%h/$HOME}
+    [[ $value != *%* ]] || fail "unknown specifier in $unit: $line"
+    case $key in
+    ExecStart | Restart | RestartSec) continue ;;
+    ConfigurationDirectory) value=$XDG_CONFIG_HOME/$value ;;
+    CacheDirectory) value=$XDG_CACHE_HOME/$value ;;
+    RuntimeDirectory) value=$XDG_RUNTIME_DIR/$value ;;
+    *Directory) fail "unhandled $key in $unit" ;;
+    esac
+    case $key in
+    ConfigurationDirectory | CacheDirectory | RuntimeDirectory)
+      install -d -m 0755 "$value"
+      key=ReadWritePaths
+      ;;
+    esac
+    printf -- '--property=%s=%s\n' "$key" "$value"
+  done <"$unit"
 }
-# Wait until daemon $1 has sent READY=1, as `systemctl start` of a
-# Type=notify unit does.
-await_ready() {
-  for _ in $(seq 300); do
-    grep -qF 'READY=1' "$LIFECYCLE_ROOT/notify/$1" && return 0
-    running "$1" || { echo "systemctl stand-in: $1 exited before READY=1" >&2; exit 1; }
-    sleep 0.1
-  done
-  echo "systemctl stand-in: $1 sent no READY=1 within 30 s" >&2
-  exit 1
+# Start daemon $1 as a transient user service and record its pid. systemd
+# returns once the service is ready (Type=notify) or has failed.
+spawn() {
+  local daemon=$1 unit="sesame-lifecycle-$LIFECYCLE_ID-$1-$RANDOM" settings pid
+  local props=()
+  settings=$(properties "$daemon") || exit 1
+  mapfile -t props <<<"$settings"
+  # A development shell's build loads its libraries (libwayland-client)
+  # through the shell's library path; a packaged binary finds the system's.
+  if [[ -n "$LIFECYCLE_LD_LIBRARY_PATH" ]]; then
+    props+=("--setenv=LD_LIBRARY_PATH=$LIFECYCLE_LD_LIBRARY_PATH")
+  fi
+  echo "$unit" >>"$LIFECYCLE_ROOT/units/$daemon"
+  host "$HOST_SYSTEMD_RUN" --user --quiet --collect --unit="$unit" "${props[@]}" \
+    --setenv=HOME="$HOME" --setenv=XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
+    --setenv=XDG_CACHE_HOME="$XDG_CACHE_HOME" --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" \
+    --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+    --setenv=XDG_SESSION_TYPE="$XDG_SESSION_TYPE" --setenv=PDS_LOG_FORMAT="$PDS_LOG_FORMAT" \
+    "$LIFECYCLE_BIN/$daemon" || fail "$daemon did not start (journalctl --user -u $unit)"
+  pid=$(host "$HOST_SYSTEMCTL" --user show --property=MainPID --value "$unit")
+  [[ "$pid" != 0 ]] || fail "$daemon is not running (journalctl --user -u $unit)"
+  echo "$pid" >"$LIFECYCLE_ROOT/pids/$daemon"
 }
 start() {
-  local daemon started=()
-  mkdir -p "$NOTIFY_DIR"
+  local daemon
   for daemon in "$@"; do
-    running "$daemon" && continue
-    spawn "$daemon"
-    started+=("$daemon")
+    running "$daemon" || spawn "$daemon"
   done
-  for daemon in "${started[@]}"; do await_ready "$daemon"; done
 }
 case "$*" in
   "--user is-active --quiet open-sesame-headless.target") active "${HEADLESS[@]}" ;;
@@ -274,10 +328,16 @@ fail() {
 # pattern substitution over a whole daemon log takes minutes.
 uncolor() { sed 's/\x1b\[[0-9;]*m//g'; }
 
-# A daemon's log, colors removed. Callers search it as a here-string:
-# under pipefail a `grep -q` that stops at its first match fails the
-# pipeline it reads (SIGPIPE).
-log_of() { uncolor <"$ROOT/log/$1.log"; }
+# A daemon's log, from the journal of every service it ran as, colors
+# removed. Callers search it as a here-string: under pipefail a `grep -q`
+# that stops at its first match fails the pipeline it reads (SIGPIPE).
+log_of() {
+    local unit
+    [[ -e "$ROOT/units/$1" ]] || return 0
+    while read -r unit; do
+        host journalctl --user --unit="$unit" --output=cat --no-pager
+    done <"$ROOT/units/$1" | uncolor
+}
 
 # The last 20 lines of a daemon's log, colors removed.
 log_tail() { log_of "$1" | tail -n 20; }
@@ -327,7 +387,7 @@ expect_no_match() {
     fi
 }
 
-alive() { kill -0 "$(cat "$ROOT/pids/$1")" 2>/dev/null; }
+alive() { [[ -e "$ROOT/pids/$1" ]] && kill -0 "$(<"$ROOT/pids/$1")" 2>/dev/null; }
 
 # Run `sesame "${@:3}"` until $OUT matches `$1`, for up to `$2` seconds.
 wait_for() {
@@ -452,7 +512,7 @@ expect_match "V-005/V-010: deactivate, activate, then the secret is served" "^li
 sesame_with "$PASSWORD" init --no-keybinding
 expect_match "V-011: sesame init re-run completes" "Setup complete"
 
-kill -TERM "$(cat "$ROOT/pids/daemon-secrets")"
+alive daemon-secrets && kill -TERM "$(<"$ROOT/pids/daemon-secrets")"
 wait_for "treated as locked" 40 status
 expect_match "V-009: with daemon-secrets gone, status reports every vault locked" "daemon-secrets is not answering; every vault is treated as locked"
 

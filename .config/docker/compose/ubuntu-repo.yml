@@ -8,6 +8,9 @@ services:
     build:
       context: ../../..
       dockerfile: .config/docker/Dockerfile.ubuntu
+      # systemd and the user only: the packages under test install over
+      # nothing of open-sesame.
+      target: base
     container_name: open-sesame-ubuntu-repo
     hostname: ubuntu-repo
     init: false

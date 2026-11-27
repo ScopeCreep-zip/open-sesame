@@ -51,7 +51,8 @@ semantic-release
 ├── build-rpm (arm64)    ─┤
 ├── build-arch (amd64)   ─┤
 ├── build-arch (arm64)   ─┤
-│                         └──► upload-assets ──► aur-publish
+│                         ├──► verify-packages (amd64 deb, rpm, pkg.tar.zst)
+│                         └──► upload-assets (after verify-packages) ──► aur-publish
 ├── nix-cache
 ├── build-docs
 │
@@ -71,6 +72,14 @@ arm64). Installs Rust and `cargo-deb` via mise. Raises `RLIMIT_MEMLOCK` to 256 M
 before building (required by `ProtectedAlloc`). Builds `.deb` packages via mise tasks
 (`ci:build:deb` / `ci:build:deb:arm64`), renames them with architecture suffixes, and uploads as
 artifacts.
+
+**verify-packages**: A matrix over the amd64 `deb-amd64`, `rpm-amd64`, and `arch-amd64` artifacts.
+Each is downloaded into `packages/` and installed by `scripts/docker/verify-install.sh` in its
+distribution's systemd container (`ubuntu-local`, `fedora-local`, `arch-local`: systemd as PID 1,
+a lingering user), which picks the headless package by its metadata, starts its units
+(`scripts/docker/post-install.sh`), and fails unless every headless daemon is active, the default
+vault is unlocked, and no doctor check fails. `upload-assets` and `publish` depend on it. The Test
+workflow's `install` job runs the same check on every push, before semantic-release can tag.
 
 **nix-cache**: Calls the reusable `nix.yml` workflow with the release tag. Builds both `open-sesame`
 and `open-sesame-desktop` for each architecture and pushes to Cachix.

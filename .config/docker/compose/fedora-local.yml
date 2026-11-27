@@ -1,9 +1,9 @@
 # Fedora -- install from locally prebuilt .rpm packages
 #
-# Requires: mise run build:rpm (produces target/generate-rpm/*.rpm)
+# Packages: $SESAME_PACKAGES, default target/generate-rpm (mise run build:rpm)
 #
-# docker compose up -d fedora-local
-# docker exec --user fedora open-sesame-fedora-local sesame status --doctor --exit-code
+# mise run test:docker:fedora:local
+# scripts/docker/verify-install.sh fedora local <DIR>
 
 services:
   fedora-local:
@@ -20,7 +20,7 @@ services:
     environment:
       container: docker
     volumes:
-      - ../../../target/generate-rpm:/packages:ro
+      - ${SESAME_PACKAGES:-../../../target/generate-rpm}:/packages:ro
       - fedora-local-config:/home/fedora/.config/pds
       - fedora-local-cache:/home/fedora/.cache/open-sesame
     tmpfs:
