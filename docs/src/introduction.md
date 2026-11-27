@@ -1,8 +1,8 @@
 # Introduction
 
 Open Sesame is a trust-scoped secret and identity fabric for the desktop. It manages encrypted secret
-vaults with per-profile trust boundaries, provides window switching with letter-hint overlays, clipboard
-history with sensitivity detection, keyboard input capture, and text snippet expansion. Everything is
+vaults with per-profile trust boundaries, provides window switching with letter-hint overlays,
+per-profile clipboard history, keyboard input capture, and per-profile text snippets. Everything is
 scoped to trust profiles that activate based on context or manual selection.
 
 ## Packages
@@ -41,19 +41,19 @@ This documentation is written for:
 
 - **[Architecture](./architecture/overview.md)** -- internal design: crate map, daemon topology, IPC
   bus, data flows. Start here for a structural understanding of the system.
-- **[Secrets](./secrets/overview.md)** -- vault system: SQLCipher storage, key hierarchy, Argon2id KDF,
+- **[Secrets](./secrets/vault-engine.md)** -- vault system: SQLCipher storage, key hierarchy, Argon2id KDF,
   key-encryption keys, per-profile isolation.
-- **[Authentication](./authentication/overview.md)** -- unlock mechanisms: password, SSH agent,
+- **[Authentication](./authentication/factor-architecture.md)** -- unlock mechanisms: password, SSH agent,
   multi-factor auth policy engine.
 - **[Platform](./platform/linux.md)** -- OS abstraction layer: Linux (Wayland, D-Bus, evdev, systemd),
   macOS (Accessibility, Keychain, launchd), Windows (UI Automation, Credential Manager, Task Scheduler).
 - **[Extending](./extending/getting-started.md)** -- extension system: Wasmtime host, WASI component
   model, WIT bindings, OCI packaging.
-- **[Desktop](./desktop/overview.md)** -- window management: compositor integration, overlay rendering,
+- **[Desktop](./desktop/window-manager.md)** -- window management: compositor integration, overlay rendering,
   focus tracking.
-- **[Deployment](./deployment/overview.md)** -- operations: systemd units, service readiness, watchdog,
+- **[Deployment](./deployment/single-desktop.md)** -- operations: systemd units, service readiness, watchdog,
   packaging.
-- **[Compliance](./compliance/overview.md)** -- security posture: Landlock, seccomp, mlock, guard pages,
+- **[Compliance](./compliance/framework-mapping.md)** -- security posture: Landlock, seccomp, mlock, guard pages,
   audit logging.
 
 For user-facing quick start instructions, CLI reference, and configuration guide, see the

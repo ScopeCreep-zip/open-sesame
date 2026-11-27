@@ -1,31 +1,33 @@
 [workspace]
 members = [
-    "core-memory",
-    "core-types",
-    "core-workspace-types",
-    "core-config",
-    "core-ipc",
-    "core-crypto",
-    "core-fuzzy",
-    "core-secrets",
-    "core-profile",
-    "core-auth",
-    "platform-linux",
-    "platform-macos",
-    "platform-windows",
-    "daemon-wm",
-    "daemon-launcher",
-    "daemon-clipboard",
-    "daemon-input",
-    "daemon-snippets",
-    "daemon-profile",
-    "daemon-secrets",
-    "open-sesame",
-    "sesame-workspace",
-    "extension-host",
-    "extension-sdk",
+  "core-memory",
+  "core-types",
+  "core-workspace-types",
+  "core-layout",
+  "core-daemon",
+  "core-config",
+  "core-ipc",
+  "core-crypto",
+  "core-fuzzy",
+  "core-secrets",
+  "core-profile",
+  "core-auth",
+  "platform-linux",
+  "platform-macos",
+  "platform-windows",
+  "daemon-wm",
+  "daemon-launcher",
+  "daemon-clipboard",
+  "daemon-input",
+  "daemon-snippets",
+  "daemon-profile",
+  "daemon-secrets",
+  "open-sesame",
+  "sesame-workspace",
+  "extension-host",
+  "extension-sdk",
+  "xtask",
 ]
-exclude = ["xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -33,173 +35,191 @@ version = "1.18.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/ScopeCreep-zip/open-sesame"
-authors = ["usrbinkat"]
+authors = ["user"]
+# Distributed as deb, rpm, AUR, and Nix packages; no crate is published
+# to a registry.
+publish = false
 
 # ============================================================================
 # Workspace Dependencies
 #
 # All external deps declared here, referenced by members via `dep.workspace = true`.
-# Version pins reflect DEPENDENCIES.*.md research (2026-02-24).
+# Requirements track the newest mutually compatible stable releases;
+# `cargo deny check` (deny.toml) gates advisories, licenses, and sources.
 # ============================================================================
 
 [workspace.dependencies]
 
 # -- Internal crates --
-core-memory     = { path = "core-memory" }
-core-types      = { path = "core-types" }
+core-memory = { path = "core-memory" }
+core-types = { path = "core-types" }
 core-workspace-types = { path = "core-workspace-types" }
-core-config     = { path = "core-config" }
-core-ipc        = { path = "core-ipc" }
-core-crypto     = { path = "core-crypto" }
-core-fuzzy      = { path = "core-fuzzy" }
-core-secrets    = { path = "core-secrets" }
-core-profile    = { path = "core-profile" }
-core-auth       = { path = "core-auth" }
-platform-linux  = { path = "platform-linux" }
-platform-macos  = { path = "platform-macos" }
-platform-windows = { path = "platform-windows" }
+core-layout = { path = "core-layout" }
+core-daemon = { path = "core-daemon" }
+core-config = { path = "core-config" }
+core-ipc = { path = "core-ipc" }
+core-crypto = { path = "core-crypto" }
+core-fuzzy = { path = "core-fuzzy" }
+core-secrets = { path = "core-secrets" }
+core-profile = { path = "core-profile" }
+core-auth = { path = "core-auth" }
+platform-linux = { path = "platform-linux" }
 sesame-workspace = { path = "sesame-workspace" }
-extension-host  = { path = "extension-host" }
-extension-sdk   = { path = "extension-sdk" }
+open-sesame = { path = "open-sesame" }
 
 # -- Serialization --
-serde           = { version = "1", features = ["derive"] }
-postcard        = { version = "1", features = ["use-std"] }
-toml            = "1"
-serde_json      = "1"
-ron             = "0.12"
+serde = { version = "1", features = ["derive"] }
+# Default features add heapless 0.7 (RUSTSEC-2026-0574..0582); the bus
+# only encodes to and decodes from Vec<u8>.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+toml = "1"
+toml_edit = "0.25" # format-preserving config writes (core-config::edit)
+serde_json = "1"
 
 # -- Types & Errors --
-thiserror       = "2"
-anyhow          = "1"
-uuid            = { version = "1", features = ["v4", "v5", "v7", "serde"] }
-bytes           = "1.11.1"                      # MANDATORY pin: RUSTSEC-2026-0007
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 
 # -- Async --
-tokio           = { version = "1", features = ["rt", "net", "io-util", "sync", "macros", "time", "signal", "fs"] }
-futures-util    = { version = "0.3", default-features = false, features = ["std"] }
-async-trait     = "0.1"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "macros", "time", "signal", "fs"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+async-trait = "0.1"
 
 # -- Crypto --
-aes-gcm         = { version = "0.10.3", features = ["zeroize"] }  # MANDATORY pin: CVE-2023-42811
-aes             = { version = "0.8", features = ["zeroize"] }    # SEC-012: zeroize AES key schedule on drop
-argon2          = "0.5"
-zeroize         = { version = "1", features = ["derive"] }
-blake3          = "1.8"
-getrandom       = "0.2"
-governor        = { version = "0.10", default-features = false, features = ["std"] }
-snow            = "0.10"
-pbkdf2          = "0.12"
-sha2            = "0.10"
-hmac            = "0.12"
-hkdf            = "0.12"
-hex             = "0.4"
-ssh-key             = { version = "0.6.7", features = ["ed25519", "rsa"] }
-ssh-agent-client-rs = "1.1.2"
+# >= 0.10.3 required: CVE-2023-42811. `zeroize` also enables
+# `aes/zeroize` and `ghash/zeroize`: the AES key schedule is wiped on drop.
+aes-gcm = { version = "0.11.1", features = ["zeroize"] }
+# Raw KDF only (`hash_password_into`, needs `alloc`); `zeroize` wipes the
+# memory blocks after hashing. The PHC-string API is unused.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+zeroize = { version = "1", features = ["derive"] }
+blake3 = "1.8"
+# std: OS error descriptions in Display.
+getrandom = { version = "0.4", features = ["std"] }
+governor = { version = "0.10", default-features = false, features = ["std"] }
+snow = "0.10"
+# Default `hmac` feature: `pbkdf2_hmac`.
+pbkdf2 = "0.13"
+sha2 = "0.11"
+hkdf = "0.13"
+hex = "0.4"
+# Public keys, certificates, and signatures: the agent holds the private
+# keys and signs (core-auth::agent); `crypto` (ed25519, rsa, p256/p384/p521)
+# verifies each agent signature against the listed key before key material
+# is derived from it, and decodes ECDSA keys so they are named and
+# rejected. 0.7 is the release on rsa 0.10 (RUSTSEC-2023-0071) and the
+# crypto-bigint 0.7 line (RUSTSEC-2026-0387).
+ssh-key = { version = "0.7.0-rc.12", default-features = false, features = ["std", "crypto"] }
+# The Verifier and Signer traits ssh-key implements (it does not re-export
+# them).
+signature = { version = "3.0.0", default-features = false }
 
 # -- Database --
-rusqlite        = { version = "0.38", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.43.0", features = ["bundled-sqlcipher"] }
 
 # -- Fuzzy --
-# TODO: pinned to git HEAD because crates.io 0.5.0 does not expose
-# Snapshot::matches() (added in helix-editor/nucleo#57, unreleased).
-# Revert to crates.io version once nucleo publishes a release with this API.
-nucleo          = { git = "https://github.com/helix-editor/nucleo.git", rev = "4253de9" }
+# Git pin: the newest crates.io release, 0.5.0 (2024-04-02), predates
+# Snapshot::matches() (74ec935) and Injector::extend() (c754da5), which
+# core-fuzzy uses. Rev 8c16d47 is upstream HEAD; a crates.io release
+# containing both replaces the pin (and its nix outputHashes entry).
+nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "8c16d47" }
 
 # -- Parallel workspace inspection --
-crossbeam-channel   = "0.5"
+crossbeam-channel = "0.5"
 
 # -- Parallel filesystem traversal (disk usage) --
-dua-core            = "4"
+dua-core = "6.1"
 
 # -- Config --
-notify          = "8"
-dirs            = "6"
+notify = "9"
+dirs = "7"
 
 # -- Logging --
-tracing             = "0.1"
-tracing-subscriber  = { version = "0.3.20", features = ["env-filter", "fmt", "json", "ansi"] }  # MANDATORY pin: CVE-2025-58160
-tracing-journald    = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "ansi"] } # MANDATORY pin: CVE-2025-58160
 
 # -- CLI --
-clap                = { version = "4", features = ["derive", "env"] }
-clap_complete       = "4"
-clap_mangen         = "0.2"
-comfy-table         = "7"
-dialoguer           = { version = "0.12", features = ["fuzzy-select"] }
-indicatif           = "0.17"
-owo-colors          = "4"
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+# env: renders the `env = "SESAME_PROFILES"` arguments' ENVIRONMENT entries.
+clap_mangen = { version = "0.3", features = ["env"] }
+comfy-table = "8"
+dialoguer = { version = "0.12", features = ["fuzzy-select"] }
+owo-colors = "4"
 
 # -- Linux platform --
-evdev                   = { version = "0.13", features = ["tokio", "stream-trait"] }
-# 0.8 matches smithay-client-toolkit's transitive dep; no 0.9 on crates.io.
-xkbcommon               = "0.8"
-wayland-client          = "0.31"
-wayland-protocols       = { version = "0.32", features = ["client", "staging"] }
-wayland-protocols-wlr   = { version = "0.3", features = ["client"] }
-smithay-client-toolkit  = { version = "0.20", features = ["xkbcommon"] }
+evdev = { version = "0.13", features = ["tokio", "stream-trait"] }
+# daemon-input's evdev keysym translation (its own xkb context; no xkb type
+# crosses into smithay-client-toolkit, which links its own xkbcommon 0.8).
+xkbcommon = "0.9"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# daemon-clipboard's capture (platform-linux::clipboard): ext-data-control-v1,
+# falling back to wlr-data-control-v1.
+wl-clipboard-rs = "0.9.5"
+smithay-client-toolkit = { version = "0.21.1", features = ["xkbcommon"] }
 # Pinned to specific revs for nix build reproducibility. Without rev pins,
 # builtins.fetchGit resolves to HEAD at fetch time, producing a different
 # NAR hash every time upstream pushes. Update procedure:
 #   1. cargo update -p cosmic-theme -p cosmic-config -p cosmic-client-toolkit -p cosmic-protocols
 #   2. grep the new rev from Cargo.lock
 #   3. update rev = here AND outputHashes in nix/package.nix + nix/package-desktop.nix
-cosmic-client-toolkit   = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit" }
-cosmic-protocols        = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-protocols" }
-cosmic-theme            = { git = "https://github.com/pop-os/libcosmic", rev = "6347ba2", package = "cosmic-theme", default-features = false }
-cosmic-config           = { git = "https://github.com/pop-os/libcosmic", rev = "6347ba2", package = "cosmic-config", default-features = false, features = ["macro"] }
-zbus                    = { version = "5", default-features = false, features = ["tokio"] }
-landlock                = "0.4"
-libseccomp              = "0.4"
-sd-notify               = "0.4"
-libc                    = "0.2"
-rustix                  = { version = "1", default-features = false, features = ["process", "event"] }
+cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols", rev = "815b2c5d", package = "cosmic-client-toolkit" }
+cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols", rev = "815b2c5d", package = "cosmic-protocols" }
+cosmic-theme = { git = "https://github.com/pop-os/libcosmic", rev = "009fb9d4", package = "cosmic-theme", default-features = false }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic", rev = "009fb9d4", package = "cosmic-config", default-features = false, features = ["macro"] }
+# tokio: connections run on the daemons' runtime; proxy: Proxy and #[proxy].
+zbus = { version = "6.5", default-features = false, features = ["tokio", "proxy"] }
+# The GlobalShortcuts portal (platform-linux::global_shortcuts), on the same
+# zbus 6 and tokio runtime.
+ashpd = { version = "0.14.3", default-features = false, features = ["tokio", "global_shortcuts"] }
+# Secret Service / Secret portal client (platform-linux::keyring), on the
+# same zbus 6 and tokio runtime; native_crypto: the pure-Rust session cipher.
+oo7 = { version = "0.7.3", default-features = false, features = ["tokio", "native_crypto"] }
+# The Secret Service implementation of the same release, as the test
+# service for platform-linux::keyring (test-util: TestServiceSetup).
+oo7-daemon = { version = "0.7.3", default-features = false, features = ["test-util", "native_crypto"] }
+landlock = "0.4"
+libseccomp = "0.4"
+sd-notify = "0.5"
+libc = "0.2"
+# std: rustix::fd is std::os::fd (AsFd/OwnedFd interoperate with std types);
+# without it rustix substitutes its own no_std fd traits.
+rustix = { version = "1", default-features = false, features = ["std", "process", "event"] }
 
 # -- Linux UI (SCTK overlay rendering) --
-tiny-skia           = { version = "0.12", default-features = false, features = ["std"] }
-cosmic-text         = "0.12"
+tiny-skia = { version = "0.12", default-features = false, features = ["std"] }
+# Git pin following COSMIC upstream: the newest crates.io release, 0.19.0,
+# depends on fontdb 0.23 and with it the unmaintained ttf-parser
+# (RUSTSEC-2026-0192). Rev b07cb90 is upstream HEAD on fontdb 0.24, which
+# vendors its own minimal parser. A crates.io release on fontdb >= 0.24
+# replaces the pin (and its nix outputHashes entry).
+cosmic-text = { git = "https://github.com/pop-os/cosmic-text", rev = "b07cb90a872cb9fec7fea1c72d734f81907fe3ad" }
 
-# -- Linux UI (GTK4, used by daemon-launcher behind feature flag) --
-gtk4                = { version = "0.10", features = ["v4_14"] }
-
-# -- macOS platform --
-security-framework  = "3"
-objc2               = "0.6"
-core-foundation     = "0.10"
-core-graphics       = "0.25"
-
-# -- Windows platform --
-# windows crate requires explicit feature selection per API surface
-windows             = "0.62"
+# -- Linux UI (GTK4, daemon-launcher `gtk` feature) --
+gtk4 = { version = "0.11", features = ["v4_14"] }
 
 # -- Daemon-specific --
-regex                       = "1"
-freedesktop-desktop-entry   = "0.8"
-
-# -- Extensions --
-wasmtime        = { version = "36", features = ["runtime", "cranelift", "component-model", "std", "pooling-allocator"] }
-wasmtime-wasi   = { version = "36", features = ["p3"] }
-wit-bindgen     = "0.42"
+freedesktop-desktop-entry = "0.8"
 
 # -- Testing --
-proptest        = "1"
-rstest          = "0.25"
-criterion       = { version = "0.7", features = ["html_reports"] }
-tempfile        = "3"
-assert_cmd      = "2"
-predicates      = "3"
-insta           = { version = "1", features = ["yaml", "json", "redactions"] }
-tokio-test      = "0.4"
+proptest = "1"
+criterion = { version = "0.8", features = ["html_reports"] }
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
 
 # -- Git (pure-Rust + bundled libgit2) --
-gix             = { version = "0.72", default-features = false, features = ["blocking-network-client", "blocking-http-transport-curl", "worktree-mutation", "status"] }
-git2            = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+gix = { version = "0.91", default-features = false, features = ["sha1", "blocking-network-client", "blocking-http-transport-curl", "worktree-mutation", "status"] }
+git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 
 # -- HTTP client (forge API calls) --
-ureq            = { version = "3", default-features = false, features = ["rustls", "json"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
-# -- Build/xtask --
-flate2          = "1"
+# -- gzip: /proc/config.gz (sesame status --doctor), xtask man page --
+flate2 = "1"
 
 # ============================================================================
 # Workspace Lints
@@ -211,6 +231,10 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# A suppression is an `#[expect(lint, reason = "...")]`: it states why, and
+# fails once the lint no longer fires.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 # ============================================================================
 # Release Profiles

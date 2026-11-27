@@ -1,0 +1,91 @@
+# Supply-chain policy for `cargo deny check`. The workspace is
+# GPL-3.0-only: every dependency license admitted here is GPL-3.0
+# compatible, and an expression passes when one of its alternatives is
+# admitted. A new license, git source, or advisory fails the check until
+# it is resolved here or upstream.
+
+[graph]
+all-features = true
+
+[advisories]
+# No advisory is ignored: a vulnerable, unsound, unmaintained, or yanked
+# dependency fails the check until it is upgraded or replaced.
+ignore = []
+
+[licenses]
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "GPL-3.0-only",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+# The bundled SQLCipher amalgamation (via rusqlite's bundled-sqlcipher)
+# carries SQLite's public-domain blessing and a WTFPL-licensed component;
+# both are GPL-3.0 compatible. Scoped to that crate so no other
+# dependency is admitted under either.
+[[licenses.exceptions]]
+crate = "sqlcipher-src"
+allow = ["blessing", "WTFPL"]
+
+[licenses.private]
+ignore = false
+
+# Git crates whose manifests omit `license`; the expression is the
+# repository-root LICENSE at the locked revision. The crate directories
+# hold no license file, so no file hash gates the clarification.
+[[licenses.clarify]]
+crate = "cosmic-config"
+expression = "MPL-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "cosmic-config-derive"
+expression = "MPL-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "cosmic-theme"
+expression = "MPL-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "dnd"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mime"
+expression = "MIT"
+license-files = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/helix-editor/nucleo.git",
+  "https://github.com/jackpot51/rust-atomicwrites",
+  "https://github.com/pop-os/cosmic-protocols",
+  "https://github.com/pop-os/cosmic-text",
+  "https://github.com/pop-os/libcosmic",
+  "https://github.com/pop-os/smithay-clipboard",
+  "https://github.com/pop-os/window_clipboard.git",
+]

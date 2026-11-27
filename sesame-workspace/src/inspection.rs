@@ -11,13 +11,14 @@
 //!
 //! # Architecture
 //!
-//! Each metadata field is a struct implementing `FieldInspector`.
-//! The [`inspect`] function opens the repository once, then runs
-//! each requested inspector in dependency order against the shared
-//! handle. Adding a new field requires one struct, one trait impl,
-//! and one entry in `INSPECTORS`. The `inspect` function does not
-//! change.
+//! A [`Field`] names one piece of metadata; an [`InspectionRequest`] is
+//! the set of fields to collect. [`inspect`] opens the repository once,
+//! then inspects each requested field in [`Field::ALL`] order — fields
+//! that read others' results (the upstream fields read the branch) come
+//! after them. Adding a field takes a `Field` variant, an
+//! `InspectionResult` field, and its arm in `inspect_field`.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 
@@ -61,6 +62,17 @@ impl<T> FieldState<T> {
     }
 }
 
+/// A read's outcome as a field: a value, none (absent), or its failure.
+impl<T> From<Result<Option<T>, InspectionFailure>> for FieldState<T> {
+    fn from(read: Result<Option<T>, InspectionFailure>) -> Self {
+        match read {
+            Ok(Some(value)) => Self::Available(value),
+            Ok(None) => Self::Absent,
+            Err(failure) => Self::Failed(failure),
+        }
+    }
+}
+
 impl<T: fmt::Display> fmt::Display for FieldState<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -82,11 +94,20 @@ pub struct InspectionFailure {
     pub message: String,
 }
 
-/// The kind of failure during field inspection.
+impl InspectionFailure {
+    /// A failure of `kind` described by `error`.
+    fn new(kind: InspectionFailureKind, error: impl fmt::Display) -> Self {
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
+}
+
+/// The kind of failure during field inspection. A repository that cannot
+/// be opened fails the whole inspection instead ([`inspect`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InspectionFailureKind {
-    /// Could not open the repository.
-    RepositoryOpen,
     /// Could not read the remote URL.
     RemoteRead,
     /// Could not read the HEAD reference.
@@ -95,22 +116,21 @@ pub enum InspectionFailureKind {
     StatusRead,
     /// Could not read the upstream tracking reference.
     UpstreamRead,
-    /// Could not traverse the commit graph.
-    GraphTraversal,
     /// Could not compute disk usage.
     DiskUsage,
+    /// The worker was cancelled before inspecting the repository.
+    Cancelled,
 }
 
 impl fmt::Display for InspectionFailureKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RepositoryOpen => write!(f, "repository open"),
             Self::RemoteRead => write!(f, "remote read"),
             Self::HeadRead => write!(f, "head read"),
             Self::StatusRead => write!(f, "status read"),
             Self::UpstreamRead => write!(f, "upstream read"),
-            Self::GraphTraversal => write!(f, "graph traversal"),
             Self::DiskUsage => write!(f, "disk usage"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -156,74 +176,106 @@ pub struct DiskUsage {
 }
 
 // ============================================================================
-// InspectionRequest
+// Fields and requests
 // ============================================================================
 
-/// Which metadata fields to collect during inspection.
-///
-/// Dependency expansion is handled internally: requesting
-/// `ahead_behind` implicitly requests head and upstream.
-#[derive(Debug, Clone, Default)]
-#[allow(clippy::struct_excessive_bools)]
+/// One piece of repository metadata inspection can collect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Field {
+    /// The `origin` fetch URL.
+    Remote,
+    /// The checked-out branch.
+    Branch,
+    /// The abbreviated HEAD commit id.
+    Head,
+    /// The first line of the HEAD commit message.
+    HeadSummary,
+    /// Whether the working tree has changes.
+    Status,
+    /// The abbreviated upstream commit id (reads the branch).
+    Upstream,
+    /// Commits ahead of and behind the upstream (reads the branch).
+    AheadBehind,
+    /// The HEAD commit's committer time.
+    HeadDate,
+    /// The upstream commit's committer time (reads the branch).
+    UpstreamDate,
+    /// Bytes and files on disk; the most expensive, so inspected last.
+    DiskUsage,
+}
+
+impl Field {
+    /// Every field, in inspection order: each after the fields it reads.
+    pub const ALL: [Self; 10] = [
+        Self::Remote,
+        Self::Branch,
+        Self::Head,
+        Self::HeadSummary,
+        Self::Status,
+        Self::Upstream,
+        Self::AheadBehind,
+        Self::HeadDate,
+        Self::UpstreamDate,
+        Self::DiskUsage,
+    ];
+
+    /// The fields this one reads from the result.
+    const fn reads(self) -> &'static [Self] {
+        match self {
+            Self::Upstream | Self::AheadBehind | Self::UpstreamDate => &[Self::Branch],
+            _ => &[],
+        }
+    }
+}
+
+/// The set of metadata fields to collect during inspection; the fields a
+/// requested field reads are inspected with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InspectionRequest {
-    pub remote: bool,
-    pub branch: bool,
-    pub head: bool,
-    pub head_summary: bool,
-    pub status: bool,
-    pub upstream: bool,
-    pub ahead_behind: bool,
-    pub disk_usage: bool,
-    pub head_date: bool,
-    pub upstream_date: bool,
+    fields: BTreeSet<Field>,
 }
 
 impl InspectionRequest {
     /// Request all available metadata.
     #[must_use]
     pub fn all() -> Self {
-        Self {
-            remote: true,
-            branch: true,
-            head: true,
-            head_summary: true,
-            status: true,
-            upstream: true,
-            ahead_behind: true,
-            disk_usage: true,
-            head_date: true,
-            upstream_date: true,
-        }
+        Field::ALL.into_iter().collect()
     }
 
-    /// Expand implicit dependencies between fields.
+    /// Add `field` to the request.
+    pub fn insert(&mut self, field: Field) {
+        self.fields.insert(field);
+    }
+
+    /// Whether `field` is requested, directly or as a field a requested
+    /// one reads.
     #[must_use]
-    pub fn expanded(&self) -> Self {
-        let mut r = self.clone();
-        if r.ahead_behind {
-            r.head = true;
-            r.upstream = true;
-        }
-        if r.upstream || r.upstream_date {
-            r.branch = true;
-        }
-        r
+    pub fn contains(&self, field: Field) -> bool {
+        self.fields.contains(&field)
+            || self
+                .fields
+                .iter()
+                .any(|requested| requested.reads().contains(&field))
     }
 
-    /// Whether the given inspector is requested.
-    fn is_requested(&self, id: InspectorId) -> bool {
-        match id {
-            InspectorId::Remote => self.remote,
-            InspectorId::Branch => self.branch,
-            InspectorId::Head => self.head,
-            InspectorId::HeadSummary => self.head_summary,
-            InspectorId::Status => self.status,
-            InspectorId::Upstream => self.upstream,
-            InspectorId::AheadBehind => self.ahead_behind,
-            InspectorId::DiskUsage => self.disk_usage,
-            InspectorId::HeadDate => self.head_date,
-            InspectorId::UpstreamDate => self.upstream_date,
+    /// Whether nothing is requested.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+impl FromIterator<Field> for InspectionRequest {
+    fn from_iter<I: IntoIterator<Item = Field>>(fields: I) -> Self {
+        Self {
+            fields: fields.into_iter().collect(),
         }
+    }
+}
+
+impl Extend<Field> for InspectionRequest {
+    fn extend<I: IntoIterator<Item = Field>>(&mut self, fields: I) {
+        self.fields.extend(fields);
     }
 }
 
@@ -243,23 +295,36 @@ pub struct InspectionResult {
     pub head_summary: FieldState<String>,
     pub status: FieldState<RepoStatus>,
     pub upstream_short: FieldState<String>,
-    pub ahead_behind: FieldState<(usize, usize)>,
+    pub ahead_behind: FieldState<AheadBehind>,
     pub disk_usage: FieldState<DiskUsage>,
     pub head_date: FieldState<i64>,
     pub upstream_date: FieldState<i64>,
 }
 
+/// Commits on HEAD not on its upstream (`ahead`), and on the upstream not
+/// on HEAD (`behind`): `git rev-list --count upstream..HEAD` and
+/// `HEAD..upstream`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AheadBehind {
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+impl fmt::Display for AheadBehind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "+{} -{}", self.ahead, self.behind)
+    }
+}
+
 impl InspectionResult {
-    /// All fields set to `Failed("skipped")`. Used when a worker is
+    /// All fields set to `Failed(Cancelled)`. Used when a worker is
     /// cancelled before inspecting this repo. Distinct from `Absent`
     /// (which means the field legitimately has no value) and from
     /// `NotRequested` (which means the caller didn't ask for it).
     #[must_use]
     pub fn skipped() -> Self {
-        let failure = InspectionFailure {
-            kind: InspectionFailureKind::StatusRead,
-            message: "skipped".into(),
-        };
+        let failure =
+            InspectionFailure::new(InspectionFailureKind::Cancelled, "inspection cancelled");
         Self {
             remote_url: FieldState::Failed(failure.clone()),
             branch: FieldState::Failed(failure.clone()),
@@ -293,364 +358,255 @@ impl Default for InspectionResult {
 }
 
 // ============================================================================
-// FieldInspector trait and registry
+// Field reads
 // ============================================================================
 
-/// Identity tag for each inspector, used for request dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InspectorId {
-    Remote,
-    Branch,
-    Head,
-    HeadSummary,
-    Status,
-    Upstream,
-    AheadBehind,
-    DiskUsage,
-    HeadDate,
-    UpstreamDate,
-}
-
-/// A single metadata field inspector.
-///
-/// Each implementation reads from the shared `gix::Repository` handle
-/// and writes to one field of `InspectionResult`. Inspectors may read
-/// previously-populated fields in `result` when they have ordering
-/// dependencies (e.g. upstream reads the branch name).
-trait FieldInspector {
-    /// Which inspector this is, for request dispatch.
-    fn id(&self) -> InspectorId;
-
-    /// Inspect the repository and write to the result.
-    ///
-    /// `path` is provided for diagnostic logging only. `result` may
-    /// contain values from previously-run inspectors.
-    fn inspect(&self, repo: &gix::Repository, path: &Path, result: &mut InspectionResult);
-}
-
-/// Inspector registry. Ordered by dependency: inspectors that read
-/// from previously-populated result fields come after the fields
-/// they depend on.
-///
-/// Adding a new field:
-/// 1. Add a struct implementing `FieldInspector`.
-/// 2. Add an `InspectorId` variant.
-/// 3. Add a bool to `InspectionRequest` and wire `is_requested`.
-/// 4. Add a `FieldState<T>` field to `InspectionResult`.
-/// 5. Append to this array in dependency order.
-const INSPECTORS: &[&dyn FieldInspector] = &[
-    &RemoteInspector,
-    &BranchInspector,
-    &HeadInspector,
-    &HeadSummaryInspector,
-    &StatusInspector,
-    &UpstreamInspector,     // depends on branch
-    &AheadBehindInspector,  // depends on head, upstream
-    &HeadDateInspector,     // independent
-    &UpstreamDateInspector, // depends on branch
-    &DiskUsageInspector,    // independent, runs last (most expensive)
-];
-
-// ============================================================================
-// Inspector implementations
-// ============================================================================
-
-struct RemoteInspector;
-
-impl FieldInspector for RemoteInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::Remote
-    }
-
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        result.remote_url = match repo.find_remote("origin") {
-            Ok(remote) => match remote.url(gix::remote::Direction::Fetch) {
-                Some(url) => FieldState::Available(url.to_bstring().to_string()),
-                None => FieldState::Absent,
-            },
-            Err(_) => FieldState::Absent,
-        };
-    }
-}
-
-struct BranchInspector;
-
-impl FieldInspector for BranchInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::Branch
-    }
-
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        result.branch = match repo.head_name() {
-            Ok(Some(name)) => FieldState::Available(name.shorten().to_string()),
-            Ok(None) => FieldState::Absent,
-            Err(e) => FieldState::Failed(InspectionFailure {
-                kind: InspectionFailureKind::HeadRead,
-                message: e.to_string(),
-            }),
-        };
-    }
-}
-
-struct HeadInspector;
-
-impl FieldInspector for HeadInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::Head
-    }
-
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        result.head_short = match repo.head() {
-            Ok(head) => match head.id() {
-                Some(id) => FieldState::Available(id.to_hex_with_len(7).to_string()),
-                None => FieldState::Absent,
-            },
-            Err(e) => FieldState::Failed(InspectionFailure {
-                kind: InspectionFailureKind::HeadRead,
-                message: e.to_string(),
-            }),
-        };
-    }
-}
-
-struct HeadSummaryInspector;
-
-impl FieldInspector for HeadSummaryInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::HeadSummary
-    }
-
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        result.head_summary = match repo.head() {
-            Ok(head) => match head.id() {
-                Some(id) => match id.object() {
-                    Ok(obj) => match obj.try_into_commit() {
-                        Ok(commit) => {
-                            let msg = commit.message_raw_sloppy().to_string();
-                            let first = msg.lines().next().unwrap_or("").to_string();
-                            if first.is_empty() {
-                                FieldState::Absent
-                            } else {
-                                FieldState::Available(first)
-                            }
-                        }
-                        Err(e) => FieldState::Failed(InspectionFailure {
-                            kind: InspectionFailureKind::HeadRead,
-                            message: e.to_string(),
-                        }),
-                    },
-                    Err(e) => FieldState::Failed(InspectionFailure {
-                        kind: InspectionFailureKind::HeadRead,
-                        message: e.to_string(),
-                    }),
-                },
-                None => FieldState::Absent,
-            },
-            Err(e) => FieldState::Failed(InspectionFailure {
-                kind: InspectionFailureKind::HeadRead,
-                message: e.to_string(),
-            }),
-        };
-    }
-}
-
-struct StatusInspector;
-
-impl FieldInspector for StatusInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::Status
-    }
-
-    fn inspect(&self, repo: &gix::Repository, path: &Path, result: &mut InspectionResult) {
-        result.status = check_status(repo, path);
-    }
-}
-
-struct UpstreamInspector;
-
-impl FieldInspector for UpstreamInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::Upstream
-    }
-
-    /// Reads `result.branch` to construct the tracking ref name.
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        let branch_name = result
-            .branch
-            .value()
-            .cloned()
-            .unwrap_or_else(|| "main".into());
-        let refname = format!("refs/remotes/origin/{branch_name}");
-        result.upstream_short = match repo.find_reference(&refname) {
-            Ok(reference) => FieldState::Available(reference.id().to_hex_with_len(7).to_string()),
-            Err(_) => FieldState::Absent,
-        };
-    }
-}
-
-struct AheadBehindInspector;
-
-impl FieldInspector for AheadBehindInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::AheadBehind
-    }
-
-    /// Reads `result.head_short` and `result.upstream_short` to
-    /// determine whether computation is possible. Full graph
-    /// traversal is not yet implemented.
-    fn inspect(&self, _repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        result.ahead_behind = FieldState::Absent;
-    }
-}
-
-struct HeadDateInspector;
-
-impl FieldInspector for HeadDateInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::HeadDate
-    }
-
-    /// Extract the committer timestamp from the local HEAD commit.
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        result.head_date = match repo.head() {
-            Ok(head) => match head.id() {
-                Some(id) => match id.object() {
-                    Ok(obj) => match obj.try_into_commit() {
-                        Ok(commit) => match commit.time() {
-                            Ok(time) => FieldState::Available(time.seconds),
-                            Err(e) => FieldState::Failed(InspectionFailure {
-                                kind: InspectionFailureKind::HeadRead,
-                                message: e.to_string(),
-                            }),
-                        },
-                        Err(e) => FieldState::Failed(InspectionFailure {
-                            kind: InspectionFailureKind::HeadRead,
-                            message: e.to_string(),
-                        }),
-                    },
-                    Err(e) => FieldState::Failed(InspectionFailure {
-                        kind: InspectionFailureKind::HeadRead,
-                        message: e.to_string(),
-                    }),
-                },
-                None => FieldState::Absent,
-            },
-            Err(e) => FieldState::Failed(InspectionFailure {
-                kind: InspectionFailureKind::HeadRead,
-                message: e.to_string(),
-            }),
-        };
-    }
-}
-
-struct UpstreamDateInspector;
-
-impl FieldInspector for UpstreamDateInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::UpstreamDate
-    }
-
-    /// Extract the committer timestamp from the upstream tracking
-    /// branch HEAD. Reads `result.branch` for the tracking ref name.
-    fn inspect(&self, repo: &gix::Repository, _path: &Path, result: &mut InspectionResult) {
-        let branch_name = result
-            .branch
-            .value()
-            .cloned()
-            .unwrap_or_else(|| "main".into());
-        let refname = format!("refs/remotes/origin/{branch_name}");
-        result.upstream_date = match repo.find_reference(&refname) {
-            Ok(reference) => match reference.id().object() {
-                Ok(obj) => match obj.try_into_commit() {
-                    Ok(commit) => match commit.time() {
-                        Ok(time) => FieldState::Available(time.seconds),
-                        Err(e) => FieldState::Failed(InspectionFailure {
-                            kind: InspectionFailureKind::UpstreamRead,
-                            message: e.to_string(),
-                        }),
-                    },
-                    Err(e) => FieldState::Failed(InspectionFailure {
-                        kind: InspectionFailureKind::UpstreamRead,
-                        message: e.to_string(),
-                    }),
-                },
-                Err(e) => FieldState::Failed(InspectionFailure {
-                    kind: InspectionFailureKind::UpstreamRead,
-                    message: e.to_string(),
-                }),
-            },
-            Err(_) => FieldState::Absent,
-        };
-    }
-}
-
-struct DiskUsageInspector;
-
-impl FieldInspector for DiskUsageInspector {
-    fn id(&self) -> InspectorId {
-        InspectorId::DiskUsage
-    }
-
-    /// Compute disk usage via `dua-core` parallel filesystem traversal.
-    ///
-    /// Uses `threads: 1` because each inspector already runs inside a
-    /// pool worker — the cross-repo parallelism is handled by the pool,
-    /// intra-repo parallelism would oversubscribe.
-    ///
-    /// Walks the entire repo directory once. Entries under `.git/` are
-    /// summed separately into `git_bytes`. Non-directory entries are
-    /// counted in `file_count`.
-    fn inspect(&self, _repo: &gix::Repository, path: &Path, result: &mut InspectionResult) {
-        let start = std::time::Instant::now();
-
-        let git_dir = path.join(".git");
-        let mut total_bytes: u64 = 0;
-        let mut git_bytes: u64 = 0;
-        let mut file_count: u64 = 0;
-
-        for entry in dua_core::walk(
-            path,
-            1, // single-threaded: pool provides cross-repo parallelism
-            dua_core::Order::Completion,
-            dua_core::Options::default(),
-            |_| true,
-        ) {
-            let Ok(entry) = entry else {
-                continue;
-            };
-            if entry.file_type.is_dir() {
-                continue;
-            }
-            let size = entry
-                .metadata
-                .as_ref()
-                .and_then(|m| m.as_ref().ok())
-                .map_or(0, dua_core::Metadata::len);
-            total_bytes = total_bytes.saturating_add(size);
-            file_count += 1;
-
-            if entry.path().starts_with(&git_dir) {
-                git_bytes = git_bytes.saturating_add(size);
-            }
+/// Inspect `field` of `repo` (at `path`, for diagnostics) into `result`,
+/// which holds the fields inspected before it.
+fn inspect_field(field: Field, repo: &gix::Repository, path: &Path, result: &mut InspectionResult) {
+    match field {
+        Field::Remote => result.remote_url = remote_url(repo).into(),
+        Field::Branch => {
+            result.branch = repo
+                .head_name()
+                .map(|name| name.map(|name| name.shorten().to_string()))
+                .map_err(|e| InspectionFailure::new(InspectionFailureKind::HeadRead, e))
+                .into();
         }
-
-        let elapsed_ms = start.elapsed().as_millis();
-        if elapsed_ms > 500 {
-            tracing::debug!(
-                path = %path.display(),
-                elapsed_ms,
-                total_bytes,
-                file_count,
-                "slow disk usage walk"
-            );
+        Field::Head => {
+            result.head_short = repo
+                .head()
+                .map(|head| head.id().map(|id| id.to_hex_with_len(7).to_string()))
+                .map_err(|e| InspectionFailure::new(InspectionFailureKind::HeadRead, e))
+                .into();
         }
-
-        result.disk_usage = FieldState::Available(DiskUsage {
-            total_bytes,
-            git_bytes,
-            file_count,
-        });
+        Field::HeadSummary => {
+            result.head_summary = head_commit(repo)
+                .map(|commit| {
+                    let message = commit?.message_raw_sloppy().to_string();
+                    let first = message.lines().next().unwrap_or_default();
+                    (!first.is_empty()).then(|| first.to_owned())
+                })
+                .into();
+        }
+        Field::Status => result.status = check_status(repo, path),
+        Field::Upstream => {
+            result.upstream_short = upstream_reference(repo, &result.branch)
+                .map(|reference| reference.map(|r| r.id().to_hex_with_len(7).to_string()))
+                .into();
+        }
+        Field::AheadBehind => result.ahead_behind = ahead_behind(repo, &result.branch).into(),
+        Field::HeadDate => {
+            result.head_date = head_commit(repo)
+                .and_then(|commit| {
+                    commit
+                        .map(|c| commit_time(&c, InspectionFailureKind::HeadRead))
+                        .transpose()
+                })
+                .into();
+        }
+        Field::UpstreamDate => {
+            result.upstream_date = upstream_commit(repo, &result.branch)
+                .and_then(|commit| {
+                    commit
+                        .map(|c| commit_time(&c, InspectionFailureKind::UpstreamRead))
+                        .transpose()
+                })
+                .into();
+        }
+        Field::DiskUsage => result.disk_usage = disk_usage(repo, path),
     }
+}
+
+/// The `origin` fetch URL; `None` without an `origin` remote or URL.
+fn remote_url(repo: &gix::Repository) -> Result<Option<String>, InspectionFailure> {
+    match repo.try_find_remote("origin") {
+        None => Ok(None),
+        Some(Err(e)) => Err(InspectionFailure::new(InspectionFailureKind::RemoteRead, e)),
+        Some(Ok(remote)) => Ok(remote
+            .url(gix::remote::Direction::Fetch)
+            .map(|url| url.to_bstring().to_string())),
+    }
+}
+
+/// The HEAD commit; `None` when HEAD is unborn.
+fn head_commit(repo: &gix::Repository) -> Result<Option<gix::Commit<'_>>, InspectionFailure> {
+    let failure = |e: &dyn fmt::Display| InspectionFailure::new(InspectionFailureKind::HeadRead, e);
+    let head = repo.head().map_err(|e| failure(&e))?;
+    let Some(id) = head.id() else {
+        return Ok(None);
+    };
+    let commit = id
+        .object()
+        .map_err(|e| failure(&e))?
+        .try_into_commit()
+        .map_err(|e| failure(&e))?;
+    Ok(Some(commit))
+}
+
+/// The commit of the inspected branch's upstream; `None` without one.
+fn upstream_commit<'repo>(
+    repo: &'repo gix::Repository,
+    branch: &FieldState<String>,
+) -> Result<Option<gix::Commit<'repo>>, InspectionFailure> {
+    let failure =
+        |e: &dyn fmt::Display| InspectionFailure::new(InspectionFailureKind::UpstreamRead, e);
+    let Some(reference) = upstream_reference(repo, branch)? else {
+        return Ok(None);
+    };
+    let commit = reference
+        .id()
+        .object()
+        .map_err(|e| failure(&e))?
+        .try_into_commit()
+        .map_err(|e| failure(&e))?;
+    Ok(Some(commit))
+}
+
+/// `commit`'s committer time in seconds since the Unix epoch; a failure
+/// is of `kind`.
+fn commit_time(
+    commit: &gix::Commit<'_>,
+    kind: InspectionFailureKind,
+) -> Result<i64, InspectionFailure> {
+    commit
+        .time()
+        .map(|time| time.seconds)
+        .map_err(|e| InspectionFailure::new(kind, e))
+}
+
+/// The upstream tracking reference `refs/remotes/origin/<branch>` of the
+/// inspected branch. `Ok(None)` when there is no upstream: HEAD is
+/// detached (branch `Absent`) or the tracking reference does not exist.
+fn upstream_reference<'repo>(
+    repo: &'repo gix::Repository,
+    branch: &FieldState<String>,
+) -> Result<Option<gix::Reference<'repo>>, InspectionFailure> {
+    let failure =
+        |message: String| InspectionFailure::new(InspectionFailureKind::UpstreamRead, message);
+    let name = match branch {
+        FieldState::Available(name) => name,
+        FieldState::Absent => return Ok(None),
+        FieldState::Failed(e) => return Err(failure(format!("branch unknown: {}", e.message))),
+        // `InspectionRequest::contains` inspects the branch with every
+        // field that reads it.
+        FieldState::NotRequested => return Err(failure("branch not inspected".into())),
+    };
+    let refname = format!("refs/remotes/origin/{name}");
+    repo.try_find_reference(refname.as_str())
+        .map_err(|e| failure(format!("{refname}: {e}")))
+}
+
+/// Ahead/behind counts of HEAD against its upstream; `Ok(None)` when HEAD
+/// is unborn or there is no upstream.
+fn ahead_behind(
+    repo: &gix::Repository,
+    branch: &FieldState<String>,
+) -> Result<Option<AheadBehind>, InspectionFailure> {
+    let Some(mut upstream) = upstream_reference(repo, branch)? else {
+        return Ok(None);
+    };
+    let failure =
+        |message: String| InspectionFailure::new(InspectionFailureKind::UpstreamRead, message);
+    let head = repo.head().map_err(|e| failure(format!("HEAD: {e}")))?;
+    let Some(head_id) = head.id() else {
+        return Ok(None); // unborn HEAD
+    };
+    let upstream_id = upstream
+        .peel_to_id()
+        .map_err(|e| failure(format!("upstream: {e}")))?
+        .detach();
+    let head_id = head_id.detach();
+    let count = |tip: gix::ObjectId, hidden: gix::ObjectId| -> Result<usize, InspectionFailure> {
+        let walk = repo
+            .rev_walk([tip])
+            .with_hidden([hidden])
+            .all()
+            .map_err(|e| failure(format!("commit walk: {e}")))?;
+        let mut n = 0usize;
+        for info in walk {
+            info.map_err(|e| failure(format!("commit walk: {e}")))?;
+            n += 1;
+        }
+        Ok(n)
+    };
+    Ok(Some(AheadBehind {
+        ahead: count(head_id, upstream_id)?,
+        behind: count(upstream_id, head_id)?,
+    }))
+}
+
+/// Disk usage via one `dua-core` traversal of `path`.
+///
+/// Single-threaded (`threads: 1`): each inspection already runs inside a
+/// pool worker, which provides the cross-repository parallelism;
+/// intra-repository parallelism would oversubscribe.
+///
+/// Entries under the git directory are summed separately into
+/// `git_bytes`; non-directory entries are counted in `file_count`. An
+/// entry that cannot be read fails the field rather than being left out
+/// of the totals.
+fn disk_usage(repo: &gix::Repository, path: &Path) -> FieldState<DiskUsage> {
+    let start = std::time::Instant::now();
+    // A linked worktree's git directory lives in the main repository,
+    // outside `path`; only the `.git` link file is under `path`.
+    let git_dir = repo.git_dir();
+    let mut usage = DiskUsage {
+        total_bytes: 0,
+        git_bytes: 0,
+        file_count: 0,
+    };
+    let failed = |message: String| {
+        FieldState::Failed(InspectionFailure::new(
+            InspectionFailureKind::DiskUsage,
+            message,
+        ))
+    };
+
+    for entry in dua_core::walk(
+        path,
+        1,
+        dua_core::Order::Completion,
+        dua_core::Options::default(),
+        |_| true,
+    ) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // The error names the failing entry or directory; only a pool
+            // failure carries no path.
+            Err(e) => {
+                return failed(match e.path() {
+                    Some(_) => e.to_string(),
+                    None => format!("walk {}: {e}", path.display()),
+                });
+            }
+        };
+        if entry.file_type.is_dir() {
+            continue;
+        }
+        let size = match entry.metadata.as_ref() {
+            Some(Ok(meta)) => meta.len(),
+            Some(Err(e)) => return failed(format!("{}: {e}", entry.path().display())),
+            None => return failed(format!("{}: no metadata", entry.path().display())),
+        };
+        usage.total_bytes = usage.total_bytes.saturating_add(size);
+        usage.file_count += 1;
+        if entry.path().starts_with(git_dir) {
+            usage.git_bytes = usage.git_bytes.saturating_add(size);
+        }
+    }
+
+    let elapsed_ms = start.elapsed().as_millis();
+    if elapsed_ms > 500 {
+        tracing::debug!(
+            path = %path.display(),
+            elapsed_ms,
+            total_bytes = usage.total_bytes,
+            file_count = usage.file_count,
+            "slow disk usage walk"
+        );
+    }
+    FieldState::Available(usage)
 }
 
 // ============================================================================
@@ -658,12 +614,10 @@ impl FieldInspector for DiskUsageInspector {
 // ============================================================================
 
 /// Inspect a repository at the given path, collecting only the
-/// requested metadata fields.
+/// requested metadata fields (with the fields they read).
 ///
-/// Opens the repository once via gix, then runs each requested
-/// `FieldInspector` in dependency order against the shared handle.
-/// The request is expanded to include implicit dependencies before
-/// inspection begins.
+/// Opens the repository once via gix, then inspects each requested field
+/// in [`Field::ALL`] order against the shared handle.
 ///
 /// # Errors
 ///
@@ -674,75 +628,32 @@ pub fn inspect(
     path: &Path,
     request: &InspectionRequest,
 ) -> Result<InspectionResult, WorkspaceError> {
-    let request = request.expanded();
     let repo = gix::open(path).map_err(|e| WorkspaceError::GitError(format!("{e}")))?;
     let mut result = InspectionResult::default();
-
-    for inspector in INSPECTORS {
-        if request.is_requested(inspector.id()) {
-            inspector.inspect(&repo, path, &mut result);
+    for field in Field::ALL {
+        if request.contains(field) {
+            inspect_field(field, &repo, path, &mut result);
         }
     }
-
     Ok(result)
 }
 
 // ============================================================================
-// Status check implementation (shared by StatusInspector)
+// Status check
 // ============================================================================
 
-/// Check repository dirty/clean status using git plumbing.
+/// Repository dirty/clean status from `gix::status`: dirty when any
+/// change exists, untracked files included (`git status --porcelain`).
 ///
-/// Primary path: `git update-index --refresh` + `git diff-index --quiet HEAD`.
-/// Faster than a full working-tree walk for clean repos because
-/// `update-index` only re-stats changed entries and `diff-index`
-/// exits on the first difference.
-///
-/// Fallback: `gix::status` if git is not on PATH.
-///
-/// The `path` parameter is for diagnostic tracing only.
+/// Read-only: unlike `git update-index --refresh`, the index is not
+/// rewritten. A bare repository has no working tree, so status is
+/// `Absent`. The `path` parameter is for diagnostic tracing only.
 fn check_status(repo: &gix::Repository, path: &Path) -> FieldState<RepoStatus> {
-    let Some(work_dir) = repo.workdir() else {
-        return FieldState::Available(RepoStatus::Clean);
-    };
-
+    if repo.workdir().is_none() {
+        return FieldState::Absent;
+    }
     let start = std::time::Instant::now();
-
-    let refresh = std::process::Command::new("git")
-        .args(["update-index", "-q", "--refresh"])
-        .current_dir(work_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    if refresh.is_err() {
-        return check_status_gix(repo);
-    }
-
-    let head_exists = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(work_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-
-    if !head_exists {
-        return FieldState::Available(RepoStatus::Clean);
-    }
-
-    let result = match std::process::Command::new("git")
-        .args(["diff-index", "--quiet", "HEAD", "--"])
-        .current_dir(work_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) if status.success() => FieldState::Available(RepoStatus::Clean),
-        Ok(_) => FieldState::Available(RepoStatus::Dirty),
-        Err(_) => check_status_gix(repo),
-    };
-
+    let result = status_of(repo).map(Some).into();
     let elapsed_ms = start.elapsed().as_millis();
     if elapsed_ms > 100 {
         tracing::debug!(
@@ -751,34 +662,22 @@ fn check_status(repo: &gix::Repository, path: &Path) -> FieldState<RepoStatus> {
             "slow status check"
         );
     }
-
     result
 }
 
-/// gix-based status check. Slower (full tree walk) but no git binary needed.
-fn check_status_gix(repo: &gix::Repository) -> FieldState<RepoStatus> {
-    let platform = match repo.status(gix::progress::Discard) {
-        Ok(p) => p,
-        Err(e) => {
-            return FieldState::Failed(InspectionFailure {
-                kind: InspectionFailureKind::StatusRead,
-                message: e.to_string(),
-            });
-        }
-    };
-    let mut iter = match platform.into_iter(Vec::new()) {
-        Ok(i) => i,
-        Err(e) => {
-            return FieldState::Failed(InspectionFailure {
-                kind: InspectionFailureKind::StatusRead,
-                message: e.to_string(),
-            });
-        }
-    };
-    if iter.next().is_some() {
-        FieldState::Available(RepoStatus::Dirty)
-    } else {
-        FieldState::Available(RepoStatus::Clean)
+/// Whether any change exists: the first status entry decides.
+fn status_of(repo: &gix::Repository) -> Result<RepoStatus, InspectionFailure> {
+    let failure =
+        |e: &dyn fmt::Display| InspectionFailure::new(InspectionFailureKind::StatusRead, e);
+    let mut entries = repo
+        .status(gix::progress::Discard)
+        .map_err(|e| failure(&e))?
+        .into_iter(Vec::new())
+        .map_err(|e| failure(&e))?;
+    match entries.next() {
+        None => Ok(RepoStatus::Clean),
+        Some(Ok(_)) => Ok(RepoStatus::Dirty),
+        Some(Err(e)) => Err(failure(&e)),
     }
 }
 
@@ -786,29 +685,27 @@ fn check_status_gix(repo: &gix::Repository) -> FieldState<RepoStatus> {
 // Human-readable byte formatting
 // ============================================================================
 
+/// Binary units, largest first, with their size in bytes.
+const BYTE_UNITS: [(&str, u64); 4] = [
+    ("TiB", 1 << 40),
+    ("GiB", 1 << 30),
+    ("MiB", 1 << 20),
+    ("KiB", 1 << 10),
+];
+
 /// Format a byte count as a human-readable string.
 ///
-/// Uses binary units (KiB, MiB, GiB, TiB) with one decimal place.
-/// Values under 1 KiB are shown as whole bytes.
+/// Uses binary units (KiB, MiB, GiB, TiB) with one decimal place, rounded
+/// to the nearest tenth. Values under 1 KiB are shown as whole bytes.
 #[must_use]
 pub fn format_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const TIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
-
-    #[allow(clippy::cast_precision_loss)] // display-only; sub-byte precision is irrelevant
-    let b = bytes as f64;
-    if b >= TIB {
-        format!("{:.1} TiB", b / TIB)
-    } else if b >= GIB {
-        format!("{:.1} GiB", b / GIB)
-    } else if b >= MIB {
-        format!("{:.1} MiB", b / MIB)
-    } else if b >= KIB {
-        format!("{:.1} KiB", b / KIB)
-    } else {
-        format!("{bytes} B")
+    match BYTE_UNITS.iter().find(|(_, size)| bytes >= *size) {
+        Some(&(unit, size)) => {
+            let (bytes, size) = (u128::from(bytes), u128::from(size));
+            let tenths = (bytes * 10 + size / 2) / size;
+            format!("{}.{} {unit}", tenths / 10, tenths % 10)
+        }
+        None => format!("{bytes} B"),
     }
 }
 
@@ -816,80 +713,106 @@ pub fn format_bytes(bytes: u64) -> String {
 // Relative time formatting
 // ============================================================================
 
-/// Format a unix epoch timestamp as a relative age string.
-///
-/// Computes the difference between the given timestamp and the
-/// current system time. Returns compact human-readable durations:
-/// `3m`, `5h`, `2d`, `1w`, `3mo`, `1y`.
+/// Format a unix epoch timestamp as a relative age string at `now`
+/// (seconds since the Unix epoch). Returns compact human-readable
+/// durations: `3m`, `5h`, `2d`, `1w`, `3mo`, `1y`.
 ///
 /// Returns `"future"` for timestamps ahead of now, `"now"` for
 /// ages under one minute.
 #[must_use]
-pub fn format_relative_time(epoch_secs: i64) -> String {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 3600;
-    const DAY: u64 = 86400;
-    const WEEK: u64 = 7 * DAY;
-    const MONTH: u64 = 30 * DAY;
-    const YEAR: u64 = 365 * DAY;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-
-    #[allow(clippy::cast_sign_loss)]
-    let epoch = epoch_secs as u64;
+pub fn format_relative_time(epoch_secs: i64, now: u64) -> String {
+    // Timestamps before the Unix epoch are older than any representable
+    // age; clamp to the epoch rather than wrapping into the future.
+    let epoch = u64::try_from(epoch_secs).unwrap_or(0);
     if epoch > now {
         return "future".into();
     }
     let age = now - epoch;
 
-    if age < MINUTE {
-        "now".into()
-    } else if age < HOUR {
-        format!("{}m", age / MINUTE)
-    } else if age < DAY {
-        format!("{}h", age / HOUR)
-    } else if age < WEEK {
-        format!("{}d", age / DAY)
-    } else if age < MONTH {
-        format!("{}w", age / WEEK)
-    } else if age < YEAR {
-        format!("{}m", age / MONTH)
-    } else {
-        format!("{}y", age / YEAR)
-    }
+    TIME_UNITS
+        .iter()
+        .find(|unit| age >= unit.seconds)
+        .map_or_else(
+            || "now".into(),
+            |unit| format!("{}{}", age / unit.seconds, unit.suffix),
+        )
 }
 
-/// Parse a human-readable duration string into seconds.
-///
-/// Accepts: `Nd` (days), `Nw` (weeks), `Nm` (months, 30d),
-/// `Ny` (years, 365d). Returns an error for unrecognized formats.
+/// A duration unit shared by relative-time output and `--stale` input.
+struct TimeUnit {
+    suffix: &'static str,
+    seconds: u64,
+    name: &'static str,
+}
+
+/// Duration units, largest first. Relative times use the first unit the
+/// age reaches; parsing matches suffixes in this order, so `mo` is tried
+/// before `m`.
+const TIME_UNITS: &[TimeUnit] = &[
+    TimeUnit {
+        suffix: "y",
+        seconds: 365 * 86400,
+        name: "years (365d)",
+    },
+    TimeUnit {
+        suffix: "mo",
+        seconds: 30 * 86400,
+        name: "months (30d)",
+    },
+    TimeUnit {
+        suffix: "w",
+        seconds: 7 * 86400,
+        name: "weeks",
+    },
+    TimeUnit {
+        suffix: "d",
+        seconds: 86400,
+        name: "days",
+    },
+    TimeUnit {
+        suffix: "h",
+        seconds: 3600,
+        name: "hours",
+    },
+    TimeUnit {
+        suffix: "m",
+        seconds: 60,
+        name: "minutes",
+    },
+];
+
+/// Parse a duration such as `30d` into seconds, using the units of
+/// `format_relative_time`: `m` (minutes), `h`, `d`, `w`, `mo` (30d),
+/// `y` (365d).
 ///
 /// # Errors
 ///
-/// Returns an error string if the format is not recognized or
-/// the numeric portion cannot be parsed.
+/// Returns an error string if the unit is not recognized, the numeric
+/// portion cannot be parsed, or the duration overflows `u64` seconds.
 pub fn parse_stale_duration(s: &str) -> Result<u64, String> {
     let s = s.trim();
-    if let Some(n) = s.strip_suffix('y') {
-        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
-        Ok(n * 365 * 86400)
-    } else if let Some(n) = s.strip_suffix('m') {
-        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
-        Ok(n * 30 * 86400)
-    } else if let Some(n) = s.strip_suffix('w') {
-        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
-        Ok(n * 7 * 86400)
-    } else if let Some(n) = s.strip_suffix('d') {
-        let n: u64 = n.parse().map_err(|_| format!("invalid number: {n}"))?;
-        Ok(n * 86400)
-    } else {
-        Err(format!(
-            "unrecognized duration: {s}\n\
-             accepted: Nd (days), Nw (weeks), Nm (months), Ny (years)"
-        ))
-    }
+    let accepted = || {
+        TIME_UNITS
+            .iter()
+            .map(|unit| format!("N{} ({})", unit.suffix, unit.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some((count, unit)) = TIME_UNITS
+        .iter()
+        .find_map(|unit| s.strip_suffix(unit.suffix).map(|count| (count, unit)))
+    else {
+        return Err(format!(
+            "unrecognized duration: {s}\naccepted: {}",
+            accepted()
+        ));
+    };
+    let count: u64 = count
+        .parse()
+        .map_err(|_| format!("invalid number: {count}"))?;
+    count
+        .checked_mul(unit.seconds)
+        .ok_or_else(|| format!("duration too large: {s}"))
 }
 
 // ============================================================================
@@ -900,6 +823,10 @@ pub fn parse_stale_duration(s: &str) -> Result<u64, String> {
 mod tests {
     use super::*;
 
+    fn request(fields: &[Field]) -> InspectionRequest {
+        fields.iter().copied().collect()
+    }
+
     #[test]
     fn inspect_fresh_repo() {
         let dir = tempfile::tempdir().unwrap();
@@ -908,6 +835,8 @@ mod tests {
         assert!(matches!(result.remote_url, FieldState::Absent));
         assert_eq!(result.branch.value(), Some(&"main".to_string()));
         assert!(matches!(result.head_short, FieldState::Absent));
+        assert!(matches!(result.head_summary, FieldState::Absent));
+        assert!(matches!(result.head_date, FieldState::Absent));
         assert_eq!(result.status.value(), Some(&RepoStatus::Clean));
         // Fresh repo has .git directory structure but no working tree files.
         let du = result.disk_usage.value().expect("disk_usage requested");
@@ -919,11 +848,7 @@ mod tests {
     fn inspect_partial_request() {
         let dir = tempfile::tempdir().unwrap();
         let _repo = gix::init(dir.path()).unwrap();
-        let request = InspectionRequest {
-            branch: true,
-            ..Default::default()
-        };
-        let result = inspect(dir.path(), &request).unwrap();
+        let result = inspect(dir.path(), &request(&[Field::Branch])).unwrap();
         assert_eq!(result.branch.value(), Some(&"main".to_string()));
         assert!(matches!(result.remote_url, FieldState::NotRequested));
         assert!(matches!(result.head_short, FieldState::NotRequested));
@@ -941,11 +866,7 @@ mod tests {
     fn inspect_only_status() {
         let dir = tempfile::tempdir().unwrap();
         let _repo = gix::init(dir.path()).unwrap();
-        let request = InspectionRequest {
-            status: true,
-            ..Default::default()
-        };
-        let result = inspect(dir.path(), &request).unwrap();
+        let result = inspect(dir.path(), &request(&[Field::Status])).unwrap();
         assert_eq!(result.status.value(), Some(&RepoStatus::Clean));
         assert!(matches!(result.branch, FieldState::NotRequested));
         assert!(matches!(result.remote_url, FieldState::NotRequested));
@@ -953,43 +874,141 @@ mod tests {
     }
 
     #[test]
-    fn inspect_upstream_expands_branch() {
+    fn fields_reading_the_branch_inspect_it_too() {
+        for field in [Field::Upstream, Field::AheadBehind, Field::UpstreamDate] {
+            let req = request(&[field]);
+            assert!(req.contains(Field::Branch), "{field:?}");
+            assert!(!req.contains(Field::Head));
+        }
         let dir = tempfile::tempdir().unwrap();
         let _repo = gix::init(dir.path()).unwrap();
-        let request = InspectionRequest {
-            upstream: true,
-            ..Default::default()
-        };
-        let expanded = request.expanded();
-        assert!(expanded.branch);
-        let result = inspect(dir.path(), &request).unwrap();
+        let result = inspect(dir.path(), &request(&[Field::Upstream])).unwrap();
         assert!(result.branch.is_available());
         assert!(matches!(result.upstream_short, FieldState::Absent));
     }
 
     #[test]
-    fn inspect_ahead_behind_expands_deps() {
-        let request = InspectionRequest {
-            ahead_behind: true,
-            ..Default::default()
-        };
-        let expanded = request.expanded();
-        assert!(expanded.head);
-        assert!(expanded.upstream);
-        assert!(expanded.branch);
+    fn every_field_is_inspected_after_the_fields_it_reads() {
+        for (position, field) in Field::ALL.iter().enumerate() {
+            for read in field.reads() {
+                let read_at = Field::ALL.iter().position(|f| f == read).unwrap();
+                assert!(read_at < position, "{field:?} reads {read:?}");
+            }
+        }
+        let distinct: BTreeSet<Field> = Field::ALL.into_iter().collect();
+        assert_eq!(distinct.len(), Field::ALL.len());
+    }
+
+    /// Commit an empty tree on top of `parent` and point `refname` at it.
+    fn commit_on(
+        repo: &git2::Repository,
+        refname: &str,
+        parent: git2::Oid,
+        msg: &str,
+    ) -> git2::Oid {
+        let sig = git2::Signature::now("alice", "alice@example.invalid").unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let parent = repo.find_commit(parent).unwrap();
+        repo.commit(Some(refname), &sig, &sig, msg, &tree, &[&parent])
+            .unwrap()
+    }
+
+    #[test]
+    fn ahead_behind_counts_diverged_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = crate::git::marker::test_repos::init(dir.path());
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let tracking = format!("refs/remotes/origin/{branch}");
+        repo.reference(&tracking, base, true, "test").unwrap();
+        // Upstream gains 3 commits; HEAD gains 2 on its own line.
+        let mut up = base;
+        for i in 0..3 {
+            up = commit_on(&repo, &tracking, up, &format!("up {i}"));
+        }
+        let mut local = base;
+        for i in 0..2 {
+            local = commit_on(&repo, "HEAD", local, &format!("local {i}"));
+        }
+        let result = inspect(
+            dir.path(),
+            &request(&[Field::AheadBehind, Field::HeadSummary, Field::UpstreamDate]),
+        )
+        .unwrap();
+        assert_eq!(
+            result.ahead_behind.value(),
+            Some(&AheadBehind {
+                ahead: 2,
+                behind: 3
+            })
+        );
+        assert_eq!(
+            result.head_summary.value().map(String::as_str),
+            Some("local 1")
+        );
+        assert!(result.upstream_date.is_available());
+    }
+
+    #[test]
+    fn ahead_behind_without_upstream_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::git::marker::test_repos::init(dir.path());
+        let result = inspect(dir.path(), &request(&[Field::AheadBehind])).unwrap();
+        assert!(matches!(result.ahead_behind, FieldState::Absent));
+    }
+
+    #[test]
+    fn upstream_of_detached_head_is_absent_not_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = crate::git::marker::test_repos::init(dir.path());
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        // A tracking ref for "main" exists; a detached HEAD must not read it.
+        repo.reference("refs/remotes/origin/main", head.id(), true, "test")
+            .unwrap();
+        repo.set_head_detached(head.id()).unwrap();
+        let result = inspect(
+            dir.path(),
+            &request(&[Field::Upstream, Field::UpstreamDate]),
+        )
+        .unwrap();
+        assert!(matches!(result.branch, FieldState::Absent));
+        assert!(matches!(result.upstream_short, FieldState::Absent));
+        assert!(matches!(result.upstream_date, FieldState::Absent));
+    }
+
+    #[test]
+    fn status_does_not_rewrite_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::git::marker::test_repos::init(dir.path());
+        std::fs::write(dir.path().join("untracked.txt"), "x").unwrap();
+        let index = dir.path().join(".git").join("index");
+        let before = std::fs::metadata(&index)
+            .map(|m| m.modified().unwrap())
+            .ok();
+        let result = inspect(dir.path(), &request(&[Field::Status])).unwrap();
+        assert_eq!(result.status.value(), Some(&RepoStatus::Dirty));
+        let after = std::fs::metadata(&index)
+            .map(|m| m.modified().unwrap())
+            .ok();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn bare_repository_status_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init_bare(dir.path()).unwrap();
+        let result = inspect(dir.path(), &request(&[Field::Status])).unwrap();
+        assert!(matches!(result.status, FieldState::Absent));
     }
 
     #[test]
     fn inspect_disk_usage_only() {
         let dir = tempfile::tempdir().unwrap();
         let _repo = gix::init(dir.path()).unwrap();
-        // Create a working tree file.
         std::fs::write(dir.path().join("hello.txt"), "hello world").unwrap();
-        let request = InspectionRequest {
-            disk_usage: true,
-            ..Default::default()
-        };
-        let result = inspect(dir.path(), &request).unwrap();
+        let result = inspect(dir.path(), &request(&[Field::DiskUsage])).unwrap();
         let du = result.disk_usage.value().expect("disk_usage requested");
         assert!(
             du.total_bytes > du.git_bytes,
@@ -1004,41 +1023,22 @@ mod tests {
     fn inspect_disk_usage_separates_git_from_working_tree() {
         let dir = tempfile::tempdir().unwrap();
         let _repo = gix::init(dir.path()).unwrap();
-        let payload = vec![0u8; 4096];
-        std::fs::write(dir.path().join("data.bin"), &payload).unwrap();
-        let request = InspectionRequest {
-            disk_usage: true,
-            ..Default::default()
-        };
-        let result = inspect(dir.path(), &request).unwrap();
+        std::fs::write(dir.path().join("data.bin"), vec![0u8; 4096]).unwrap();
+        let result = inspect(dir.path(), &request(&[Field::DiskUsage])).unwrap();
         let du = result.disk_usage.value().unwrap();
-        assert!(
-            du.total_bytes >= 4096,
-            "total includes working tree file: {}",
-            du.total_bytes
-        );
-        assert!(
-            du.total_bytes - du.git_bytes >= 4096,
-            "working tree bytes = total - git = {}",
-            du.total_bytes - du.git_bytes
-        );
+        assert!(du.total_bytes >= 4096, "{}", du.total_bytes);
+        assert!(du.total_bytes - du.git_bytes >= 4096);
     }
 
     #[test]
-    fn inspectors_cover_all_ids() {
-        let registered: Vec<InspectorId> = INSPECTORS.iter().map(|i| i.id()).collect();
-        assert!(registered.contains(&InspectorId::Remote));
-        assert!(registered.contains(&InspectorId::Branch));
-        assert!(registered.contains(&InspectorId::Head));
-        assert!(registered.contains(&InspectorId::HeadSummary));
-        assert!(registered.contains(&InspectorId::Status));
-        assert!(registered.contains(&InspectorId::Upstream));
-        assert!(registered.contains(&InspectorId::AheadBehind));
-        assert!(registered.contains(&InspectorId::DiskUsage));
-        let mut deduped = registered.clone();
-        deduped.sort_by_key(|id| *id as u8);
-        deduped.dedup();
-        assert_eq!(registered.len(), deduped.len());
+    fn reads_become_field_states() {
+        let failure = InspectionFailure::new(InspectionFailureKind::HeadRead, "corrupt");
+        assert_eq!(FieldState::from(Ok(Some(1))), FieldState::Available(1));
+        assert_eq!(FieldState::<i32>::from(Ok(None)), FieldState::Absent);
+        assert_eq!(
+            FieldState::<i32>::from(Err(failure.clone())),
+            FieldState::Failed(failure)
+        );
     }
 
     #[test]
@@ -1048,123 +1048,73 @@ mod tests {
     }
 
     #[test]
-    fn field_state_not_requested_display() {
-        let fs: FieldState<String> = FieldState::NotRequested;
-        assert_eq!(fs.to_string(), "");
+    fn field_state_display() {
+        assert_eq!(FieldState::<String>::NotRequested.to_string(), "");
+        assert_eq!(
+            FieldState::Available("main".to_string()).to_string(),
+            "main"
+        );
+        let failed: FieldState<String> = FieldState::Failed(InspectionFailure::new(
+            InspectionFailureKind::HeadRead,
+            "corrupt",
+        ));
+        assert!(failed.to_string().contains("head read"));
     }
 
     #[test]
-    fn field_state_available_display() {
-        let fs = FieldState::Available("main".to_string());
-        assert_eq!(fs.to_string(), "main");
-    }
-
-    #[test]
-    fn field_state_failed_display() {
-        let fs: FieldState<String> = FieldState::Failed(InspectionFailure {
-            kind: InspectionFailureKind::HeadRead,
-            message: "corrupt".into(),
-        });
-        assert!(fs.to_string().contains("head read"));
-    }
-
-    #[test]
-    fn request_expansion() {
-        let req = InspectionRequest {
-            ahead_behind: true,
-            ..Default::default()
-        };
-        let expanded = req.expanded();
-        assert!(expanded.head);
-        assert!(expanded.upstream);
-        assert!(expanded.branch);
-    }
-
-    #[test]
-    fn request_expansion_upstream_requires_branch() {
-        let req = InspectionRequest {
-            upstream: true,
-            ..Default::default()
-        };
-        let expanded = req.expanded();
-        assert!(expanded.branch);
-    }
-
-    #[test]
-    fn inspect_head_date_on_fresh_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        let _repo = gix::init(dir.path()).unwrap();
-        let request = InspectionRequest {
-            head_date: true,
-            ..Default::default()
-        };
-        let result = inspect(dir.path(), &request).unwrap();
-        // Fresh repo has no commits, so head_date is Absent.
-        assert!(matches!(result.head_date, FieldState::Absent));
-    }
-
-    #[test]
-    fn inspect_upstream_date_expands_branch() {
-        let request = InspectionRequest {
-            upstream_date: true,
-            ..Default::default()
-        };
-        let expanded = request.expanded();
-        assert!(expanded.branch);
-    }
-
-    #[test]
-    fn parse_stale_duration_days() {
+    fn parse_stale_duration_units() {
         assert_eq!(parse_stale_duration("7d").unwrap(), 7 * 86400);
-        assert_eq!(parse_stale_duration("30d").unwrap(), 30 * 86400);
-    }
-
-    #[test]
-    fn parse_stale_duration_weeks() {
         assert_eq!(parse_stale_duration("2w").unwrap(), 14 * 86400);
-    }
-
-    #[test]
-    fn parse_stale_duration_months() {
-        assert_eq!(parse_stale_duration("3m").unwrap(), 90 * 86400);
-    }
-
-    #[test]
-    fn parse_stale_duration_years() {
+        assert_eq!(parse_stale_duration("3mo").unwrap(), 90 * 86400);
         assert_eq!(parse_stale_duration("1y").unwrap(), 365 * 86400);
+        // `m` is minutes, as in the relative-time column.
+        assert_eq!(parse_stale_duration("3m").unwrap(), 180);
+        assert_eq!(parse_stale_duration("2h").unwrap(), 7200);
     }
 
     #[test]
-    fn parse_stale_duration_rejects_invalid() {
+    fn parse_stale_duration_rejects_overflow_and_garbage() {
+        assert!(parse_stale_duration(&format!("{}y", u64::MAX)).is_err());
         assert!(parse_stale_duration("abc").is_err());
         assert!(parse_stale_duration("").is_err());
         assert!(parse_stale_duration("7x").is_err());
     }
 
+    /// A fixed clock for relative-time tests.
+    const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn stale_duration_round_trips_relative_time_output() {
+        for secs in [120, 7200, 172_800, 1_209_600, 5_184_000, 63_072_000] {
+            let epoch = i64::try_from(NOW - secs).unwrap();
+            let shown = format_relative_time(epoch, NOW);
+            assert_eq!(parse_stale_duration(&shown).unwrap(), secs, "{shown}");
+        }
+    }
+
     #[test]
     fn format_relative_time_recent() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        #[allow(clippy::cast_possible_wrap)]
-        let epoch = now as i64;
-        assert_eq!(format_relative_time(epoch), "now");
-        assert_eq!(format_relative_time(epoch - 30), "now");
-        assert_eq!(format_relative_time(epoch - 120), "2m");
-        assert_eq!(format_relative_time(epoch - 7200), "2h");
-        assert_eq!(format_relative_time(epoch - 172800), "2d");
+        let epoch = i64::try_from(NOW).unwrap();
+        let at = |e: i64| format_relative_time(e, NOW);
+        assert_eq!(at(epoch), "now");
+        assert_eq!(at(epoch - 30), "now");
+        assert_eq!(at(epoch - 120), "2m");
+        assert_eq!(at(epoch - 7200), "2h");
+        assert_eq!(at(epoch - 172_800), "2d");
+        assert_eq!(at(epoch - 14 * 86_400), "2w");
+        assert_eq!(at(epoch - 90 * 86_400), "3mo");
+        assert_eq!(at(epoch - 400 * 86_400), "1y");
+    }
+
+    #[test]
+    fn format_relative_time_pre_epoch_is_old_not_future() {
+        assert!(format_relative_time(-1, NOW).ends_with('y'));
     }
 
     #[test]
     fn format_relative_time_future() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        #[allow(clippy::cast_possible_wrap)]
-        let future = (now + 3600) as i64;
-        assert_eq!(format_relative_time(future), "future");
+        let future = i64::try_from(NOW + 3600).unwrap();
+        assert_eq!(format_relative_time(future, NOW), "future");
     }
 
     #[test]
@@ -1176,5 +1126,8 @@ mod tests {
         assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
         assert_eq!(format_bytes(1_099_511_627_776), "1.0 TiB");
         assert_eq!(format_bytes(1_536), "1.5 KiB");
+        assert_eq!(format_bytes(1_075), "1.0 KiB", "1.0498 rounds down");
+        assert_eq!(format_bytes(1_076), "1.1 KiB", "1.0508 rounds up");
+        assert_eq!(format_bytes(u64::MAX), "16777216.0 TiB");
     }
 }

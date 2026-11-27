@@ -14,7 +14,7 @@ in a `tokio::task::spawn_blocking` context at daemon startup.
 Entries are filtered before indexing:
 
 | Condition | Action |
-|---|---|
+| --- | --- |
 | `NoDisplay=true` | Skipped. Non-launchable entries (e.g., D-Bus activatable services). |
 | `Hidden=true` | Skipped. Explicitly hidden by the packager. |
 | No `Exec=` field | Skipped. Not a launchable application. |

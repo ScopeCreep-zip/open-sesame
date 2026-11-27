@@ -5,60 +5,40 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-core-types   = { workspace = true }
-core-config  = { workspace = true }
-core-ipc     = { workspace = true }
-core-crypto  = { workspace = true }
-core-auth    = { workspace = true }
-core-profile = { workspace = true }
-tokio        = { workspace = true }
-tracing      = { workspace = true }
-tracing-subscriber = { workspace = true }
-clap         = { workspace = true }
-anyhow       = { workspace = true }
-serde        = { workspace = true }
-dirs         = { workspace = true }
-libc         = { workspace = true }
-snow         = { workspace = true }
-zeroize      = { workspace = true }
-
-[features]
-default = ["wayland"]
-wayland = [
-    "dep:smithay-client-toolkit",
-    "dep:wayland-client",
-    "dep:wayland-protocols",
-    "dep:wayland-protocols-wlr",
-    "dep:tiny-skia",
-    "dep:cosmic-text",
-]
+core-types = { workspace = true }
+core-config = { workspace = true }
+core-daemon = { workspace = true }
+core-layout = { workspace = true }
+core-ipc = { workspace = true }
+core-crypto = { workspace = true }
+core-auth = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux          = { workspace = true, features = ["cosmic"] }
-smithay-client-toolkit  = { workspace = true, optional = true }
-wayland-client          = { workspace = true, optional = true }
-wayland-protocols       = { workspace = true, optional = true }
-wayland-protocols-wlr   = { workspace = true, optional = true }
-tiny-skia               = { workspace = true, optional = true }
-cosmic-text             = { workspace = true, optional = true }
-rustix                  = { workspace = true }
-tracing-journald        = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-platform-macos  = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-platform-windows = { workspace = true }
+platform-linux = { workspace = true, features = ["cosmic"] }
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+tiny-skia = { workspace = true }
+cosmic-text = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
-tempfile    = { workspace = true }
-tokio-test  = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
 
 [package.metadata.deb]
 name = "open-sesame-desktop"
-maintainer = "usrbinkat"
+maintainer = "user <user@example.invalid>"
 copyright = "2024-2026 scopecreep.zip"
 license-file = ["../LICENSE", "0"]
 depends = "open-sesame, libc6, libgcc-s1, libseccomp2, libxkbcommon0, libwayland-client0, libfontconfig1, libfreetype6, fonts-dejavu-core"
@@ -74,15 +54,15 @@ headless package for core infrastructure (profiles, secrets, launcher, snippets)
 maintainer-scripts = "../scripts/desktop/"
 
 assets = [
-    # Desktop daemon binaries
-    ["target/release/daemon-wm", "/usr/bin/daemon-wm", "755"],
-    ["target/release/daemon-clipboard", "/usr/bin/daemon-clipboard", "755"],
-    ["target/release/daemon-input", "/usr/bin/daemon-input", "755"],
-    # Desktop systemd units
-    ["../contrib/systemd/open-sesame-desktop.target", "/usr/lib/systemd/user/open-sesame-desktop.target", "644"],
-    ["../contrib/systemd/open-sesame-wm.service", "/usr/lib/systemd/user/open-sesame-wm.service", "644"],
-    ["../contrib/systemd/open-sesame-clipboard.service", "/usr/lib/systemd/user/open-sesame-clipboard.service", "644"],
-    ["../contrib/systemd/open-sesame-input.service", "/usr/lib/systemd/user/open-sesame-input.service", "644"],
+  # Desktop daemon binaries
+  ["target/release/daemon-wm", "/usr/bin/daemon-wm", "755"],
+  ["target/release/daemon-clipboard", "/usr/bin/daemon-clipboard", "755"],
+  ["target/release/daemon-input", "/usr/bin/daemon-input", "755"],
+  # Desktop systemd units
+  ["../contrib/systemd/open-sesame-desktop.target", "/usr/lib/systemd/user/open-sesame-desktop.target", "644"],
+  ["../contrib/systemd/open-sesame-wm.service", "/usr/lib/systemd/user/open-sesame-wm.service", "644"],
+  ["../contrib/systemd/open-sesame-clipboard.service", "/usr/lib/systemd/user/open-sesame-clipboard.service", "644"],
+  ["../contrib/systemd/open-sesame-input.service", "/usr/lib/systemd/user/open-sesame-input.service", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -99,14 +79,14 @@ post_uninstall_script = "../scripts/rpm/desktop/postrm"
 post_trans_script = "../scripts/rpm/desktop/posttrans"
 
 assets = [
-    { source = "target/release/daemon-wm", dest = "/usr/bin/daemon-wm", mode = "755" },
-    { source = "target/release/daemon-clipboard", dest = "/usr/bin/daemon-clipboard", mode = "755" },
-    { source = "target/release/daemon-input", dest = "/usr/bin/daemon-input", mode = "755" },
-    { source = "../contrib/systemd/open-sesame-desktop.target", dest = "/usr/lib/systemd/user/open-sesame-desktop.target", mode = "644" },
-    { source = "../contrib/systemd/open-sesame-wm.service", dest = "/usr/lib/systemd/user/open-sesame-wm.service", mode = "644" },
-    { source = "../contrib/systemd/open-sesame-clipboard.service", dest = "/usr/lib/systemd/user/open-sesame-clipboard.service", mode = "644" },
-    { source = "../contrib/systemd/open-sesame-input.service", dest = "/usr/lib/systemd/user/open-sesame-input.service", mode = "644" },
-    { source = "../contrib/systemd/user-preset/90-open-sesame-desktop.preset", dest = "/usr/lib/systemd/user-preset/90-open-sesame-desktop.preset", mode = "644" },
+  { source = "target/release/daemon-wm", dest = "/usr/bin/daemon-wm", mode = "755" },
+  { source = "target/release/daemon-clipboard", dest = "/usr/bin/daemon-clipboard", mode = "755" },
+  { source = "target/release/daemon-input", dest = "/usr/bin/daemon-input", mode = "755" },
+  { source = "../contrib/systemd/open-sesame-desktop.target", dest = "/usr/lib/systemd/user/open-sesame-desktop.target", mode = "644" },
+  { source = "../contrib/systemd/open-sesame-wm.service", dest = "/usr/lib/systemd/user/open-sesame-wm.service", mode = "644" },
+  { source = "../contrib/systemd/open-sesame-clipboard.service", dest = "/usr/lib/systemd/user/open-sesame-clipboard.service", mode = "644" },
+  { source = "../contrib/systemd/open-sesame-input.service", dest = "/usr/lib/systemd/user/open-sesame-input.service", mode = "644" },
+  { source = "../contrib/systemd/user-preset/90-open-sesame-desktop.preset", dest = "/usr/lib/systemd/user-preset/90-open-sesame-desktop.preset", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

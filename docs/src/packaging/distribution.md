@@ -12,7 +12,7 @@ and analyzes conventional commits to determine version bumps.
 ### Release Rules
 
 | Commit type | Release |
-|-------------|---------|
+| --- | --- |
 | `feat` | minor |
 | `fix` | patch |
 | `perf` | patch |
@@ -167,7 +167,7 @@ instructions.
 The release workflow requests the following permissions:
 
 | Permission | Purpose |
-|-----------|---------|
+| --- | --- |
 | `contents: write` | Create GitHub releases, push version commits |
 | `pages: write` | Deploy APT + DNF repos and docs to GitHub Pages |
 | `id-token: write` | OIDC token for Pages deployment and attestations |

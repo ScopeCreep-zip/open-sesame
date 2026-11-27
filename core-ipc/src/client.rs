@@ -2,15 +2,21 @@
 //! and receives subscribed events over a Unix domain socket.
 //!
 //! Two connection modes:
-//! - `connect_encrypted()`: low-level constructor for tests and CLI clients.
-//! - `connect_daemon_with_keypair_retry()`: production constructor for daemons.
-//!   Spawns an I/O task that transparently handles `KeyRotationPending` —
+//! - `connect_encrypted()`: an ephemeral client (the CLI) with a keypair the
+//!   registry does not know.
+//! - `connect_daemon_with_keypair_retry()`: a named daemon with its issued
+//!   keypair. Its I/O task handles `KeyRotationPending` for the daemon, so
 //!   the caller's `recv()` is never interrupted by routine key rotation.
+//!
+//! Each inbound frame is decoded once, in the I/O task: correlated
+//! responses go to their waiting request, everything else to `recv()`.
 
 use crate::message::MessageContext;
+use crate::noise::{BusEndpoint, Connection};
+use core_layout::Layout;
 use core_types::{DaemonId, EventKind, SecurityLevel};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
@@ -19,7 +25,7 @@ use uuid::Uuid;
 
 use crate::framing::{decode_frame, encode_frame};
 use crate::message::Message;
-use crate::transport::{extract_ucred, local_credentials};
+use crate::transport::extract_ucred;
 
 /// Retry parameters for initial IPC bus connection.
 pub struct RetryConfig {
@@ -29,15 +35,31 @@ pub struct RetryConfig {
     pub backoff: Duration,
 }
 
-/// Metadata for transparent key rotation inside the I/O task.
-#[derive(Clone)]
+/// Request-response waiters, keyed by the request's `msg_id`.
+type Pending = Arc<Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>>;
+
+/// What a named daemon's I/O task needs to follow a key rotation.
 struct RotationConfig {
+    /// The keypair and bus endpoint locations; rotation re-reads the
+    /// keypair from the same layout the daemon started with.
+    layout: Layout,
     daemon_name: String,
     daemon_id: DaemonId,
-    socket_path: PathBuf,
-    server_pub: [u8; 32],
+    endpoint: BusEndpoint,
     capabilities: Vec<String>,
     version: String,
+}
+
+/// Connect to the socket at `path` and handshake with `endpoint` as
+/// `keypair`.
+async fn open(
+    path: &Path,
+    endpoint: &BusEndpoint,
+    keypair: &snow::Keypair,
+) -> core_types::Result<Connection> {
+    let stream = connect_with_retry(path, 3, Duration::from_millis(100)).await?;
+    let server_creds = extract_ucred(&stream)?;
+    Connection::client(stream, endpoint, keypair, &server_creds).await
 }
 
 /// The IPC bus client used by each daemon to communicate on the bus.
@@ -46,203 +68,114 @@ pub struct BusClient {
     msg_ctx: MessageContext,
     /// Outbound frames to send to the server.
     outbound_tx: mpsc::Sender<Vec<u8>>,
-    /// Inbound frames received from the server (broadcast/unsolicited).
-    inbound_rx: mpsc::Receiver<Vec<u8>>,
-    /// Pending request-response waiters, keyed by `msg_id`.
-    pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>>,
+    /// Inbound messages that answer no pending request.
+    inbound_rx: mpsc::Receiver<Message<EventKind>>,
+    pending: Pending,
     epoch: Instant,
-    /// Handle to the multiplexed I/O task (encrypted transport).
-    /// `None` for in-process test clients created via `new()`.
-    io_handle: Option<tokio::task::JoinHandle<()>>,
+    /// The I/O task owning the encrypted connection.
+    io_handle: tokio::task::JoinHandle<()>,
 }
 
 impl BusClient {
-    /// Create a new bus client with pre-wired channels (for in-process testing).
-    #[must_use]
-    pub fn new(
+    /// Connect as an ephemeral client: `client_keypair` is not in the
+    /// clearance registry, and no key rotation is followed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection or handshake fails.
+    pub async fn connect_encrypted(
         daemon_id: DaemonId,
-        outbound_tx: mpsc::Sender<Vec<u8>>,
-        inbound_rx: mpsc::Receiver<Vec<u8>>,
+        path: &Path,
+        endpoint: &BusEndpoint,
+        client_keypair: &snow::Keypair,
+    ) -> core_types::Result<Self> {
+        let connection = open(path, endpoint, client_keypair).await?;
+        Ok(Self::start(daemon_id, connection, None))
+    }
+
+    /// Connect as the named daemon `daemon_name` with the keypair issued to
+    /// it, retrying `retry.max_attempts` times. The keypair is re-read on
+    /// every attempt (daemon-profile may be issuing it). The I/O task
+    /// follows `KeyRotationPending` for this daemon: it reads the rotated
+    /// keypair, reconnects, re-announces `DaemonStarted`, and swaps the
+    /// connection without the caller seeing it.
+    ///
+    /// The initial `DaemonStarted` announcement is the caller's.
+    ///
+    /// # Errors
+    ///
+    /// The last attempt's error when every attempt fails.
+    pub async fn connect_daemon_with_keypair_retry(
+        layout: &Layout,
+        daemon_name: &str,
+        daemon_id: DaemonId,
+        endpoint: &BusEndpoint,
+        capabilities: Vec<String>,
+        version: &str,
+        retry: RetryConfig,
+    ) -> core_types::Result<Self> {
+        let socket = layout.bus_socket()?;
+        let mut last_err = None;
+        for attempt in 1..=retry.max_attempts {
+            let attempt_result = async {
+                let keypair = read_keypair(layout, daemon_name).await?;
+                open(&socket, endpoint, keypair.as_inner()).await
+            }
+            .await;
+            match attempt_result {
+                Ok(connection) => {
+                    let rotation = RotationConfig {
+                        layout: layout.clone(),
+                        daemon_name: daemon_name.to_owned(),
+                        daemon_id,
+                        endpoint: *endpoint,
+                        capabilities,
+                        version: version.to_owned(),
+                    };
+                    return Ok(Self::start(daemon_id, connection, Some(rotation)));
+                }
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "IPC connect failed, retrying");
+                    last_err = Some(e);
+                    if attempt < retry.max_attempts {
+                        tokio::time::sleep(retry.backoff * attempt).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            core_types::Error::Ipc(format!(
+                "connect failed after {} attempts",
+                retry.max_attempts
+            ))
+        }))
+    }
+
+    /// Start the I/O task that owns `connection`.
+    fn start(
+        daemon_id: DaemonId,
+        connection: Connection,
+        rotation: Option<RotationConfig>,
     ) -> Self {
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
+        let (inbound_tx, inbound_rx) = mpsc::channel(1024);
+        let pending = Pending::default();
+        let io_handle = tokio::spawn(io_loop(
+            connection,
+            rotation,
+            Arc::clone(&pending),
+            inbound_tx,
+            outbound_rx,
+        ));
         Self {
             daemon_id,
             msg_ctx: MessageContext::new(daemon_id),
             outbound_tx,
             inbound_rx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending,
             epoch: Instant::now(),
-            io_handle: None,
+            io_handle,
         }
-    }
-
-    /// Connect to the bus server with Noise IK encrypted transport.
-    ///
-    /// Low-level constructor used by tests and `connect_with_keypair_retry`.
-    /// Does NOT handle key rotation — the I/O task is a plain byte pipe.
-    /// Production daemons should use `connect_daemon_with_keypair_retry` instead.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if connection, key read, or handshake fails.
-    pub async fn connect_encrypted(
-        daemon_id: DaemonId,
-        path: &Path,
-        server_public_key: &[u8; 32],
-        client_keypair: &snow::Keypair,
-    ) -> core_types::Result<Self> {
-        let stream = connect_with_retry(path, 3, Duration::from_millis(100)).await?;
-        let server_creds = extract_ucred(&stream)?;
-        let local_creds = local_credentials();
-
-        let (reader, writer) = stream.into_split();
-        let mut reader = tokio::io::BufReader::new(reader);
-        let mut writer = tokio::io::BufWriter::new(writer);
-
-        let transport = crate::noise::client_handshake(
-            &mut reader,
-            &mut writer,
-            server_public_key,
-            client_keypair,
-            &local_creds,
-            &server_creds,
-        )
-        .await?;
-
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(256);
-        let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(1024);
-        let pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let pending_clone = Arc::clone(&pending);
-        let io_handle = tokio::spawn(async move {
-            let mut transport = transport;
-            let mut reader = reader;
-            let mut writer = writer;
-            loop {
-                tokio::select! {
-                    result = transport.read_encrypted_frame(&mut reader) => {
-                        if let Ok(payload) = result {
-                            route_inbound(payload, &pending_clone, &inbound_tx).await;
-                        } else {
-                            tracing::info!("server disconnected (encrypted)");
-                            break;
-                        }
-                    }
-                    msg = outbound_rx.recv() => {
-                        if let Some(mut payload) = msg {
-                            let result = transport.write_encrypted_frame(&mut writer, &payload).await;
-                            zeroize::Zeroize::zeroize(&mut payload);
-                            if let Err(e) = result {
-                                tracing::debug!(error = %e, "encrypted write failed, closing client");
-                                break;
-                            }
-                        } else {
-                            tracing::debug!("outbound channel closed, I/O task exiting");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            daemon_id,
-            msg_ctx: MessageContext::new(daemon_id),
-            outbound_tx,
-            inbound_rx,
-            pending,
-            epoch: Instant::now(),
-            io_handle: Some(io_handle),
-        })
-    }
-
-    /// Connect to the bus as a named daemon with transparent key rotation.
-    ///
-    /// Same handshake as `connect_encrypted`, but the I/O task intercepts
-    /// `KeyRotationPending` messages matching `config.daemon_name` and
-    /// performs reconnection internally. The caller's `recv()` is never
-    /// interrupted by routine rotation.
-    ///
-    /// On rotation failure (disk error, connection refused), the I/O task
-    /// logs the error and continues on the existing connection. The old key
-    /// remains valid in the registry during the grace period.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the initial connection or handshake fails.
-    async fn connect_as_daemon(
-        config: RotationConfig,
-        client_keypair: &snow::Keypair,
-    ) -> core_types::Result<Self> {
-        let stream = connect_with_retry(&config.socket_path, 3, Duration::from_millis(100)).await?;
-        let server_creds = extract_ucred(&stream)?;
-        let local_creds = local_credentials();
-
-        let (reader, writer) = stream.into_split();
-        let mut reader = tokio::io::BufReader::new(reader);
-        let mut writer = tokio::io::BufWriter::new(writer);
-
-        let transport = crate::noise::client_handshake(
-            &mut reader,
-            &mut writer,
-            &config.server_pub,
-            client_keypair,
-            &local_creds,
-            &server_creds,
-        )
-        .await?;
-
-        let daemon_id = config.daemon_id;
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(256);
-        let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(1024);
-        let pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let pending_clone = Arc::clone(&pending);
-        let io_handle = tokio::spawn(async move {
-            let mut transport = transport;
-            let mut reader = reader;
-            let mut writer = writer;
-            loop {
-                tokio::select! {
-                    result = transport.read_encrypted_frame(&mut reader) => {
-                        if let Ok(payload) = result {
-                            if let RotationResult::NotRotation = try_handle_rotation(
-                                &payload, &config, &mut transport, &mut reader, &mut writer,
-                            ).await {
-                                route_inbound(payload, &pending_clone, &inbound_tx).await;
-                            }
-                        } else {
-                            tracing::error!("server disconnected (encrypted)");
-                            break;
-                        }
-                    }
-                    msg = outbound_rx.recv() => {
-                        if let Some(mut payload) = msg {
-                            let result = transport.write_encrypted_frame(&mut writer, &payload).await;
-                            zeroize::Zeroize::zeroize(&mut payload);
-                            if let Err(e) = result {
-                                tracing::debug!(error = %e, "encrypted write failed, closing client");
-                                break;
-                            }
-                        } else {
-                            tracing::debug!("outbound channel closed, I/O task exiting");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            daemon_id,
-            msg_ctx: MessageContext::new(daemon_id),
-            outbound_tx,
-            inbound_rx,
-            pending,
-            epoch: Instant::now(),
-            io_handle: Some(io_handle),
-        })
     }
 
     /// Send a message to the bus server.
@@ -273,18 +206,35 @@ impl BusClient {
         self.send(&msg).await
     }
 
+    /// Publish an event whose delivery the caller does not act on
+    /// (lifecycle announcements, notifications). A failure is logged at
+    /// `warn` with `what` naming the event; the payload is never logged,
+    /// since events can carry sensitive data.
+    pub async fn publish_or_log(
+        &self,
+        what: &'static str,
+        event: EventKind,
+        security_level: SecurityLevel,
+    ) {
+        if let Err(e) = self.publish(event, security_level).await {
+            tracing::warn!(event = what, error = %e, "bus publish failed");
+        }
+    }
+
     /// Send a request and wait for a correlated response.
     ///
     /// # Errors
     ///
-    /// Returns an error on send failure or timeout.
+    /// `core_types::Error::Timeout` when no response arrives within
+    /// `timeout`; `core_types::Error::Ipc` on send failure.
     pub async fn request(
         &self,
         event: EventKind,
         security_level: SecurityLevel,
         timeout: Duration,
     ) -> core_types::Result<Message<EventKind>> {
-        let msg = Message::new(&self.msg_ctx, event, security_level, self.epoch);
+        let msg =
+            Message::new(&self.msg_ctx, event, security_level, self.epoch).expecting_response();
         let msg_id = msg.msg_id;
 
         let (tx, rx) = oneshot::channel();
@@ -300,29 +250,19 @@ impl BusClient {
             }
             Err(_) => {
                 self.pending.lock().await.remove(&msg_id);
-                Err(core_types::Error::Ipc(format!(
-                    "request timed out after {}ms",
-                    timeout.as_millis()
-                )))
+                Err(core_types::Error::Timeout {
+                    operation: "request".into(),
+                    after: timeout,
+                })
             }
         }
     }
 
-    /// Receive the next broadcast/unsolicited inbound event.
+    /// Receive the next inbound message that answers no pending request.
     ///
-    /// Returns `None` if the server disconnected.
+    /// Returns `None` only when the server disconnected.
     pub async fn recv(&mut self) -> Option<Message<EventKind>> {
-        let mut payload = self.inbound_rx.recv().await?;
-        let result = decode_frame(&payload);
-        // Zeroize raw postcard bytes — may contain serialized secret values.
-        zeroize::Zeroize::zeroize(&mut payload);
-        match result {
-            Ok(msg) => Some(msg),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to decode inbound frame");
-                None
-            }
-        }
+        self.inbound_rx.recv().await
     }
 
     /// Return this client's daemon ID.
@@ -345,248 +285,158 @@ impl BusClient {
     /// Gracefully shut down the client, flushing all pending outbound frames.
     pub async fn shutdown(self) {
         drop(self.outbound_tx);
-        if let Some(handle) = self.io_handle {
-            let _ = handle.await;
+        if let Err(e) = self.io_handle.await {
+            // The I/O task panicked or was cancelled; frames still queued
+            // in it were not delivered.
+            tracing::error!(error = %e, "IPC client I/O task did not finish cleanly");
         }
-    }
-
-    /// Connect to the IPC bus with keypair re-read on each attempt.
-    ///
-    /// Low-level retry constructor for CLI clients and tests.
-    /// Does NOT handle key rotation. Production daemons should use
-    /// `connect_daemon_with_keypair_retry`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if all attempts fail (keypair read or connect).
-    pub async fn connect_with_keypair_retry(
-        daemon_name: &str,
-        daemon_id: DaemonId,
-        socket_path: &Path,
-        server_pub: &[u8; 32],
-        max_attempts: u32,
-        backoff: Duration,
-    ) -> core_types::Result<(Self, crate::noise::ZeroizingKeypair)> {
-        let mut last_err = None;
-        for attempt in 1..=max_attempts {
-            let (private_key, public_key) =
-                match crate::noise::read_daemon_keypair(daemon_name).await {
-                    Ok(kp) => kp,
-                    Err(e) => {
-                        tracing::warn!(attempt, error = %e, "keypair read failed, retrying");
-                        last_err = Some(e);
-                        if attempt < max_attempts {
-                            tokio::time::sleep(backoff * attempt).await;
-                        }
-                        continue;
-                    }
-                };
-            let client_keypair = crate::noise::ZeroizingKeypair::new(snow::Keypair {
-                private: private_key.to_vec(),
-                public: public_key.to_vec(),
-            });
-
-            match Self::connect_encrypted(
-                daemon_id,
-                socket_path,
-                server_pub,
-                client_keypair.as_inner(),
-            )
-            .await
-            {
-                Ok(client) => {
-                    return Ok((client, client_keypair));
-                }
-                Err(e) => {
-                    tracing::warn!(attempt, error = %e, "IPC connect failed, retrying");
-                    last_err = Some(e);
-                    if attempt < max_attempts {
-                        tokio::time::sleep(backoff * attempt).await;
-                    }
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            core_types::Error::Ipc(format!("connect failed after {max_attempts} attempts"))
-        }))
-    }
-
-    /// Connect to the IPC bus as a named daemon with transparent key rotation.
-    ///
-    /// Same retry logic as `connect_with_keypair_retry`, but the returned
-    /// client's I/O task automatically handles `KeyRotationPending` messages.
-    /// The caller never sees rotation events and `recv()` is uninterrupted.
-    ///
-    /// The initial `DaemonStarted` announcement is NOT sent by this method —
-    /// the caller publishes it after connecting.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if all connection attempts fail.
-    pub async fn connect_daemon_with_keypair_retry(
-        daemon_name: &str,
-        daemon_id: DaemonId,
-        socket_path: &Path,
-        server_pub: &[u8; 32],
-        capabilities: Vec<String>,
-        version: &str,
-        retry: RetryConfig,
-    ) -> core_types::Result<Self> {
-        let config = RotationConfig {
-            daemon_name: daemon_name.to_owned(),
-            daemon_id,
-            socket_path: socket_path.to_owned(),
-            server_pub: *server_pub,
-            capabilities,
-            version: version.to_owned(),
-        };
-
-        let mut last_err = None;
-        for attempt in 1..=retry.max_attempts {
-            let (private_key, public_key) =
-                match crate::noise::read_daemon_keypair(daemon_name).await {
-                    Ok(kp) => kp,
-                    Err(e) => {
-                        tracing::warn!(attempt, error = %e, "keypair read failed, retrying");
-                        last_err = Some(e);
-                        if attempt < retry.max_attempts {
-                            tokio::time::sleep(retry.backoff * attempt).await;
-                        }
-                        continue;
-                    }
-                };
-            let client_keypair = crate::noise::ZeroizingKeypair::new(snow::Keypair {
-                private: private_key.to_vec(),
-                public: public_key.to_vec(),
-            });
-
-            match Self::connect_as_daemon(config.clone(), client_keypair.as_inner()).await {
-                Ok(client) => return Ok(client),
-                Err(e) => {
-                    tracing::warn!(attempt, error = %e, "IPC connect failed, retrying");
-                    last_err = Some(e);
-                    if attempt < retry.max_attempts {
-                        tokio::time::sleep(retry.backoff * attempt).await;
-                    }
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            core_types::Error::Ipc(format!(
-                "connect failed after {} attempts",
-                retry.max_attempts
-            ))
-        }))
     }
 }
 
-/// Result of checking whether an inbound payload is a rotation message.
-enum RotationResult {
-    /// The message was a `KeyRotationPending` for this daemon and was handled.
-    /// Transport/reader/writer have been swapped. Continue the I/O loop.
-    Handled,
-    /// The message was not a rotation event. Forward it normally.
-    NotRotation,
+/// The daemon's issued keypair, verified against its checksum.
+async fn read_keypair(
+    layout: &Layout,
+    daemon_name: &str,
+) -> core_types::Result<crate::noise::ZeroizingKeypair> {
+    let (private, public) = crate::noise::read_daemon_keypair(layout, daemon_name).await?;
+    Ok(crate::noise::ZeroizingKeypair::new(snow::Keypair {
+        private: private.to_vec(),
+        public: public.to_vec(),
+    }))
 }
 
-/// Check if an inbound payload is a `KeyRotationPending` for this daemon.
-/// If so, reconnect with the new keypair and swap the transport in place.
-/// On failure, log the error and return `NotRotation` so the original
-/// payload is forwarded to the caller — the old connection remains valid.
-#[allow(clippy::similar_names)] // reader vs new_reader, writer vs new_writer
-async fn try_handle_rotation(
-    payload: &[u8],
+/// Own `connection`: write outbound frames, and decode each inbound frame
+/// once — a `KeyRotationPending` for this daemon is followed (`rotation`),
+/// a correlated response goes to its waiter, anything else to `recv()`.
+async fn io_loop(
+    mut connection: Connection,
+    rotation: Option<RotationConfig>,
+    pending: Pending,
+    inbound_tx: mpsc::Sender<Message<EventKind>>,
+    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
+) {
+    loop {
+        tokio::select! {
+            result = connection.transport.read_encrypted_frame(&mut connection.reader) => {
+                let payload = match result {
+                    Ok(payload) => zeroize::Zeroizing::new(payload),
+                    Err(e) => {
+                        tracing::info!(error = %e, "bus connection closed");
+                        break;
+                    }
+                };
+                let Some(msg) = decode_inbound(&payload) else {
+                    continue;
+                };
+                if let Some(config) = &rotation
+                    && let EventKind::KeyRotationPending { daemon_name, new_pubkey, .. } = &msg.payload
+                    && *daemon_name == config.daemon_name
+                {
+                    follow_rotation(config, new_pubkey, &mut connection).await;
+                    continue;
+                }
+                deliver(msg, &pending, &inbound_tx).await;
+            }
+            msg = outbound_rx.recv() => {
+                let Some(payload) = msg else {
+                    tracing::debug!("outbound channel closed, I/O task exiting");
+                    break;
+                };
+                let payload = zeroize::Zeroizing::new(payload);
+                if let Err(e) = connection.transport.write_encrypted_frame(&mut connection.writer, &payload).await {
+                    tracing::debug!(error = %e, "encrypted write failed, closing client");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Decode one inbound frame. A frame that does not decode is logged and
+/// skipped: one malformed frame does not end the connection.
+fn decode_inbound(payload: &[u8]) -> Option<Message<EventKind>> {
+    match decode_frame(payload) {
+        Ok(msg) => Some(msg),
+        Err(e) => {
+            tracing::warn!(error = %e, "inbound frame does not decode, skipped");
+            None
+        }
+    }
+}
+
+/// Route a decoded message to its pending waiter, or to `recv()`.
+async fn deliver(
+    msg: Message<EventKind>,
+    pending: &Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>,
+    inbound_tx: &mpsc::Sender<Message<EventKind>>,
+) {
+    if let Some(corr_id) = msg.correlation_id {
+        let waiter = pending.lock().await.remove(&corr_id);
+        if let Some(tx) = waiter {
+            // A closed receiver means the requester already timed out
+            // and returned its error; the late response has no reader.
+            if tx.send(msg).is_err() {
+                tracing::debug!(%corr_id, "response arrived after its requester gave up");
+            }
+            return;
+        }
+    }
+    if inbound_tx.try_send(msg).is_err() {
+        tracing::warn!("inbound channel full, message dropped");
+    }
+}
+
+/// Follow a `KeyRotationPending` for this daemon. A failure (disk error,
+/// connection refused, announced key differing from the key on disk) is
+/// logged and the current connection kept: both keys stay valid in the
+/// registry for the grace period.
+async fn follow_rotation(
     config: &RotationConfig,
-    transport: &mut crate::noise::NoiseTransport,
-    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: &mut tokio::io::BufWriter<tokio::net::unix::OwnedWriteHalf>,
-) -> RotationResult {
-    // Attempt decode. If it fails, this isn't a valid message for us.
-    let msg: Message<EventKind> = match decode_frame(payload) {
-        Ok(m) => m,
-        Err(_) => return RotationResult::NotRotation,
-    };
-
-    let (announced_name, announced_pubkey) = match &msg.payload {
-        EventKind::KeyRotationPending {
-            daemon_name,
-            new_pubkey,
-            ..
-        } => (daemon_name.as_str(), new_pubkey),
-        _ => return RotationResult::NotRotation,
-    };
-
-    if announced_name != config.daemon_name {
-        return RotationResult::NotRotation;
-    }
-
+    announced_pubkey: &[u8; 32],
+    connection: &mut Connection,
+) {
     tracing::info!(
         daemon = %config.daemon_name,
         "key rotation: reading new keypair and reconnecting"
     );
-
-    // Perform the reconnection. All errors are recoverable — the old
-    // connection remains valid because both keys are in the registry.
-    match perform_rotation(config, announced_pubkey, transport, reader, writer).await {
-        Ok(()) => RotationResult::Handled,
-        Err(e) => {
-            tracing::error!(
+    match rotated_connection(config, announced_pubkey).await {
+        Ok(rotated) => {
+            // The old socket is dropped: the server sees a clean disconnect.
+            *connection = rotated;
+            tracing::info!(
                 daemon = %config.daemon_name,
-                error = %e,
-                "key rotation failed, continuing on current connection"
+                "key rotation: transport swapped to new connection"
             );
-            RotationResult::NotRotation
         }
+        Err(e) => tracing::error!(
+            daemon = %config.daemon_name,
+            error = %e,
+            "key rotation failed, continuing on current connection"
+        ),
     }
 }
 
-/// Execute the key rotation: read keypair, connect, handshake, announce,
-/// swap transport/reader/writer in place.
-async fn perform_rotation(
+/// A connection under the rotated keypair, already re-announced with
+/// `DaemonStarted` under the same `DaemonId` (daemon-profile treats a new
+/// `DaemonId` as a crash-restart and revokes the keys).
+async fn rotated_connection(
     config: &RotationConfig,
     announced_pubkey: &[u8; 32],
-    transport: &mut crate::noise::NoiseTransport,
-    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: &mut tokio::io::BufWriter<tokio::net::unix::OwnedWriteHalf>,
-) -> core_types::Result<()> {
-    let (new_private, new_public) = crate::noise::read_daemon_keypair(&config.daemon_name).await?;
-
-    if new_public != *announced_pubkey {
+) -> core_types::Result<Connection> {
+    let keypair = read_keypair(&config.layout, &config.daemon_name).await?;
+    if keypair.public() != announced_pubkey {
         return Err(core_types::Error::Ipc(
             "rotated pubkey mismatch: disk vs announced — possible tampering".into(),
         ));
     }
-
-    let kp = crate::noise::ZeroizingKeypair::new(snow::Keypair {
-        private: new_private.to_vec(),
-        public: new_public.to_vec(),
-    });
-
-    let new_stream = connect_with_retry(&config.socket_path, 3, Duration::from_millis(100)).await?;
-    let server_creds = extract_ucred(&new_stream)?;
-    let local_creds = local_credentials();
-
-    let (new_read_half, new_write_half) = new_stream.into_split();
-    let mut new_reader = tokio::io::BufReader::new(new_read_half);
-    let mut new_writer = tokio::io::BufWriter::new(new_write_half);
-
-    let mut new_transport = crate::noise::client_handshake(
-        &mut new_reader,
-        &mut new_writer,
-        &config.server_pub,
-        kp.as_inner(),
-        &local_creds,
-        &server_creds,
+    let mut connection = open(
+        &config.layout.bus_socket()?,
+        &config.endpoint,
+        keypair.as_inner(),
     )
     .await?;
-    // kp dropped here — ZeroizingKeypair::drop() zeroizes private key.
-
-    // Write DaemonStarted directly on the new connection before swapping.
-    // Uses the same DaemonId to preserve the rotation cascade invariant:
-    // DaemonTracker only triggers revocation when old_id != new_id.
-    let msg_ctx = MessageContext::new(config.daemon_id);
     let announce = Message::new(
-        &msg_ctx,
+        &MessageContext::new(config.daemon_id),
         EventKind::DaemonStarted {
             daemon_id: config.daemon_id,
             version: config.version.clone(),
@@ -595,49 +445,12 @@ async fn perform_rotation(
         SecurityLevel::Internal,
         Instant::now(),
     );
-    let mut announce_bytes = encode_frame(&announce)?;
-    new_transport
-        .write_encrypted_frame(&mut new_writer, &announce_bytes)
+    let announce_bytes = zeroize::Zeroizing::new(encode_frame(&announce)?);
+    connection
+        .transport
+        .write_encrypted_frame(&mut connection.writer, &announce_bytes)
         .await?;
-    zeroize::Zeroize::zeroize(&mut announce_bytes);
-
-    // Swap transport, reader, writer in place. Old socket fds are dropped,
-    // causing the server to see a clean disconnect on the old connection.
-    *transport = new_transport;
-    *reader = new_reader;
-    *writer = new_writer;
-
-    tracing::info!(
-        daemon = %config.daemon_name,
-        "key rotation: transport swapped to new connection"
-    );
-
-    Ok(())
-}
-
-/// Route an inbound payload to pending waiters or the broadcast channel.
-async fn route_inbound(
-    payload: Vec<u8>,
-    pending: &Mutex<HashMap<Uuid, oneshot::Sender<Message<EventKind>>>>,
-    inbound_tx: &mpsc::Sender<Vec<u8>>,
-) {
-    match decode_frame::<Message<EventKind>>(&payload) {
-        Ok(msg) => {
-            if let Some(corr_id) = msg.correlation_id {
-                let waiter = pending.lock().await.remove(&corr_id);
-                if let Some(tx) = waiter {
-                    let _ = tx.send(msg);
-                    return;
-                }
-            }
-            if inbound_tx.try_send(payload).is_err() {
-                tracing::warn!("inbound channel full, frame dropped");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to decode inbound frame");
-        }
-    }
+    Ok(connection)
 }
 
 /// Connect to a Unix socket with retries.
@@ -670,4 +483,54 @@ async fn connect_with_retry(
         path.display(),
         last_err.map_or_else(|| "unknown error".to_string(), |e| e.to_string())
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(correlation: Option<Uuid>) -> Message<EventKind> {
+        let msg = Message::new(
+            &MessageContext::new(DaemonId::new()),
+            EventKind::StatusRequest,
+            SecurityLevel::Internal,
+            Instant::now(),
+        );
+        match correlation {
+            Some(id) => msg.with_correlation(id),
+            None => msg,
+        }
+    }
+
+    #[test]
+    fn undecodable_frames_are_skipped_and_valid_ones_decode() {
+        assert!(decode_inbound(&[0xff; 8]).is_none());
+        let valid = message(None);
+        let decoded = decode_inbound(&encode_frame(&valid).unwrap()).unwrap();
+        assert_eq!(decoded.msg_id, valid.msg_id);
+    }
+
+    #[tokio::test]
+    async fn responses_reach_their_waiter_and_the_rest_reach_recv() {
+        let pending = Pending::default();
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
+        let request_id = Uuid::new_v4();
+        let (waiter_tx, waiter_rx) = oneshot::channel();
+        pending.lock().await.insert(request_id, waiter_tx);
+
+        let response = message(Some(request_id));
+        let response_id = response.msg_id;
+        deliver(response, &pending, &inbound_tx).await;
+        assert_eq!(waiter_rx.await.unwrap().msg_id, response_id);
+        assert!(pending.lock().await.is_empty());
+
+        // A broadcast, and a response nobody waits for, reach recv().
+        let broadcast = message(None);
+        let orphan = message(Some(Uuid::new_v4()));
+        let (broadcast_id, orphan_id) = (broadcast.msg_id, orphan.msg_id);
+        deliver(broadcast, &pending, &inbound_tx).await;
+        deliver(orphan, &pending, &inbound_tx).await;
+        assert_eq!(inbound_rx.recv().await.unwrap().msg_id, broadcast_id);
+        assert_eq!(inbound_rx.recv().await.unwrap().msg_id, orphan_id);
+    }
 }

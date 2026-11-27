@@ -1,118 +1,166 @@
-//! Integration tests for per-daemon keypair persistence.
+//! Integration tests for the bus endpoint record and per-daemon keypair
+//! persistence.
 //!
-//! Uses `Mutex<Option<PathBuf>>` runtime directory override instead of
-//! `unsafe { set_var(...) }` to avoid race conditions with parallel tests.
+//! Every location comes from a `core_layout::Layout` under a temporary
+//! root, so tests never touch the process environment.
 
-use core_ipc::{generate_keypair, noise};
+use core_ipc::noise::{self, BusEndpoint, NoiseSuite, generate_keypair};
+use core_layout::{KeyFile, Layout};
+use core_types::{NoiseCipher, NoiseHash};
+
+#[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// A layout under a fresh root, with the keys directory created.
+async fn layout() -> (tempfile::TempDir, Layout) {
+    let root = tempfile::tempdir().unwrap();
+    let layout = Layout::under(root.path());
+    noise::create_keys_dir(&layout).await.unwrap();
+    (root, layout)
+}
 
 #[tokio::test]
 async fn daemon_keypair_persistence() {
-    let dir = tempfile::tempdir().unwrap();
-    let pds_dir = dir.path().join("pds");
-    std::fs::create_dir_all(&pds_dir).unwrap();
-
-    // Set override instead of mutating env (no set_var race).
-    noise::set_runtime_dir_override(pds_dir.clone());
-
-    noise::create_keys_dir().await.unwrap();
+    let (_root, layout) = layout().await;
 
     // SECURITY INVARIANT: The keys directory must have 0700 permissions to
     // prevent other users from reading daemon private keys.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(pds_dir.join("keys")).unwrap();
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o700,
-            "keys directory must have 0700 permissions"
-        );
-    }
+    assert_eq!(
+        mode(&layout.keys_dir().unwrap()),
+        0o700,
+        "keys directory must have 0700 permissions"
+    );
 
-    // Roundtrip: write + read.
     let kp = generate_keypair().unwrap();
-    noise::write_daemon_keypair("test-daemon", kp.as_inner())
+    let written = noise::write_daemon_keypair(&layout, "test-daemon", kp.as_inner())
         .await
         .unwrap();
-
-    let (private, public) = noise::read_daemon_keypair("test-daemon").await.unwrap();
+    let (private, public) = noise::read_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
     assert_eq!(&*private, kp.private());
     assert_eq!(public, <[u8; 32]>::try_from(kp.public()).unwrap());
+    assert_eq!(written, public);
 
-    let pub_only = noise::read_daemon_public_key("test-daemon").await.unwrap();
-    assert_eq!(pub_only, public);
-
-    // SECURITY INVARIANT: Private key files must have 0600 permissions —
-    // never world-readable.
+    // SECURITY INVARIANT: Private key and checksum files are 0600 — never
+    // world-readable. Public key files are 0644.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(pds_dir.join("keys").join("test-daemon.key")).unwrap();
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o600,
-            "private key must have 0600 permissions"
-        );
+    for (file, expected) in [
+        (KeyFile::Private, 0o600),
+        (KeyFile::Public, 0o644),
+        (KeyFile::Checksum, 0o600),
+    ] {
+        let path = layout.daemon_key_file("test-daemon", file).unwrap();
+        assert_eq!(mode(&path), expected, "{}", path.display());
     }
-
-    // SECURITY INVARIANT: A tampered checksum must produce an error containing
-    // "TAMPER DETECTED" — corrupted keypairs must never be silently accepted.
-    let checksum_path = pds_dir.join("keys").join("test-daemon.checksum");
-    assert!(checksum_path.exists(), "checksum file should exist");
-
-    // Corrupt the checksum file.
-    std::fs::write(&checksum_path, [0xDE; 32]).unwrap();
-    let result = noise::read_daemon_keypair("test-daemon").await;
-    assert!(result.is_err(), "tampered checksum should be detected");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("TAMPER DETECTED"),
-        "error should mention tamper detection, got: {err_msg}"
-    );
 
     // Missing keypair returns error.
-    let result = noise::read_daemon_keypair("nonexistent").await;
-    assert!(result.is_err(), "reading nonexistent keypair must fail");
-
-    // SECURITY INVARIANT: Bus keypair write must create bus.pub, bus.key (0600),
-    // and bus.checksum for tamper detection.
-    let bus_kp = generate_keypair().unwrap();
-    noise::write_bus_keypair(bus_kp.as_inner()).await.unwrap();
-
-    assert!(pds_dir.join("bus.pub").exists(), "bus.pub must exist");
-    assert!(pds_dir.join("bus.key").exists(), "bus.key must exist");
     assert!(
-        pds_dir.join("bus.checksum").exists(),
-        "bus.checksum must exist"
+        noise::read_daemon_keypair(&layout, "nonexistent")
+            .await
+            .is_err(),
+        "reading nonexistent keypair must fail"
     );
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(pds_dir.join("bus.key")).unwrap();
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o600,
-            "bus.key must have 0600 permissions"
-        );
-        // bus.pub must have explicit 0644 permissions (defense-in-depth).
-        let meta = std::fs::metadata(pds_dir.join("bus.pub")).unwrap();
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o644,
-            "bus.pub must have 0644 permissions"
-        );
-    }
+// SECURITY INVARIANT: A tampered checksum must produce an error containing
+// "TAMPER DETECTED" naming the files — corrupted keypairs are never
+// silently accepted.
+#[tokio::test]
+async fn a_tampered_checksum_is_rejected() {
+    let (_root, layout) = layout().await;
+    noise::issue_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
+    let checksum = layout
+        .daemon_key_file("test-daemon", KeyFile::Checksum)
+        .unwrap();
+    std::fs::write(&checksum, [0xDE; 32]).unwrap();
+    let err = noise::read_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("TAMPER DETECTED"), "{err}");
+    assert!(err.contains(&checksum.display().to_string()), "{err}");
+}
 
-    // Per-daemon .pub file permissions: 0644.
+// SECURITY INVARIANT: deleting the checksum does not bypass verification;
+// every writer writes one, so its absence is an error.
+#[tokio::test]
+async fn a_missing_checksum_is_rejected() {
+    let (_root, layout) = layout().await;
+    noise::issue_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
+    let checksum = layout
+        .daemon_key_file("test-daemon", KeyFile::Checksum)
+        .unwrap();
+    std::fs::remove_file(&checksum).unwrap();
+    let err = noise::read_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&checksum.display().to_string()), "{err}");
+}
+
+#[tokio::test]
+async fn issued_keypair_is_persisted_and_its_public_key_returned() {
+    let (_root, layout) = layout().await;
+    let first = noise::issue_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
+    let (_, persisted) = noise::read_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
+    assert_eq!(first, persisted);
+
+    // Each issue replaces the previous keypair.
+    let second = noise::issue_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+    let (_, persisted) = noise::read_daemon_keypair(&layout, "test-daemon")
+        .await
+        .unwrap();
+    assert_eq!(persisted, second);
+}
+
+// SECURITY INVARIANT: the bus endpoint is world-readable and holds no
+// private key material; the server's private key is never written.
+#[tokio::test]
+async fn bus_endpoint_round_trips_and_is_public() {
+    let (_root, layout) = layout().await;
+    let kp = generate_keypair().unwrap();
+    let endpoint = BusEndpoint {
+        suite: NoiseSuite::new(NoiseCipher::AesGcm, NoiseHash::Sha256),
+        public_key: kp.public().try_into().unwrap(),
+    };
+    noise::publish_bus_endpoint(&layout, &endpoint)
+        .await
+        .unwrap();
+    assert_eq!(noise::read_bus_endpoint(&layout).await.unwrap(), endpoint);
+
+    let path = layout.bus_endpoint_file().unwrap();
+    let contents = std::fs::read(&path).unwrap();
+    assert!(
+        !contents
+            .windows(kp.private().len())
+            .any(|w| w == kp.private()),
+        "the endpoint must not contain the private key"
+    );
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(pds_dir.join("keys").join("test-daemon.pub")).unwrap();
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o644,
-            "daemon .pub file must have 0644 permissions"
-        );
-    }
+    assert_eq!(mode(&path), 0o644);
+    let runtime = layout.runtime_dir().unwrap();
+    let names: Vec<_> = std::fs::read_dir(&runtime)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        names.iter().all(|n| n == "bus.endpoint" || n == "keys"),
+        "only the endpoint and the keys directory are written: {names:?}"
+    );
 }

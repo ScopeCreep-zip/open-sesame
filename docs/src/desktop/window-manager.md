@@ -1,442 +1,423 @@
 # Window Manager Daemon
 
-The `daemon-wm` process implements a Wayland overlay window switcher with Vimium-style letter hints,
-application launching, and inline vault unlock. It runs as a single-threaded tokio process
-(`current_thread` runtime) connected to the IPC bus as a `BusClient`.
+The `daemon-wm` process implements a Wayland overlay window switcher with mnemonic letter hints,
+application launching, and inline vault unlock. It runs a single-threaded tokio runtime
+(`current_thread`) connected to the IPC bus as a `BusClient`, plus two OS threads: the overlay
+(`overlay-sctk`) and the window list poll (`wm-winlist-poll`).
+
+## Event Loop
+
+`main.rs` drives a `core_daemon::EventLoop`. Each iteration wakes for one of:
+
+| Wake | Source | Handling |
+| --- | --- | --- |
+| `Wake::Message` | IPC bus | `Runtime::message`: overlay activations, `InputKeyEvent`, `WmListWindows`, `WmActivateWindow` |
+| `Wake::Own(Local::Overlay(Some(event)))` | Overlay thread | `Runtime::overlay_event`: keyboard events, dismissal |
+| `Wake::Own(Local::Overlay(None))` | Overlay thread exited | `Runtime::overlay_died`: discard the activation, release the keyboard, schedule a respawn |
+| `Wake::Own(Local::Respawn)` | Respawn timer (2 s) | `Runtime::respawn_overlay`: a new overlay thread |
+| `Wake::Own(Local::Deadline)` | `controller.next_deadline()` | `Event::DwellTimeout` |
+| `Wake::Own(Local::CompositorLost)` | Window list poll thread | The daemon stops with an error; systemd restarts it |
+| `Wake::ConfigReloaded` | Configuration watcher | `Runtime::reconfigure`: new `WmConfig`, new theme, `ConfigReloaded` announced |
+| `Wake::Shutdown` | SIGTERM/SIGINT | The overlay thread quits; `DaemonStopped` announced |
+
+`serve::Respawns::next` orders the daemon's own sources: a lost compositor first, then the
+pending respawn while the overlay thread is dead (otherwise its next event), then the
+controller deadline. An overlay thread that dies more than 5 times within 2 minutes stops the
+daemon for a systemd restart. A bus connection loss is an error from the event loop and stops
+the daemon the same way.
 
 ## Controller State Machine
 
 The `OverlayController` (`controller.rs`) is the single owner of all overlay state, timing, and
-decisions. The main loop feeds events in, executes the returned `Command` list, and does nothing
-else. The controller never performs I/O directly.
+decisions. `Runtime::handle` feeds it an `Event`, and `Runtime::execute` performs the returned
+`Command` list in order. The controller performs no I/O.
 
 ### Phases
 
-The controller tracks a `Phase` enum with the following variants:
-
 - **Idle** -- Nothing happening. No overlay visible, no timers running.
-- **Armed** -- Border visible, keyboard exclusive mode acquired via layer-shell. The picker is not
-  yet visible. The controller waits for either modifier release (quick-switch) or dwell timeout
-  (transition to Picking). Carries `entered_at: Instant`, `selection: usize`, `input: String`,
-  `dwell_ms: u32`, and an optional `PendingLaunch`.
-- **Picking** -- Full picker visible. The user is browsing the window list or typing hint
-  characters. Carries the same `Snapshot`, `selection`, `input`, and optional `PendingLaunch`.
-- **Launching** -- An application launch request has been sent to `daemon-launcher` via IPC. The
-  overlay displays a status indicator while waiting for the response.
-- **LaunchError** -- A launch failed. The overlay shows an error toast. Any keystroke dismisses.
-- **Unlocking** -- Vault unlock in progress. Contains `profiles_to_unlock`, `current_index`,
-  `password_len`, `unlock_mode` (one of `AutoAttempt`, `WaitingForTouch`, `Password`, `Verifying`),
-  and the original launch command for retry after unlock.
+- **Armed** -- The overlay surface is mapped but draws nothing, holding keyboard exclusivity.
+  The controller waits for a modifier release (quick-switch) or the dwell deadline (Picking).
+  Carries `entered_at`, the `Snapshot`, `selection`, `input`, `dwell_ms`, and an optional
+  pending `LaunchRequest`.
+- **Picking** -- The picker is visible. The user browses the window list or types hint
+  characters. Carries the `Snapshot`, `selection`, `input`, and an optional pending launch.
+- **Launching** -- A `LaunchExecute` request is in flight to `daemon-launcher`.
+- **LaunchError** -- A launch failed. The overlay shows the reason; any key dismisses.
+- **Unlocking** -- Vault unlock in progress: `profiles_to_unlock`, `current_index`,
+  `password_len`, `unlock_mode` (`Resolving`, `Password`, `Verifying`),
+  and the `LaunchRequest` retried after unlock.
 
 ### Events
 
-The controller accepts the following `Event` variants:
-
 | Event | Source | Description |
-|-------|--------|-------------|
+| --- | --- | --- |
 | `Activate` | IPC `WmActivateOverlay` | Forward activation (Alt+Tab) |
 | `ActivateBackward` | IPC `WmActivateOverlayBackward` | Backward activation (Alt+Shift+Tab) |
-| `ActivateLauncher` | IPC `WmActivateOverlayLauncher` | Launcher mode (Alt+Space) |
-| `ActivateLauncherBackward` | IPC `WmActivateOverlayLauncherBackward` | Launcher mode backward |
-| `ModifierReleased` | Overlay SCTK or IPC `InputKeyEvent` | Alt/Meta key released |
-| `Char(char)` | Overlay or IPC key event | Alphanumeric character typed |
-| `Backspace` | Overlay or IPC key event | Backspace pressed |
-| `SelectionDown` / `SelectionUp` | Overlay or IPC key event | Arrow/Tab navigation |
-| `Confirm` | Overlay or IPC key event | Enter pressed |
-| `Escape` / `Dismiss` | Overlay or IPC key event | Cancel/timeout |
-| `DwellTimeout` | Main loop deadline | Dwell timer expired |
-| `LaunchResult` | Command executor callback | Launch IPC completed |
-| `AutoUnlockResult` | Command executor callback | SSH agent unlock completed |
-| `TouchResult` | Command executor callback | Hardware token touch completed |
-| `UnlockResult` | Command executor callback | Password unlock IPC completed |
+| `ActivateLauncher` | IPC `WmActivateOverlayLauncher` | Launcher mode (`[global] launcher_key`, default Alt+Space) |
+| `ActivateLauncherBackward` | IPC `WmActivateOverlayLauncherBackward` | Launcher mode, backward (launcher key with Shift) |
+| `ModifierReleased` | Overlay keyboard or IPC `InputKeyEvent` | Alt/Meta released |
+| `Char(char)` | Overlay or IPC key event | Character typed (alphanumeric characters are kept) |
+| `Backspace` | Overlay or IPC key event | Backspace |
+| `SelectionDown` / `SelectionUp` | Overlay or IPC key event | Arrow navigation |
+| `Confirm` | Overlay or IPC key event | Enter |
+| `Escape` / `Dismiss` | Overlay or IPC key event / stale activation | Cancel |
+| `DwellTimeout` | Controller deadline | Dwell expired |
+| `LaunchResult` | Launch executor | The `LaunchOutcome` of a request |
+| `UnlockStatus` | Unlock executor | Where a vault's unlock stands: `Unlocked`, `NeedsPassword { error }`, or `Failed { message }` |
+
+The four activations are `core_types::OverlayRequest`, the one definition of each request's bus
+event, shortcut id (the `sesame wm overlay` fast-path datagram and the GlobalShortcuts portal id),
+description, `sesame` command arguments, and shortcut (`OverlayRequest::trigger`). The shortcuts
+reach daemon-wm through the session's keybinding backend ([Linux
+Platform](../platform/linux.md#overlay-shortcuts)).
 
 ### Transitions
 
 ```text
 Idle ──Activate──> Armed ──DwellTimeout──> Picking
                      |                        |
-                     |<──────Activate──────────|  (re-activation cycles selection)
+                     |──Activate──> Picking   |──Activate──> Picking (selection cycles)
                      |                        |
-                     |──ModifierReleased──> Idle (activate selected window)
-                     |                        |
-                     |──Char──> Picking        |──ModifierReleased──> Idle
+                     |──Char / Selection──> Picking
+                     |                        |──ModifierReleased──> Idle (activate selection)
+                     |                        |──Confirm──> Idle (activate selection)
                      |                        |──Escape──> Idle
-                     |                        |──Confirm──> Idle
-                     |                        +──launch match──> Launching
                      |
-                     +──ModifierReleased (fast)──> Idle (quick-switch)
+                     |──ModifierReleased──> Idle (quick-switch or selection)
+                     +──staged launch + ModifierReleased / Confirm──> Launching
 
-Launching ──LaunchResult(success)──> Idle
+Launching ──LaunchResult(Launched)──> Idle
 Launching ──LaunchResult(VaultsLocked)──> Unlocking
-Launching ──LaunchResult(error)──> LaunchError ──any key──> Idle
+Launching ──LaunchResult(other)──> LaunchError ──any key──> Idle
 
-Unlocking ──AutoUnlockResult(success)──> retry launch or next profile
-Unlocking ──AutoUnlockResult(fail)──> Password prompt
-Unlocking ──UnlockResult(success)──> retry launch or next profile
+Unlocking ──UnlockStatus(Unlocked)──> next profile or Launching (retry)
+Unlocking ──UnlockStatus(NeedsPassword)──> password prompt (with the error, if any)
+Unlocking ──UnlockStatus(Failed)──> LaunchError
 Unlocking ──Escape──> Idle
 ```
 
-### Pre-computed Snapshot
+An activation in Launching, LaunchError, or Unlocking is ignored.
 
-At activation time, the controller builds a `Snapshot` that carries all data through the entire
-overlay lifecycle. The snapshot contains:
+### Snapshot
 
-- A copy of the window list, MRU-reordered via `mru::reorder()` and truncated to
-  `max_visible_windows` (default: 20).
-- The origin window (currently focused) rotated from MRU position 0 to the last index.
-- Hint strings assigned via `hints::assign_app_hints()`, parallel to the window list.
-- Overlay-ready `WindowInfo` structs containing `app_id` and `title`.
-- A clone of the `key_bindings` map for launch-or-focus resolution.
+A fresh activation builds a `Snapshot` that carries all window data through the overlay
+lifecycle:
 
-No recomputation occurs after the snapshot is built. Keyboard actions only update the selection
-index and input buffer.
+1. MRU entries for windows that no longer exist are pruned.
+2. The window list is MRU-ordered (`mru::reorder`) and truncated to `max_visible_windows`
+   (default 20).
+3. The origin (the focused window, top of the MRU stack) is moved to the last index.
+4. Hints are assigned with `hints::assign_app_hints` (see [Hints](hints.md)), parallel to the
+   window list, with the overlay rows (`WindowInfo`: `app_id`, `title`).
+5. The key bindings are copied for focus-or-launch.
+
+Keyboard actions only update the selection and input. The picker the overlay draws is always
+the snapshot's rows at the controller's selection (`Snapshot::picker_at`), so the highlighted
+row is the one a release or Enter activates.
+
+Before a fresh activation, `Runtime::activate` re-reads the theme (dark/light, accent, and
+frosted-glass changes apply without a restart) and asks the poll thread for a fresh window
+list, waiting up to 200 ms (`FRESH_WINDOWS_WAIT`) so windows closed since the last poll are not
+offered.
 
 ## Quick-Switch
 
-When `ModifierReleased` fires during the `Armed` phase, the controller evaluates three conditions
-in `on_modifier_released()`:
+On `ModifierReleased` in Armed, the controller activates `initial_forward()` (the MRU previous
+window) when all of these hold:
 
-1. Elapsed time since `entered_at` is below `quick_switch_threshold_ms` (default: 250ms from
-   `WmConfig`).
-2. No input characters have been typed (`input.is_empty()`).
-3. The selection has not moved from `snap.initial_forward()`.
+1. Less than `dwell_ms` has elapsed since `entered_at`.
+2. No input has been typed.
+3. The selection has not moved from `initial_forward()`.
 
-If all three hold, the controller activates `initial_forward()` -- the MRU previous window
-(index 0 after origin rotation). Otherwise, it activates the current selection.
+Otherwise it activates the current selection. A fast Alt+Tab release therefore switches to the
+previous window without the picker ever drawing.
 
-This enables fast Alt+Tab release to instantly switch to the previously focused window without
-ever showing the picker overlay.
+## Dwell
 
-## Dwell Timeout
+`controller.next_deadline()` returns `entered_at + dwell_ms` in Armed. `dwell_ms` is:
 
-The main loop calls `controller.next_deadline()` on each iteration of the `tokio::select!` loop.
-During the `Armed` phase, this returns `entered_at + Duration::from_millis(dwell_ms)`. The
-`dwell_ms` value is set to:
+- `quick_switch_threshold_ms` (default 250) for forward and backward activation.
+- `min(overlay_delay_ms, 100)` for launcher activation: a short dwell that lets the compositor
+  grant keyboard exclusivity before the first keypress. Launcher mode activates even with no
+  windows; the switcher modes require at least one.
 
-- `quick_switch_threshold_ms` (default: 250ms) for `ActivationMode::Forward` and
-  `ActivationMode::Backward`.
-- `min(overlay_delay_ms, 100)` for `ActivationMode::Launcher` and
-  `ActivationMode::LauncherBackward`, providing a shorter dwell to let the compositor grant
-  keyboard exclusivity before the first keypress.
-
-When the deadline fires, the main loop sends `Event::DwellTimeout`. The controller's
-`on_dwell_timeout()` method transitions Armed to Picking and emits `Command::ShowPicker` with the
-snapshot's pre-computed `overlay_windows` and `hints`.
+At the deadline, `on_dwell_timeout()` enters Picking and shows the picker.
 
 ## Reactivation
 
-When an `Activate` or `ActivateBackward` event arrives while already in Armed or Picking (e.g.,
-repeated Alt+Tab intercepted by the compositor):
-
-1. The selection index advances forward or backward by one position, wrapping via modular
-   arithmetic over `snap.windows.len()`.
-2. If in Armed, the phase transitions to Picking with `Command::ShowPicker` and
-   `Command::UpdatePicker`.
-3. A `Command::ResetGrace` is emitted to reset the overlay's modifier-poll grace timer, proving
-   Alt is still held.
-4. `last_ipc_advance` is set to `Instant::now()`. Any `SelectionDown` or `SelectionUp` event
-   within 100ms (`REACTIVATION_DEDUP_MS`) is suppressed by `is_reactivation_duplicate()` to
-   prevent double-advancement from the same physical keystroke arriving via both IPC
-   re-activation and the keyboard handler.
+An `Activate` or `ActivateBackward` while Armed or Picking (a repeated Alt+Tab the compositor
+intercepted) moves the selection one step, wrapping, enters Picking, and emits
+`Command::ResetGrace` so the overlay's modifier grace period restarts (Alt is still held). The
+advance is timestamped: one `SelectionDown`/`SelectionUp` within 100 ms
+(`REACTIVATION_DEDUP`) is the same keystroke arriving through the keyboard and is suppressed.
 
 ## Staged Launch
 
-When the user types a character in `on_char()` and `check_hint_or_launch()` finds that the input
-does not match any hint (`MatchResult::NoMatch`) but is a single character matching a
-`key_bindings` entry with a `launch` command:
+When the typed input matches no hint and is a single key whose binding has a `launch` command
+(`hints::binding_for_key`), the controller stages a `LaunchRequest` (command, tags, launch
+args) and emits `Command::ShowLaunchStaged`. The launch is not executed yet:
 
-1. A `PendingLaunch` struct (containing `command`, `tags`, `launch_args`) is stored in the current
-   phase via `set_pending_launch()`.
-2. `Command::ShowLaunchStaged { command }` is emitted to display the intent in the overlay.
-3. The launch is not executed immediately.
+- **ModifierReleased** or **Confirm** with a staged launch enters Launching and emits
+  `Command::ShowLaunching` and `Command::LaunchApp`.
+- Typing more, or a hint match, clears the staged launch; so does a Backspace that empties the
+  input.
+- **Escape** dismisses the overlay.
 
-Commitment occurs when:
+`Runtime::launch_app` releases the keyboard grab, sends `LaunchExecute` under the configured
+default profile with a 10-second timeout (`LAUNCH_TIMEOUT`), and feeds the outcome back as
+`Event::LaunchResult`. An unanswered request is `LaunchOutcome::Failed`.
 
-- **ModifierReleased**: `on_modifier_released()` checks for `pending_launch` before window
-  activation. If present, the controller transitions to `Phase::Launching` and emits
-  `Command::ShowLaunching` followed by `Command::LaunchApp`.
-- **Confirm (Enter)**: `on_confirm()` follows the same path.
-- **Backspace**: If `input.pop()` empties the buffer, `pending_launch` is set to `None`.
-- **Escape**: `on_escape()` dismisses the overlay entirely, clearing all state.
+## Overlay Thread
 
-## Overlay Lifecycle
+`surface::wayland::spawn_overlay` starts the `overlay-sctk` thread, themed and laid out from
+`WmConfig`. The daemon sends it `OverlayCmd` over `std::sync::mpsc` and receives
+`OverlayEvent` over a tokio channel (capacity 64).
 
-### SCTK Layer-Shell Surface
+### Layer-Shell Surface
 
-The overlay runs on a dedicated OS thread spawned by `overlay::spawn_overlay()`, communicating
-with the tokio event loop via `std::sync::mpsc` (commands in) and `tokio::sync::mpsc` (events
-out). The `OverlayApp` struct holds all Wayland state and creates a `wlr-layer-shell` surface
-with:
+`OverlayApp::recreate_layer_surface` creates a `zwlr_layer_shell_v1` surface:
 
-- `Layer::Overlay` -- renders above all other surfaces.
-- `Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT` -- fullscreen coverage.
-- `KeyboardInteractivity::Exclusive` -- captures all keyboard input when visible.
+- `Layer::Overlay`, namespace `sesame`, anchored to all four edges, exclusive zone `-1`.
+- Keyboard interactivity `None` and an empty input region while hidden or armed, so the
+  surface takes no input until it is shown.
+- An `ext_background_effect_surface_v1` object for blur when the compositor offers
+  `ext_background_effect_manager_v1`.
 
-The overlay thread runs a manual poll loop using `prepare_read()` and `rustix::event::poll()` for
-low-latency Wayland event dispatch, draining the command channel every `POLL_INTERVAL_MS` (4ms).
+### Loop
 
-### Show/Hide
+`run_sctk_overlay` repeats until `Quit`, a dropped command channel, or a failed Wayland
+connection:
 
-- **ShowBorder**: Creates the layer-shell surface if absent. Sets `OverlayPhase::BorderOnly`.
-  Acquires keyboard exclusivity. Records `activated_at` for stale-activation timeout.
-- **ShowFull**: Stores the `windows` and `hints` vectors, transitions to `OverlayPhase::Full`,
-  and triggers a redraw.
-- **HideAndSync**: Destroys the surface, performs a Wayland display sync via
-  `wl_display.roundtrip()`, then sends `OverlayEvent::SurfaceUnmapped` as acknowledgment. The
-  main loop's `execute_commands()` waits up to 5 seconds for this event before proceeding with
-  window activation. This ensures the compositor no longer sees the exclusive-keyboard surface
-  before focus transfers.
-- **Hide**: Destroys the surface without synchronization. Used for escape/dismiss where no
-  subsequent window activation is needed.
+1. Flush requests, poll the display fd for up to 4 ms (`POLL_TIMEOUT`), read, and dispatch.
+2. Apply every queued `OverlayCmd`.
+3. Poll the activation (modifier release, stale activation).
+4. Render when the view changed.
 
-### Modifier Tracking
+Without `wl_compositor` or `wl_shm` the thread ends. Without a layer shell it runs a stub loop
+that answers activations with `Dismiss` and `HideAndSync` with `SurfaceUnmapped`, so the daemon
+never waits on a surface that does not exist.
 
-The overlay tracks `alt_held` via the SCTK `KeyboardHandler`'s modifier callback. After
-activation, a grace period (`MODIFIER_POLL_GRACE_MS` = 150ms) prevents premature modifier-release
-detection. If no keyboard event arrives within `STALE_ACTIVATION_TIMEOUT_MS` (3000ms), the overlay
-sends `OverlayEvent::Dismiss` to handle cases where Alt was released before keyboard focus was
-granted.
+### Views
 
-The `ConfirmKeyboardInput` command from the main loop (sent on the first IPC key event) sets
-`received_key_event = true`, disabling the stale activation timeout.
+The overlay shows one `View`: `Hidden`, `Border` (armed: an invisible surface holding the
+keyboard), `Picker`, `Launching`, `LaunchError`, `UnlockPrompt`, or `UnlockProgress`.
 
-### Overlay Phases
+| Command | Effect |
+| --- | --- |
+| `ShowBorder` | Starts an activation, view `Border`, keyboard `Exclusive` |
+| `ShowFull { windows, hints }` | View `Picker` with empty input (starts an activation when none is running) |
+| `UpdateInput { input, selection }` | Picker input and selection; clears the staged launch |
+| `ShowLaunchStaged { command }` | Picker shows `Launch <command>` when the input leaves no row |
+| `ShowLaunching` / `ShowLaunchError` | Launch status views |
+| `ShowUnlockPrompt` / `ShowUnlockProgress` | Unlock views (the prompt receives `password_len`, never password bytes) |
+| `Hide` | View `Hidden`: keyboard `None`, empty input region, no blur |
+| `HideAndSync` | `Hide`, then `SurfaceUnmapped` to the daemon |
+| `ResetGrace` | Restarts the activation's grace period |
+| `ConfirmKeyboardInput` | Keyboard input arrives over IPC this activation |
+| `UpdateTheme` | New theme, redraw |
+| `Quit` | The thread ends |
 
-The overlay thread tracks `OverlayPhase`: `Hidden`, `BorderOnly`, `Full`, `Launching`,
-`LaunchError`, `UnlockPrompt`, `UnlockProgress`. Each phase determines what the render module
-draws.
+`Runtime::hide_and_sync` releases the keyboard grab, sends `HideAndSync`, and waits up to
+5 seconds (`UNMAP_TIMEOUT`) for `SurfaceUnmapped` before a window is activated, so the window
+activated next receives focus from an overlay already gone.
+
+### Activation Polling
+
+`poll::Activation` tracks the keyboard source of one activation (`Unconfirmed`, `Compositor`,
+or `Ipc`) and reports at most one end:
+
+- No key event within 3 seconds (`STALE_ACTIVATION_TIMEOUT`): `Dismiss`. While unconfirmed,
+  the overlay re-requests exclusive keyboard focus on every poll.
+- IPC keyboard but no input within 30 seconds (`IPC_IDLE_TIMEOUT`): `Dismiss`.
+- Compositor keyboard, past the 150 ms grace period (`MODIFIER_POLL_GRACE`), Alt released:
+  `ModifierReleased`. Alt held again rearms the release.
+
+### Scale and Buffers
+
+The output scale comes from SCTK's `scale_factor_changed` (the preferred buffer scale on
+`wl_surface` v6, the largest output scale otherwise). The buffer is the configured logical size
+times the scale, in a shm `SlotPool` resized with the surface.
 
 ## Rendering
 
-The `render.rs` module implements software rendering using two libraries:
+`render::Canvas` draws one frame on a transparent `tiny_skia::Pixmap` (tiny-skia zero-fills
+it, so the Armed view draws nothing). Each view returns the card it drew:
 
-- **tiny-skia**: 2D path operations. `rounded_rect_path()` builds quadratic Bezier paths for
-  rounded rectangles. `fill_rounded_rect()` and `stroke_rounded_rect()` render filled and stroked
-  shapes onto a `tiny_skia::Pixmap`. Layout follows a Material Design 4-point grid with base
-  constants: padding (20px), row height (48px), row spacing (8px), badge dimensions (48x32px),
-  badge radius (8px), app column width (180px), text size (16px), border width (3px), corner
-  radius (16px), and column gap (16px). All dimensions scale with HiDPI via the `Layout` struct.
-- **cosmic-text**: Text shaping, layout, and glyph rasterization. `FontSystem` manages font
-  discovery and caching. `SwashCache` provides glyph rasterization. Text is measured with
-  `measure_text()` (returns width and height) and drawn with `draw_text()`, both operating on
-  `Buffer` objects with configurable `Attrs` (family, weight) and `Metrics` (font size, line
-  height at 1.3x).
+- **Picker**: a centered card with one row per visible window: the hint badge (matched,
+  partially matched, or unmatched colors), the app name column (`show_app_id`), and the title
+  column (`show_title`, ellipsized). The selected row gets the selection wash. Typed input shows
+  in a pill below the card. Input that leaves no row shows `Launch <command>` for a staged
+  launch, or that nothing matches.
+- **Messages**: launch status, launch errors, the unlock prompt (one dot per character, at
+  most 32), and unlock progress, each on a centered card.
+
+Layout metrics (`render::layout::Layout`) follow a 4-point grid in logical pixels -- padding 20,
+row height 48, row spacing 8, badge 48x32 with radius 8, app column 180, text 16, column gap 16,
+card outline 1 -- scaled by the output scale. Text is shaped and rasterized with cosmic-text
+(`FontSystem`, `SwashCache`) in the theme's font family.
+
+`render_frame::present` attaches the ARGB8888 buffer, sets the buffer scale and damage, sets the
+blur region behind the drawn card (converted to surface-local logical coordinates), and commits
+once: the blur region is double-buffered state applied by that same commit.
 
 ### Theme
 
-`OverlayTheme` defines colors for: `background`, `card_background`, `card_border`,
-`text_primary`, `text_secondary`, `badge_background`, `badge_text`,
-`badge_matched_background`, `badge_matched_text`, `selection_highlight`, `border_color`, plus
-`border_width` and `corner_radius`. Theme construction follows a priority chain:
+`OverlayTheme` holds `card_background`, `card_border`, `text_primary`, `text_secondary`,
+`badge_background`, `badge_text`, `badge_matched_background`, `badge_matched_text`,
+`selection_highlight`, `corner_radius`, and `font_family`. `OverlayTheme::from_config` builds
+it in priority order:
 
-1. **COSMIC system theme**: `OverlayTheme::from_cosmic()` loads
-   `platform_linux::cosmic_theme::CosmicTheme` and maps its semantic color tokens
-   (`background.base`, `primary.base`, `primary.on`, `secondary.component.base`, `accent.base`,
-   `accent.on`, `corner_radii.radius_m`) to overlay theme fields.
-2. **User config overrides**: `OverlayTheme::from_config()` compares each `WmConfig` color field
-   against its default. Non-default values override the COSMIC-derived theme.
-3. **Hardcoded defaults**: Dark theme with Catppuccin-inspired palette (`#89b4fa` border,
-   `#000000c8` background, `#1e1e1ef0` cards, `#646464` badges, `#4caf50` matched badges).
+1. **COSMIC system theme** (`platform_linux::cosmic_theme::CosmicTheme`): primary, accent,
+   and secondary component colors, the medium corner radius, and the interface font. The card
+   is translucent so the compositor blur shows through: the theme's blurred alpha when frosted,
+   half opacity otherwise.
+2. **Configuration**: each `WmConfig` color set to other than its default overrides the theme
+   (`card_color`, `border_color`, `text_color`, `hint_color`, `hint_matched_color`).
+3. **Defaults** when no COSMIC theme is available.
 
-Colors are parsed from CSS hex notation (`#RRGGBB` or `#RRGGBBAA`) via `Color::from_hex()`.
-Theme updates arrive via `OverlayCmd::UpdateTheme` on config hot-reload.
-
-### Rendered Elements
-
-- **Border-only phase**: A border indicator around the screen edges.
-- **Full picker**: A centered card with: hint badges (letter hints with `badge_background` or
-  `badge_matched_background` depending on match state), app ID column (optional, controlled by
-  `show_app_id`), and title column per window row. The selected row receives a
-  `selection_highlight` background. An input buffer is displayed for typed characters.
-- **Launch status**: Staged launch intent, launching indicator, or error messages.
-- **Unlock prompt**: Profile name, dot-masked password field (receives only `password_len`, never
-  password bytes), and optional error message.
-- **Unlock progress**: Profile name with status message (e.g., "Authenticating...",
-  "Verifying...", "Touch your security key...").
+Colors are CSS hex (`#RRGGBB` or `#RRGGBBAA`) parsed by `Color::from_hex`.
 
 ## MRU Stack
 
-The `mru.rs` module maintains a file-based most-recently-used window stack at
-`~/.cache/open-sesame/mru`. The cache directory is created with mode `0o700` on Unix.
+`mru::MruStore` keeps the most-recently-used window stack in the file `Layout::mru_file`
+names: one window ID per line, most recent first, capped at 64 entries.
 
-### File Format
+- `load()` reads under a shared `flock`; a missing file is an empty stack.
+- `save(target)` moves `target` to the top under an exclusive `flock`.
+- `prune(live_ids)` drops entries for windows that no longer exist.
+- `seed_if_empty(windows)` seeds an empty stack with the focused window at startup.
+- `reorder(windows, get_id, state)` sorts by stack position; windows not in the stack keep
+  their compositor order after the tracked ones.
 
-One window ID per line, most recent first. The stack is capped at `MAX_ENTRIES` (64).
-
-### Operations
-
-- **`load()`**: Opens the file with a shared `flock` (`LOCK_SH | LOCK_NB` -- never blocks the
-  tokio thread). Parses one ID per line, trimming whitespace and filtering empty lines. Returns
-  `MruState` containing the ordered `stack: Vec<String>`.
-- **`save(target)`**: Opens the file with an exclusive `flock` (`LOCK_EX | LOCK_NB`). Reads the
-  current stack, removes `target` from its old position via `retain()`, inserts it at index 0,
-  truncates to 64 entries, and writes back as newline-joined text. No-op if target is already at
-  position 0.
-- **`seed_if_empty(windows)`**: On first launch or after crash, seeds the stack from the
-  compositor's window list. The focused window goes to position 0. No-op if the stack already
-  has entries.
-- **`reorder(windows, get_id, state)`**: Sorts a window slice by MRU stack position. Windows
-  present in the stack sort by their position (0 = most recent). Windows not in the stack receive
-  `usize::MAX` and sort after all tracked windows, preserving their relative compositor order.
-
-### Origin Tracking
-
-After `mru::reorder()`, the currently focused window (MRU position 0) sits at the beginning of
-the sorted list. `Snapshot::build()` then rotates it to the end via `remove()` + `push()`. The
-result:
-
-- Index 0 = MRU previous (the quick-switch target).
-- Last index = origin (currently focused, lowest switch priority).
-- `initial_forward()` returns 0 unless that is the origin, in which case it returns 1.
-- `initial_backward()` returns the last index unless that is the origin, in which case it returns
-  `last - 1`.
-
-The origin window remains in the list for display and is reachable by full-circle cycling or
-explicit hint selection.
+The stack orders the overlay and is not authoritative: `MruStore` logs I/O failures and
+degrades to an empty stack or an unchanged file.
 
 ## Inline Vault Unlock
 
-When a launch request returns a `LaunchDenial::VaultsLocked { locked_profiles }` denial,
-`on_launch_result()` transitions to `Phase::Unlocking` without dismissing the overlay. The phase
-stores the `locked_profiles` list, a `current_index` into it, and the original `retry_command`,
-`retry_tags`, and `retry_launch_args` for replay after unlock.
+A launch denied with `LaunchDenial::VaultsLocked { locked_profiles }` enters Unlocking without
+dismissing the overlay, keeping the `LaunchRequest` for the retry.
 
-### Unlock Flow
+1. **Resolve** (`Command::ResolveUnlock`): `Runtime::resolve_unlock` shows "Authenticating"
+   and runs the unlock loop of [Factor Architecture](../authentication/factor-architecture.md#the-unlock-loop):
+   it asks `daemon-secrets` which factors the vault still requires (`VaultAuthQuery`,
+   5-second `QUERY_TIMEOUT`), looks each one up (`AuthDispatcher::backend`), and submits
+   every factor that needs no interaction (the SSH agent) as a `FactorSubmit` (30-second
+   `FACTOR_TIMEOUT`) under the vault's keying (`core_auth::VaultMetadata::load_keying`). The
+   platform keyring factor is submitted by daemon-launcher (`KeyringUnlockRequest`, 2-minute
+   `KEYRING_TIMEOUT`: the keyring's own unlock prompt may wait for the user), because the
+   credential store is on the session D-Bus bus, which this daemon's sandbox does not grant.
+   `daemon-secrets` applies the vault's auth policy. The result is an `Event::UnlockStatus`:
+   - `Unlocked` when a submission completed the unlock (or the vault already was unlocked);
+   - `NeedsPassword` when a remaining factor is the password;
+   - `Failed` when the vault requires a factor the overlay cannot provide (no backend, or a
+     hardware touch), its metadata or enrollment is unreadable, or no factor is available. The
+     overlay shows the message as a launch error.
+2. **Password**: the controller enters `Password` and shows the prompt. Characters go to the
+   runtime's `SecureVec` password buffer; the overlay receives only the length.
+3. **Submission** (`Command::SubmitPasswordUnlock`): `Runtime::submit_password_unlock` shows
+   "Verifying", moves the buffer into `core_auth::PasswordBackend` (the runtime keeps a fresh
+   empty buffer), unwraps the master key, and submits it as a factor. A password that does not
+   unwrap the key shows the prompt again with "Wrong password"; a factor `daemon-secrets`
+   rejects shows its reason. An accepted password of a vault whose policy requires more
+   factors resolves the remaining factors (step 1) instead of reporting a wrong password.
+4. **Next profile**: after each unlock the next locked profile starts at step 1. A status for
+   any profile but the one being unlocked is ignored.
+5. **Retry**: with every profile unlocked, the controller emits `Command::ActivateProfiles`
+   (`ProfileActivate` per profile, 10-second `ACTIVATE_TIMEOUT`) and `Command::LaunchApp` with
+   the original request.
 
-1. **Auto-unlock attempt** (`Command::AttemptAutoUnlock`): The
-   `commands_unlock::attempt_auto_unlock()` handler reads the vault's salt file from
-   `{config_dir}/vaults/{profile}.salt`, creates a `core_auth::AuthDispatcher`, calls
-   `find_auto_backend()` to locate an SSH agent enrollment, and invokes `auto_backend.unlock()`.
-   On success, the resulting master key is transferred into `SensitiveBytes::from_protected()`
-   and sent to `daemon-secrets` via `SshUnlockRequest` IPC with a 30-second timeout. The
-   `AutoUnlockResult` event is fed back through the controller.
-
-2. **Touch prompt**: If the auto-unlock backend sets `needs_touch = true`, the controller
-   transitions to `UnlockMode::WaitingForTouch` and emits `Command::ShowTouchPrompt`. The
-   overlay displays "Touch your security key for {profile}...".
-
-3. **Password fallback**: If auto-unlock fails (no backend available, agent error, or secrets
-   rejection), the controller transitions to `UnlockMode::Password` and emits
-   `Command::ShowPasswordPrompt`. Password bytes are accumulated in a `SecureVec` (pre-allocated
-   with `mlock` via `SecureVec::for_password()`). The overlay receives only `password_len` via
-   `OverlayCmd::ShowUnlockPrompt`, never password bytes.
-
-4. **Password submission** (`Command::SubmitPasswordUnlock`): On Enter,
-   `commands_unlock::submit_password_unlock()` copies the password from `SecureVec` into
-   `SensitiveBytes::from_slice()` (mlock-to-mlock copy, no heap exposure), clears the `SecureVec`
-   immediately, shows "Verifying..." in the overlay, and sends `UnlockRequest` IPC to
-   `daemon-secrets` with a 30-second timeout (accommodating Argon2id KDF with high memory
-   parameters). `AlreadyUnlocked` responses are treated as success.
-
-5. **Multi-profile unlock**: If multiple profiles are locked,
-   `advance_to_next_profile_or_retry()` increments `current_index` and starts the auto-unlock
-   flow for the next profile.
-
-6. **Retry**: After all profiles are unlocked, the controller emits `Command::ActivateProfiles`
-   (sends `ProfileActivate` IPC for each profile) followed by `Command::LaunchApp` with the
-   original command, tags, and launch args.
-
-### Security Properties
-
-- Password bytes never cross the thread boundary to the render thread. The overlay receives only
-  `password_len: usize`.
-- `SecureVec` uses `mlock` to prevent swap and core-dump exposure.
-- `SensitiveBytes` uses `ProtectedAlloc` for the IPC transfer to `daemon-secrets`.
-- The password buffer is zeroized via `Command::ClearPasswordBuffer` on escape, successful
-  unlock, or any transition out of the Unlocking phase.
+Escape in Unlocking clears the password buffer and dismisses the overlay. The password buffer
+is pre-allocated and `mlock`ed (`SecureVec::for_password`) and never leaves the daemon thread.
 
 ## Keyboard Input
 
-Keyboard events arrive from two sources:
+Key events arrive from two sources:
 
-1. **SCTK keyboard handler**: The overlay's `wlr-layer-shell` surface receives Wayland keyboard
-   events when it holds `KeyboardInteractivity::Exclusive`. The `KeyboardHandler` implementation
-   maps `KeyEvent` and `Modifiers` to `OverlayEvent` variants.
-2. **IPC `InputKeyEvent`**: `daemon-input` forwards evdev keyboard events over the IPC bus when
-   a grab is active. The main loop maps these via `map_ipc_key_to_event()` to controller `Event`
-   variants.
+1. **The overlay keyboard**: the layer surface's SCTK `KeyboardHandler` while it holds
+   exclusive focus, sent as `OverlayEvent`s.
+2. **IPC `InputKeyEvent`**: `daemon-input` forwards evdev key events while this daemon holds a
+   grab. `ipc_keys::map_ipc_key_to_event` maps X11 keysyms (`core_types::keysym`) to controller
+   events; Tab is ignored (cycling comes from reactivation), and of releases only Alt/Meta
+   count.
 
-Both sources pass through a shared `KeyDeduplicator` instance (8-entry ring buffer, 50ms expiry
-window, direction-aware) to ensure only the first arrival of each physical keystroke is processed.
+Both pass through one `KeyDeduplicator` (8 recent entries, 50 ms window, direction-aware), so
+the first arrival of each keystroke is handled. `Command::ShowBorder` publishes
+`InputGrabRequest`; hiding publishes `InputGrabRelease` (before the overlay hides). The first
+IPC key event of an activation sends `ConfirmKeyboardInput`. A launcher activation with no
+windows confirms IPC input at once: the compositor grants no focus without a toplevel.
 
-When the overlay activates, `Command::ShowBorder` triggers an `InputGrabRequest` publish to
-acquire keyboard forwarding from `daemon-input`. On hide (`Command::HideAndSync` or
-`Command::Hide`), `InputGrabRelease` is published. The first IPC key event each activation cycle
-sends `OverlayCmd::ConfirmKeyboardInput` to the overlay thread, setting
-`ipc_keyboard_active = true` and stopping the stale activation timeout.
+## Window List
+
+When `platform_linux::compositor::detect_compositor` finds a backend, the stack is seeded from
+its first enumeration and the `wm-winlist-poll` thread re-enumerates every 2 seconds
+(`POLL_INTERVAL`) and on request (`Refresh::fresh`); the compositor backend's synchronous
+Wayland roundtrips would otherwise stall the single-threaded runtime. After 10 consecutive
+failed enumerations (`MAX_FAILURES`) the compositor connection is dead: the thread reports it
+(`Refresh::lost`), and the event loop stops the daemon with an error for a systemd restart.
+
+Without a backend, `winlist::track_focus` builds the list from the wlr-foreign-toplevel focus
+monitor (`platform_linux::focus_monitor`): each focused app ID is a window, removed when it
+closes. Without that protocol the list stays empty.
+
+Window activation (`Runtime::activate_window`) calls the backend's `activate_window` on the
+blocking pool and, when the compositor accepts it, records the window in the MRU stack. Without
+a backend, or when the compositor refuses, the activation fails (`WmActivateWindowResponse
+{ success: false }`).
 
 ## IPC Interface
 
 | Message | Response | Description |
-|---------|----------|-------------|
-| `WmListWindows` | `WmListWindowsResponse { windows }` | Returns MRU-reordered window list |
-| `WmActivateWindow { window_id }` | `WmActivateWindowResponse { success }` | Activates a window by ID or `app_id` match, saves MRU state |
-| `WmActivateOverlay` | -- | Triggers forward overlay activation |
-| `WmActivateOverlayBackward` | -- | Triggers backward overlay activation |
-| `WmActivateOverlayLauncher` | -- | Triggers launcher-mode activation |
-| `WmActivateOverlayLauncherBackward` | -- | Triggers launcher-mode backward activation |
-| `InputKeyEvent` | -- | Keyboard event from daemon-input (processed only when not idle) |
-| `KeyRotationPending` | -- | Reconnects with rotated keypair via `BusClient::handle_key_rotation()` |
+| --- | --- | --- |
+| `WmListWindows` | `WmListWindowsResponse { windows }` | The MRU-ordered window list |
+| `WmActivateWindow { window_id }` | `WmActivateWindowResponse { success }` | Activates the window with that ID or app ID |
+| `WmActivateOverlay` | -- | Forward activation |
+| `WmActivateOverlayBackward` | -- | Backward activation |
+| `WmActivateOverlayLauncher` | -- | Launcher activation |
+| `WmActivateOverlayLauncherBackward` | -- | Launcher activation, backward |
+| `InputKeyEvent` | -- | Key event from daemon-input (handled only while not idle) |
+
+The daemon publishes `WmOverlayShown` on activation and `WmOverlayDismissed` when the overlay
+closes.
 
 ## Process Hardening
 
-On Linux, daemon-wm applies the following security measures:
-
-- `platform_linux::security::harden_process()` for process-level hardening.
-- Resource limits: `nofile = 4096`, `memlock_bytes = 0`.
-- `core_types::init_secure_memory()` probes `memfd_secret` and initializes secure memory before
-  the sandbox is applied.
-- Landlock filesystem sandbox via `daemon_wm::sandbox::apply_sandbox()`, applied after IPC
-  keypair read and bus connection but before IPC traffic processing.
-- systemd watchdog notification every 15 seconds via
-  `platform_linux::systemd::notify_watchdog()`, with
-  `platform_linux::systemd::notify_ready()` called at startup.
+- `platform_linux::security::harden_process()` and resource limits (`nofile = 4096`,
+  `memlock_bytes = 0`).
+- `core_types::init_secure_memory()` probes `memfd_secret` before the sandbox.
+- `daemon_wm::sandbox::apply_sandbox` applies Landlock and seccomp on the only thread, before
+  the runtime, configuration watcher, Wayland, and overlay threads start. The grants are the
+  bus, the Wayland socket, configuration (read), SSH agent sockets, the systemd notification
+  socket, the cache directory (MRU stack), COSMIC theme configuration, user data, and the system
+  font, library, and XKB paths. There are no DRI or GPU grants (rendering is CPU `wl_shm`) and
+  no D-Bus bus ([Sandbox Model](../architecture/sandbox-model.md)).
+- `platform_linux::systemd::notify_ready()` at startup; the event loop sends watchdog
+  notifications.
 
 ## Configuration
 
-The `WmConfig` struct (`core-config/src/schema_wm.rs`) provides:
+`WmConfig` (`core-config/src/schema_wm.rs`), from the configured default profile:
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `hint_keys` | String | `"asdfghjkl"` | Characters used for hint assignment |
-| `overlay_delay_ms` | u32 | 150 | Dwell delay before showing full picker |
-| `activation_delay_ms` | u32 | 200 | Delay after activation before dismiss |
-| `quick_switch_threshold_ms` | u32 | 250 | Fast-release threshold for instant switch |
-| `border_width` | f32 | 4.0 | Border width in pixels |
-| `border_color` | String | `"#89b4fa"` | Border color (CSS hex) |
-| `background_color` | String | `"#000000c8"` | Overlay background (hex with alpha) |
+| --- | --- | --- | --- |
+| `hint_keys` | String | `"asdfghjkl"` | Hint keys for apps without a key binding or a letter in their name |
+| `overlay_delay_ms` | u32 | 150 | Launcher dwell bound (the launcher dwell is `min(overlay_delay_ms, 100)`) |
+| `quick_switch_threshold_ms` | u32 | 250 | Release within this time switches instantly; the switcher dwell |
+| `border_color` | String | `"#89b4fa"` | Card outline color |
 | `card_color` | String | `"#1e1e1ef0"` | Card background color |
-| `text_color` | String | `"#ffffff"` | Primary text color |
+| `text_color` | String | `"#ffffff"` | Text color |
 | `hint_color` | String | `"#646464"` | Hint badge color |
 | `hint_matched_color` | String | `"#4caf50"` | Matched hint badge color |
-| `key_bindings` | BTreeMap | (see [Hints](hints.md)) | Per-key app bindings |
-| `show_title` | bool | true | Show window titles in overlay |
-| `show_app_id` | bool | false | Show app IDs in overlay |
-| `max_visible_windows` | u32 | 20 | Maximum windows in picker |
+| `key_bindings` | BTreeMap | (see [Hints](hints.md)) | Per-key app bindings and launch commands |
+| `show_title` | bool | true | Title column |
+| `show_app_id` | bool | false | App name column |
+| `max_visible_windows` | u32 | 20 | Windows in the picker |
 
-Configuration hot-reloads via `core_config::ConfigWatcher`. When the watcher fires, the main loop
-reads the new `WmConfig`, builds an `OverlayTheme::from_config()`, sends
-`OverlayCmd::UpdateTheme` to the overlay thread, updates the shared `wm_config` mutex, and
-publishes `ConfigReloaded` on the IPC bus.
-
-## Compositor Backend
-
-Window list polling runs on a dedicated OS thread named `wm-winlist-poll` because the compositor
-backend (`platform_linux::compositor::CompositorBackend`) performs synchronous Wayland roundtrips
-with `libc::poll()`. On the `current_thread` tokio runtime, this would block all IPC message
-processing. The thread calls `backend.list_windows()` every 2 seconds, sending results to the
-tokio runtime via a `tokio::sync::mpsc` channel.
-
-If `platform_linux::compositor::detect_compositor()` fails (e.g., no
-`wlr-foreign-toplevel-management` protocol support), daemon-wm falls back to a D-Bus focus
-monitor (`platform_linux::compositor::focus_monitor`). This monitor receives
-`FocusEvent::Focus(app_id)` and `FocusEvent::Closed(app_id)` events, maintaining a synthetic
-window list by tracking focus changes and window closures.
+On a configuration reload the daemon adopts the new `WmConfig`, sends the overlay its theme, and
+announces `ConfigReloaded`.
 
 ## Dependencies
 
-The `daemon-wm` crate depends on the following workspace crates: `core-types`, `core-config`,
-`core-ipc`, `core-crypto`, `core-auth`, `core-profile`. External dependencies include
-`smithay-client-toolkit` (SCTK), `wayland-client`, `wayland-protocols-wlr`, `tiny-skia`, and
-`cosmic-text`, all gated behind the `wayland` feature (enabled by default). The `platform-linux`
-crate is used with the `cosmic` feature for compositor backend and theme integration.
+Workspace crates: `core-types`, `core-config`, `core-daemon`, `core-layout`, `core-ipc`,
+`core-crypto`, `core-auth`. On Linux: `platform-linux` (with `cosmic`),
+`smithay-client-toolkit`, `wayland-client`, `wayland-protocols`, `tiny-skia`, `cosmic-text`,
+and `rustix`.

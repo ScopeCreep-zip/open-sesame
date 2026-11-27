@@ -69,11 +69,35 @@ impl std::fmt::Display for InspectError {
 
 impl std::error::Error for InspectError {}
 
-/// Estimate inspection cost from `.git/index` file size in KB.
+/// Cost assumed when the index size cannot be read.
+const UNKNOWN_COST: u64 = 100;
+
+/// Estimate inspection cost from the index file size in KB.
+///
+/// A linked worktree's index lives in its private git directory inside
+/// the main repository (`<main>/.git/worktrees/<id>/index`), not under
+/// the worktree. The estimate only orders jobs, so a directory whose
+/// `.git` or index cannot be read gets `UNKNOWN_COST`; the inspection
+/// itself reports the failure.
 #[must_use]
 pub fn estimate_cost(path: &Path) -> u64 {
-    let index_path = path.join(".git").join("index");
-    std::fs::metadata(&index_path).map_or(100, |m| m.len() / 1024)
+    use crate::git::GitMarker;
+    let index_path = match crate::git::git_marker(path) {
+        Ok(GitMarker::LinkedWorktree { admin_dir }) => admin_dir.join("index"),
+        Ok(GitMarker::Repository) => path.join(".git").join("index"),
+        Ok(GitMarker::Absent | GitMarker::Submodule) => return UNKNOWN_COST,
+        Err(e) => {
+            tracing::debug!(path = %path.display(), error = %e, "cost estimate: unclassifiable .git");
+            return UNKNOWN_COST;
+        }
+    };
+    match std::fs::metadata(&index_path) {
+        Ok(meta) => meta.len() / 1024,
+        Err(e) => {
+            tracing::debug!(path = %index_path.display(), error = %e, "cost estimate: no index");
+            UNKNOWN_COST
+        }
+    }
 }
 
 /// Inspect a single job with panic recovery.
@@ -243,7 +267,7 @@ mod tests {
 
         assert_eq!(results.len(), 8);
         let mut indices: Vec<usize> = results.iter().map(|r| r.index).collect();
-        indices.sort();
+        indices.sort_unstable();
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
@@ -318,6 +342,26 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let result = inspect_one_job(&job, &cancel);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn estimate_cost_reads_linked_worktree_index_from_admin_dir() {
+        use crate::git::marker::test_repos;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repos::init(&dir.path().join("main"));
+        let wt = dir.path().join("wt");
+        test_repos::add_worktree(&repo, "wt", &wt);
+        // A 300 KiB index distinguishes the admin-dir read from the
+        // `UNKNOWN_COST` default a `<worktree>/.git/index` read yields.
+        let index = dir.path().join("main/.git/worktrees/wt/index");
+        std::fs::write(&index, vec![0u8; 300 * 1024]).unwrap();
+        assert_eq!(estimate_cost(&wt), 300);
+    }
+
+    #[test]
+    fn estimate_cost_without_repository_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(estimate_cost(dir.path()), UNKNOWN_COST);
     }
 
     #[test]

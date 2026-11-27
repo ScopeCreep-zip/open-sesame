@@ -10,40 +10,53 @@ pub struct GitHub {
 }
 
 impl GitHub {
-    pub fn new() -> Self {
-        let policy = crate::net::ProxyPolicy::from_env();
+    /// A client honoring the shared proxy policy and `GITHUB_TOKEN`.
+    ///
+    /// # Errors
+    ///
+    /// The `ProxyPolicy::from_env` errors; `WorkspaceError::ConfigError`
+    /// when the selected proxy URL is invalid (connecting directly instead
+    /// would bypass it); the `env::first_set` errors for `GITHUB_TOKEN`.
+    pub fn new() -> Result<Self, WorkspaceError> {
+        let policy = crate::net::ProxyPolicy::from_env()?;
         let decision = policy.for_target("https://api.github.com");
 
         let mut builder =
             ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30)));
 
-        match &decision {
+        // The agent's proxy is always set explicitly: ureq's default
+        // (`Config::default()`) re-reads the proxy variables with its own
+        // precedence, a second resolution beside `ProxyPolicy`.
+        let proxy = match &decision {
             crate::net::ProxyDecision::Proxy(endpoint) => {
                 tracing::debug!(proxy = %endpoint, "forge API using proxy");
-                if let Ok(proxy) = ureq::Proxy::new(endpoint.url()) {
-                    builder = builder.proxy(Some(proxy));
-                }
+                Some(ureq::Proxy::new(endpoint.url()).map_err(|e| {
+                    WorkspaceError::ConfigError(format!("invalid proxy {endpoint}: {e}"))
+                })?)
             }
             crate::net::ProxyDecision::Direct => {
                 tracing::debug!("forge API direct (host in NO_PROXY)");
-                builder = builder.proxy(None);
+                None
             }
             crate::net::ProxyDecision::NoEnvironmentProxy => {
-                // Leave default: ureq reads env vars through
-                // Config::default(). This is the fallback for when
-                // our policy found nothing but ureq may find a
-                // proxy through its own resolution.
+                tracing::debug!("forge API direct (no proxy configured)");
+                None
             }
-        }
+        };
+        builder = builder.proxy(proxy);
 
         let agent = builder.build().into();
-        // Optional auth: GITHUB_TOKEN env var for higher rate limits (5000/hr
-        // vs 60/hr unauthenticated) and access to private repos.
-        let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
-        Self { agent, token }
+        // Optional auth: higher rate limits (5000/hr vs 60/hr
+        // unauthenticated) and access to private repositories.
+        let token = crate::env::first_set(&["GITHUB_TOKEN"])?;
+        Ok(Self { agent, token })
     }
 
-    fn get(&self, url: &str) -> Result<ureq::http::Response<ureq::Body>, WorkspaceError> {
+    /// Fetch one page of a repository listing.
+    ///
+    /// Non-success statuses are `ureq::Error::StatusCode` (ureq's default
+    /// `http_status_as_error`), so the caller can tell 404 apart.
+    fn fetch_page(&self, url: &str) -> Result<Page, FetchError> {
         let mut req = self
             .agent
             .get(url)
@@ -54,12 +67,26 @@ impl GitHub {
             req = req.header("Authorization", &format!("Bearer {token}"));
         }
 
-        req.call()
-            .map_err(|e| WorkspaceError::GitError(format!("GitHub API request failed: {e}")))
+        let mut response = req.call().map_err(FetchError::Http)?;
+        self.check_rate_limit(&response);
+
+        // Check for Link header with rel="next" before consuming body.
+        let has_next = response
+            .headers()
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|link| link.contains("rel=\"next\""));
+
+        let repos: Vec<ApiRepo> = response
+            .body_mut()
+            .read_json()
+            .map_err(|e| FetchError::Decode(e.to_string()))?;
+        Ok(Page { repos, has_next })
     }
 
-    /// Check rate limit headers and warn if running low.
-    fn check_rate_limit(response: &ureq::http::Response<ureq::Body>) {
+    /// Check rate limit headers and warn if running low; without a token,
+    /// name the variable that raises the limit.
+    fn check_rate_limit(&self, response: &ureq::http::Response<ureq::Body>) {
         let remaining = response
             .headers()
             .get("x-ratelimit-remaining")
@@ -71,22 +98,129 @@ impl GitHub {
             eprintln!(
                 "  Warning: GitHub API rate limit nearly exhausted ({remaining} requests remaining)."
             );
-            if std::env::var("GITHUB_TOKEN")
-                .ok()
-                .as_ref()
-                .is_none_or(String::is_empty)
-            {
+            if self.token.is_none() {
                 eprintln!("  Set GITHUB_TOKEN for 5000 req/hr instead of 60 req/hr.");
             }
         }
     }
 }
 
-/// GitHub API endpoint type — org or user. Remembered after first successful
-/// request so pagination uses the correct endpoint.
+/// A repository as the GitHub REST API returns it.
+#[derive(Debug, serde::Deserialize)]
+struct ApiRepo {
+    clone_url: String,
+    html_url: String,
+    default_branch: String,
+    #[serde(default)]
+    fork: bool,
+    #[serde(default)]
+    archived: bool,
+    description: Option<String>,
+}
+
+impl TryFrom<ApiRepo> for RepoInfo {
+    type Error = WorkspaceError;
+
+    fn try_from(repo: ApiRepo) -> Result<Self, Self::Error> {
+        Ok(Self {
+            identity: RepoInfo::identity_from_clone_url(&repo.clone_url)?,
+            html_url: repo.html_url,
+            default_branch: repo.default_branch,
+            fork: repo.fork,
+            archived: repo.archived,
+            description: repo.description,
+        })
+    }
+}
+
+/// One page of a listing.
+struct Page {
+    repos: Vec<ApiRepo>,
+    has_next: bool,
+}
+
+/// Why a page could not be fetched.
+#[derive(Debug)]
+enum FetchError {
+    /// The request failed or returned a non-success status.
+    Http(ureq::Error),
+    /// The response body was not a repository list.
+    Decode(String),
+}
+
+impl FetchError {
+    fn into_workspace_error(self, url: &str) -> WorkspaceError {
+        match self {
+            Self::Http(e) => {
+                WorkspaceError::GitError(format!("GitHub API request failed: {url}: {e}"))
+            }
+            Self::Decode(e) => {
+                WorkspaceError::GitError(format!("failed to parse GitHub API response: {url}: {e}"))
+            }
+        }
+    }
+}
+
+/// GitHub listing endpoint: organizations and users list repositories
+/// under different paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Endpoint {
     Org,
     User,
+}
+
+impl Endpoint {
+    fn url(self, owner: &str, page: u32) -> String {
+        let kind = match self {
+            Self::Org => "orgs",
+            Self::User => "users",
+        };
+        format!("https://api.github.com/{kind}/{owner}/repos?per_page=100&type=public&page={page}")
+    }
+}
+
+/// List every repository of `owner`, following pagination.
+///
+/// `owner` is tried as an organization first. Only a 404 on the first
+/// organization page means "not an organization" and switches to the
+/// user endpoint; every other failure (rate limit, authentication,
+/// server error, transport) is returned.
+fn list_all(
+    owner: &str,
+    opts: &ListOptions,
+    mut fetch: impl FnMut(&str) -> Result<Page, FetchError>,
+) -> Result<Vec<RepoInfo>, WorkspaceError> {
+    let mut endpoint = Endpoint::Org;
+    let mut page = 1u32;
+    let mut all = Vec::new();
+    loop {
+        let url = endpoint.url(owner, page);
+        let result = match fetch(&url) {
+            Err(FetchError::Http(ureq::Error::StatusCode(404)))
+                if endpoint == Endpoint::Org && page == 1 =>
+            {
+                endpoint = Endpoint::User;
+                let user_url = endpoint.url(owner, page);
+                fetch(&user_url).map_err(|e| e.into_workspace_error(&user_url))
+            }
+            other => other.map_err(|e| e.into_workspace_error(&url)),
+        };
+        let listing = result?;
+        if listing.repos.is_empty() {
+            break;
+        }
+        for repo in listing.repos {
+            if (!opts.include_forks && repo.fork) || (!opts.include_archived && repo.archived) {
+                continue;
+            }
+            all.push(RepoInfo::try_from(repo)?);
+        }
+        if !listing.has_next {
+            break;
+        }
+        page += 1;
+    }
+    Ok(all)
 }
 
 impl Forge for GitHub {
@@ -95,71 +229,101 @@ impl Forge for GitHub {
         org: &str,
         opts: &ListOptions,
     ) -> Result<Vec<RepoInfo>, WorkspaceError> {
-        let mut all_repos = Vec::new();
-        let mut page = 1u32;
-        let mut endpoint: Option<Endpoint> = None;
+        list_all(org, opts, |url| self.fetch_page(url))
+    }
+}
 
-        loop {
-            let url = match endpoint {
-                Some(Endpoint::User) => format!(
-                    "https://api.github.com/users/{org}/repos?per_page=100&type=public&page={page}"
-                ),
-                _ => format!(
-                    "https://api.github.com/orgs/{org}/repos?per_page=100&type=public&page={page}"
-                ),
-            };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            let mut response = match self.get(&url) {
-                Ok(r) => {
-                    if endpoint.is_none() {
-                        endpoint = Some(Endpoint::Org);
-                    }
-                    r
-                }
-                Err(_) if endpoint.is_none() => {
-                    // First request to /orgs/ failed — try /users/ endpoint.
-                    let user_url = format!(
-                        "https://api.github.com/users/{org}/repos?per_page=100&type=public&page={page}"
-                    );
-                    endpoint = Some(Endpoint::User);
-                    self.get(&user_url)?
-                }
-                Err(e) => return Err(e),
-            };
-
-            Self::check_rate_limit(&response);
-
-            // Check for Link header with rel="next" before consuming body.
-            let has_next = response
-                .headers()
-                .get("link")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|link| link.contains("rel=\"next\""));
-
-            let repos: Vec<RepoInfo> = response.body_mut().read_json().map_err(|e| {
-                WorkspaceError::GitError(format!("failed to parse GitHub API response: {e}"))
-            })?;
-
-            if repos.is_empty() {
-                break;
-            }
-
-            for repo in repos {
-                if !opts.include_forks && repo.fork {
-                    continue;
-                }
-                if !opts.include_archived && repo.archived {
-                    continue;
-                }
-                all_repos.push(repo);
-            }
-
-            if !has_next {
-                break;
-            }
-            page += 1;
+    fn api_repo(url: &str) -> ApiRepo {
+        ApiRepo {
+            clone_url: url.into(),
+            html_url: url.into(),
+            default_branch: "main".into(),
+            fork: false,
+            archived: false,
+            description: None,
         }
+    }
 
-        Ok(all_repos)
+    /// A final page holding `repos`.
+    fn page(repos: Vec<ApiRepo>) -> Page {
+        Page {
+            repos,
+            has_next: false,
+        }
+    }
+
+    #[test]
+    fn org_404_falls_back_to_user_endpoint() {
+        let mut requested = Vec::new();
+        let repos = list_all("alice", &ListOptions::default(), |url| {
+            requested.push(url.to_string());
+            if url.contains("/orgs/") {
+                Err(FetchError::Http(ureq::Error::StatusCode(404)))
+            } else {
+                Ok(page(vec![api_repo(
+                    "https://github.com/alice/dotfiles.git",
+                )]))
+            }
+        })
+        .unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(requested.len(), 2);
+        assert!(requested[1].contains("/users/alice/"));
+    }
+
+    #[test]
+    fn rate_limit_on_org_is_not_retried_as_user() {
+        for status in [403, 429, 500] {
+            let mut requested = Vec::new();
+            let result = list_all("org", &ListOptions::default(), |url| {
+                requested.push(url.to_string());
+                Err(FetchError::Http(ureq::Error::StatusCode(status)))
+            });
+            assert!(result.is_err(), "{status}");
+            assert_eq!(requested.len(), 1, "{status}: {requested:?}");
+        }
+    }
+
+    #[test]
+    fn listing_maps_typed_identity_in_forge_spelling() {
+        let repos = list_all("SesameOS", &ListOptions::default(), |_| {
+            Ok(page(vec![api_repo(
+                "https://github.com/SesameOS/.github.git",
+            )]))
+        })
+        .unwrap();
+        assert_eq!(repos[0].identity.namespace().to_string(), "SesameOS");
+        assert_eq!(repos[0].identity.repository().as_str(), ".github");
+    }
+
+    #[test]
+    fn listing_rejects_clone_url_without_repository() {
+        let result = list_all("org", &ListOptions::default(), |_| {
+            Ok(page(vec![api_repo("https://github.com/SesameOS")]))
+        });
+        assert!(matches!(result, Err(WorkspaceError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn filters_forks_and_archived() {
+        let mut fork = api_repo("https://github.com/org/fork.git");
+        fork.fork = true;
+        let mut archived = api_repo("https://github.com/org/old.git");
+        archived.archived = true;
+        let mut pages = vec![vec![
+            api_repo("https://github.com/org/keep.git"),
+            fork,
+            archived,
+        ]];
+        let repos = list_all("org", &ListOptions::default(), |_| {
+            Ok(page(pages.remove(0)))
+        })
+        .unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].identity.repository().as_str(), "keep");
     }
 }

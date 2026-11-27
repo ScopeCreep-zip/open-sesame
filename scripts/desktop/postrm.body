@@ -1,11 +1,12 @@
+# shellcheck shell=bash
 # %postrm for open-sesame-desktop -- deb
 case "$1" in
-    remove|purge)
-        # daemon-reload handled by dpkg triggers on unit file removal.
-        echo "open-sesame-desktop removed."
-        echo "Headless daemons (open-sesame) are still installed."
-        #DEBHELPER#
-        ;;
+remove | purge)
+    # daemon-reload handled by dpkg triggers on unit file removal.
+    echo "open-sesame-desktop removed."
+    echo "Headless daemons (open-sesame) are still installed."
+    #DEBHELPER#
+    ;;
 esac
 
 exit 0

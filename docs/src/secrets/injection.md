@@ -98,7 +98,7 @@ The `secret_key_to_env_var()` function in `open-sesame/src/env.rs` converts secr
 to environment variable names using the following rules:
 
 | Input character | Output |
-|---|---|
+| --- | --- |
 | Hyphen (`-`) | Underscore (`_`) |
 | Dot (`.`) | Underscore (`_`) |
 | ASCII alphanumeric | Uppercased |
@@ -111,7 +111,7 @@ separator.
 **Examples** (from tests in `open-sesame/src/env.rs`):
 
 | Secret key | Prefix | Environment variable |
-|---|---|---|
+| --- | --- | --- |
 | `api-key` | None | `API_KEY` |
 | `api-key` | `MYAPP` | `MYAPP_API_KEY` |
 | `db.host-name` | None | `DB_HOST_NAME` |
@@ -217,7 +217,7 @@ The `shell_escape()` function in `open-sesame/src/env.rs` produces output safe f
 in double-quoted `export` statements. The following transformations are applied:
 
 | Character | Output | Reason |
-|---|---|---|
+| --- | --- | --- |
 | `\0` (null) | Stripped | C string truncation risk |
 | `"` | `\"` | Shell metacharacter |
 | `\` | `\\` | Shell metacharacter |
@@ -232,7 +232,7 @@ in double-quoted `export` statements. The following transformations are applied:
 The `json_escape()` function produces output safe for embedding in JSON string values:
 
 | Character | Output |
-|---|---|
+| --- | --- |
 | `\0` (null) | Stripped |
 | `"` | `\"` |
 | `\` | `\\` |

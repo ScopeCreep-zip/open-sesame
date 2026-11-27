@@ -13,7 +13,7 @@ JavaScript API.
 ## Relevant Standards
 
 | Standard | Role |
-|----------|------|
+| --- | --- |
 | **CTAP2** (Client to Authenticator Protocol 2.1) | Wire protocol between host and authenticator. Open Sesame acts as the CTAP2 platform (client). |
 | **WebAuthn Level 2** (W3C) | Defines the relying party model, credential creation, and assertion ceremonies. Open Sesame borrows the data model (RP ID, credential ID, user handle) but does not use a browser. |
 | **HMAC-secret extension** (CTAP2.1) | Allows the authenticator to compute a deterministic symmetric secret from a caller-provided salt, without exposing the credential private key. This is the primary key-derivation mechanism. |
@@ -154,7 +154,7 @@ library maintained by Yubico. Consequences:
 ## Integration Dependencies
 
 | Dependency | Type | Purpose |
-|-----------|------|---------|
+| --- | --- | --- |
 | `libfido2` >= 1.13 | System C library | CTAP2 HID/NFC/BLE transport |
 | `libfido2-dev` | System package | Build-time headers and pkg-config |
 | Rust crate: `libfido2` or `ctap-hid-fido2` | Cargo dependency | Safe Rust bindings |

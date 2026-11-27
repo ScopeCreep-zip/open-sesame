@@ -10,7 +10,7 @@ The `SecretsStore` trait (`core-secrets/src/store.rs`) defines four operations t
 backend must implement:
 
 | Operation | Behavior |
-|---|---|
+| --- | --- |
 | `get(key)` | Retrieve a secret by key. Returns an error if the key does not exist. |
 | `set(key, value)` | Store a secret. Overwrites if the key already exists. Updates `updated_at`; sets `created_at` on first insert. |
 | `delete(key)` | Delete a secret by key. Returns an error if the key does not exist. |
@@ -131,7 +131,7 @@ The `compliance_tests()` function (`core-secrets/src/compliance.rs`) defines a p
 suite that every `SecretsStore` implementation must pass. The suite verifies:
 
 | Test case | Assertion |
-|---|---|
+| --- | --- |
 | Set and get | A stored value is retrievable with identical bytes. |
 | Overwrite | Storing to an existing key replaces the value. |
 | Get nonexistent | Retrieving a key that does not exist returns an error. |

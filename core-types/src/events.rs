@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::auth::{AuthCombineMode, AuthFactorId};
 use crate::constants::Timestamp;
-use crate::denial::{LaunchDenial, SecretDenialReason, UnlockRejectedReason};
+use crate::denial::{LaunchOutcome, SecretDenialReason, UnlockRejectedReason};
 use crate::ids::{
     AgentId, AppId, ClipboardEntryId, CompositorWorkspaceId, DaemonId, MonitorId, ProfileId,
     WindowId,
@@ -20,14 +20,10 @@ use crate::security::{
 use crate::sensitive::SensitiveBytes;
 use crate::window::Window;
 
-fn default_clipboard_limit() -> u32 {
-    20
-}
-
-/// Externally-tagged enum (serde default) for postcard wire compatibility.
-/// Postcard does not support `#[serde(tag = "...", content = "...")]`.
-/// JSON output uses `{"VariantName": {...}}` format which is still
-/// fully deserializable and forward-compatible via `#[serde(other)]`.
+/// Every bus payload. Externally tagged (serde's default): postcard encodes
+/// the variant index and then every field positionally, so each field is
+/// always present and the enum is decoded only by binaries built from the
+/// same source (`core_ipc::WIRE_VERSION`).
 #[derive(Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum EventKind {
@@ -111,8 +107,8 @@ pub enum EventKind {
     },
 
     /// Request daemon-input to start forwarding keyboard events for the overlay.
-    /// Published by daemon-wm when the overlay activates. daemon-input processes
-    /// this as a broadcast event (fire-and-forget, no response expected).
+    /// Published by daemon-wm when the overlay activates; daemon-input starts
+    /// the grab and answers with a correlated `InputGrabResponse`.
     InputGrabRequest {
         /// Requesting daemon's ID — used to scope the grab.
         requester: DaemonId,
@@ -227,12 +223,10 @@ pub enum EventKind {
         /// Trust profile the operation targeted
         profile: TrustProfileName,
         /// Secret key name (None for list operations)
-        #[serde(default)]
         key: Option<String>,
         /// `DaemonId` of the requester
         requester: DaemonId,
         /// Server-verified name of the requester (if known)
-        #[serde(default)]
         requester_name: Option<String>,
         /// Outcome: "success", "denied-locked", "denied-profile-not-active",
         /// "denied-acl", "rate-limited", "not-found", "denied-invalid-key", "failed", "empty"
@@ -251,7 +245,6 @@ pub enum EventKind {
         /// this is additionally AES-256-GCM encrypted per-field.
         value: SensitiveBytes,
         /// Typed denial reason. `None` = success, `Some` = denied.
-        #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
     SecretSet {
@@ -265,7 +258,6 @@ pub enum EventKind {
     SecretSetResponse {
         success: bool,
         /// Typed denial reason. `None` = success, `Some` = denied.
-        #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
     SecretDelete {
@@ -275,7 +267,6 @@ pub enum EventKind {
     SecretDeleteResponse {
         success: bool,
         /// Typed denial reason. `None` = success, `Some` = denied.
-        #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
     SecretList {
@@ -284,7 +275,6 @@ pub enum EventKind {
     SecretListResponse {
         keys: Vec<String>,
         /// Typed denial reason. `None` = success, `Some` = denied.
-        #[serde(default)]
         denial: Option<SecretDenialReason>,
     },
 
@@ -322,42 +312,31 @@ pub enum EventKind {
         daemon_uptimes_ms: Vec<(DaemonId, u64)>,
         /// True if ALL vaults are locked. Convenience for callers that don't need per-profile granularity.
         locked: bool,
-        /// Per-profile lock state. Key = profile name, value = true if locked.
-        #[serde(default)]
-        lock_state: BTreeMap<TrustProfileName, bool>,
+        /// Per-profile lock state from daemon-secrets. Key = profile name,
+        /// value = true if locked. `None` when daemon-secrets did not
+        /// answer: the state is unknown and every vault is treated as
+        /// locked.
+        lock_state: Option<BTreeMap<TrustProfileName, bool>>,
     },
 
     // -- RPC: Unlock/Lock --
-    UnlockRequest {
-        /// Vault password bytes (transmitted over UCred-authenticated Unix socket only).
-        password: SensitiveBytes,
-        /// Target profile to unlock. None = default profile.
-        #[serde(default)]
-        profile: Option<TrustProfileName>,
-    },
-    UnlockResponse {
-        success: bool,
-        /// Which profile was unlocked.
-        profile: TrustProfileName,
-    },
-    /// Typed rejection for unlock when preconditions are not met.
-    /// Distinct from `UnlockResponse` { success: false } to avoid ambiguity
-    /// between "wrong password" and "already unlocked".
+    /// Typed rejection of a `FactorSubmit` whose vault is already unlocked.
     UnlockRejected {
         reason: UnlockRejectedReason,
         profile: Option<TrustProfileName>,
     },
-    /// Unlock a vault using a pre-derived master key (SSH-agent or future backends).
-    /// The caller performed signing, KEK derivation, and master key unwrapping.
-    SshUnlockRequest {
-        master_key: SensitiveBytes,
+    /// Announcement by daemon-secrets: `profile`'s vault was unlocked.
+    VaultUnlocked {
         profile: TrustProfileName,
-        ssh_fingerprint: String,
+    },
+    /// Announcement by daemon-secrets: the vaults of `profiles` were
+    /// locked; empty means every vault.
+    VaultsLocked {
+        profiles: Vec<TrustProfileName>,
     },
 
     LockRequest {
         /// Target profile. None = lock all vaults.
-        #[serde(default)]
         profile: Option<TrustProfileName>,
     },
     LockResponse {
@@ -375,7 +354,6 @@ pub enum EventKind {
         locked: bool,
         active_profiles: Vec<TrustProfileName>,
         /// Per-profile lock state.
-        #[serde(default)]
         lock_state: BTreeMap<TrustProfileName, bool>,
     },
 
@@ -406,7 +384,6 @@ pub enum EventKind {
         query: String,
         max_results: u32,
         /// Trust profile context for scoped frecency and launch environment.
-        #[serde(default)]
         profile: Option<TrustProfileName>,
     },
     LaunchQueryResponse {
@@ -415,27 +392,19 @@ pub enum EventKind {
     LaunchExecute {
         entry_id: String,
         /// Trust profile context — injected as `SESAME_PROFILE` env var in spawned process.
-        #[serde(default)]
         profile: Option<TrustProfileName>,
         /// Launch profile tags to compose for environment injection.
-        #[serde(default)]
         tags: Vec<String>,
         /// Additional CLI arguments appended to the desktop entry's Exec line.
-        #[serde(default)]
         launch_args: Vec<String>,
     },
     LaunchExecuteResponse {
-        pid: u32,
-        error: Option<String>,
-        /// Machine-readable denial reason for programmatic action by the WM.
-        #[serde(default)]
-        denial: Option<LaunchDenial>,
+        outcome: LaunchOutcome,
     },
 
     // -- RPC: Clipboard --
     ClipboardHistory {
         profile: TrustProfileName,
-        #[serde(default = "default_clipboard_limit")]
         limit: u32,
     },
     ClipboardHistoryResponse {
@@ -506,11 +475,6 @@ pub enum EventKind {
         id: InstallationId,
         org: Option<OrganizationNamespace>,
         machine_binding_present: bool,
-    },
-    ProfileIdMigrated {
-        name: TrustProfileName,
-        old_id: ProfileId,
-        new_id: ProfileId,
     },
 
     // -- Authorization Broker (v2: defined, not exercised) --
@@ -583,7 +547,6 @@ pub enum EventKind {
         /// Target profile.
         profile: TrustProfileName,
         /// Audit metadata from the backend (e.g., SSH fingerprint).
-        #[serde(default)]
         audit_metadata: BTreeMap<String, String>,
     },
 
@@ -600,7 +563,6 @@ pub enum EventKind {
         /// Target profile.
         profile: TrustProfileName,
         /// Error message if not accepted.
-        #[serde(default)]
         error: Option<String>,
     },
 
@@ -619,13 +581,35 @@ pub enum EventKind {
         /// Whether a partial unlock is in progress.
         partial_in_progress: bool,
         /// If partial in progress, which factors have been received.
-        #[serde(default)]
         received_factors: Vec<AuthFactorId>,
+        /// Why the vault's requirements could not be read; the other
+        /// fields are then empty and carry no policy.
+        error: Option<String>,
     },
 
-    // Forward compatibility: unknown events deserialize to this variant.
-    #[serde(other)]
-    Unknown,
+    /// A profile deactivation did not complete: daemon-secrets rejected it,
+    /// or did not confirm it and daemon-profile reconciles with its state.
+    ProfileDeactivationFailed {
+        target: ProfileId,
+        reason: String,
+    },
+
+    /// Ask daemon-launcher to submit `profile`'s platform keyring factor.
+    /// Sent by daemon-wm, whose sandbox grants no D-Bus bus: daemon-launcher
+    /// reads the KEK from the platform credential store, unwraps the master
+    /// key, and submits it to daemon-secrets, so neither enters daemon-wm.
+    /// The answer is daemon-secrets' own (`FactorResponse`,
+    /// `UnlockRejected`), relayed, or `KeyringUnlockFailed`.
+    KeyringUnlockRequest {
+        profile: TrustProfileName,
+    },
+
+    /// daemon-launcher could not read or submit `profile`'s platform keyring
+    /// factor; daemon-secrets was not asked.
+    KeyringUnlockFailed {
+        profile: TrustProfileName,
+        reason: String,
+    },
 }
 
 /// Implement `fmt::Debug` for `EventKind` with automatic redaction of sensitive variants.
@@ -683,8 +667,6 @@ impl_event_debug! {
     sensitive {
         SecretGetResponse { key, value => REDACTED, denial },
         SecretSet { profile, key, value => REDACTED },
-        UnlockRequest { password => REDACTED, profile },
-        SshUnlockRequest { master_key => REDACTED, profile, ssh_fingerprint },
         FactorSubmit { factor_id, key_material => REDACTED, profile, audit_metadata },
     }
     transparent {
@@ -739,8 +721,9 @@ impl_event_debug! {
         SetDefaultProfileResponse { success },
         StatusRequest,
         StatusResponse { active_profiles, default_profile, daemon_uptimes_ms, locked, lock_state },
-        UnlockResponse { success, profile },
         UnlockRejected { reason, profile },
+        VaultUnlocked { profile },
+        VaultsLocked { profiles },
         LockRequest { profile },
         LockResponse { success, profiles_locked },
         SecretsStateRequest,
@@ -758,7 +741,7 @@ impl_event_debug! {
         LaunchQuery { query, max_results, profile },
         LaunchQueryResponse { results },
         LaunchExecute { entry_id, profile, tags, launch_args },
-        LaunchExecuteResponse { pid, error, denial },
+        LaunchExecuteResponse { outcome },
         ClipboardHistory { profile, limit },
         ClipboardHistoryResponse { entries },
         ClipboardClear { profile },
@@ -778,7 +761,6 @@ impl_event_debug! {
         AgentConnected { agent_id, agent_type, attestations },
         AgentDisconnected { agent_id, reason },
         InstallationCreated { id, org, machine_binding_present },
-        ProfileIdMigrated { name, old_id, new_id },
         AuthorizationRequired { request_id, operation, missing_attestations, expires_at },
         AuthorizationGrant { request_id, delegator, scope, ttl_seconds, point_of_use_filter },
         AuthorizationDenied { request_id, reason },
@@ -790,8 +772,10 @@ impl_event_debug! {
         PostureEvaluated { secure_boot, disk_encrypted, screen_locked, composite_score },
         FactorResponse { accepted, unlock_complete, remaining_factors, remaining_additional, profile, error },
         VaultAuthQuery { profile },
-        VaultAuthQueryResponse { profile, enrolled_factors, auth_policy, partial_in_progress, received_factors },
+        VaultAuthQueryResponse { profile, enrolled_factors, auth_policy, partial_in_progress, received_factors, error },
         AccessDenied { reason },
-        Unknown,
+        ProfileDeactivationFailed { target, reason },
+        KeyringUnlockRequest { profile },
+        KeyringUnlockFailed { profile, reason },
     }
 }

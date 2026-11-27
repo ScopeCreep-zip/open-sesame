@@ -1,75 +1,170 @@
 //! SSH-agent authentication backend.
 //!
-//! Connects to the user's SSH agent via `$SSH_AUTH_SOCK`, signs a
-//! deterministic BLAKE3 challenge with the enrolled key, derives a KEK
-//! from the signature, and unwraps the AES-256-GCM wrapped master key
-//! from the enrollment blob.
+//! Connects to the user's SSH agent (`Layout::ssh_agent_sockets`), signs
+//! the vault's deterministic challenge with the enrolled key, derives a
+//! KEK from the signature, and unwraps the AES-256-GCM wrapped master key
+//! from the enrollment blob. Challenge and KEK derive under the vault's
+//! `hkdf` (`KeyContext::SshChallenge`, `KeyContext::SshVaultKek`).
 
 use crate::AuthError;
-use crate::backend::{AuthInteraction, IpcUnlockStrategy, UnlockOutcome, VaultAuthBackend};
+use crate::agent::Agent;
+use crate::backend::{AuthInteraction, UnlockOutcome, VaultAuthBackend};
 use crate::ssh_types::{EnrollmentBlob, SshKeyType};
-use core_crypto::SecureBytes;
+use crate::vault_meta::VaultKeying;
+use core_crypto::{EncryptionKey, KeyContext, SecureBytes};
+use core_layout::{Layout, VaultFile};
 use core_types::AuthFactorId;
 use core_types::TrustProfileName;
-use ssh_agent_client_rs::Identity;
 use std::collections::BTreeMap;
-use std::path::Path;
-use zeroize::Zeroize;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use zeroize::Zeroizing;
 
-/// Get the fingerprint string for an identity.
-fn identity_fingerprint(id: &Identity<'_>) -> String {
-    match id {
-        Identity::PublicKey(cow) => cow.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
-        Identity::Certificate(cow) => cow
-            .public_key()
-            .fingerprint(ssh_key::HashAlg::Sha256)
-            .to_string(),
+/// Whether two SHA-256 key fingerprints name the same key; the `SHA256:`
+/// prefix (as `ssh-add -l` prints it) is optional on either side.
+#[must_use]
+pub fn same_fingerprint(a: &str, b: &str) -> bool {
+    let bare = |fp: &str| fp.strip_prefix("SHA256:").unwrap_or(fp).to_owned();
+    bare(a) == bare(b)
+}
+
+/// An SSH agent key that can be enrolled: its signatures are
+/// deterministic (`SshKeyType`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentKey {
+    /// `SHA256:` fingerprint.
+    pub fingerprint: String,
+    pub key_type: SshKeyType,
+    /// The agent's comment for the key (often the key file); may be empty.
+    pub comment: String,
+}
+
+impl AgentKey {
+    /// `fingerprint (comment)`, or the fingerprint alone without a comment.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.comment.is_empty() {
+            self.fingerprint.clone()
+        } else {
+            format!("{} ({})", self.fingerprint, self.comment)
+        }
     }
 }
 
-/// Get the algorithm for an identity.
-fn identity_algorithm(id: &Identity<'_>) -> ssh_key::Algorithm {
-    match id {
-        Identity::PublicKey(cow) => cow.algorithm(),
-        Identity::Certificate(cow) => cow.algorithm(),
-    }
+/// The enrollable keys of the first reachable agent among
+/// `Layout::ssh_agent_sockets`, in agent order.
+///
+/// # Errors
+///
+/// `AuthError::AgentUnavailable` when no agent is reachable, and
+/// `AuthError::AgentProtocolError` when the agent fails to list its keys.
+pub async fn eligible_agent_keys(layout: &Layout) -> Result<Vec<AgentKey>, AuthError> {
+    let candidates = layout.ssh_agent_sockets();
+    tokio::task::spawn_blocking(move || {
+        let identities = connect_agent(&candidates)?.identities()?;
+        Ok(identities
+            .iter()
+            .filter_map(|id| {
+                SshKeyType::from_algorithm(&id.algorithm())
+                    .ok()
+                    .map(|key_type| AgentKey {
+                        fingerprint: id.fingerprint(),
+                        key_type,
+                        comment: id.comment().to_owned(),
+                    })
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| AuthError::AgentUnavailable(format!("agent query task failed: {e}")))?
 }
 
-/// Connect to the SSH agent, trying multiple socket paths.
+/// Connect to the first reachable agent among `candidates`
+/// (`Layout::ssh_agent_sockets`, in discovery order).
 ///
-/// Resolution order:
-/// 1. `$SSH_AUTH_SOCK` (may be a symlink to a forwarded agent socket)
-/// 2. `~/.ssh/agent.sock` — stable symlink path created by the Konductor
-///    profile.d propagation script for forwarded SSH agent sessions
+/// Intentionally synchronous — local Unix socket connect is sub-millisecond;
+/// callers run it inside `spawn_blocking`.
 ///
-/// Returns `None` if no connectable agent socket is found.
-/// Intentionally synchronous — local Unix socket connect is sub-millisecond.
-fn connect_agent() -> Option<ssh_agent_client_rs::Client> {
-    // Primary: $SSH_AUTH_SOCK (set by ssh-agent, sshd forwarding, or systemd env)
-    if let Some(sock_path) = std::env::var_os("SSH_AUTH_SOCK") {
-        let path = std::path::Path::new(&sock_path);
-        if let Ok(client) = ssh_agent_client_rs::Client::connect(path) {
-            return Some(client);
+/// # Errors
+///
+/// `AuthError::AgentUnavailable` naming every candidate and why it could
+/// not be reached, or that no candidate input is set.
+fn connect_agent(candidates: &[PathBuf]) -> Result<Agent<UnixStream>, AuthError> {
+    if candidates.is_empty() {
+        return Err(AuthError::AgentUnavailable(
+            "neither $SSH_AUTH_SOCK nor $HOME is set".into(),
+        ));
+    }
+    let mut failures = Vec::with_capacity(candidates.len());
+    for path in candidates {
+        match Agent::connect(path) {
+            Ok(client) => return Ok(client),
+            Err(e) => failures.push(format!("{}: {e}", path.display())),
         }
     }
+    Err(AuthError::AgentUnavailable(failures.join("; ")))
+}
 
-    // Fallback: well-known stable symlink managed by profile.d hook.
-    // On Konductor VMs, /etc/profile.d/konductor-ssh-agent.sh creates
-    // ~/.ssh/agent.sock -> /tmp/ssh-XXXX/agent.PID on each SSH login,
-    // giving systemd user services a stable path to the forwarded agent.
-    if let Some(home) = std::env::var_os("HOME") {
-        let fallback = std::path::Path::new(&home).join(".ssh/agent.sock");
-        if let Ok(client) = ssh_agent_client_rs::Client::connect(&fallback) {
-            return Some(client);
-        }
-    }
+/// The challenge the agent signs for `profile`'s vault.
+fn challenge(keying: &VaultKeying, profile: &TrustProfileName) -> SecureBytes {
+    core_crypto::derive_key(
+        keying.algorithms.hkdf,
+        &KeyContext::SshChallenge(profile),
+        &keying.salt,
+    )
+}
 
-    None
+/// The enrollment KEK of `profile`'s vault, from the challenge signature.
+fn kek(keying: &VaultKeying, profile: &TrustProfileName, signature: &[u8]) -> EncryptionKey {
+    core_crypto::derive_encryption_key(
+        keying.algorithms.hkdf,
+        &KeyContext::SshVaultKek(profile),
+        signature,
+    )
+}
+
+/// The agent key that signed, and the KEK derived from its signature.
+struct SignedKek {
+    fingerprint: String,
+    key_type: SshKeyType,
+    kek: EncryptionKey,
+}
+
+/// Sign `profile`'s challenge with the agent key `fingerprint` names
+/// (`SHA256:` optional) and derive the enrollment KEK from the signature.
+/// The agent client is synchronous (Unix socket I/O), so the session runs
+/// inside `spawn_blocking`; the signature is zeroized once the KEK exists.
+async fn agent_kek(
+    layout: &Layout,
+    profile: &TrustProfileName,
+    keying: &VaultKeying,
+    fingerprint: &str,
+) -> Result<SignedKek, AuthError> {
+    let candidates = layout.ssh_agent_sockets();
+    let (profile, keying, wanted) = (profile.clone(), *keying, fingerprint.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let mut agent = connect_agent(&candidates)?;
+        let identity = agent
+            .identities()?
+            .into_iter()
+            .find(|id| same_fingerprint(&id.fingerprint(), &wanted))
+            .ok_or(AuthError::KeyNotInAgent(wanted))?;
+        let key_type = SshKeyType::from_algorithm(&identity.algorithm())?;
+        let signature =
+            Zeroizing::new(agent.sign(&identity, challenge(&keying, &profile).as_bytes())?);
+        Ok(SignedKek {
+            fingerprint: identity.fingerprint(),
+            key_type,
+            kek: kek(&keying, &profile, &signature),
+        })
+    })
+    .await
+    .map_err(|e| AuthError::AgentUnavailable(format!("agent signing task failed: {e}")))?
 }
 
 /// SSH-agent backed vault authentication.
 ///
-/// Connects to `$SSH_AUTH_SOCK`, signs a BLAKE3-derived challenge with
+/// Connects to the user's SSH agent, signs a BLAKE3-derived challenge with
 /// the enrolled key, derives a KEK from the deterministic signature,
 /// and unwraps the master key from the enrollment blob.
 pub struct SshAgentBackend;
@@ -81,10 +176,32 @@ impl SshAgentBackend {
     }
 
     /// Path to the enrollment blob for a profile.
-    fn enrollment_path(config_dir: &Path, profile: &TrustProfileName) -> std::path::PathBuf {
-        config_dir
-            .join("vaults")
-            .join(format!("{profile}.ssh-enrollment"))
+    fn enrollment_path(layout: &Layout, profile: &TrustProfileName) -> Result<PathBuf, AuthError> {
+        Ok(layout.vault_file(profile, VaultFile::SshEnrollment)?)
+    }
+
+    /// The enrollment blob, or `None` when the profile has no enrollment.
+    ///
+    /// # Errors
+    ///
+    /// The layout errors, an unreadable enrollment file, and
+    /// `AuthError::InvalidBlob` for one that does not parse, each naming
+    /// the file.
+    pub fn read_enrollment(
+        layout: &Layout,
+        profile: &TrustProfileName,
+    ) -> Result<Option<EnrollmentBlob>, AuthError> {
+        let path = Self::enrollment_path(layout, profile)?;
+        match std::fs::read(&path) {
+            Ok(data) => EnrollmentBlob::deserialize(&data)
+                .map(Some)
+                .map_err(|e| e.in_file(&path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(AuthError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to read SSH enrollment {}: {e}", path.display()),
+            ))),
+        }
     }
 }
 
@@ -95,51 +212,48 @@ impl Default for SshAgentBackend {
 }
 
 #[async_trait::async_trait]
-#[allow(clippy::unnecessary_literal_bound)]
 impl VaultAuthBackend for SshAgentBackend {
     fn factor_id(&self) -> AuthFactorId {
         AuthFactorId::SshAgent
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "SSH Agent"
     }
 
-    fn backend_id(&self) -> &str {
+    fn backend_id(&self) -> &'static str {
         "ssh-agent"
     }
 
-    fn is_enrolled(&self, profile: &TrustProfileName, config_dir: &Path) -> bool {
-        Self::enrollment_path(config_dir, profile).exists()
+    fn is_enrolled(&self, profile: &TrustProfileName, layout: &Layout) -> Result<bool, AuthError> {
+        Ok(core_layout::file::exists(&Self::enrollment_path(
+            layout, profile,
+        )?)?)
     }
 
-    async fn can_unlock(&self, profile: &TrustProfileName, config_dir: &Path) -> bool {
-        if !self.is_enrolled(profile, config_dir) {
-            return false;
-        }
-
-        let blob_path = Self::enrollment_path(config_dir, profile);
-        let Ok(blob_data) = std::fs::read(&blob_path) else {
-            return false;
+    async fn can_unlock(
+        &self,
+        profile: &TrustProfileName,
+        layout: &Layout,
+    ) -> Result<bool, AuthError> {
+        let Some(blob) = Self::read_enrollment(layout, profile)? else {
+            return Ok(false);
         };
-        let Ok(blob) = EnrollmentBlob::deserialize(&blob_data) else {
-            return false;
-        };
-
         let fingerprint = blob.key_fingerprint.clone();
+        let candidates = layout.ssh_agent_sockets();
         tokio::task::spawn_blocking(move || {
-            let Some(mut agent) = connect_agent() else {
-                return false;
+            // An unreachable agent: this factor cannot unlock now. An agent
+            // that answers and fails the protocol: an error.
+            let Ok(mut agent) = connect_agent(&candidates) else {
+                return Ok(false);
             };
-            let Ok(identities) = agent.list_all_identities() else {
-                return false;
-            };
-            identities
+            Ok(agent
+                .identities()?
                 .iter()
-                .any(|id| identity_fingerprint(id) == fingerprint)
+                .any(|id| id.fingerprint() == fingerprint))
         })
         .await
-        .unwrap_or(false)
+        .map_err(|e| AuthError::AgentUnavailable(format!("agent query task failed: {e}")))?
     }
 
     fn requires_interaction(&self) -> AuthInteraction {
@@ -149,78 +263,23 @@ impl VaultAuthBackend for SshAgentBackend {
     async fn unlock(
         &self,
         profile: &TrustProfileName,
-        config_dir: &Path,
-        salt: &[u8],
+        layout: &Layout,
+        keying: &VaultKeying,
     ) -> Result<UnlockOutcome, AuthError> {
-        // 1. Read enrollment blob
-        let blob_path = Self::enrollment_path(config_dir, profile);
-        let blob_data =
-            std::fs::read(&blob_path).map_err(|_| AuthError::NotEnrolled(profile.to_string()))?;
-        let blob = EnrollmentBlob::deserialize(&blob_data)?;
-
-        // 2. Derive challenge
-        let profile_str = profile.to_string();
-        let challenge_ctx = format!("pds v2 ssh-challenge {profile_str}");
-        let challenge_bytes: [u8; 32] = blake3::derive_key(&challenge_ctx, salt);
-
-        // 3. Connect to agent, find enrolled key, sign challenge.
-        //    ssh-agent-client-rs is synchronous (Unix socket I/O), so all
-        //    agent calls run inside spawn_blocking to avoid blocking the
-        //    tokio runtime.
-        let fingerprint = blob.key_fingerprint.clone();
-        let challenge = challenge_bytes.to_vec();
-        let sign_result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AuthError> {
-            let mut agent = connect_agent().ok_or_else(|| {
-                AuthError::AgentUnavailable("SSH_AUTH_SOCK not set or agent not running".into())
-            })?;
-
-            let identities = agent.list_all_identities().map_err(|e| {
-                AuthError::AgentProtocolError(format!("failed to list identities: {e}"))
-            })?;
-
-            let identity = identities
-                .into_iter()
-                .find(|id| identity_fingerprint(id) == fingerprint)
-                .ok_or(AuthError::NoEligibleKey)?;
-
-            let signature = agent
-                .sign(identity, &challenge)
-                .map_err(|e| AuthError::AgentProtocolError(format!("sign request failed: {e}")))?;
-
-            // Immediately copy the signature bytes so the Vec is the only
-            // unprotected holder; zeroized promptly after KEK derivation below.
-            Ok(signature.as_bytes().to_vec())
-        })
-        .await
-        .map_err(|e| AuthError::AgentUnavailable(format!("spawn_blocking failed: {e}")))??;
-
-        // 4. Derive KEK from signature, then zeroize the raw signature bytes
-        //    immediately. The signature is the sole input to KEK derivation —
-        //    minimizing its lifetime reduces the exposure window.
-        let kek_ctx = format!("pds v2 ssh-vault-kek {profile_str}");
-        let mut kek_bytes: [u8; 32] = blake3::derive_key(&kek_ctx, &sign_result);
-        let mut sig_bytes = sign_result;
-        sig_bytes.zeroize();
-
-        // 5. Unwrap master key
-        let encryption_key = core_crypto::EncryptionKey::from_bytes(&kek_bytes)
-            .map_err(|_| AuthError::UnwrapFailed)?;
-        kek_bytes.zeroize();
-
-        let master_key_bytes = encryption_key
+        let blob = Self::read_enrollment(layout, profile)?
+            .ok_or_else(|| AuthError::NotEnrolled(profile.to_string()))?;
+        let signed = agent_kek(layout, profile, keying, &blob.key_fingerprint).await?;
+        let master_key = signed
+            .kek
             .decrypt(&blob.nonce, &blob.ciphertext)
             .map_err(|_| AuthError::UnwrapFailed)?;
-
-        // 6. Build outcome
-        let mut audit_metadata = BTreeMap::new();
-        audit_metadata.insert("backend".into(), "ssh-agent".into());
-        audit_metadata.insert("ssh_fingerprint".into(), blob.key_fingerprint.clone());
-        audit_metadata.insert("key_type".into(), blob.key_type.wire_name().into());
-
         Ok(UnlockOutcome {
-            master_key: master_key_bytes,
-            audit_metadata,
-            ipc_strategy: IpcUnlockStrategy::DirectMasterKey,
+            master_key,
+            audit_metadata: BTreeMap::from([
+                ("backend".into(), "ssh-agent".into()),
+                ("ssh_fingerprint".into(), blob.key_fingerprint.clone()),
+                ("key_type".into(), blob.key_type.wire_name().into()),
+            ]),
             factor_id: AuthFactorId::SshAgent,
         })
     }
@@ -229,100 +288,35 @@ impl VaultAuthBackend for SshAgentBackend {
         &self,
         profile: &TrustProfileName,
         master_key: &SecureBytes,
-        config_dir: &Path,
-        salt: &[u8],
-        selected_key_index: Option<usize>,
+        layout: &Layout,
+        keying: &VaultKeying,
+        credential: Option<&str>,
     ) -> Result<(), AuthError> {
-        // 1. Connect to agent, list eligible keys, sign challenge
-        let profile_str = profile.to_string();
-        let challenge_ctx = format!("pds v2 ssh-challenge {profile_str}");
-        let challenge: [u8; 32] = blake3::derive_key(&challenge_ctx, salt);
-        let challenge_vec = challenge.to_vec();
-
-        // ssh-agent-client-rs is synchronous (Unix socket I/O), so all agent
-        // calls run inside spawn_blocking to avoid blocking the tokio runtime.
-        let kek_ctx = format!("pds v2 ssh-vault-kek {profile_str}");
-        let (fingerprint, key_type, mut kek_bytes) = tokio::task::spawn_blocking(
-            move || -> Result<(String, SshKeyType, [u8; 32]), AuthError> {
-                let mut agent = connect_agent().ok_or_else(|| {
-                    AuthError::AgentUnavailable("SSH_AUTH_SOCK not set or agent not running".into())
-                })?;
-
-                let identities = agent
-                    .list_all_identities()
-                    .map_err(|e| AuthError::AgentProtocolError(format!("list identities: {e}")))?;
-
-                let eligible: Vec<_> = identities
-                    .into_iter()
-                    .filter(|id| SshKeyType::from_algorithm(&identity_algorithm(id)).is_ok())
-                    .collect();
-
-                if eligible.is_empty() {
-                    return Err(AuthError::NoEligibleKey);
-                }
-
-                let idx = selected_key_index.ok_or(AuthError::NoEligibleKey)?;
-                if idx >= eligible.len() {
-                    return Err(AuthError::NoEligibleKey);
-                }
-                let identity = eligible.into_iter().nth(idx).unwrap();
-                let fp = identity_fingerprint(&identity);
-                let algo = identity_algorithm(&identity);
-                let kt = SshKeyType::from_algorithm(&algo)?;
-
-                let sig = agent
-                    .sign(identity, &challenge_vec)
-                    .map_err(|e| AuthError::AgentProtocolError(format!("sign: {e}")))?;
-
-                // Derive KEK immediately, zeroize signature, return only the KEK.
-                let mut sig_bytes = sig.as_bytes().to_vec();
-                let kek: [u8; 32] = blake3::derive_key(&kek_ctx, &sig_bytes);
-                sig_bytes.zeroize();
-
-                Ok((fp, kt, kek))
-            },
-        )
-        .await
-        .map_err(|e| AuthError::AgentUnavailable(format!("spawn_blocking: {e}")))??;
-
-        // 3. Wrap master key
-        let encryption_key = core_crypto::EncryptionKey::from_bytes(&kek_bytes)
-            .map_err(|_| AuthError::UnwrapFailed)?;
-        kek_bytes.zeroize();
-
-        let mut nonce_bytes = [0u8; 12];
-        getrandom::getrandom(&mut nonce_bytes)
-            .map_err(|e| AuthError::Io(std::io::Error::other(e)))?;
-
-        let ciphertext = encryption_key
-            .encrypt(&nonce_bytes, master_key.as_bytes())
-            .map_err(|_| AuthError::UnwrapFailed)?;
-
-        // 4. Write enrollment blob atomically
+        let wanted = credential.ok_or_else(|| {
+            AuthError::BackendNotApplicable(
+                "SSH enrollment requires the key fingerprint to enroll".into(),
+            )
+        })?;
+        let SignedKek {
+            fingerprint,
+            key_type,
+            kek,
+        } = agent_kek(layout, profile, keying, wanted).await?;
+        let (nonce, ciphertext) = kek.seal(master_key.as_bytes())?;
         let blob = EnrollmentBlob {
             version: crate::ENROLLMENT_VERSION,
             key_fingerprint: fingerprint.clone(),
             key_type,
-            nonce: nonce_bytes,
+            nonce,
             ciphertext,
         };
 
-        let blob_path = Self::enrollment_path(config_dir, profile);
-        let vaults_dir = config_dir.join("vaults");
-        std::fs::create_dir_all(&vaults_dir)?;
-
-        let tmp_path = blob_path.with_extension("ssh-enrollment.tmp");
-        std::fs::write(&tmp_path, blob.serialize())?;
-
-        // Set restrictive permissions (owner-only) before rename. The blob
-        // contains an AES-256-GCM encrypted master key; do not rely on umask.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-
-        std::fs::rename(&tmp_path, &blob_path)?;
+        // The blob holds the AES-256-GCM wrapped master key: owner-only.
+        core_layout::file::write(
+            &Self::enrollment_path(layout, profile)?,
+            &blob.serialize()?,
+            core_layout::file::Mode::OwnerOnly,
+        )?;
 
         tracing::info!(
             profile = %profile,
@@ -334,22 +328,18 @@ impl VaultAuthBackend for SshAgentBackend {
         Ok(())
     }
 
-    async fn revoke(&self, profile: &TrustProfileName, config_dir: &Path) -> Result<(), AuthError> {
-        let path = Self::enrollment_path(config_dir, profile);
-        if path.exists() {
-            // Extract fingerprint for audit logging before deletion
-            let fingerprint = std::fs::read(&path)
-                .ok()
-                .and_then(|data| EnrollmentBlob::deserialize(&data).ok())
-                .map_or_else(|| "<unreadable>".into(), |blob| blob.key_fingerprint);
-
-            // Overwrite with zeros before deletion to prevent casual recovery
-            #[allow(clippy::cast_possible_truncation)]
-            let file_len = std::fs::metadata(&path).map_or(256, |m| m.len() as usize);
-            let zeros = vec![0u8; file_len];
-            let _ = std::fs::write(&path, &zeros);
-            std::fs::remove_file(&path)?;
-
+    async fn revoke(&self, profile: &TrustProfileName, layout: &Layout) -> Result<(), AuthError> {
+        // The fingerprint is for the revocation log only; an unreadable
+        // enrollment is revoked and logged as such.
+        let fingerprint = match Self::read_enrollment(layout, profile) {
+            Ok(Some(blob)) => blob.key_fingerprint,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(profile = %profile, error = %e, "revoking an unreadable SSH enrollment");
+                "<unreadable>".into()
+            }
+        };
+        if core_layout::file::destroy(&Self::enrollment_path(layout, profile)?)? {
             tracing::info!(
                 profile = %profile,
                 fingerprint = %fingerprint,
@@ -363,264 +353,225 @@ impl VaultAuthBackend for SshAgentBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{layout, profile, test_profile};
+    use core_types::{HkdfAlgorithm, KdfAlgorithm};
 
-    fn test_profile() -> TrustProfileName {
-        TrustProfileName::try_from("test-profile").unwrap()
+    fn keying(salt: u8, hkdf: HkdfAlgorithm) -> VaultKeying {
+        crate::test_support::keying(salt, KdfAlgorithm::Argon2id, hkdf)
+    }
+
+    /// Write `contents` as the test profile's enrollment blob.
+    fn write_enrollment(layout: &Layout, contents: &[u8]) -> PathBuf {
+        let path = SshAgentBackend::enrollment_path(layout, &test_profile()).unwrap();
+        core_layout::file::write(&path, contents, core_layout::file::Mode::OwnerOnly).unwrap();
+        path
     }
 
     #[test]
     fn is_enrolled_checks_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_root, layout) = layout();
         let backend = SshAgentBackend::new();
         let profile = test_profile();
 
-        assert!(!backend.is_enrolled(&profile, dir.path()));
-
-        let vaults = dir.path().join("vaults");
-        std::fs::create_dir_all(&vaults).unwrap();
-        std::fs::write(vaults.join("test-profile.ssh-enrollment"), b"blob").unwrap();
-
-        assert!(backend.is_enrolled(&profile, dir.path()));
+        assert!(!backend.is_enrolled(&profile, &layout).unwrap());
+        write_enrollment(&layout, b"blob");
+        assert!(backend.is_enrolled(&profile, &layout).unwrap());
     }
 
     #[tokio::test]
     async fn can_unlock_false_when_not_enrolled() {
+        let (_root, layout) = layout();
         let backend = SshAgentBackend::new();
-        let profile = test_profile();
+        assert!(!backend.can_unlock(&test_profile(), &layout).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn can_unlock_reports_a_damaged_enrollment() {
+        let (_root, layout) = layout();
+        write_enrollment(&layout, b"corrupt");
+        let result = SshAgentBackend::new()
+            .can_unlock(&test_profile(), &layout)
+            .await;
         assert!(
-            !backend
-                .can_unlock(&profile, std::path::Path::new("/tmp"))
-                .await
+            matches!(result, Err(AuthError::InvalidBlob(_))),
+            "{result:?}"
         );
     }
 
     #[tokio::test]
     async fn unlock_fails_no_enrollment() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = SshAgentBackend::new();
-        let profile = test_profile();
-        let result = backend.unlock(&profile, dir.path(), &[0; 16]).await;
+        let (_root, layout) = layout();
+        let result = SshAgentBackend::new()
+            .unlock(&test_profile(), &layout, &keying(0, HkdfAlgorithm::Blake3))
+            .await;
         assert!(matches!(result, Err(AuthError::NotEnrolled(_))));
     }
 
     #[tokio::test]
     async fn unlock_fails_invalid_blob() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = SshAgentBackend::new();
-        let profile = test_profile();
+        let (_root, layout) = layout();
+        let path = write_enrollment(&layout, b"corrupt");
+        let result = SshAgentBackend::new()
+            .unlock(&test_profile(), &layout, &keying(0, HkdfAlgorithm::Blake3))
+            .await;
+        assert!(
+            matches!(&result, Err(AuthError::InvalidBlob(m)) if m.contains(&path.display().to_string())),
+            "{:?}",
+            result.err()
+        );
+    }
 
-        let vaults = dir.path().join("vaults");
-        std::fs::create_dir_all(&vaults).unwrap();
-        std::fs::write(vaults.join("test-profile.ssh-enrollment"), b"corrupt").unwrap();
-
-        let result = backend.unlock(&profile, dir.path(), &[0; 16]).await;
-        assert!(matches!(result, Err(AuthError::InvalidBlob(_))));
+    #[test]
+    fn unreachable_agents_are_named() {
+        let (root, layout) = layout();
+        let candidates = layout.ssh_agent_sockets();
+        let Err(AuthError::AgentUnavailable(message)) = connect_agent(&candidates) else {
+            panic!("expected AgentUnavailable");
+        };
+        for candidate in &candidates {
+            assert!(
+                message.contains(&candidate.display().to_string()),
+                "{message}"
+            );
+        }
+        drop(root);
+        assert!(matches!(
+            connect_agent(&[]),
+            Err(AuthError::AgentUnavailable(m)) if m.contains("$SSH_AUTH_SOCK")
+        ));
     }
 
     #[tokio::test]
     async fn revoke_removes_blob() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = SshAgentBackend::new();
-        let profile = test_profile();
-
-        let vaults = dir.path().join("vaults");
-        std::fs::create_dir_all(&vaults).unwrap();
-        let blob_path = vaults.join("test-profile.ssh-enrollment");
-        std::fs::write(&blob_path, b"blob").unwrap();
-        assert!(blob_path.exists());
-
-        backend.revoke(&profile, dir.path()).await.unwrap();
+        let (_root, layout) = layout();
+        let blob_path = write_enrollment(&layout, b"blob");
+        SshAgentBackend::new()
+            .revoke(&test_profile(), &layout)
+            .await
+            .unwrap();
         assert!(!blob_path.exists());
     }
 
     #[tokio::test]
     async fn revoke_noop_when_no_blob() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = SshAgentBackend::new();
-        let profile = test_profile();
-        backend.revoke(&profile, dir.path()).await.unwrap();
+        let (_root, layout) = layout();
+        SshAgentBackend::new()
+            .revoke(&test_profile(), &layout)
+            .await
+            .unwrap();
     }
 
     #[test]
-    fn requires_no_interaction() {
+    fn fingerprints_match_with_or_without_prefix() {
+        assert!(same_fingerprint("SHA256:abc", "abc"));
+        assert!(same_fingerprint("abc", "SHA256:abc"));
+        assert!(same_fingerprint("SHA256:abc", "SHA256:abc"));
+        assert!(!same_fingerprint("SHA256:abc", "SHA256:abd"));
+    }
+
+    #[tokio::test]
+    async fn enroll_requires_a_fingerprint() {
+        let (_root, layout) = layout();
+        let result = SshAgentBackend::new()
+            .enroll(
+                &test_profile(),
+                &SecureBytes::new(vec![0; 32]),
+                &layout,
+                &keying(0, HkdfAlgorithm::Blake3),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AuthError::BackendNotApplicable(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn agent_key_label_includes_comment() {
+        let key = AgentKey {
+            fingerprint: "SHA256:abc".into(),
+            key_type: SshKeyType::Ed25519,
+            comment: String::new(),
+        };
+        assert_eq!(key.label(), "SHA256:abc");
+        let commented = AgentKey {
+            comment: "user@host".into(),
+            ..key
+        };
+        assert_eq!(commented.label(), "SHA256:abc (user@host)");
+    }
+
+    #[test]
+    fn identifies_as_the_non_interactive_agent_factor() {
         let backend = SshAgentBackend::new();
         assert_eq!(backend.requires_interaction(), AuthInteraction::None);
-    }
-
-    #[test]
-    fn backend_id_is_ssh_agent() {
-        let backend = SshAgentBackend::new();
         assert_eq!(backend.backend_id(), "ssh-agent");
     }
 
-    /// Verify `connect_agent` handles nonexistent socket paths gracefully.
-    /// We cannot mutate env vars (crate forbids unsafe), so this exercises
-    /// the connect path with a known-bad socket via direct `Client::connect`.
     #[test]
-    fn connect_to_nonexistent_socket_returns_error() {
-        let bad_path = std::path::Path::new("/tmp/nonexistent-ssh-agent-test.sock");
-        let result = ssh_agent_client_rs::Client::connect(bad_path);
-        assert!(result.is_err());
+    fn challenges_are_scoped_to_profile_salt_and_algorithm() {
+        let (work, home) = (test_profile(), profile("home"));
+        let base = challenge(&keying(0xAA, HkdfAlgorithm::Blake3), &work);
+        assert_eq!(
+            base.as_bytes(),
+            challenge(&keying(0xAA, HkdfAlgorithm::Blake3), &work).as_bytes()
+        );
+        for other in [
+            challenge(&keying(0xAA, HkdfAlgorithm::Blake3), &home),
+            challenge(&keying(0xBB, HkdfAlgorithm::Blake3), &work),
+            challenge(&keying(0xAA, HkdfAlgorithm::HkdfSha256), &work),
+        ] {
+            assert_ne!(base.as_bytes(), other.as_bytes());
+        }
     }
 
+    /// An enrollment wrapped under the KEK of one signature: written to
+    /// disk, read back, and unwrapped by the KEK the same signature
+    /// derives under the vault's algorithm, and by no other.
     #[test]
-    fn challenge_is_deterministic() {
-        let salt = [0xAA; 16];
-        let ctx = "pds v2 ssh-challenge test-profile";
-        let c1: [u8; 32] = blake3::derive_key(ctx, &salt);
-        let c2: [u8; 32] = blake3::derive_key(ctx, &salt);
-        assert_eq!(c1, c2);
-    }
-
-    #[test]
-    fn different_profiles_produce_different_challenges() {
-        let salt = [0xAA; 16];
-        let c1: [u8; 32] = blake3::derive_key("pds v2 ssh-challenge profile-a", &salt);
-        let c2: [u8; 32] = blake3::derive_key("pds v2 ssh-challenge profile-b", &salt);
-        assert_ne!(c1, c2);
-    }
-
-    #[test]
-    fn different_salts_produce_different_challenges() {
-        let c1: [u8; 32] = blake3::derive_key("pds v2 ssh-challenge test", &[0xAA; 16]);
-        let c2: [u8; 32] = blake3::derive_key("pds v2 ssh-challenge test", &[0xBB; 16]);
-        assert_ne!(c1, c2);
-    }
-
-    #[test]
-    fn kek_derivation_is_deterministic() {
-        let sig = [0x42u8; 64];
-        let ctx = "pds v2 ssh-vault-kek test-profile";
-        let k1: [u8; 32] = blake3::derive_key(ctx, &sig);
-        let k2: [u8; 32] = blake3::derive_key(ctx, &sig);
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn enrollment_blob_crypto_round_trip() {
-        let master_key_data = vec![0x42u8; 32];
-
-        // Simulate enrollment: derive KEK, wrap master key
-        let sig_bytes = [0xDE; 64]; // simulated signature
-        let kek: [u8; 32] = blake3::derive_key("pds v2 ssh-vault-kek test", &sig_bytes);
-        let enc_key = core_crypto::EncryptionKey::from_bytes(&kek).unwrap();
-        let nonce = [0x11u8; 12];
-        let ciphertext = enc_key.encrypt(&nonce, &master_key_data).unwrap();
-
-        let blob = EnrollmentBlob {
-            version: crate::ENROLLMENT_VERSION,
-            key_fingerprint: "SHA256:test".into(),
-            key_type: SshKeyType::Ed25519,
-            nonce,
-            ciphertext: ciphertext.clone(),
-        };
-
-        // Serialize and deserialize
-        let data = blob.serialize();
-        let parsed = EnrollmentBlob::deserialize(&data).unwrap();
-
-        // Simulate unlock: same KEK, unwrap
-        let kek2: [u8; 32] = blake3::derive_key("pds v2 ssh-vault-kek test", &sig_bytes);
-        let enc_key2 = core_crypto::EncryptionKey::from_bytes(&kek2).unwrap();
-        let unwrapped = enc_key2.decrypt(&parsed.nonce, &parsed.ciphertext).unwrap();
-
-        assert_eq!(unwrapped.as_bytes(), &master_key_data);
-    }
-
-    #[test]
-    fn tampered_blob_fails_unwrap() {
-        let master_key_data = vec![0x42u8; 32];
-        let sig_bytes = [0xDE; 64];
-        let kek: [u8; 32] = blake3::derive_key("pds v2 ssh-vault-kek test", &sig_bytes);
-        let enc_key = core_crypto::EncryptionKey::from_bytes(&kek).unwrap();
-        let nonce = [0x11u8; 12];
-        let mut ciphertext = enc_key.encrypt(&nonce, &master_key_data).unwrap();
-
-        // Tamper with ciphertext
-        ciphertext[0] ^= 0x01;
-
-        let result = enc_key.decrypt(&nonce, &ciphertext);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn wrong_kek_fails_unwrap() {
-        let master_key_data = vec![0x42u8; 32];
-        let sig_bytes = [0xDE; 64];
-        let kek: [u8; 32] = blake3::derive_key("pds v2 ssh-vault-kek test", &sig_bytes);
-        let enc_key = core_crypto::EncryptionKey::from_bytes(&kek).unwrap();
-        let nonce = [0x11u8; 12];
-        let ciphertext = enc_key.encrypt(&nonce, &master_key_data).unwrap();
-
-        // Use wrong KEK (different signature)
-        let wrong_sig = [0xAB; 64];
-        let wrong_kek: [u8; 32] = blake3::derive_key("pds v2 ssh-vault-kek test", &wrong_sig);
-        let wrong_enc_key = core_crypto::EncryptionKey::from_bytes(&wrong_kek).unwrap();
-        let result = wrong_enc_key.decrypt(&nonce, &ciphertext);
-        assert!(result.is_err());
-    }
-
-    /// Full enrollment + unlock cycle integration test (simulated agent).
-    ///
-    /// Exercises the complete crypto round-trip without a real SSH agent:
-    /// generate challenge, derive KEK from simulated signature, wrap master
-    /// key, write enrollment blob to disk, read it back, unwrap, and verify
-    /// the recovered master key matches the original.
-    #[test]
-    fn full_enrollment_unlock_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
+    fn enrollments_unwrap_only_under_the_same_signature_and_algorithm() {
+        let (_root, layout) = layout();
         let profile = test_profile();
-        let salt = [0xBB; 16];
-        let master_key_data = vec![0x42u8; 32];
-        let simulated_sig = [0xAB; 64];
+        let master_key = SecureBytes::from_slice(&[0x42; 32]);
+        for hkdf in [HkdfAlgorithm::Blake3, HkdfAlgorithm::HkdfSha256] {
+            let vault = keying(0xBB, hkdf);
+            let (nonce, ciphertext) = kek(&vault, &profile, &[0xAB; 64])
+                .seal(master_key.as_bytes())
+                .unwrap();
+            let blob = EnrollmentBlob {
+                version: crate::ENROLLMENT_VERSION,
+                key_fingerprint: "SHA256:test-round-trip".into(),
+                key_type: SshKeyType::Ed25519,
+                nonce,
+                ciphertext,
+            };
+            write_enrollment(&layout, &blob.serialize().unwrap());
+            let parsed = SshAgentBackend::read_enrollment(&layout, &profile)
+                .unwrap()
+                .unwrap();
 
-        // --- Enrollment phase ---
-
-        // 1. Generate challenge (same as SshAgentBackend::enroll)
-        let challenge_ctx = format!("pds v2 ssh-challenge {profile}");
-        let challenge: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
-
-        // 2. Derive KEK from simulated signature
-        let kek_ctx = format!("pds v2 ssh-vault-kek {profile}");
-        let kek: [u8; 32] = blake3::derive_key(&kek_ctx, &simulated_sig);
-
-        // 3. Wrap master key
-        let enc_key = core_crypto::EncryptionKey::from_bytes(&kek).unwrap();
-        let nonce = [0x33u8; 12];
-        let ciphertext = enc_key.encrypt(&nonce, &master_key_data).unwrap();
-
-        // 4. Build and write enrollment blob
-        let blob = EnrollmentBlob {
-            version: crate::ENROLLMENT_VERSION,
-            key_fingerprint: "SHA256:test-round-trip".into(),
-            key_type: SshKeyType::Ed25519,
-            nonce,
-            ciphertext,
-        };
-        let vaults_dir = dir.path().join("vaults");
-        std::fs::create_dir_all(&vaults_dir).unwrap();
-        let blob_path = vaults_dir.join(format!("{profile}.ssh-enrollment"));
-        std::fs::write(&blob_path, blob.serialize()).unwrap();
-
-        // --- Unlock phase ---
-
-        // 5. Read blob back from disk
-        let blob_data = std::fs::read(&blob_path).unwrap();
-        let parsed = EnrollmentBlob::deserialize(&blob_data).unwrap();
-        assert_eq!(parsed.key_fingerprint, "SHA256:test-round-trip");
-        assert_eq!(parsed.key_type, SshKeyType::Ed25519);
-
-        // 6. Re-derive the same challenge (deterministic)
-        let challenge2: [u8; 32] = blake3::derive_key(&challenge_ctx, &salt);
-        assert_eq!(challenge, challenge2);
-
-        // 7. Same signature -> same KEK -> successful unwrap
-        let kek2: [u8; 32] = blake3::derive_key(&kek_ctx, &simulated_sig);
-        assert_eq!(kek, kek2);
-        let enc_key2 = core_crypto::EncryptionKey::from_bytes(&kek2).unwrap();
-        let unwrapped = enc_key2.decrypt(&parsed.nonce, &parsed.ciphertext).unwrap();
-
-        // 8. Verify recovered master key matches original
-        assert_eq!(unwrapped.as_bytes(), &master_key_data);
+            let unwrapped = kek(&vault, &profile, &[0xAB; 64])
+                .decrypt(&parsed.nonce, &parsed.ciphertext)
+                .unwrap();
+            assert_eq!(unwrapped.as_bytes(), master_key.as_bytes());
+            assert!(
+                kek(&vault, &profile, &[0xAC; 64])
+                    .decrypt(&parsed.nonce, &parsed.ciphertext)
+                    .is_err()
+            );
+            let other = keying(
+                0xBB,
+                match hkdf {
+                    HkdfAlgorithm::Blake3 => HkdfAlgorithm::HkdfSha256,
+                    HkdfAlgorithm::HkdfSha256 => HkdfAlgorithm::Blake3,
+                },
+            );
+            assert!(
+                kek(&other, &profile, &[0xAB; 64])
+                    .decrypt(&parsed.nonce, &parsed.ciphertext)
+                    .is_err()
+            );
+        }
     }
 }

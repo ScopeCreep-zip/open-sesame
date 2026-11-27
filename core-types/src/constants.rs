@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -32,22 +32,44 @@ pub struct Timestamp {
     /// Nanoseconds since daemon start.
     pub monotonic_ns: u64,
     /// Wall clock for cross-daemon and cross-restart ordering.
-    /// Milliseconds since Unix epoch.
-    pub wall_ms: u64,
+    /// Milliseconds since Unix epoch; `None` when the system clock reads
+    /// before the epoch.
+    pub wall_ms: Option<u64>,
 }
 
 impl Timestamp {
+    /// The time now: elapsed since `epoch` (daemon start) and the system
+    /// wall clock.
     #[must_use]
     pub fn now(epoch: Instant) -> Self {
-        let mono = epoch.elapsed();
-        let wall = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
+        Self::at(epoch, SystemTime::now())
+    }
+
+    /// The time elapsed since `epoch`, with the wall clock reading `wall`.
+    fn at(epoch: Instant, wall: SystemTime) -> Self {
+        // Saturating: u64 nanoseconds of uptime last 584 years, u64
+        // milliseconds of wall clock 584 million.
         Self {
-            #[allow(clippy::cast_possible_truncation)] // Uptime > 584 years before truncation
-            monotonic_ns: mono.as_nanos() as u64,
-            #[allow(clippy::cast_possible_truncation)] // Wall clock > 584M years before truncation
-            wall_ms: wall.as_millis() as u64,
+            monotonic_ns: u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            wall_ms: wall
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_wall_clock_before_the_epoch_is_absent_not_zero() {
+        let epoch = Instant::now();
+        let before = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(Timestamp::at(epoch, before).wall_ms, None);
+        let after = SystemTime::UNIX_EPOCH + Duration::from_millis(5);
+        assert_eq!(Timestamp::at(epoch, after).wall_ms, Some(5));
     }
 }

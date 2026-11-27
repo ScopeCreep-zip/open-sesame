@@ -176,7 +176,7 @@ BLAKE3 (default) or SHA-256 (governance-compatible).
 ### NIST 800-53
 
 | Control | Open Sesame Mechanism |
-|---------|----------------------|
+| --- | --- |
 | SC-28 (Protection of Information at Rest) | SQLCipher AES-256-CBC + HMAC-SHA512, Argon2id KDF |
 | SC-12 (Cryptographic Key Establishment) | BLAKE3 domain-separated key derivation hierarchy |
 | SC-13 (Cryptographic Protection) | Config-selectable algorithms via `CryptoConfig`; governance-compatible profile uses NIST-approved algorithms |
@@ -187,7 +187,7 @@ BLAKE3 (default) or SHA-256 (governance-compatible).
 ### DISA STIG
 
 | STIG Control | Open Sesame Mechanism |
-|--------------|----------------------|
+| --- | --- |
 | Encrypted storage at rest | SQLCipher vaults, per-profile encryption keys |
 | Memory protection | `memfd_secret(2)`, guard pages, volatile zeroize |
 | Audit trail integrity | BLAKE3 hash chain, tamper detection |

@@ -1,4 +1,4 @@
-# Maintainer: Kat Morgan <usrbinkat at braincraft dot io>
+# Maintainer: user <user at example dot invalid>
 # https://github.com/ScopeCreep-zip/open-sesame
 pkgbase=open-sesame-bin
 pkgname=('open-sesame-bin' 'open-sesame-desktop-bin')

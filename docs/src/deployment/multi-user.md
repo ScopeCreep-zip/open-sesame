@@ -17,7 +17,7 @@ When user `alice` and user `bob` both log into the same machine:
 ### Isolation Boundaries
 
 | Boundary | Mechanism |
-|----------|-----------|
+| --- | --- |
 | IPC bus | Separate Unix domain sockets under each user's `$XDG_RUNTIME_DIR` |
 | Configuration | Separate `~/.config/pds/` per user home directory |
 | Vaults | Separate SQLCipher databases per user, per profile |
@@ -116,7 +116,7 @@ file managed by the operating system's package manager or configuration manageme
 For full multi-user isolation:
 
 | Requirement | Purpose | Verification |
-|-------------|---------|--------------|
+| --- | --- | --- |
 | Linux 5.14+ | `memfd_secret(2)` | `uname -r` |
 | `CONFIG_SECRETMEM=y` | Kernel direct-map removal | `grep SECRETMEM /boot/config-$(uname -r)` |
 | systemd 255+ | Per-user service management | `systemctl --version` |

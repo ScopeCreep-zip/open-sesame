@@ -2,6 +2,8 @@
 //!
 //! Called early in daemon startup before any key material is loaded.
 
+use rustix::process::{DumpableBehavior, Resource, Rlimit};
+
 /// Disable core dumps and mark the process as non-dumpable.
 ///
 /// - `PR_SET_DUMPABLE(0)`: Prevents ptrace-attach by non-root processes.
@@ -12,37 +14,27 @@
 /// Logs errors via tracing but does not fail — these are best-effort hardening.
 /// A daemon should still apply Landlock/seccomp even if these calls fail.
 pub fn harden_process() {
-    // SAFETY: `prctl(PR_SET_DUMPABLE, 0)` is a simple integer flag operation
-    // with no pointer arguments, no preconditions, and no UB on failure (returns -1).
-    // Signal-safe per POSIX.
-    unsafe {
-        if libc::prctl(libc::PR_SET_DUMPABLE, 0) != 0 {
-            tracing::error!(
-                "prctl(PR_SET_DUMPABLE, 0) failed (errno {}) — \
-                 process may be ptrace-attachable",
-                *libc::__errno_location()
-            );
-        }
+    if let Err(e) = rustix::process::set_dumpable_behavior(DumpableBehavior::NotDumpable) {
+        tracing::error!(
+            error = %e,
+            "prctl(PR_SET_DUMPABLE, 0) failed — process may be ptrace-attachable"
+        );
     }
-
-    // SAFETY: `setrlimit(RLIMIT_CORE, &rlimit{0,0})` is a simple struct-pointer
-    // operation. The rlimit struct is stack-allocated and valid for the call
-    // duration. No UB on failure (returns -1).
-    unsafe {
-        let rlim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if libc::setrlimit(libc::RLIMIT_CORE, &rlim) != 0 {
-            tracing::error!(
-                "setrlimit(RLIMIT_CORE, 0) failed (errno {}) — \
-                 core dumps may still be enabled",
-                *libc::__errno_location()
-            );
-        }
+    if let Err(e) = rustix::process::setrlimit(Resource::Core, fixed(0)) {
+        tracing::error!(
+            error = %e,
+            "setrlimit(RLIMIT_CORE, 0) failed — core dumps may still be enabled"
+        );
     }
-
     tracing::debug!("process hardening applied: non-dumpable, no core dumps");
+}
+
+/// A limit whose soft and hard values are both `value`.
+fn fixed(value: u64) -> Rlimit {
+    Rlimit {
+        current: Some(value),
+        maximum: Some(value),
+    }
 }
 
 /// Resource limits for a daemon, applied via setrlimit (POSIX).
@@ -52,9 +44,9 @@ pub fn harden_process() {
 /// (macOS launchd, Windows Task Scheduler, bare metal), the application
 /// still enforces its own resource boundaries.
 pub struct ResourceLimits {
-    /// Maximum open file descriptors (RLIMIT_NOFILE).
+    /// Maximum open file descriptors (`RLIMIT_NOFILE`).
     pub nofile: u64,
-    /// Maximum locked memory in bytes (RLIMIT_MEMLOCK). 0 = don't set.
+    /// Maximum locked memory in bytes (`RLIMIT_MEMLOCK`). 0 = don't set.
     pub memlock_bytes: u64,
 }
 
@@ -64,41 +56,27 @@ pub struct ResourceLimits {
 /// Logs warnings on failure but does not panic — systemd limits provide
 /// a fallback on Linux, and the daemon can still run with defaults.
 pub fn apply_resource_limits(limits: &ResourceLimits) {
-    unsafe {
-        let rlim = libc::rlimit {
-            rlim_cur: limits.nofile,
-            rlim_max: limits.nofile,
-        };
-        if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
-            tracing::warn!(
-                nofile = limits.nofile,
-                errno = *libc::__errno_location(),
-                "setrlimit(RLIMIT_NOFILE) failed — using system default"
-            );
-        } else {
-            tracing::info!(nofile = limits.nofile, "RLIMIT_NOFILE set");
-        }
-
-        if limits.memlock_bytes > 0 {
-            let rlim = libc::rlimit {
-                rlim_cur: limits.memlock_bytes,
-                rlim_max: limits.memlock_bytes,
-            };
-            if libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) != 0 {
-                tracing::warn!(
-                    memlock_bytes = limits.memlock_bytes,
-                    errno = *libc::__errno_location(),
-                    "setrlimit(RLIMIT_MEMLOCK) failed — using system default"
-                );
-            } else {
-                tracing::info!(memlock_bytes = limits.memlock_bytes, "RLIMIT_MEMLOCK set");
-            }
+    match rustix::process::setrlimit(Resource::Nofile, fixed(limits.nofile)) {
+        Ok(()) => tracing::info!(nofile = limits.nofile, "RLIMIT_NOFILE set"),
+        Err(e) => tracing::warn!(
+            nofile = limits.nofile,
+            error = %e,
+            "setrlimit(RLIMIT_NOFILE) failed — using system default"
+        ),
+    }
+    if limits.memlock_bytes > 0 {
+        match rustix::process::setrlimit(Resource::Memlock, fixed(limits.memlock_bytes)) {
+            Ok(()) => tracing::info!(memlock_bytes = limits.memlock_bytes, "RLIMIT_MEMLOCK set"),
+            Err(e) => tracing::warn!(
+                memlock_bytes = limits.memlock_bytes,
+                error = %e,
+                "setrlimit(RLIMIT_MEMLOCK) failed — using system default"
+            ),
         }
     }
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -108,9 +86,9 @@ mod tests {
     #[test]
     fn harden_process_disables_dumpable() {
         harden_process();
-        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
         assert_eq!(
-            dumpable, 0,
+            rustix::process::dumpable_behavior().unwrap(),
+            DumpableBehavior::NotDumpable,
             "process must be non-dumpable after harden_process()"
         );
     }
@@ -121,13 +99,6 @@ mod tests {
     #[test]
     fn harden_process_sets_rlimit_core_zero() {
         harden_process();
-        let mut rlim = libc::rlimit {
-            rlim_cur: u64::MAX,
-            rlim_max: u64::MAX,
-        };
-        let rc = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut rlim) };
-        assert_eq!(rc, 0, "getrlimit should succeed");
-        assert_eq!(rlim.rlim_cur, 0, "RLIMIT_CORE soft limit must be 0");
-        assert_eq!(rlim.rlim_max, 0, "RLIMIT_CORE hard limit must be 0");
+        assert_eq!(rustix::process::getrlimit(Resource::Core), fixed(0));
     }
 }

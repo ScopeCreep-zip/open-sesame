@@ -3,10 +3,15 @@
 //! Provides forward-secret, mutually-authenticated encryption for all IPC
 //! traffic using the Noise Protocol Framework (IK pattern) via `snow`.
 //!
-//! Pattern: `Noise_IK_25519_ChaChaPoly_BLAKE2s`
+//! Protocol: `Noise_IK_25519_<cipher>_<hash>` ([`NoiseSuite`]), from
+//! `[crypto] noise_cipher` (ChaChaPoly or AESGCM) and `noise_hash`
+//! (BLAKE2s or SHA256)
 //! - IK: initiator's static key transmitted, responder's static key pre-known
-//! - X25519 DH, ChaCha20-Poly1305 AEAD, BLAKE2s hash
+//! - X25519 DH
 //! - 2-message handshake (1 round-trip), then forward-secret transport
+//!
+//! The bus server binds with one suite and publishes it with its public key
+//! ([`BusEndpoint`]); clients handshake with the published suite.
 //!
 //! `UCred` (PID + UID) is bound into the Noise prologue so that both sides must
 //! agree on the peer identity — cryptographically binding the OS-level transport
@@ -19,18 +24,77 @@
 //! `noise_keys`.
 
 use crate::framing::{MAX_FRAME_SIZE, read_frame, write_frame};
-use crate::transport::PeerCredentials;
-use tokio::io::{AsyncRead, AsyncWrite};
+use crate::transport::{PeerCredentials, local_credentials};
+use core_types::{NoiseCipher, NoiseHash};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader, BufWriter};
+use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-// Re-export key management API so downstream `use core_ipc::noise::*` paths remain stable.
 pub use crate::noise_keys::{
-    ZeroizingKeypair, create_keys_dir, generate_keypair, read_bus_public_key,
-    read_bus_public_key_from, read_daemon_keypair, read_daemon_public_key,
-    set_runtime_dir_override, write_bus_keypair, write_daemon_keypair,
+    BusEndpoint, ZeroizingKeypair, create_keys_dir, generate_keypair, issue_daemon_keypair,
+    publish_bus_endpoint, read_bus_endpoint, read_daemon_keypair, write_daemon_keypair,
 };
 
-/// Noise protocol parameter string.
-pub(crate) const NOISE_PARAMS: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+/// The bus's Noise protocol: IK, X25519, and one AEAD cipher and hash.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoiseSuite {
+    pub cipher: NoiseCipher,
+    pub hash: NoiseHash,
+}
+
+impl NoiseSuite {
+    /// Every supported suite: each `[crypto] noise_cipher` and
+    /// `noise_hash` combination.
+    pub const ALL: [Self; 4] = [
+        Self::new(NoiseCipher::ChaChaPoly, NoiseHash::Blake2s),
+        Self::new(NoiseCipher::ChaChaPoly, NoiseHash::Sha256),
+        Self::new(NoiseCipher::AesGcm, NoiseHash::Blake2s),
+        Self::new(NoiseCipher::AesGcm, NoiseHash::Sha256),
+    ];
+
+    #[must_use]
+    pub const fn new(cipher: NoiseCipher, hash: NoiseHash) -> Self {
+        Self { cipher, hash }
+    }
+
+    /// The Noise protocol name, in snow's tokens (`ChaChaPoly`/`AESGCM`,
+    /// `BLAKE2s`/`SHA256`).
+    #[must_use]
+    pub const fn protocol_name(self) -> &'static str {
+        match (self.cipher, self.hash) {
+            (NoiseCipher::ChaChaPoly, NoiseHash::Blake2s) => "Noise_IK_25519_ChaChaPoly_BLAKE2s",
+            (NoiseCipher::ChaChaPoly, NoiseHash::Sha256) => "Noise_IK_25519_ChaChaPoly_SHA256",
+            (NoiseCipher::AesGcm, NoiseHash::Blake2s) => "Noise_IK_25519_AESGCM_BLAKE2s",
+            (NoiseCipher::AesGcm, NoiseHash::Sha256) => "Noise_IK_25519_AESGCM_SHA256",
+        }
+    }
+
+    /// The suite whose protocol name is `name`.
+    ///
+    /// # Errors
+    ///
+    /// `core_types::Error::Ipc` naming `name` and the supported names when
+    /// no suite has it.
+    pub fn from_protocol_name(name: &str) -> core_types::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|suite| suite.protocol_name() == name)
+            .ok_or_else(|| {
+                let supported: Vec<&str> = Self::ALL.iter().map(|s| s.protocol_name()).collect();
+                core_types::Error::Ipc(format!(
+                    "unsupported Noise protocol {name:?}; supported: {}",
+                    supported.join(", ")
+                ))
+            })
+    }
+
+    /// The snow parameters of this suite.
+    pub(crate) fn params(self) -> snow::params::NoiseParams {
+        self.protocol_name()
+            .parse()
+            .expect("every NoiseSuite protocol name is one snow's default resolver supports")
+    }
+}
 
 /// Maximum plaintext per Noise transport message: 65535 - 16 (AEAD tag) = 65519 bytes.
 const MAX_NOISE_PLAINTEXT: usize = 65535 - 16;
@@ -68,10 +132,81 @@ fn build_prologue(local: &PeerCredentials, remote: &PeerCredentials) -> Vec<u8> 
 /// bytes, each encrypted as a separate Noise transport message.
 ///
 /// The `TransportState` requires `&mut self` for both encrypt and decrypt,
-/// so callers must coordinate access (e.g. via `Arc<Mutex<NoiseTransport>>`
-/// when split into separate read/write tasks).
-pub struct NoiseTransport {
+/// so one task owns it and multiplexes reads and writes with
+/// `tokio::select!` (`BusServer`, `BusClient`). Splitting it across tasks
+/// behind a lock would let the reader hold the lock while it awaits the
+/// socket and starve the writer.
+///
+/// [`read_encrypted_frame`](Self::read_encrypted_frame) is cancel-safe, as
+/// a `select!` branch must be: received bytes accumulate in `inbox`, and a
+/// frame is decrypted and removed from it only once all of its chunks have
+/// arrived, so a read dropped at any await loses nothing.
+pub(crate) struct NoiseTransport {
     state: snow::TransportState,
+    /// Bytes received and not yet consumed as a complete frame.
+    inbox: Vec<u8>,
+}
+
+/// Largest wire frame of one encrypted chunk: a Noise transport message.
+const MAX_NOISE_MESSAGE: usize = 65535;
+
+/// The range of the length-prefixed frame at `*at` in `inbox`, advancing
+/// `*at` past it; `None` when it has not fully arrived. Frames longer than
+/// `limit` are an error.
+fn take_frame(
+    inbox: &[u8],
+    at: &mut usize,
+    limit: usize,
+) -> core_types::Result<Option<std::ops::Range<usize>>> {
+    let Some(prefix) = inbox.get(*at..*at + 4) else {
+        return Ok(None);
+    };
+    let len = u32::from_be_bytes(prefix.try_into().expect("the prefix is 4 bytes")) as usize;
+    if len > limit {
+        return Err(core_types::Error::Ipc(format!(
+            "frame size {len} exceeds maximum {limit}"
+        )));
+    }
+    let start = *at + 4;
+    let end = start + len;
+    if inbox.len() < end {
+        return Ok(None);
+    }
+    *at = end;
+    Ok(Some(start..end))
+}
+
+/// One complete encrypted application frame at the start of `inbox`: the
+/// ranges of its ciphertext chunks and the bytes it spans; `None` when it
+/// has not fully arrived.
+fn complete_frame(
+    inbox: &[u8],
+) -> core_types::Result<Option<(Vec<std::ops::Range<usize>>, usize)>> {
+    let mut at = 0;
+    let Some(header) = take_frame(inbox, &mut at, MAX_FRAME_SIZE as usize)? else {
+        return Ok(None);
+    };
+    let header: [u8; 4] = inbox[header.clone()].try_into().map_err(|_| {
+        core_types::Error::Ipc(format!(
+            "invalid chunk count header: expected 4 bytes, got {}",
+            header.len()
+        ))
+    })?;
+    let chunk_count = u32::from_be_bytes(header) as usize;
+    let max_chunks = (MAX_FRAME_SIZE as usize).div_ceil(MAX_NOISE_PLAINTEXT);
+    if chunk_count > max_chunks {
+        return Err(core_types::Error::Ipc(format!(
+            "chunk count {chunk_count} exceeds maximum {max_chunks}"
+        )));
+    }
+    let mut chunks = Vec::with_capacity(chunk_count);
+    for _ in 0..chunk_count {
+        let Some(chunk) = take_frame(inbox, &mut at, MAX_NOISE_MESSAGE)? else {
+            return Ok(None);
+        };
+        chunks.push(chunk);
+    }
+    Ok(Some((chunks, at)))
 }
 
 impl NoiseTransport {
@@ -89,7 +224,7 @@ impl NoiseTransport {
     /// # Errors
     ///
     /// Returns an error on I/O failure or if the payload exceeds `MAX_FRAME_SIZE`.
-    pub async fn write_encrypted_frame<W: AsyncWrite + Unpin>(
+    pub(crate) async fn write_encrypted_frame<W: AsyncWrite + Unpin>(
         &mut self,
         writer: &mut W,
         payload: &[u8],
@@ -135,56 +270,47 @@ impl NoiseTransport {
         Ok(())
     }
 
-    /// Read and decrypt an application frame.
+    /// Read and decrypt an application frame: the chunk count header and
+    /// each chunk, reassembled into the original plaintext payload.
     ///
-    /// Reads the chunk count header, then reads and decrypts each chunk,
-    /// reassembling the original plaintext payload.
+    /// Cancel-safe: the only await is `read_buf` into the transport's
+    /// inbox, and the frame is decrypted and consumed only once it is
+    /// complete, so a call dropped by `select!` loses no bytes and the next
+    /// call resumes the same frame.
     ///
     /// # Errors
     ///
-    /// Returns an error on I/O failure, decryption failure, or if the
+    /// Returns an error on I/O failure (end of stream included), a
+    /// malformed or oversized frame, decryption failure, or if the
     /// reassembled payload exceeds `MAX_FRAME_SIZE`.
-    pub async fn read_encrypted_frame<R: AsyncRead + Unpin>(
+    pub(crate) async fn read_encrypted_frame<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
     ) -> core_types::Result<Vec<u8>> {
-        // Read chunk count header.
-        let count_frame = read_frame(reader).await?;
-        if count_frame.len() != 4 {
-            return Err(core_types::Error::Ipc(format!(
-                "invalid chunk count header: expected 4 bytes, got {}",
-                count_frame.len()
-            )));
-        }
-        let chunk_count = u32::from_be_bytes([
-            count_frame[0],
-            count_frame[1],
-            count_frame[2],
-            count_frame[3],
-        ]) as usize;
+        let (chunks, used) = loop {
+            if let Some(frame) = complete_frame(&self.inbox)? {
+                break frame;
+            }
+            self.inbox.reserve(8192);
+            if reader.read_buf(&mut self.inbox).await? == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+        };
 
-        // Sanity check: max chunks for 16 MiB payload.
-        let max_chunks = (MAX_FRAME_SIZE as usize).div_ceil(MAX_NOISE_PLAINTEXT);
-        if chunk_count > max_chunks {
-            return Err(core_types::Error::Ipc(format!(
-                "chunk count {chunk_count} exceeds maximum {max_chunks}"
-            )));
-        }
+        // Both buffers hold decrypted plaintext (possibly secret values);
+        // `Zeroizing` clears them on every return path, including errors.
+        let mut payload =
+            zeroize::Zeroizing::new(Vec::with_capacity(chunks.len() * MAX_NOISE_PLAINTEXT));
+        let mut dec_buf = zeroize::Zeroizing::new(vec![0u8; MAX_NOISE_PLAINTEXT]);
 
-        let mut payload = Vec::with_capacity(chunk_count * MAX_NOISE_PLAINTEXT);
-        let mut dec_buf = vec![0u8; MAX_NOISE_PLAINTEXT];
-
-        for _ in 0..chunk_count {
-            let ciphertext = read_frame(reader).await?;
+        for chunk in chunks {
             let len = self
                 .state
-                .read_message(&ciphertext, &mut dec_buf)
+                .read_message(&self.inbox[chunk], &mut dec_buf)
                 .map_err(|e| core_types::Error::Ipc(format!("Noise decrypt failed: {e}")))?;
             payload.extend_from_slice(&dec_buf[..len]);
         }
-
-        // Zeroize intermediate decrypt buffer (may contain secret fragments).
-        zeroize::Zeroize::zeroize(&mut dec_buf);
+        self.inbox.drain(..used);
 
         if payload.len() > MAX_FRAME_SIZE as usize {
             return Err(core_types::Error::Ipc(format!(
@@ -194,26 +320,110 @@ impl NoiseTransport {
             )));
         }
 
-        Ok(payload)
-    }
-
-    /// Check if this transport was created by the initiator side.
-    #[must_use]
-    pub fn is_initiator(&self) -> bool {
-        self.state.is_initiator()
+        // The caller owns the plaintext from here and zeroizes it.
+        Ok(std::mem::take(&mut *payload))
     }
 
     /// Get the remote party's static public key.
     #[must_use]
-    pub fn remote_static(&self) -> Option<&[u8]> {
+    pub(crate) fn remote_static(&self) -> Option<&[u8]> {
         self.state.get_remote_static()
+    }
+}
+
+/// An established encrypted bus connection: the Noise transport and the
+/// buffered halves of its socket, owned by one task.
+pub(crate) struct Connection {
+    pub(crate) transport: NoiseTransport,
+    pub(crate) reader: BufReader<OwnedReadHalf>,
+    pub(crate) writer: BufWriter<OwnedWriteHalf>,
+}
+
+/// The buffered halves of `stream`.
+fn split(stream: UnixStream) -> (BufReader<OwnedReadHalf>, BufWriter<OwnedWriteHalf>) {
+    let (reader, writer) = stream.into_split();
+    (BufReader::new(reader), BufWriter::new(writer))
+}
+
+impl Connection {
+    /// Handshake `stream` as the client `keypair` with the bus `server`
+    /// (running with credentials `server_creds`).
+    ///
+    /// # Errors
+    ///
+    /// The [`client_handshake`] errors.
+    pub(crate) async fn client(
+        stream: UnixStream,
+        server: &BusEndpoint,
+        keypair: &snow::Keypair,
+        server_creds: &PeerCredentials,
+    ) -> core_types::Result<Self> {
+        let (mut reader, mut writer) = split(stream);
+        let transport = client_handshake(
+            &mut reader,
+            &mut writer,
+            server,
+            keypair,
+            &local_credentials(),
+            server_creds,
+        )
+        .await?;
+        Ok(Self {
+            transport,
+            reader,
+            writer,
+        })
+    }
+
+    /// Handshake `stream` as the bus server `keypair` under `suite` with a
+    /// client running with credentials `peer_creds`.
+    ///
+    /// # Errors
+    ///
+    /// The [`server_handshake`] errors.
+    pub(crate) async fn server(
+        stream: UnixStream,
+        keypair: &snow::Keypair,
+        suite: NoiseSuite,
+        peer_creds: &PeerCredentials,
+    ) -> core_types::Result<Self> {
+        let (mut reader, mut writer) = split(stream);
+        let transport = server_handshake(
+            &mut reader,
+            &mut writer,
+            keypair,
+            suite,
+            &local_credentials(),
+            peer_creds,
+        )
+        .await?;
+        Ok(Self {
+            transport,
+            reader,
+            writer,
+        })
+    }
+
+    /// The peer's static public key, which the Noise IK pattern always
+    /// transmits.
+    ///
+    /// # Panics
+    ///
+    /// Never: an IK handshake completes only with the initiator's
+    /// 32-byte X25519 static key.
+    pub(crate) fn remote_static_key(&self) -> [u8; 32] {
+        self.transport
+            .remote_static()
+            .expect("the Noise IK pattern guarantees the remote static key after the handshake")
+            .try_into()
+            .expect("an X25519 public key is exactly 32 bytes")
     }
 }
 
 /// Perform the server-side (responder) Noise IK handshake.
 ///
-/// Called after `stream.into_split()` and `extract_ucred()`, before the
-/// read/write loops. The server's static keypair was generated at startup
+/// Called by [`Connection::server`] after the accept loop extracted the
+/// peer's `UCred`. The server's static keypair was generated at startup
 /// and the client's identity is verified via the Noise handshake + `UCred`
 /// prologue binding.
 ///
@@ -225,10 +435,11 @@ impl NoiseTransport {
 /// # Errors
 ///
 /// Returns an error if the handshake fails or times out.
-pub async fn server_handshake<R, W>(
+pub(crate) async fn server_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
     server_keypair: &snow::Keypair,
+    suite: NoiseSuite,
     local_creds: &PeerCredentials,
     remote_creds: &PeerCredentials,
 ) -> core_types::Result<NoiseTransport>
@@ -238,17 +449,13 @@ where
 {
     let prologue = build_prologue(local_creds, remote_creds);
 
-    let mut handshake = snow::Builder::new(
-        NOISE_PARAMS
-            .parse()
-            .map_err(|e| core_types::Error::Platform(format!("invalid Noise params: {e}")))?,
-    )
-    .local_private_key(&server_keypair.private)
-    .map_err(|e| core_types::Error::Ipc(format!("Noise builder error: {e}")))?
-    .prologue(&prologue)
-    .map_err(|e| core_types::Error::Ipc(format!("Noise prologue error: {e}")))?
-    .build_responder()
-    .map_err(|e| core_types::Error::Ipc(format!("Noise responder build failed: {e}")))?;
+    let mut handshake = snow::Builder::new(suite.params())
+        .local_private_key(&server_keypair.private)
+        .map_err(|e| core_types::Error::Ipc(format!("Noise builder error: {e}")))?
+        .prologue(&prologue)
+        .map_err(|e| core_types::Error::Ipc(format!("Noise prologue error: {e}")))?
+        .build_responder()
+        .map_err(|e| core_types::Error::Ipc(format!("Noise responder build failed: {e}")))?;
 
     tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         // IK responder: read msg1, write msg2.
@@ -275,7 +482,10 @@ where
             .map_err(|e| core_types::Error::Ipc(format!("Noise transport mode failed: {e}")))?;
 
         tracing::info!("Noise IK handshake completed (server)");
-        Ok(NoiseTransport { state: transport })
+        Ok(NoiseTransport {
+            state: transport,
+            inbox: Vec::new(),
+        })
     })
     .await
     .map_err(|_| core_types::Error::Ipc("Noise handshake timed out".into()))?
@@ -295,10 +505,10 @@ where
 /// # Errors
 ///
 /// Returns an error if the handshake fails or times out.
-pub async fn client_handshake<R, W>(
+pub(crate) async fn client_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
-    server_public_key: &[u8; 32],
+    server: &BusEndpoint,
     client_keypair: &snow::Keypair,
     local_creds: &PeerCredentials,
     remote_creds: &PeerCredentials,
@@ -309,19 +519,15 @@ where
 {
     let prologue = build_prologue(local_creds, remote_creds);
 
-    let mut handshake = snow::Builder::new(
-        NOISE_PARAMS
-            .parse()
-            .map_err(|e| core_types::Error::Platform(format!("invalid Noise params: {e}")))?,
-    )
-    .local_private_key(&client_keypair.private)
-    .map_err(|e| core_types::Error::Ipc(format!("Noise builder error: {e}")))?
-    .remote_public_key(server_public_key)
-    .map_err(|e| core_types::Error::Ipc(format!("Noise remote key error: {e}")))?
-    .prologue(&prologue)
-    .map_err(|e| core_types::Error::Ipc(format!("Noise prologue error: {e}")))?
-    .build_initiator()
-    .map_err(|e| core_types::Error::Ipc(format!("Noise initiator build failed: {e}")))?;
+    let mut handshake = snow::Builder::new(server.suite.params())
+        .local_private_key(&client_keypair.private)
+        .map_err(|e| core_types::Error::Ipc(format!("Noise builder error: {e}")))?
+        .remote_public_key(&server.public_key)
+        .map_err(|e| core_types::Error::Ipc(format!("Noise remote key error: {e}")))?
+        .prologue(&prologue)
+        .map_err(|e| core_types::Error::Ipc(format!("Noise prologue error: {e}")))?
+        .build_initiator()
+        .map_err(|e| core_types::Error::Ipc(format!("Noise initiator build failed: {e}")))?;
 
     tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         // IK initiator: write msg1, read msg2.
@@ -348,7 +554,10 @@ where
             .map_err(|e| core_types::Error::Ipc(format!("Noise transport mode failed: {e}")))?;
 
         tracing::info!("Noise IK handshake completed (client)");
-        Ok(NoiseTransport { state: transport })
+        Ok(NoiseTransport {
+            state: transport,
+            inbox: Vec::new(),
+        })
     })
     .await
     .map_err(|_| core_types::Error::Ipc("Noise handshake timed out".into()))?
@@ -377,203 +586,211 @@ mod tests {
         assert_eq!(p, "PDS-IPC-v1:100:1000:200:1000");
     }
 
-    #[tokio::test]
-    async fn handshake_and_transport_roundtrip() {
-        // Generate server and client keypairs.
+    type Half = tokio::io::DuplexStream;
+    type Reader = tokio::io::ReadHalf<Half>;
+    type Writer = tokio::io::WriteHalf<Half>;
+
+    /// One side of a completed handshake: its transport and stream halves.
+    struct Side {
+        transport: NoiseTransport,
+        reader: Reader,
+        writer: Writer,
+    }
+
+    /// The two outcomes of one handshake over an in-memory stream.
+    struct Handshake {
+        client: core_types::Result<NoiseTransport>,
+        server: core_types::Result<NoiseTransport>,
+        client_io: (Reader, Writer),
+        server_io: (Reader, Writer),
+    }
+
+    const SERVER: PeerCredentials = PeerCredentials { pid: 1, uid: 1000 };
+    const CLIENT: PeerCredentials = PeerCredentials { pid: 2, uid: 1000 };
+
+    /// Handshake a client using `client_suite` with a server bound with
+    /// `server_suite`, over an in-memory stream of `buffer` bytes. The
+    /// client sees the server's true credentials; the server believes its
+    /// peer is `server_sees`.
+    async fn handshake(
+        server_suite: NoiseSuite,
+        client_suite: NoiseSuite,
+        server_sees: &PeerCredentials,
+        buffer: usize,
+    ) -> Handshake {
         let server_kp = generate_keypair().unwrap();
         let client_kp = generate_keypair().unwrap();
-
-        let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
-
-        // Simulated peer credentials (both sides must agree).
-        let server_creds = PeerCredentials { pid: 1, uid: 1000 };
-        let client_creds = PeerCredentials { pid: 2, uid: 1000 };
-
-        // Create a duplex channel simulating a UDS pair.
-        let (client_stream, server_stream) = tokio::io::duplex(65536);
-
-        let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
-        let (mut server_reader, mut server_writer) = tokio::io::split(server_stream);
-
-        // Run handshake concurrently.
-        let (client_result, server_result) = tokio::join!(
+        // The endpoint as the client read it: the server's key, and the
+        // suite the client handshakes with.
+        let endpoint = BusEndpoint {
+            suite: client_suite,
+            public_key: server_kp.public().try_into().unwrap(),
+        };
+        let (client_stream, server_stream) = tokio::io::duplex(buffer);
+        let (mut cr, mut cw) = tokio::io::split(client_stream);
+        let (mut sr, mut sw) = tokio::io::split(server_stream);
+        let (client, server) = tokio::join!(
             client_handshake(
-                &mut client_reader,
-                &mut client_writer,
-                &server_pub,
+                &mut cr,
+                &mut cw,
+                &endpoint,
                 client_kp.as_inner(),
-                &client_creds,
-                &server_creds,
+                &CLIENT,
+                &SERVER,
             ),
             server_handshake(
-                &mut server_reader,
-                &mut server_writer,
+                &mut sr,
+                &mut sw,
                 server_kp.as_inner(),
-                &server_creds,
-                &client_creds,
+                server_suite,
+                &SERVER,
+                server_sees,
             ),
         );
+        Handshake {
+            client,
+            server,
+            client_io: (cr, cw),
+            server_io: (sr, sw),
+        }
+    }
 
-        let mut client_transport = client_result.unwrap();
-        let mut server_transport = server_result.unwrap();
+    /// A completed handshake under `suite` with agreeing credentials.
+    async fn connected(suite: NoiseSuite, buffer: usize) -> (Side, Side) {
+        let h = handshake(suite, suite, &CLIENT, buffer).await;
+        (
+            Side {
+                transport: h.client.unwrap(),
+                reader: h.client_io.0,
+                writer: h.client_io.1,
+            },
+            Side {
+                transport: h.server.unwrap(),
+                reader: h.server_io.0,
+                writer: h.server_io.1,
+            },
+        )
+    }
 
-        // Client sends encrypted message, server decrypts.
-        let plaintext = b"hello encrypted world";
+    #[tokio::test]
+    async fn every_suite_handshakes_and_carries_frames_both_ways() {
+        for suite in NoiseSuite::ALL {
+            let (mut client, mut server) = connected(suite, 65536).await;
+            client
+                .transport
+                .write_encrypted_frame(&mut client.writer, b"hello encrypted world")
+                .await
+                .unwrap();
+            let decrypted = server
+                .transport
+                .read_encrypted_frame(&mut server.reader)
+                .await
+                .unwrap();
+            assert_eq!(decrypted, b"hello encrypted world", "{suite:?}");
+            server
+                .transport
+                .write_encrypted_frame(&mut server.writer, b"acknowledged")
+                .await
+                .unwrap();
+            let decrypted = client
+                .transport
+                .read_encrypted_frame(&mut client.reader)
+                .await
+                .unwrap();
+            assert_eq!(decrypted, b"acknowledged", "{suite:?}");
+        }
+    }
 
-        client_transport
-            .write_encrypted_frame(&mut client_writer, plaintext)
-            .await
-            .unwrap();
-
-        let decrypted = server_transport
-            .read_encrypted_frame(&mut server_reader)
-            .await
-            .unwrap();
-
-        assert_eq!(decrypted, plaintext);
-
-        // Server sends back, client decrypts.
-        let response = b"acknowledged";
-        server_transport
-            .write_encrypted_frame(&mut server_writer, response)
-            .await
-            .unwrap();
-
-        let decrypted_response = client_transport
-            .read_encrypted_frame(&mut client_reader)
-            .await
-            .unwrap();
-
-        assert_eq!(decrypted_response, response);
+    #[tokio::test]
+    async fn a_client_on_another_suite_fails_the_handshake() {
+        for server_suite in NoiseSuite::ALL {
+            for client_suite in NoiseSuite::ALL {
+                if client_suite == server_suite {
+                    continue;
+                }
+                let h = handshake(server_suite, client_suite, &CLIENT, 65536).await;
+                assert!(
+                    h.client.is_err() || h.server.is_err(),
+                    "server {server_suite:?} accepted client {client_suite:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
     async fn large_frame_chunking() {
-        // Test that frames larger than 65519 bytes are chunked correctly.
-        let server_kp = generate_keypair().unwrap();
-        let client_kp = generate_keypair().unwrap();
-        let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
-
-        let server_creds = PeerCredentials { pid: 10, uid: 1000 };
-        let client_creds = PeerCredentials { pid: 20, uid: 1000 };
-
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let (mut cr, mut cw) = tokio::io::split(client_stream);
-        let (mut sr, mut sw) = tokio::io::split(server_stream);
-
-        let (mut ct, mut st) = tokio::join!(
-            async {
-                client_handshake(
-                    &mut cr,
-                    &mut cw,
-                    &server_pub,
-                    client_kp.as_inner(),
-                    &client_creds,
-                    &server_creds,
-                )
-                .await
-                .unwrap()
-            },
-            async {
-                server_handshake(
-                    &mut sr,
-                    &mut sw,
-                    server_kp.as_inner(),
-                    &server_creds,
-                    &client_creds,
-                )
-                .await
-                .unwrap()
-            },
-        );
-
-        // 200 KiB payload — requires multiple chunks (200*1024 / 65519 = ~4 chunks).
+        // Frames larger than 65519 bytes are chunked: 200 KiB is ~4 chunks.
+        let (mut client, mut server) = connected(NoiseSuite::default(), 1024 * 1024).await;
         let large_payload = vec![0xABu8; 200 * 1024];
-
-        ct.write_encrypted_frame(&mut cw, &large_payload)
+        client
+            .transport
+            .write_encrypted_frame(&mut client.writer, &large_payload)
             .await
             .unwrap();
-        let decrypted = st.read_encrypted_frame(&mut sr).await.unwrap();
+        let decrypted = server
+            .transport
+            .read_encrypted_frame(&mut server.reader)
+            .await
+            .unwrap();
         assert_eq!(decrypted, large_payload);
     }
 
     #[tokio::test]
     async fn prologue_mismatch_fails_handshake() {
-        let server_kp = generate_keypair().unwrap();
-        let client_kp = generate_keypair().unwrap();
-        let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
-
-        // Deliberately mismatched credentials — server thinks client is PID 99.
-        let server_creds = PeerCredentials { pid: 1, uid: 1000 };
-        let client_creds_real = PeerCredentials { pid: 2, uid: 1000 };
-        let client_creds_fake = PeerCredentials { pid: 99, uid: 1000 };
-
-        let (client_stream, server_stream) = tokio::io::duplex(65536);
-        let (mut cr, mut cw) = tokio::io::split(client_stream);
-        let (mut sr, mut sw) = tokio::io::split(server_stream);
-
-        let (client_result, server_result) = tokio::join!(
-            // Client uses real creds for prologue.
-            client_handshake(
-                &mut cr,
-                &mut cw,
-                &server_pub,
-                client_kp.as_inner(),
-                &client_creds_real,
-                &server_creds,
-            ),
-            // Server uses WRONG creds for prologue (thinks client is PID 99).
-            server_handshake(
-                &mut sr,
-                &mut sw,
-                server_kp.as_inner(),
-                &server_creds,
-                &client_creds_fake,
-            ),
-        );
-
-        // At least one side should fail due to prologue mismatch.
+        // The server believes its peer is PID 99; the client is PID 2.
+        let fake_client = PeerCredentials { pid: 99, uid: 1000 };
+        let suite = NoiseSuite::default();
+        let h = handshake(suite, suite, &fake_client, 65536).await;
         assert!(
-            client_result.is_err() || server_result.is_err(),
+            h.client.is_err() || h.server.is_err(),
             "prologue mismatch should cause handshake failure"
         );
     }
 
+    /// A read dropped by `select!` after the chunk count header arrived
+    /// (another branch won) loses nothing: the next read returns the frame.
+    #[tokio::test]
+    async fn a_read_cancelled_mid_frame_resumes_it() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected(NoiseSuite::default(), 65536).await;
+        let mut wire = Vec::new();
+        client
+            .transport
+            .write_encrypted_frame(&mut wire, b"after the cancel")
+            .await
+            .unwrap();
+        // [4-byte length][4-byte chunk count], then the chunk frame.
+        let (header, chunk) = wire.split_at(8);
+        client.writer.write_all(header).await.unwrap();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            server.transport.read_encrypted_frame(&mut server.reader),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the read waits for the chunk");
+        client.writer.write_all(chunk).await.unwrap();
+        let payload = server
+            .transport
+            .read_encrypted_frame(&mut server.reader)
+            .await
+            .unwrap();
+        assert_eq!(payload, b"after the cancel");
+    }
+
     #[tokio::test]
     async fn empty_payload_roundtrip() {
-        let server_kp = generate_keypair().unwrap();
-        let client_kp = generate_keypair().unwrap();
-        let server_pub: [u8; 32] = server_kp.public().try_into().unwrap();
-
-        let sc = PeerCredentials { pid: 1, uid: 1000 };
-        let cc = PeerCredentials { pid: 2, uid: 1000 };
-
-        let (cs, ss) = tokio::io::duplex(65536);
-        let (mut cr, mut cw) = tokio::io::split(cs);
-        let (mut sr, mut sw) = tokio::io::split(ss);
-
-        let (mut ct, mut st) = tokio::join!(
-            async {
-                client_handshake(
-                    &mut cr,
-                    &mut cw,
-                    &server_pub,
-                    client_kp.as_inner(),
-                    &cc,
-                    &sc,
-                )
-                .await
-                .unwrap()
-            },
-            async {
-                server_handshake(&mut sr, &mut sw, server_kp.as_inner(), &sc, &cc)
-                    .await
-                    .unwrap()
-            },
-        );
-
-        ct.write_encrypted_frame(&mut cw, b"").await.unwrap();
-        let decrypted = st.read_encrypted_frame(&mut sr).await.unwrap();
+        let (mut client, mut server) = connected(NoiseSuite::default(), 65536).await;
+        client
+            .transport
+            .write_encrypted_frame(&mut client.writer, b"")
+            .await
+            .unwrap();
+        let decrypted = server
+            .transport
+            .read_encrypted_frame(&mut server.reader)
+            .await
+            .unwrap();
         assert!(decrypted.is_empty());
     }
 }

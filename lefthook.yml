@@ -71,7 +71,7 @@ pre-commit:
 
     # Shell script checks
     shell-lint:
-      glob: "*.sh"
+      glob: "*.{sh,body}"
       run: shellcheck {staged_files}
       tags: [bash, lint]
       fail_text: |
@@ -79,7 +79,7 @@ pre-commit:
         Fix issues reported by shellcheck.
 
     shell-format:
-      glob: "*.sh"
+      glob: "*.{sh,body}"
       run: shfmt -d {staged_files}
       tags: [bash, format]
       fail_text: |

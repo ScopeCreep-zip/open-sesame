@@ -1,14 +1,14 @@
-//! Compliance test suite for SecretsStore implementations.
+//! Compliance test suite for `SecretsStore` implementations.
 //!
-//! Every backend (InMemoryStore, SQLCipher, etc.) must pass these tests
+//! Every backend (`InMemoryStore`, `SqlCipherStore`) must pass these tests
 //! to ensure consistent behavior across platforms.
 
 use crate::SecretsStore;
 
-/// Run the full compliance test suite against any SecretsStore implementation.
-///
-/// Tests: set/get, overwrite, delete, delete-nonexistent, list_keys, isolation.
-pub async fn compliance_tests(store: &dyn SecretsStore) {
+/// Run the full compliance test suite against any `SecretsStore`
+/// implementation: set/get, overwrite, delete, delete-nonexistent,
+/// `list_keys`, cleanup.
+pub(crate) async fn compliance_tests(store: &dyn SecretsStore) {
     // -- Set and get --
     store.set("test/key1", b"value1").await.unwrap();
     let val = store.get("test/key1").await.unwrap();
@@ -35,8 +35,7 @@ pub async fn compliance_tests(store: &dyn SecretsStore) {
     store.set("test/b", b"2").await.unwrap();
     let mut keys = store.list_keys().await.unwrap();
     keys.sort();
-    assert!(keys.contains(&"test/a".to_string()));
-    assert!(keys.contains(&"test/b".to_string()));
+    assert_eq!(keys, ["test/a", "test/b"]);
 
     // -- Cleanup --
     store.delete("test/a").await.unwrap();
@@ -45,14 +44,7 @@ pub async fn compliance_tests(store: &dyn SecretsStore) {
     assert!(keys.is_empty());
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::InMemoryStore;
-
-    #[tokio::test]
-    async fn in_memory_store_passes_compliance() {
-        let store = InMemoryStore::new();
-        compliance_tests(&store).await;
-    }
+#[tokio::test]
+async fn in_memory_store_passes_compliance() {
+    compliance_tests(&crate::store::InMemoryStore::default()).await;
 }

@@ -12,11 +12,11 @@ REPO_NAME="${PAGES_REPO:-open-sesame}"
 repo_url="https://${OWNER}.github.io/${REPO_NAME}/repo/"
 generated_at="$(date -u +'%Y-%m-%d %H:%M UTC')"
 
-: > "$SITE_DIR/.nojekyll"
-[[ -f "$REPO_DIR/manifest.txt" ]] || : > "$REPO_DIR/manifest.txt"
+: >"$SITE_DIR/.nojekyll"
+[[ -f "$REPO_DIR/manifest.txt" ]] || : >"$REPO_DIR/manifest.txt"
 
 {
-  cat <<HTML
+    cat <<HTML
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -52,24 +52,24 @@ Point a <code>.repo</code> file at the base URL above.
 <thead><tr><th>File</th><th class="size">Size</th></tr></thead>
 <tbody>
 HTML
-  while IFS= read -r -d '' f; do
-    base="$(basename "$f")"
-    [[ "$base" == "index.html" ]] && continue
-    size="$(wc -c < "$f" | tr -d ' ')"
-    if command -v numfmt >/dev/null 2>&1; then
-      hsize="$(numfmt --to=iec --suffix=B "$size")"
-    else
-      hsize="${size}B"
-    fi
-    printf '<tr><td><a href="%s"><code>%s</code></a></td><td class="size">%s</td></tr>\n' \
-      "$base" "$base" "$hsize"
-  done < <(find "$REPO_DIR" -maxdepth 1 -type f ! -name 'index.html' -print0 | sort -z)
-  cat <<'HTML'
+    while IFS= read -r -d '' f; do
+        base="$(basename "$f")"
+        [[ "$base" == "index.html" ]] && continue
+        size="$(wc -c <"$f" | tr -d ' ')"
+        if command -v numfmt >/dev/null 2>&1; then
+            hsize="$(numfmt --to=iec --suffix=B "$size")"
+        else
+            hsize="${size}B"
+        fi
+        printf '<tr><td><a href="%s"><code>%s</code></a></td><td class="size">%s</td></tr>\n' \
+            "$base" "$base" "$hsize"
+    done < <(find "$REPO_DIR" -maxdepth 1 -type f ! -name 'index.html' -print0 | sort -z)
+    cat <<'HTML'
 </tbody>
 </table>
 </body>
 </html>
 HTML
-} > "$REPO_DIR/index.html"
+} >"$REPO_DIR/index.html"
 
 echo "Wrote repo index under $SITE_DIR"

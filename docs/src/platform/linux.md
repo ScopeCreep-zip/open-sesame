@@ -1,337 +1,279 @@
 # Linux Platform
 
-The `platform-linux` crate provides safe Rust abstractions over Linux-specific APIs consumed by the daemon
-crates. It contains no business logic. All modules are gated with `#[cfg(target_os = "linux")]`.
+The `platform-linux` crate wraps the Linux APIs the daemons use: Wayland toplevel and clipboard
+protocols, evdev input, D-Bus, the Secret Service, systemd notification, Landlock, and seccomp. It
+holds no business logic. Every module is compiled only on Linux (`#[cfg(target_os = "linux")]`).
 
 ## Feature Flags
 
-The crate uses two feature flags to control dependency scope:
+| Feature | Modules | Dependencies |
+| --- | --- | --- |
+| none (default) | `cosmic_keys`, `dbus`, `global_shortcuts`, `keyring`, `sandbox`, `security`, `systemd` | zbus, ashpd, oo7, landlock, libseccomp, sd-notify, rustix |
+| `desktop` | adds `compositor`, `backend_wlr`, `focus_monitor`, `clipboard`, `input`, `wayland` | wayland-client, wayland-protocols, wayland-protocols-wlr, wl-clipboard-rs, evdev |
+| `cosmic` | implies `desktop`; adds `backend_cosmic`, `cosmic_theme` | cosmic-client-toolkit, cosmic-protocols, cosmic-theme, cosmic-config (GPL-3.0) |
 
-- **No features (default):** Only headless-safe modules are compiled: `sandbox`, `security`, `systemd`,
-  `dbus`, `cosmic_keys`, `cosmic_theme`, and the `clipboard` trait definition. This is sufficient for the
-  `open-sesame` (headless) package.
-- **`desktop`:** Enables Wayland compositor integration (`compositor`, `focus_monitor`), evdev input capture
-  (`input`), and pulls in `wayland-client`, `wayland-protocols`, `wayland-protocols-wlr`,
-  `smithay-client-toolkit`, and `evdev`.
-- **`cosmic`:** Enables COSMIC-specific Wayland protocol support. Implies `desktop`. Pulls in
-  `cosmic-client-toolkit` and `cosmic-protocols`, which are GPL-3.0 licensed. This feature flag isolates
-  the GPL license obligation to builds that opt in.
+The `cosmic` feature isolates the GPL-3.0 obligation of the COSMIC crates to builds that opt in.
+daemon-wm builds with `cosmic`; daemon-clipboard, daemon-input, and daemon-profile (with its own
+`desktop` feature) build with `desktop`; the headless daemons use the default.
 
-## Compositor Abstraction
+## Compositor
 
 ### The `CompositorBackend` Trait
 
-Window and workspace management is abstracted behind the `CompositorBackend` trait defined in
-`compositor.rs`. The trait requires `Send + Sync` and exposes these operations:
+`compositor.rs` defines the toplevel operations daemon-wm performs. The trait is `Send + Sync`
+and synchronous: the window list is a snapshot a dispatch thread maintains, and requests are
+Wayland round-trips that block the calling thread, so async callers run them on a blocking thread.
 
-- `list_windows()` -- enumerate all toplevel windows
-- `list_workspaces()` -- enumerate workspaces
-- `activate_window(id)` -- bring a window to the foreground
-- `set_window_geometry(id, geom)` -- resize/reposition a window
-- `move_to_workspace(id, ws)` -- move a window to a different workspace
-- `focus_window(id)` -- set input focus to a window
-- `close_window(id)` -- request a window to close
-- `name()` -- human-readable backend name for diagnostics
+| Method | Result |
+| --- | --- |
+| `list_windows()` | The open toplevels as `core_types::Window`s |
+| `activate_window(id)` | The window brought to the foreground with input focus |
+| `close_window(id)` | The window asked to close |
+| `name()` | `cosmic` or `wlr`, for diagnostics |
 
-All methods return `Pin<Box<dyn Future<Output = T> + Send>>` (aliased as `BoxFuture`) to maintain
-dyn-compatibility. This is required because `detect_compositor()` returns `Box<dyn CompositorBackend>`
-for runtime backend selection.
+An unknown window or an undeliverable request is `core_types::Error::Platform`.
 
-The trait also defines a `Workspace` struct with fields `id` (`CompositorWorkspaceId`), `name`
-(`String`), and `is_active` (`bool`).
+`detect_compositor()` returns the first backend that connects: with the `cosmic` feature the
+COSMIC backend, then the wlr backend; neither is `Error::Platform` ("no supported compositor
+backend"). Detection runs once at daemon-wm startup.
 
-### Runtime Backend Detection
+### Shared Wayland Plumbing
 
-The `detect_compositor()` factory function probes the Wayland display for supported protocols and
-instantiates the appropriate backend:
+`wayland.rs` holds what both backends and the focus monitor share:
 
-1. If the `cosmic` feature is enabled, attempt to connect the `CosmicBackend`. On success, return it.
-2. If COSMIC protocols are unavailable (or the feature is disabled), attempt to connect the `WlrBackend`.
-3. If neither backend connects, return `Error::Platform`.
+- `dispatch_forever(conn, queue, state, name)`: the loop of a dedicated event thread, in the order
+  `wayland_client::EventQueue` documents for an external poll loop: flush, `dispatch_pending`,
+  `prepare_read`, `poll(2)` on the socket for at most 50 ms, read. A failed step is logged with the
+  connection's protocol error and backs off exponentially from 100 ms to 30 s.
+- `ToplevelState::decode(packed, values)`: the activated, minimized, and fullscreen flags of a
+  toplevel `state` event's packed array of native-endian `u32` values (a trailing partial element
+  is ignored), under each protocol's enum values (`WLR_STATE`, and the COSMIC values in
+  `backend_cosmic`).
 
-This detection runs once at daemon startup. The returned `Box<dyn CompositorBackend>` is stored and used
-for the daemon's lifetime.
+### COSMIC Backend
 
-## CosmicBackend
+`backend_cosmic.rs` binds `ext_foreign_toplevel_list_v1` (version 1) and `zcosmic_toplevel_info_v1`
+(versions 2 to 3) once and dispatches them forever on the `cosmic-dispatch` thread. Each new
+toplevel gets its cosmic handle (`get_cosmic_toplevel`) for its state; the snapshot is republished
+on every `Done`, cosmic `State`, and `Closed` event. Toplevels without an identifier or `app_id`
+are not listed.
 
-The `CosmicBackend` (in `backend_cosmic.rs`) targets the COSMIC desktop compositor (cosmic-comp). It
-uses three Wayland protocols:
+- **Window identity**: `WindowId` is UUID v5 of the protocol identifier in a fixed namespace (the
+  bytes of `open-sesame-wind`), so it is stable across enumerations.
+- **Order**: the focused window is moved to the end of the list.
+- **Requests**: activate and close each use a disposable connection
+  (`CosmicBackend::on_toplevel`). It enumerates, obtains the target's cosmic handle, issues the
+  `zcosmic_toplevel_manager_v1` request with the seat, and round-trips. cosmic-comp panics when
+  protocol objects are destroyed while a request is in flight, so the objects are never destroyed;
+  the connection is dropped instead, isolating the shared dispatch connection.
 
-- **`ext_foreign_toplevel_list_v1`** -- standard protocol for window enumeration (toplevel handles with
-  identifier, app_id, title).
-- **`zcosmic_toplevel_info_v1`** -- COSMIC-specific extension providing activation state detection via
-  `State::Activated`.
-- **`zcosmic_toplevel_manager_v1`** -- COSMIC-specific extension providing window activation
-  (`manager.activate(handle, seat)`) and close operations.
+### wlr Backend
 
-### Connection and Protocol Probing
+`backend_wlr.rs` binds `wlr-foreign-toplevel-management-v1` (versions 1 to 3) and `wl_seat`
+(versions 1 to 9), and dispatches on the `wlr-dispatch` thread. Pending per-toplevel state
+(`app_id`, title, state) is published to the shared snapshot on each `Done`, the protocol's commit
+point; `Closed` removes the toplevel and destroys its handle. `WindowId`s are UUIDv7s minted per
+toplevel. Activate and close call the handle's proxy (proxies are `Send + Sync` in
+wayland-client 0.31) and flush the shared connection. The protocol is offered by sway, Hyprland,
+niri, Wayfire, and cosmic-comp.
 
-`CosmicBackend::connect()` opens a Wayland connection, initializes the registry, and verifies that all
-three required protocol interfaces are advertised in the global list. It does not bind protocol objects
-during probing -- binding `ExtForeignToplevelListV1` causes the compositor to start sending toplevel
-events, and if the probe event queue is then dropped, those objects become zombies that cause the
-compositor to close the connection.
+### Focus Monitor
 
-The backend holds the `wayland_client::Connection` and an `op_lock` (`Mutex<()>`) that serializes all
-protocol operations. Concurrent bind/destroy cycles on the same `wl_display` can corrupt compositor
-state and crash cosmic-comp.
-
-### Window Enumeration (2-Roundtrip Pattern)
-
-`enumerate()` follows a two-roundtrip protocol flow:
-
-1. **Roundtrip 1:** Bind `ext_foreign_toplevel_list_v1` and `zcosmic_toplevel_info_v1`. Receive all
-   `ExtForeignToplevelHandleV1` events (identifier, app_id, title, Done).
-2. Request `zcosmic_toplevel_handle` for each handle via `info.get_cosmic_toplevel()`.
-3. **Roundtrip 2:** Receive cosmic state events. Detect activation by checking for `State::Activated`
-   in the state byte array (packed `u32` values in native endian).
-
-Windows are converted to `core_types::Window` structs. The `WindowId` is derived deterministically
-using UUID v5 with a fixed namespace (`"open-sesame-wind"` as bytes) and the protocol identifier as
-input. The focused window is reordered to the end of the list (MRU ordering for Alt+Tab).
-
-After enumeration, all protocol objects are destroyed in the correct order per the protocol
-specification: destroy cosmic handles, destroy foreign toplevel handles, stop the list, roundtrip for
-the `finished` event, destroy the list, flush.
-
-### Window Activation (3-Roundtrip Pattern)
-
-`activate()` uses a separate disposable Wayland connection to avoid crashing cosmic-comp. The compositor
-panics (`toplevel_management.rs:267 unreachable!()`) when protocol objects are destroyed while an
-activation is in flight, which would kill the entire COSMIC desktop session. The disposable connection
-isolates this breakage from the shared connection used for enumeration.
-
-1. **Roundtrip 1:** Enumerate toplevels on the disposable connection.
-2. Find the target window by deterministic UUID mapping. Request its cosmic handle.
-3. **Roundtrip 2:** Receive the cosmic handle.
-4. Call `manager.activate(cosmic_handle, seat)`.
-5. **Roundtrip 3:** Ensure activation is processed.
-
-Protocol objects are intentionally leaked. The leaked objects cause a broken pipe when the `EventQueue`
-drops, but this only affects the disposable connection.
-
-### Unsupported Operations
-
-`set_window_geometry` and `move_to_workspace` return `Error::Platform` -- these operations are not
-supported by the COSMIC toplevel protocols. `focus_window` delegates to `activate_window`.
-
-## WlrBackend
-
-The `WlrBackend` (in `backend_wlr.rs`) implements `CompositorBackend` using
-`wlr-foreign-toplevel-management-v1`. This protocol is supported by sway, Hyprland, niri, Wayfire,
-and COSMIC (which advertises it for backwards compatibility).
-
-### Architecture
-
-Unlike the COSMIC backend's re-enumerate-on-each-call approach, the WLR backend maintains a
-continuously updated state snapshot:
-
-- A **dedicated dispatch thread** (`wlr-dispatch`) continuously reads Wayland events using
-  `prepare_read()` + `libc::poll()` with a 50ms periodic wake-up.
-- On each `Done` event (the protocol's atomic commit point), the dispatch thread publishes the
-  committed toplevel state to a shared `Arc<Mutex<WlrState>>`.
-- On `Closed` events, the toplevel is removed from shared state and the handle proxy is destroyed.
-- `list_windows()` reads the snapshot under the mutex. No Wayland roundtrips occur on the API thread.
-- `activate_window()` and `close_window()` call proxy methods directly (wayland-client 0.31 proxies
-  are `Send + Sync`) and flush the shared connection.
-
-The dispatch loop uses exponential backoff (100ms to 30s) on read, dispatch, or flush errors.
-
-### Unsupported Operations
-
-`set_window_geometry` and `move_to_workspace` return `Error::Platform` -- the wlr-foreign-toplevel
-protocol does not support these operations. `focus_window` delegates to `activate_window`.
-
-## Focus Monitor
-
-The `focus_monitor` module (in `focus_monitor.rs`) tracks the active window and sends `FocusEvent`
-values through a `tokio::sync::mpsc` channel. It uses `wlr-foreign-toplevel-management-v1` and is
-compatible with sway, Hyprland, niri, Wayfire, and COSMIC.
-
-`FocusEvent` has two variants:
-
-- `Focus(String)` -- an app gained focus; payload is the `app_id`.
-- `Closed(String)` -- a window closed; payload is the `app_id`.
-
-The monitor runs as a long-lived async task. It connects to the Wayland display, binds the wlr foreign
-toplevel manager (version 1-3), and enters an async event loop using `tokio::io::unix::AsyncFd` on the
-Wayland socket file descriptor. On each `Done` event, if the activated app_id changed, a
-`FocusEvent::Focus` is sent via `try_send`. On `Closed` events, a `FocusEvent::Closed` is sent and the
-handle proxy is destroyed.
-
-The focus monitor is re-exported from `compositor` for backward compatibility: downstream crates import
-`platform_linux::compositor::{FocusEvent, focus_monitor}`.
+`focus_monitor::spawn(tx)` binds `wlr-foreign-toplevel-management-v1` (versions 1 to 3), receives
+the existing toplevels on the calling thread, then dispatches on the `focus-monitor` thread. It
+sends `FocusEvent::Focus(app_id)` on a `Done` whose toplevel is activated with an `app_id` other
+than the last one sent, and `FocusEvent::Closed(app_id)` when a toplevel with an `app_id` closes.
+Events are sent with `try_send`: a full channel drops the event and logs it. daemon-profile runs it
+in a Wayland session for context-based profile activation.
 
 ## Clipboard
 
-The `clipboard` module defines the `DataControl` trait for Wayland clipboard access. It abstracts over
-two protocols:
+`clipboard::spawn_capture(tx)` captures the regular clipboard for daemon-clipboard through
+wl-clipboard-rs's `Watcher`, over `ext-data-control-v1` or `wlr-data-control-v1`. cosmic-comp,
+sway, Hyprland, niri, and KWin offer data-control to clients outside a security context; Mutter does
+not, and there `spawn_capture` returns `Error::Platform` ("clipboard capture unavailable").
 
-- **`ext-data-control-v1`** (preferred, standardized)
-- **`wlr-data-control-v1`** (fallback for older compositors)
-
-The trait provides:
-
-- `read_selection()` -- read the current clipboard content with MIME type metadata.
-- `write_selection(content)` -- write content to the clipboard.
-- `subscribe()` -- subscribe to clipboard change notifications via a
-  `tokio::sync::mpsc::Receiver<ClipboardContent>`.
-- `protocol_name()` -- diagnostic name.
-
-`ClipboardContent` carries a `mime_type` string and `data` byte vector.
-
-The `connect_data_control()` factory function currently returns an error -- clipboard implementation is
-deferred to a later phase. The trait definition and module are available as the integration contract.
-
-On COSMIC, the `COSMIC_DATA_CONTROL_ENABLED=1` environment variable is required for data-control
-protocol access.
+- **Thread**: the watcher's blocking wait runs on the `clipboard-capture` thread; each selection is
+  sent to `tx` as a `Capture { content_type, text, password_manager_hint }` (its `Debug` shows the
+  length, never the text).
+- **Selection**: the text type wl-paste reads (`select_mime_type(_, MimeType::Text)`: UTF-8 plain
+  text first). A selection without text, with non-UTF-8 text, or larger than `MAX_CAPTURE_BYTES`
+  (1 MiB) is skipped, never truncated.
+- **Source deadline**: the source client has 2 seconds to deliver a selection through its pipe
+  (`poll(2)` bounded reads).
+- **Secrets**: `password_manager_hint` is set when the source offers `x-kde-passwordManagerHint`
+  with the content `secret`.
+- **Recovery**: a Wayland failure after the start reconnects with backoff from 1 to 30 seconds; the
+  thread ends when `tx` closes.
 
 ## Input
 
-The `input` module (in `input.rs`) provides evdev device discovery and async keyboard event streaming.
+`input.rs` reads evdev devices for daemon-input:
 
-### Device Discovery
+- `enumerate_devices()`: the `/dev/input/event*` devices the process can open (the evdev crate's
+  enumerator skips the rest), each a keyboard when it has `KEY_A`, `KEY_Z`, and `KEY_ENTER`, a
+  pointer when it has `BTN_LEFT`.
+- `open_keyboard_stream(path)`: the device as an async `EventStream` (`AsyncFd` underneath).
 
-`enumerate_devices()` iterates `/dev/input/event*` via the evdev crate's built-in enumerator. Each
-device is classified:
+Devices are not grabbed (`EVIOCGRAB`): events also reach the compositor. Access requires `input`
+group membership, never root. Nothing is injected; there is no uinput device.
 
-- **Keyboard:** supports `KEY_A`, `KEY_Z`, and `KEY_ENTER`. This heuristic excludes power buttons,
-  media controllers, and other devices that report KEY events but lack a full key set.
-- **Pointer:** supports `BTN_LEFT`.
+## D-Bus: the NetworkManager SSID Monitor
 
-The function returns a `Vec<DeviceInfo>` with `path`, `name`, `is_keyboard`, and `is_pointer` fields.
-Devices that fail to open (EACCES) are silently skipped.
+`dbus::ssid_monitor(system_bus, tx)` reports the active Wi-Fi SSID for daemon-profile's context
+engine. It connects to the system bus socket at `system_bus` (`Layout::system_bus_socket`, from
+`DBUS_SYSTEM_BUS_ADDRESS` or `/var/run/dbus/system_bus_socket`) through
+`zbus::connection::Builder::unix_stream`, on zbus with `default-features = false, features =
+["tokio", "proxy"]`, so all I/O runs on the daemon's tokio runtime.
 
-### Keyboard Streaming
+It subscribes to NetworkManager's `StateChanged` first and then reads the SSID, so a change between
+the two is not missed; each state change re-reads it, and an SSID that differs from the last one
+sent is sent. The read walks typed `#[zbus::proxy]` proxies, each built with
+`CacheProperties::No` so every read is a fresh `Properties.Get`:
 
-`open_keyboard_stream(path)` opens an evdev device and returns an `EventStream` (from the evdev crate)
-that uses `AsyncFd<Device>` internally. This is fully async with no `spawn_blocking` required. Call
-`stream.next_event().await` to read events.
+1. The primary connection (`/` means none).
+2. Its type, which must be `802-11-wireless`.
+3. Its first device.
+4. The device's active access point (`/` means none).
+5. The SSID bytes, as UTF-8 text.
 
-The device is not grabbed (`EVIOCGRAB` is not used). Events are read passively -- they also reach the
-compositor. This is intentional: the system observes and forwards copies rather than stealing events.
+A non-UTF-8 SSID, a Wi-Fi connection without a device, or a D-Bus failure fails that read;
+monitoring continues with the next state change.
 
-Requires `input` group membership. Root is never required. For future remap support via `/dev/uinput`,
-a udev rule is needed: `KERNEL=="uinput", GROUP="uinput", MODE="0660"`.
+## Secret Service: `keyring`
 
-## D-Bus Integration
+`keyring::SecretServiceStore` is the Linux `core_types::CredentialStore`, over oo7: the freedesktop
+Secret Service default collection (gnome-keyring, KWallet, oo7-daemon, KeePassXC) on the host, or
+the Secret portal's file keyring inside a Flatpak. `connect()` uses the session bus;
+`with_connection(conn)` uses a given connection.
 
-The `dbus` module (in `dbus.rs`) provides typed D-Bus proxies using `zbus` with
-`default-features = false, features = ["tokio"]` to ensure all I/O runs on the tokio runtime with no
-background threads.
+- **Items**: credentials are items with the attributes `service` and `username`
+  (`CredentialId`), the convention libsecret's `secret-tool` and keyring-rs share.
+- **Unlocking**: a locked collection is unlocked before every operation (possibly raising the
+  keyring's own prompt), so a locked keyring is never read as an empty one.
+- **Ambiguity**: more than one item for an id is `CredentialError::Ambiguous`, never a guess.
+- **Errors**: a dismissed prompt is `Dismissed`, a locked collection or portal keyring is `Locked`,
+  and anything else is `Platform`.
 
-### Session Bus
+The sandboxed daemons have no session bus; daemon-launcher reads the platform keyring factor
+([Platform Keyring](../authentication/platform-keyring.md)).
 
-`SessionBus::connect()` opens a connection to the D-Bus session bus. It serves as the shared connection
-handle for all proxies.
+## Overlay Shortcuts
 
-### Secret Service (`org.freedesktop.secrets`)
+The four overlay activations are `core_types::OverlayRequest`. Each request owns its bus event
+(`WmActivateOverlay…`), its id, its description, its `sesame` arguments (`wm overlay` with
+`--launcher` and `--backward`), and its shortcut, `OverlayRequest::trigger(launcher)`:
 
-`SecretServiceProxy` provides raw store/retrieve/delete/has operations for the freedesktop Secret
-Service API. It opens a plain-text session (secrets transmitted unencrypted over D-Bus, which is safe
-because D-Bus is local transport). The proxy operates on the default collection
-(`/org/freedesktop/secrets/aliases/default`) and identifies items by `application` and `account`
-attributes with type `master-key-wrapped`.
+| Request | Shortcut |
+| --- | --- |
+| `Forward` | Alt+Tab |
+| `Backward` | Alt+Shift+Tab |
+| `Launcher` | `[global] launcher_key` (default `alt+space`) |
+| `LauncherBackward` | the launcher key with Shift |
 
-This module provides only the low-level D-Bus proxy. Business logic (KeyLocker trait, key hierarchy)
-lives in `daemon-secrets`.
+The launcher key is a `core_types::KeyCombo`. Its modifiers are `super` (`mod`, `logo`, `win`),
+`ctrl` (`control`), `alt`, and `shift`, and its key is an XKB keysym name. An invalid
+combination fails the configuration load with the accepted modifiers named.
 
-### Global Shortcuts Portal (`org.freedesktop.portal.GlobalShortcuts`)
+### The Backend
 
-`GlobalShortcutsProxy` provides compositor-agnostic global hotkey registration through
-`xdg-desktop-portal`. Supported on COSMIC, KDE Plasma 6.4+, and niri. The proxy supports
-`create_session`, `bind_shortcuts`, and `list_shortcuts` operations.
+One backend binds a session's shortcuts, never both, so a key cannot fire twice. It is chosen
+by what the session and the system provide, not by the calling shell's environment
+(`open-sesame/src/keybinding.rs`):
 
-### NetworkManager SSID Monitor
+1. **The `GlobalShortcuts` portal**, when the session's portal implements
+   `org.freedesktop.portal.GlobalShortcuts` (KDE, GNOME 48 and later, Hyprland).
+2. **COSMIC's shortcut configuration**, when COSMIC's shortcut defaults are installed
+   (`cosmic/com.system76.CosmicSettings.Shortcuts` under a system data directory,
+   `Layout::cosmic_shortcut_defaults`). xdg-desktop-portal-cosmic does not implement
+   GlobalShortcuts.
+3. Neither: `sesame setup-keybinding` names both conditions, and `sesame init` reports the step
+   and continues.
 
-`ssid_monitor()` is a long-lived async task that monitors the active WiFi SSID via NetworkManager D-Bus
-signals on the system bus. It subscribes to the `StateChanged` signal on
-`org.freedesktop.NetworkManager`, re-reads the primary active connection's SSID on each state change,
-and sends the SSID string through a `tokio::sync::mpsc::Sender<String>` when it changes.
+`sesame setup-keybinding [KEY]`, `remove-keybinding`, and `keybinding-status` act through the
+chosen backend; `sesame init` binds the configured key.
 
-The SSID reading traverses the NetworkManager object graph: primary connection -> connection type check
-(must be `802-11-wireless`) -> device list -> active access point -> SSID byte array -> UTF-8 string.
+### Portal: `global_shortcuts`
 
-This enables context-based profile activation (e.g., activate "work" profile when connected to the
-office WiFi).
+daemon-launcher holds the portal session, since it is outside the sandboxes and on the session
+bus. At start it creates a session and binds every request:
 
-## COSMIC Key Injection
+- **Binding**: each request is bound under its id and description, with its trigger in the XDG
+  shortcuts format as the preferred trigger (`ALT+Tab`, `ALT+SHIFT+Tab`, `ALT+space`,
+  `ALT+SHIFT+space`). The desktop assigns the final keys, may ask the user to confirm them, and
+  lets the user change them in its settings. The assigned triggers are logged.
+- **Activation**: each `Activated` signal becomes the request of its id, published to daemon-wm.
+- **Lifetime**: the session lives on daemon-launcher's session-bus connection.
+- **Rebinding**: a reloaded configuration with another `launcher_key` ends the session and binds a
+  new one, because a portal session binds once.
 
-The `cosmic_keys` module (in `cosmic_keys.rs`) manages keybindings in COSMIC desktop's shortcut
-configuration files:
+Without a session bus or a portal implementing the interface, daemon-launcher logs it and binds
+nothing.
 
-- `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom` -- custom `Spawn(...)` bindings
-- `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/system_actions` -- maps `System(...)`
-  action variants to command strings
+### COSMIC: `cosmic_keys`
 
-### System Actions Override Strategy
+`setup_keybinding(layout, launcher)`, `remove_keybinding(layout)`, and `keybinding_status(layout)`
+manage the bindings in COSMIC's shortcut configuration under `Layout::cosmic_config_dir`, in
+`com.system76.CosmicSettings.Shortcuts/v1/`:
 
-For Alt+Tab integration, the module overrides `system_actions` rather than adding a competing
-`Spawn(...)` binding. COSMIC's default keybindings map Alt+Tab to `System(WindowSwitcher)`. Adding a
-parallel `Spawn(...)` binding would race with the default and leak the Alt modifier to applications.
-By overriding `system_actions`, the compositor's own built-in Alt+Tab binding fires sesame, and the key
-event is consumed at compositor level before any application sees the Alt keypress.
+- `system_actions`: `WindowSwitcher` and `WindowSwitcherPrevious` run the `Forward` and `Backward`
+  requests' commands. COSMIC's own Alt+Tab binding then runs sesame and consumes the key at the
+  compositor, where a competing `Spawn` binding would race the default and leak Alt to
+  applications.
+- `custom`: `Spawn` bindings for the `Launcher` and `LauncherBackward` requests at their
+  triggers.
 
-The overrides point `WindowSwitcher` to `sesame wm overlay` and `WindowSwitcherPrevious` to
-`sesame wm overlay --backward`.
+Commands are rendered from `OverlayRequest::command_args`, modifiers as COSMIC names them
+(`Super`, `Ctrl`, `Alt`, `Shift`), and keys lowercased, since cosmic-comp matches lowercase keysym
+names. Values are escaped for RON. Every write first copies the file to `<file>.bak`, and a failed
+backup aborts the write. Removing the bindings deletes a `system_actions` file left empty, so
+COSMIC falls back to its system defaults. cosmic-comp watches both files and reloads them on
+change.
 
-### Injection Safety
+## COSMIC Theme: `cosmic_theme` (feature `cosmic`)
 
-All values written to RON configuration files are escaped through `escape_ron_string()`, which handles
-backslash and double-quote characters to prevent RON injection.
+`cosmic_theme::CosmicTheme::load(cosmic_dir)` reads the theme of the COSMIC configuration under
+`cosmic_dir` (`Layout::cosmic_config_dir`) for daemon-wm's overlay: the mode from
+`com.system76.CosmicTheme.Mode`, then `com.system76.CosmicTheme.Dark` or `.Light`. It returns the
+container, component, and accent colors as 8-bit RGBA, the medium corner radii, the frosted
+settings and the blurred-container alpha, and the interface font family.
 
-### Configuration Files
+- **No writes**: a config is opened only when its version directory exists, so nothing is created
+  and a non-COSMIC desktop is `None`. cosmic-config's `Config::new` runs `create_dir_all`.
+- **No `get_active`**: `Theme::get_active` reads the mode from the `com.system76.CosmicTheme`
+  config, which COSMIC does not write, so the theme is not loaded through it.
+- **Fallbacks**: an unreadable config entry is logged and its defaults are used.
 
-The files are in RON (Rusty Object Notation) format. The compositor watches these files via
-`cosmic_config::calloop::ConfigWatchSource` and live-reloads on change -- no logout is required.
+## systemd: `systemd`
 
-Before writing, the module creates a `.bak` backup of the existing file. The
-`setup_keybinding(launcher_key_combo)` function:
+Built on `sd-notify`, which leaves `NOTIFY_SOCKET` set so later notifications keep working; outside
+systemd every notification is a no-op.
 
-1. Overrides `system_actions` for WindowSwitcher/WindowSwitcherPrevious.
-2. Adds a custom `Spawn(...)` binding for the launcher key (e.g., `alt+space`).
-3. Adds a backward variant with Shift (e.g., `alt+shift+space`).
+| Function | Notification |
+| --- | --- |
+| `notify_ready()` | `READY=1` (`Type=notify`) |
+| `notify_reloading()` | `RELOADING=1` with `MONOTONIC_USEC` in one datagram (`Type=notify-reload`; systemd 253 and later require the timestamp); followed by `notify_ready()` |
+| `notify_watchdog()` | `WATCHDOG=1` keepalive |
+| `notify_status(status)` | `STATUS=` shown by `systemctl status` |
 
-`remove_keybinding()` removes all sesame entries from both files. If `system_actions` becomes empty
-after removal, the file is deleted so COSMIC falls back to system defaults at `/usr/share/cosmic/`.
+## Sandbox and Process Hardening: `sandbox`, `security`
 
-## COSMIC Theme Integration
+`security::harden_process()` sets `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE` 0;
+`security::apply_resource_limits` sets `RLIMIT_NOFILE` and `RLIMIT_MEMLOCK`. Both log a failure
+and continue.
 
-The `cosmic_theme` module (in `cosmic_theme.rs`) reads theme colors, fonts, corner radii, and dark/light
-mode from COSMIC's RON configuration at `~/.config/cosmic/`:
+`sandbox` holds the one Landlock ruleset definition (ABI 9, every access right and scope a hard
+requirement; `landlock_support()` asks the kernel whether it enforces them) and the seccomp filter
+(default action kill-process, other architectures killed, `socket`/`socketpair` only for `AF_UNIX`,
+synchronized onto every thread). `apply_sandbox(rules, seccomp)` applies both. The grants and
+allowlists each daemon passes are described in [Sandbox Model](../architecture/sandbox-model.md).
 
-- Theme mode: `com.system76.CosmicTheme.Mode/v1/is_dark`
-- Dark theme: `com.system76.CosmicTheme.Dark/v1/`
-- Light theme: `com.system76.CosmicTheme.Light/v1/`
+## Adding a Compositor Backend
 
-`CosmicTheme::load()` reads the mode, selects the appropriate theme directory, and deserializes
-`background`, `primary`, `secondary` containers, accent colors, and corner radii from individual RON
-files. Returns `None` on non-COSMIC systems where these files do not exist.
+1. Create `backend_<name>.rs` implementing `CompositorBackend` (`Send + Sync`, synchronous
+   methods; a dispatch thread through `wayland::dispatch_forever` keeps the snapshot).
+2. Add `pub(crate) mod backend_<name>;` to `lib.rs` under its feature.
+3. Add it to `detect_compositor()`, more specific protocols before generic ones.
+4. Add the feature and its protocol dependencies to `Cargo.toml`.
 
-The types (`CosmicColor`, `ComponentColors`, `Container`, `AccentColors`, `CornerRadii`) provide the
-theme data needed for overlay rendering. `CosmicColor` stores RGBA as 0.0-1.0 floats with a
-`to_rgba()` conversion to `(u8, u8, u8, u8)`.
-
-## systemd Integration
-
-The `systemd` module (in `systemd.rs`) provides three helpers using the `sd-notify` crate:
-
-- `notify_ready()` -- sends `READY=1` to systemd for `Type=notify` services. Preserves `NOTIFY_SOCKET`
-  (does not unset it) so subsequent watchdog pings continue to work.
-- `notify_watchdog()` -- sends a watchdog keepalive ping.
-- `notify_status(status)` -- updates the daemon's status string visible in `systemctl status`.
-
-## Adding a New Compositor Backend
-
-To add support for a new compositor (e.g., GNOME/Mutter via `org.gnome.Mutter.IdleMonitor`, KDE/KWin
-via `org.kde.KWin`, or Hyprland IPC):
-
-1. Create `backend_<name>.rs` in `platform-linux/src/` implementing the `CompositorBackend` trait.
-2. Add `pub(crate) mod backend_<name>;` to `lib.rs`, gated behind an appropriate feature flag.
-3. Add a match arm to `detect_compositor()` in `compositor.rs`. Place it in the detection order
-   according to protocol specificity (more specific protocols first, generic fallbacks last).
-4. Add the feature flag to `Cargo.toml` with any new protocol dependencies.
-
-The backend struct must be `Send + Sync`. Methods return `BoxFuture` for dyn-compatibility. For
-operations not supported by the target compositor's protocols, return `Error::Platform` with a
-descriptive message.
+An operation the compositor's protocols do not offer is `Error::Platform` naming it.

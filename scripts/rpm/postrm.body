@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # %postun for open-sesame (headless)
 # $1: 0=remove, >=1=upgrade
 

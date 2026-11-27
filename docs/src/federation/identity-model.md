@@ -35,7 +35,7 @@ profile name on two different installations produces different profile IDs.
 ### Properties
 
 | Property | Value |
-|----------|-------|
+| --- | --- |
 | Generation | UUID v4 for `InstallationId.id`; UUID v7 via `Uuid::now_v7()` for `ProfileId`, `AgentId`, and other `define_id!` types |
 | Persistence | `~/.config/pds/installation.toml` |
 | Scope | One per user per machine |
@@ -113,7 +113,7 @@ pub struct MachineBinding {
 Two binding types are defined:
 
 | Type | Source | Portability |
-|------|--------|-------------|
+| --- | --- | --- |
 | `MachineId` | BLAKE3 hash of `/etc/machine-id` + installation ID | Survives reboots, not disk clones |
 | `TpmBound` | TPM-sealed key material | Survives reboots, tied to hardware TPM |
 

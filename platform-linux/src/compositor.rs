@@ -1,76 +1,63 @@
 //! Compositor backend trait and detection for Linux Wayland compositors.
 //!
-//! The `CompositorBackend` trait abstracts window/workspace management over
-//! multiple Wayland compositor protocol sets:
+//! The [`CompositorBackend`] trait abstracts the toplevel operations
+//! daemon-wm performs over two Wayland protocol sets:
 //! - `ext_foreign_toplevel_list_v1` + `zcosmic_toplevel_info_v1` +
-//!   `zcosmic_toplevel_manager_v1` (COSMIC)
-//! - `wlr-foreign-toplevel-management-v1` (Hyprland, sway, niri, Wayfire)
-//!
-//! Backend implementations live in dedicated modules:
-//! - `backend_wlr` — wlr-foreign-toplevel-management-v1
-//! - `backend_cosmic` — COSMIC toplevel-info/manager protocols
+//!   `zcosmic_toplevel_manager_v1` (COSMIC), in `backend_cosmic`;
+//! - `wlr-foreign-toplevel-management-v1` (Hyprland, sway, niri, Wayfire),
+//!   in `backend_wlr`.
 //!
 //! Focus tracking lives in `focus_monitor`.
 //!
 //! To add a new compositor backend:
-//! 1. Create `backend_<name>.rs` implementing `CompositorBackend`
-//! 2. Add `pub(crate) mod backend_<name>;` to `lib.rs`
-//! 3. Add a match arm to `detect_compositor()` below
+//! 1. Create `backend_<name>.rs` implementing `CompositorBackend`.
+//! 2. Add `pub(crate) mod backend_<name>;` to `lib.rs`.
+//! 3. Add a match arm to `detect_compositor()` below.
 
-use core_types::{CompositorWorkspaceId, Geometry, Window, WindowId};
-use std::future::Future;
-use std::pin::Pin;
+use core_types::{Window, WindowId};
 
-// Re-export focus_monitor types at the compositor path for backward compatibility.
-// Downstream crates use `platform_linux::compositor::{FocusEvent, focus_monitor}`.
-pub use crate::focus_monitor::{FocusEvent, focus_monitor};
-
-/// A Wayland workspace.
-#[derive(Debug, Clone)]
-pub struct Workspace {
-    pub id: CompositorWorkspaceId,
-    pub name: String,
-    pub is_active: bool,
-}
-
-// Type alias for boxed async results used by CompositorBackend methods.
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Abstraction over Wayland compositor protocols for window management.
+/// The toplevel operations every compositor backend provides.
 ///
-/// Implementations:
-/// - `CosmicBackend` — ext_foreign_toplevel + zcosmic_toplevel_{info,manager}
-/// - `WlrBackend` — wlr-foreign-toplevel-management-v1
-///
-/// Uses `Pin<Box<dyn Future>>` return types for dyn-compatibility — required
-/// because `detect_compositor()` returns `Box<dyn CompositorBackend>` for
-/// runtime backend selection.
+/// Methods are synchronous: the window list is a snapshot a dispatch
+/// thread maintains, and requests are Wayland round-trips that block the
+/// calling thread. Async callers run requests on a blocking thread.
 pub trait CompositorBackend: Send + Sync {
-    fn list_windows(&self) -> BoxFuture<'_, core_types::Result<Vec<Window>>>;
-    fn list_workspaces(&self) -> BoxFuture<'_, core_types::Result<Vec<Workspace>>>;
-    fn activate_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>>;
-    fn set_window_geometry(
-        &self,
-        id: &WindowId,
-        geom: &Geometry,
-    ) -> BoxFuture<'_, core_types::Result<()>>;
-    fn move_to_workspace(
-        &self,
-        id: &WindowId,
-        ws: &CompositorWorkspaceId,
-    ) -> BoxFuture<'_, core_types::Result<()>>;
-    fn focus_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>>;
-    fn close_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>>;
+    /// The open toplevel windows.
+    ///
+    /// # Errors
+    ///
+    /// `core_types::Error::Platform` when the snapshot cannot be read.
+    fn list_windows(&self) -> core_types::Result<Vec<Window>>;
 
-    /// Human-readable backend name for diagnostics (e.g. "cosmic", "wlr", "sway-ipc").
-    fn name(&self) -> &str;
+    /// Bring window `id` to the foreground with input focus.
+    ///
+    /// # Errors
+    ///
+    /// `core_types::Error::Platform` when the window is unknown or the
+    /// request cannot be delivered.
+    fn activate_window(&self, id: &WindowId) -> core_types::Result<()>;
+
+    /// Ask window `id` to close.
+    ///
+    /// # Errors
+    ///
+    /// `core_types::Error::Platform` when the window is unknown or the
+    /// request cannot be delivered.
+    fn close_window(&self, id: &WindowId) -> core_types::Result<()>;
+
+    /// The backend's name for diagnostics (`cosmic`, `wlr`).
+    fn name(&self) -> &'static str;
 }
 
-/// Detect and instantiate the appropriate compositor backend.
+/// Detect and instantiate the compositor backend.
 ///
 /// Detection order:
-/// 1. COSMIC-specific protocols (if `cosmic` feature enabled)
-/// 2. wlr-foreign-toplevel-management-v1 (Hyprland, sway, niri)
+/// 1. COSMIC-specific protocols (with the `cosmic` feature);
+/// 2. wlr-foreign-toplevel-management-v1 (Hyprland, sway, niri).
+///
+/// # Errors
+///
+/// `core_types::Error::Platform` when no backend can connect.
 pub fn detect_compositor() -> core_types::Result<Box<dyn CompositorBackend>> {
     #[cfg(feature = "cosmic")]
     {

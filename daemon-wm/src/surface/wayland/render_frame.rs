@@ -1,207 +1,145 @@
-//! Frame rendering — pixmap creation, phase-based render dispatch, blur region,
-//! and buffer attach/commit.
+//! Frame rendering: draw the view, then attach, blur, and commit it.
 
 use smithay_client_toolkit::{compositor::Region, shell::WaylandSurface};
-use wayland_client::QueueHandle;
 use wayland_client::protocol::wl_shm;
+use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_manager_v1::Capability;
 
-use super::OverlayPhase;
-use super::app::OverlayApp;
-use crate::render::{self, HintRow};
+use super::app::{OverlayApp, View};
+use crate::render::layout::Rect;
+use crate::render::{self, Canvas, Picker, whole};
+
+/// The text of the launch-in-progress toast.
+const LAUNCHING: &str = "Launching\u{2026}";
 
 impl OverlayApp {
-    pub fn render_frame(&mut self, _qh: &QueueHandle<Self>) {
+    /// Draw the current view and present it: the buffer, and the blur
+    /// region behind the card drawn, in one commit.
+    pub fn render_frame(&mut self) {
         self.needs_redraw = false;
-
-        let (logical_w, logical_h) = self.configured_size;
-        if logical_w == 0 || logical_h == 0 {
+        let Some((width, height)) = self.physical_size() else {
             return;
-        }
+        };
+        let Some(mut canvas) = Canvas::new(
+            width,
+            height,
+            self.output_scale,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &self.theme,
+        ) else {
+            tracing::warn!(width, height, "surface size has no pixmap");
+            return;
+        };
+        let card = match &self.view {
+            View::Hidden | View::Border => None,
+            View::Picker {
+                windows,
+                hints,
+                input,
+                selection,
+                staged_launch,
+            } => Some(canvas.picker(&Picker {
+                windows,
+                hints,
+                input,
+                selection: *selection,
+                staged_launch: staged_launch.as_deref(),
+                columns: self.columns,
+            })),
+            View::Launching => Some(canvas.message(LAUNCHING)),
+            View::LaunchError(reason) => Some(canvas.message(&render::launch_error_text(reason))),
+            View::UnlockPrompt {
+                profile,
+                password_len,
+                error,
+            } => Some(canvas.unlock_prompt(profile, *password_len, error.as_deref())),
+            View::UnlockProgress(message) => Some(canvas.message(message)),
+        };
+        let mut pixels = canvas.into_pixels();
+        render::convert_rgba_to_argb8888(&mut pixels);
+        self.present(&pixels, width, height, card);
+    }
 
-        let scale = self.output_scale;
-        let width = (logical_w as f32 * scale) as u32;
-        let height = (logical_h as f32 * scale) as u32;
-        let wf = width as f32;
-        let hf = height as f32;
-
-        // Compute blur region geometry BEFORE borrowing the pool.
-        // Blur covers the card area only — set whenever the card is visible.
-        // The card is the ONLY visual element; it must have consistent blur
-        // from the moment it appears until dismissal.
-        let blur_rect = if self.phase == OverlayPhase::Full
-            || self.phase == OverlayPhase::Launching
-            || self.phase == OverlayPhase::LaunchError
-            || self.phase == OverlayPhase::UnlockPrompt
-            || self.phase == OverlayPhase::UnlockProgress
-        {
-            // For Full, use the window-list card geometry.
-            // For toasts/prompts, use a generous centered region.
-            if self.phase == OverlayPhase::Full {
-                let row_count = self.windows.len();
-                Some(render::compute_card_rect(
-                    row_count,
-                    wf,
-                    hf,
-                    scale,
-                    self.show_app_id,
-                    self.show_title,
-                ))
-            } else {
-                // Toast/prompt: blur a centered region roughly 500x200
-                let cw = (wf * 0.5).min(500.0);
-                let ch = 200.0;
-                Some(((wf - cw) / 2.0, (hf - ch) / 2.0, cw, ch))
+    /// Attach `pixels` (ARGB8888, `width` x `height` buffer pixels), set
+    /// the blur region behind `card`, and commit. The blur region is
+    /// double-buffered state applied by this same commit
+    /// (`ext_background_effect_surface_v1.set_blur_region`).
+    fn present(&mut self, pixels: &[u8], width: u32, height: u32, card: Option<Rect>) {
+        let (Ok(w), Ok(h), Some(Ok(stride))) = (
+            i32::try_from(width),
+            i32::try_from(height),
+            width.checked_mul(4).map(i32::try_from),
+        ) else {
+            tracing::warn!(width, height, "surface too large for a buffer");
+            return;
+        };
+        let Some(pool) = self.slot_pool.as_mut() else {
+            return;
+        };
+        let buffer = match pool.create_buffer(w, h, stride, wl_shm::Format::Argb8888) {
+            Ok((buffer, canvas)) if canvas.len() == pixels.len() => {
+                canvas.copy_from_slice(pixels);
+                buffer
             }
-        } else {
-            None
-        };
-
-        let pool = match self.slot_pool.as_mut() {
-            Some(p) => p,
-            None => return,
-        };
-
-        let stride = width as i32 * 4;
-        let (buffer, canvas) = match pool.create_buffer(
-            width as i32,
-            height as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) {
-            Ok((buf, canvas)) => (buf, canvas),
+            Ok((_, canvas)) => {
+                tracing::warn!(
+                    buffer = canvas.len(),
+                    frame = pixels.len(),
+                    "buffer and frame sizes differ"
+                );
+                return;
+            }
             Err(e) => {
-                tracing::warn!("failed to create shm buffer: {e}");
+                tracing::warn!(error = %e, "failed to create a shm buffer");
                 return;
             }
         };
-
-        if let Some(mut pixmap) = tiny_skia::Pixmap::new(width, height) {
-            match self.phase {
-                OverlayPhase::Hidden => {
-                    pixmap.fill(tiny_skia::Color::TRANSPARENT);
-                }
-                OverlayPhase::BorderOnly => {
-                    render::draw_border_only(&mut pixmap, wf, hf, scale, &self.theme);
-                }
-                OverlayPhase::Full => {
-                    let rows: Vec<HintRow<'_>> = self
-                        .windows
-                        .iter()
-                        .zip(self.hints.iter())
-                        .map(|(w, h)| HintRow {
-                            hint: h.as_str(),
-                            app_id: &w.app_id,
-                            title: &w.title,
-                        })
-                        .collect();
-                    render::draw_full_overlay(
-                        &mut pixmap,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        wf,
-                        hf,
-                        scale,
-                        &rows,
-                        &self.input_buffer,
-                        self.selection,
-                        &self.hints,
-                        &self.theme,
-                        self.show_app_id,
-                        self.show_title,
-                        self.staged_launch.as_deref(),
-                    );
-                }
-                OverlayPhase::Launching => {
-                    render::draw_status_toast(
-                        &mut pixmap,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        wf,
-                        hf,
-                        scale,
-                        "Launching\u{2026}",
-                        &self.theme,
-                    );
-                }
-                OverlayPhase::LaunchError => {
-                    render::draw_error_toast(
-                        &mut pixmap,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        wf,
-                        hf,
-                        scale,
-                        &self.error_message,
-                        &self.theme,
-                    );
-                }
-                OverlayPhase::UnlockPrompt => {
-                    let error = if self.error_message.is_empty() {
-                        None
-                    } else {
-                        Some(self.error_message.as_str())
-                    };
-                    render::draw_unlock_prompt(
-                        &mut pixmap,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        wf,
-                        hf,
-                        scale,
-                        &self.unlock_profile,
-                        self.unlock_password_len,
-                        error,
-                        &self.theme,
-                    );
-                }
-                OverlayPhase::UnlockProgress => {
-                    render::draw_status_toast(
-                        &mut pixmap,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        wf,
-                        hf,
-                        scale,
-                        &self.unlock_message,
-                        &self.theme,
-                    );
-                }
-            }
-
-            let mut pixel_data = pixmap.take();
-            render::convert_rgba_to_argb8888(&mut pixel_data);
-            let len = canvas.len().min(pixel_data.len());
-            canvas[..len].copy_from_slice(&pixel_data[..len]);
-        } else {
-            canvas.fill(0);
-        }
-
-        // Attach buffer and commit.
-        if let Some(ref surface) = self.layer_surface {
-            let wl_surface = surface.wl_surface();
-            buffer
-                .attach_to(wl_surface)
-                .expect("failed to attach buffer");
-            wl_surface.set_buffer_scale(scale.ceil() as i32);
-            wl_surface.damage_buffer(0, 0, width as i32, height as i32);
-            wl_surface.commit();
-        }
-
-        // Set blur region AFTER buffer commit (pool borrow is dropped).
-        if let Some((cx, cy, cw, ch)) = blur_rect {
-            self.set_blur_region(cx as i32, cy as i32, cw as i32, ch as i32);
-        }
-    }
-
-    /// Set the blur region on the compositor to cover the card area.
-    fn set_blur_region(&self, x: i32, y: i32, w: i32, h: i32) {
-        let Some(ref blur_surface) = self.blur_surface else {
+        let Some(surface) = &self.layer_surface else {
             return;
         };
+        let wl_surface = surface.wl_surface();
+        if let Err(e) = buffer.attach_to(wl_surface) {
+            tracing::warn!(error = %e, "failed to attach the frame buffer");
+            return;
+        }
+        wl_surface.set_buffer_scale(i32::from(self.output_scale));
+        wl_surface.damage_buffer(0, 0, w, h);
+        self.set_blur_region(card);
+        wl_surface.commit();
+    }
 
-        if let Ok(region) = Region::new(&self.compositor_state) {
-            region.add(x, y, w, h);
-            blur_surface.set_blur_region(Some(region.wl_region()));
+    /// Whether the compositor advertised the blur effect.
+    pub(crate) fn blurs(&self) -> bool {
+        self.background_effect
+            .capabilities()
+            .is_some_and(|caps| caps.contains(Capability::Blur))
+    }
+
+    /// Blur behind `card` (buffer pixels), or nothing; the region is in
+    /// surface-local (logical) coordinates.
+    fn set_blur_region(&self, card: Option<Rect>) {
+        let Some(blur_surface) = &self.blur_surface else {
+            return;
+        };
+        if !self.blurs() {
+            return;
+        }
+        let Some(card) = card else {
+            blur_surface.set_blur_region(None);
+            return;
+        };
+        match Region::new(&self.compositor_state) {
+            Ok(region) => {
+                let logical = card.unscaled(f32::from(self.output_scale));
+                region.add(
+                    whole(logical.x),
+                    whole(logical.y),
+                    whole(logical.width),
+                    whole(logical.height),
+                );
+                blur_surface.set_blur_region(Some(region.wl_region()));
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to create the blur region"),
         }
     }
 }

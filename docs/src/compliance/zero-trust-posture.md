@@ -47,7 +47,7 @@ boundaries are enforced at multiple layers:
 #### Per-Daemon Clearance
 
 | Daemon | Clearance | Rationale |
-|--------|-----------|-----------|
+| --- | --- | --- |
 | `daemon-secrets` | SecretsOnly | Holds decrypted vault keys; must not leak to other daemons |
 | `daemon-clipboard` | ProfileScoped | Handles clipboard content scoped to the active profile |
 | `daemon-profile` | Internal | IPC bus host; sees all Internal-level and below |
@@ -78,7 +78,7 @@ usage.
 All daemon services apply:
 
 | Directive | Effect |
-|-----------|--------|
+| --- | --- |
 | `NoNewPrivileges=yes` | Prevents privilege escalation via setuid/setgid binaries |
 | `ProtectSystem=strict` | Root filesystem mounted read-only |
 | `ProtectHome=read-only` | Home directory read-only except explicit `ReadWritePaths` |
@@ -148,7 +148,7 @@ The availability of `memfd_secret(2)` is a binary posture signal. A system with
 secrets accessible to any process that can read `/proc/pid/mem` or perform DMA.
 
 | Posture Signal | Value | Meaning |
-|---------------|-------|---------|
+| --- | --- | --- |
 | `memfd_secret` available | `device_posture: 1.0` | Secrets removed from kernel direct map |
 | `memfd_secret` unavailable | `device_posture: 0.5` | Secrets on kernel direct map (mlock fallback) |
 | No mlock | `device_posture: 0.0` | Secrets may be swapped to disk |
@@ -172,7 +172,7 @@ Trust profiles are the microsegmentation boundary in Open Sesame. Each profile i
 isolated trust context:
 
 | Boundary | Isolation Mechanism |
-|----------|-------------------|
+| --- | --- |
 | Secrets | Separate SQLCipher vault per profile (`vaults/{name}.db`) |
 | Encryption keys | Separate BLAKE3-derived vault key per profile |
 | Clipboard | Profile-scoped clipboard history |

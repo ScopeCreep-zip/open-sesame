@@ -1,11 +1,8 @@
 //! Keyboard and seat handler implementations for the overlay.
 
-use smithay_client_toolkit::{
-    delegate_keyboard, delegate_seat,
-    seat::{
-        Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-    },
+use smithay_client_toolkit::seat::{
+    Capability, SeatHandler, SeatState,
+    keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
 };
 use wayland_client::{
     Connection, QueueHandle,
@@ -29,8 +26,10 @@ impl SeatHandler for OverlayApp {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard {
-            let _ = self.seat_state.get_keyboard(qh, &seat, None);
+        if capability == Capability::Keyboard
+            && let Err(e) = self.seat_state.get_keyboard(qh, &seat, None)
+        {
+            tracing::warn!(error = %e, "seat keyboard unavailable to the overlay");
         }
     }
 
@@ -45,6 +44,26 @@ impl SeatHandler for OverlayApp {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 
+/// The overlay event a key press means, if any. Tab is not one: cycling
+/// is driven by IPC re-activation, and handling it here would advance
+/// twice.
+fn pressed(event: &KeyEvent) -> Option<OverlayEvent> {
+    match event.keysym {
+        Keysym::Escape => Some(OverlayEvent::Escape),
+        Keysym::Return | Keysym::KP_Enter => Some(OverlayEvent::Confirm),
+        Keysym::Tab | Keysym::ISO_Left_Tab => None,
+        Keysym::Down => Some(OverlayEvent::SelectionDown),
+        Keysym::Up => Some(OverlayEvent::SelectionUp),
+        Keysym::BackSpace => Some(OverlayEvent::Backspace),
+        Keysym::space => Some(OverlayEvent::KeyChar(' ')),
+        _ => {
+            let mut chars = event.utf8.as_deref()?.chars();
+            let ch = chars.next()?;
+            (chars.next().is_none() && ch.is_ascii_graphic()).then_some(OverlayEvent::KeyChar(ch))
+        }
+    }
+}
+
 impl KeyboardHandler for OverlayApp {
     fn enter(
         &mut self,
@@ -56,7 +75,9 @@ impl KeyboardHandler for OverlayApp {
         _: &[u32],
         _: &[Keysym],
     ) {
-        self.received_key_event = true;
+        self.activation.key_event();
+        // The overlay is entered while Alt+Tab is held; modifier updates
+        // follow.
         self.alt_held = true;
     }
 
@@ -78,31 +99,9 @@ impl KeyboardHandler for OverlayApp {
         _: u32,
         event: KeyEvent,
     ) {
-        self.received_key_event = true;
-        let ev = match event.keysym {
-            Keysym::Escape => Some(OverlayEvent::Escape),
-            Keysym::Return | Keysym::KP_Enter => Some(OverlayEvent::Confirm),
-            Keysym::Tab | Keysym::ISO_Left_Tab => None,
-            Keysym::Down => Some(OverlayEvent::SelectionDown),
-            Keysym::Up => Some(OverlayEvent::SelectionUp),
-            Keysym::BackSpace => Some(OverlayEvent::Backspace),
-            Keysym::space => Some(OverlayEvent::KeyChar(' ')),
-            _ => event
-                .utf8
-                .as_ref()
-                .and_then(|s| {
-                    let mut chars = s.chars();
-                    let c = chars.next()?;
-                    if chars.next().is_none() && c.is_ascii_graphic() {
-                        Some(c)
-                    } else {
-                        None
-                    }
-                })
-                .map(OverlayEvent::KeyChar),
-        };
-        if let Some(ev) = ev {
-            self.send_event(ev);
+        self.activation.key_event();
+        if let Some(event) = pressed(&event) {
+            self.send_event(event);
         }
     }
 
@@ -114,7 +113,7 @@ impl KeyboardHandler for OverlayApp {
         _: u32,
         event: KeyEvent,
     ) {
-        self.received_key_event = true;
+        self.activation.key_event();
         if matches!(
             event.keysym,
             Keysym::Alt_L | Keysym::Alt_R | Keysym::Meta_L | Keysym::Meta_R
@@ -147,6 +146,3 @@ impl KeyboardHandler for OverlayApp {
         self.press_key(conn, qh, keyboard, serial, event);
     }
 }
-
-delegate_seat!(OverlayApp);
-delegate_keyboard!(OverlayApp);

@@ -132,7 +132,7 @@ All synchronization traffic between peers uses the Noise IK protocol, the same t
 used for local IPC. This provides:
 
 | Property | Mechanism |
-|----------|-----------|
+| --- | --- |
 | Mutual authentication | X25519 static keys, verified against clearance registry |
 | Forward secrecy | Per-session Noise IK ephemeral keys |
 | Encryption | ChaChaPoly (default) or AES-256-GCM (`NoiseCipher` in `core-types/src/crypto.rs`) |

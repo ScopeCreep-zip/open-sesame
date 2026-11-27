@@ -4,6 +4,7 @@
 //! deep merge, semantic validation, and filesystem-watched hot-reload.
 #![forbid(unsafe_code)]
 
+pub mod edit;
 mod loader;
 mod loader_installation;
 mod loader_workspace;
@@ -19,9 +20,8 @@ mod validation;
 mod watcher;
 
 pub use loader::{
-    atomic_write, bootstrap_dirs, config_dir, installation_path, load_config, load_installation,
-    load_workspace_config, resolve_config_paths, resolve_config_real_dirs, save_workspace_config,
-    write_installation,
+    load_config, load_installation, load_workspace_config, read_machine_id, resolve_config_paths,
+    resolve_config_real_dirs, system_policy_file, write_installation,
 };
 pub use schema::*;
 pub use validation::{ConfigDiagnostic, DiagnosticSeverity, validate};

@@ -1,8 +1,9 @@
 //! COSMIC keybinding integration.
 //!
-//! Manages keybindings in COSMIC desktop's shortcut configuration files:
-//! - `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom` (custom shortcuts)
-//! - `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/system_actions` (system action commands)
+//! Manages keybindings in COSMIC desktop's shortcut configuration files,
+//! under `Layout::cosmic_config_dir`:
+//! - `com.system76.CosmicSettings.Shortcuts/v1/custom` (custom shortcuts)
+//! - `com.system76.CosmicSettings.Shortcuts/v1/system_actions` (system action commands)
 //!
 //! Strategy for Alt+Tab: COSMIC's default keybindings map Alt+Tab to
 //! `System(WindowSwitcher)`. Rather than adding a competing `Spawn(...)` binding
@@ -15,70 +16,67 @@
 //! The compositor watches these files via `cosmic_config::calloop::ConfigWatchSource`
 //! and live-reloads on change — no logout required.
 
+use core_layout::Layout;
+use core_types::{KeyCombo, Modifier, OverlayRequest};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Base path for COSMIC shortcuts config directory.
-fn cosmic_shortcuts_dir() -> core_types::Result<PathBuf> {
-    let base = dirs::config_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .ok_or_else(|| {
-            core_types::Error::Platform("cannot determine config directory: HOME not set".into())
-        })?;
-    Ok(base.join("cosmic/com.system76.CosmicSettings.Shortcuts/v1"))
+/// COSMIC's shortcuts configuration schema directory.
+fn cosmic_shortcuts_dir(layout: &Layout) -> core_types::Result<PathBuf> {
+    Ok(layout
+        .cosmic_config_dir()?
+        .join("com.system76.CosmicSettings.Shortcuts")
+        .join("v1"))
 }
 
-/// Path to COSMIC custom shortcuts config.
-///
-/// COSMIC reads custom keybindings from:
-///   `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`
-///
-/// The compositor watches this file and live-reloads on change (no logout needed).
-fn cosmic_shortcuts_path() -> core_types::Result<PathBuf> {
-    Ok(cosmic_shortcuts_dir()?.join("custom"))
+/// COSMIC custom shortcuts config. The compositor watches this file and
+/// live-reloads on change.
+fn cosmic_shortcuts_path(layout: &Layout) -> core_types::Result<PathBuf> {
+    Ok(cosmic_shortcuts_dir(layout)?.join("custom"))
 }
 
-/// Path to COSMIC system_actions config.
-///
-/// Maps `System(...)` action enum variants to command strings.
-/// E.g., `WindowSwitcher` -> "sesame wm overlay".
-fn cosmic_system_actions_path() -> core_types::Result<PathBuf> {
-    Ok(cosmic_shortcuts_dir()?.join("system_actions"))
+/// COSMIC `system_actions` config: maps `System(...)` action enum variants
+/// to command strings (e.g. `WindowSwitcher` -> "sesame wm overlay").
+fn cosmic_system_actions_path(layout: &Layout) -> core_types::Result<PathBuf> {
+    Ok(cosmic_shortcuts_dir(layout)?.join("system_actions"))
 }
 
-/// Normalize a key name to lowercase XKB keysym format.
-///
-/// COSMIC's key matching compares against XKB keysym names which are
-/// lowercase: "space", "tab", "escape", "return". Capitalized names like
-/// "Space" trigger a "only matched case insensitive" warning in cosmic-comp
-/// and may fail to dispatch the binding entirely.
-fn capitalize_key(key: &str) -> String {
-    key.to_lowercase()
-}
-
-/// Parse a key combo string like "super+space" into (modifiers, key).
-fn parse_key_combo(combo: &str) -> core_types::Result<(Vec<String>, String)> {
-    let parts: Vec<&str> = combo.split('+').map(|s| s.trim()).collect();
-    if parts.is_empty() {
-        return Err(core_types::Error::Platform("empty key combo".into()));
-    }
-
-    // COSMIC key names are capitalized (e.g. "Tab", "Space", "Escape").
-    // Normalize the key so user input like "tab" becomes "Tab".
-    let raw_key = parts.last().unwrap();
-    let key = capitalize_key(raw_key);
-    let modifiers: Vec<String> = parts[..parts.len() - 1]
+/// Whether COSMIC reads shortcuts on this system: its default shortcut
+/// configuration is installed under a system data directory
+/// (`Layout::cosmic_shortcut_defaults`). A property of the system, not of
+/// the calling shell's environment.
+#[must_use]
+pub fn shortcuts_supported(layout: &Layout) -> bool {
+    layout
+        .cosmic_shortcut_defaults()
         .iter()
-        .map(|m| match m.to_lowercase().as_str() {
-            "super" | "mod" | "logo" | "win" => "Super".to_string(),
-            "shift" => "Shift".to_string(),
-            "ctrl" | "control" => "Ctrl".to_string(),
-            "alt" => "Alt".to_string(),
-            other => other.to_string(),
-        })
-        .collect();
+        .any(|dir| dir.is_dir())
+}
 
-    Ok((modifiers, key))
+/// Whether `path` exists; a failure to determine it is an error.
+fn exists(path: &Path) -> core_types::Result<bool> {
+    path.try_exists().map_err(|e| {
+        core_types::Error::Platform(format!("failed to check {}: {e}", path.display()))
+    })
+}
+
+/// COSMIC's name for `modifier` in a shortcut's `modifiers` list.
+const fn cosmic_modifier(modifier: Modifier) -> &'static str {
+    match modifier {
+        Modifier::Super => "Super",
+        Modifier::Ctrl => "Ctrl",
+        Modifier::Alt => "Alt",
+        Modifier::Shift => "Shift",
+    }
+}
+
+/// The command a COSMIC binding runs for `request`: `sesame` and the
+/// request's arguments.
+fn command(request: OverlayRequest) -> String {
+    std::iter::once("sesame")
+        .chain(request.command_args().iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Escape a string for RON format (prevents injection).
@@ -94,55 +92,72 @@ fn escape_ron_string(s: &str) -> String {
     escaped
 }
 
-/// Format a keybinding entry in COSMIC RON format.
-fn format_keybinding(modifiers: &[String], key: &str, command: &str) -> String {
-    let mods = if modifiers.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", modifiers.join(", "))
-    };
-    let escaped_key = escape_ron_string(key);
-    let escaped_command = escape_ron_string(command);
+/// The COSMIC RON entry binding `combo` to `request`. COSMIC matches keys
+/// against lowercase XKB keysym names (`space`, `tab`): a capitalized
+/// name draws cosmic-comp's "only matched case insensitive" warning and
+/// may not dispatch, so the key is lowercased.
+fn format_keybinding(combo: &KeyCombo, request: OverlayRequest) -> String {
+    let mods: Vec<&str> = combo
+        .modifiers()
+        .iter()
+        .map(|m| cosmic_modifier(*m))
+        .collect();
+    let escaped_key = escape_ron_string(&combo.key().to_lowercase());
+    let escaped_command = escape_ron_string(&command(request));
     format!(
-        "    (modifiers: {}, key: \"{}\"): Spawn(\"{}\"),",
-        mods, escaped_key, escaped_command
+        "    (modifiers: [{}], key: \"{escaped_key}\"): Spawn(\"{escaped_command}\"),",
+        mods.join(", ")
     )
 }
 
-/// Read the current custom shortcuts file.
-fn read_shortcuts() -> core_types::Result<String> {
-    let path = cosmic_shortcuts_path()?;
-    if path.exists() {
-        fs::read_to_string(&path).map_err(|e| {
-            core_types::Error::Platform(format!("failed to read {}: {e}", path.display()))
-        })
-    } else {
-        Ok("{\n}".to_string())
+/// Read a COSMIC RON config file; an absent file is an empty map.
+fn read_config(path: &Path) -> core_types::Result<String> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{\n}".to_string()),
+        Err(e) => Err(core_types::Error::Platform(format!(
+            "failed to read {}: {e}",
+            path.display()
+        ))),
     }
 }
 
-/// Write the custom shortcuts file with backup.
-fn write_shortcuts(content: &str) -> core_types::Result<()> {
-    let path = cosmic_shortcuts_path()?;
-
+/// Write a COSMIC RON config file, first copying an existing file to
+/// `<path>.bak`. A failed backup aborts the write: the user's
+/// configuration is never overwritten without one.
+fn write_config(path: &Path, content: &str) -> core_types::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
             core_types::Error::Platform(format!("failed to create {}: {e}", parent.display()))
         })?;
     }
 
-    if path.exists() {
-        let backup = path.with_extension("bak");
-        if let Err(e) = fs::copy(&path, &backup) {
-            tracing::warn!("failed to create backup at {}: {e}", backup.display());
-        } else {
-            tracing::info!("created backup at {}", backup.display());
+    let backup = path.with_extension("bak");
+    match fs::copy(path, &backup) {
+        Ok(_) => tracing::info!("created backup at {}", backup.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(core_types::Error::Platform(format!(
+                "failed to back up {} to {}: {e}; not modified",
+                path.display(),
+                backup.display()
+            )));
         }
     }
 
-    fs::write(&path, content).map_err(|e| {
+    fs::write(path, content).map_err(|e| {
         core_types::Error::Platform(format!("failed to write {}: {e}", path.display()))
     })
+}
+
+/// Read the current custom shortcuts file.
+fn read_shortcuts(layout: &Layout) -> core_types::Result<String> {
+    read_config(&cosmic_shortcuts_path(layout)?)
+}
+
+/// Write the custom shortcuts file with backup.
+fn write_shortcuts(layout: &Layout, content: &str) -> core_types::Result<()> {
+    write_config(&cosmic_shortcuts_path(layout)?, content)
 }
 
 /// Remove existing sesame bindings from content.
@@ -171,50 +186,24 @@ fn add_binding(content: &str, binding: &str) -> String {
     }
 }
 
-/// Read the current system_actions file.
-fn read_system_actions() -> core_types::Result<String> {
-    let path = cosmic_system_actions_path()?;
-    if path.exists() {
-        fs::read_to_string(&path).map_err(|e| {
-            core_types::Error::Platform(format!("failed to read {}: {e}", path.display()))
-        })
-    } else {
-        Ok("{\n}".to_string())
-    }
+/// Read the current `system_actions` file.
+fn read_system_actions(layout: &Layout) -> core_types::Result<String> {
+    read_config(&cosmic_system_actions_path(layout)?)
 }
 
-/// Write the system_actions file with backup.
-fn write_system_actions(content: &str) -> core_types::Result<()> {
-    let path = cosmic_system_actions_path()?;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            core_types::Error::Platform(format!("failed to create {}: {e}", parent.display()))
-        })?;
-    }
-
-    if path.exists() {
-        let backup = path.with_extension("bak");
-        if let Err(e) = fs::copy(&path, &backup) {
-            tracing::warn!("failed to create backup at {}: {e}", backup.display());
-        } else {
-            tracing::info!("created backup at {}", backup.display());
-        }
-    }
-
-    fs::write(&path, content).map_err(|e| {
-        core_types::Error::Platform(format!("failed to write {}: {e}", path.display()))
-    })
+/// Write the `system_actions` file with backup.
+fn write_system_actions(layout: &Layout, content: &str) -> core_types::Result<()> {
+    write_config(&cosmic_system_actions_path(layout)?, content)
 }
 
-/// Update system_actions to point WindowSwitcher/WindowSwitcherPrevious at sesame.
+/// Update `system_actions` to point `WindowSwitcher`/`WindowSwitcherPrevious` at sesame.
 ///
 /// This overrides the commands that COSMIC's built-in `System(WindowSwitcher)`
 /// and `System(WindowSwitcherPrevious)` actions execute. The keybindings
 /// themselves (Alt+Tab, Super+Tab, etc.) remain unchanged — we only change
 /// what program they launch.
-fn setup_system_actions() -> core_types::Result<()> {
-    let mut content = read_system_actions()?;
+fn setup_system_actions(layout: &Layout) -> core_types::Result<()> {
+    let mut content = read_system_actions(layout)?;
 
     // Remove any existing WindowSwitcher entries.
     content = content
@@ -224,24 +213,30 @@ fn setup_system_actions() -> core_types::Result<()> {
         .join("\n");
 
     // Add sesame entries.
-    let switcher_entry = "    WindowSwitcher: \"sesame wm overlay\",";
-    let switcher_prev_entry = "    WindowSwitcherPrevious: \"sesame wm overlay --backward\",";
+    let entry = |action: &str, request: OverlayRequest| {
+        format!(
+            "    {action}: \"{}\",",
+            escape_ron_string(&command(request))
+        )
+    };
+    let content = add_binding(&content, &entry("WindowSwitcher", OverlayRequest::Forward));
+    let content = add_binding(
+        &content,
+        &entry("WindowSwitcherPrevious", OverlayRequest::Backward),
+    );
 
-    let content = add_binding(&content, switcher_entry);
-    let content = add_binding(&content, switcher_prev_entry);
-
-    write_system_actions(&content)?;
+    write_system_actions(layout, &content)?;
     Ok(())
 }
 
-/// Remove sesame entries from system_actions, restoring COSMIC defaults.
-fn remove_system_actions() -> core_types::Result<()> {
-    let path = cosmic_system_actions_path()?;
-    if !path.exists() {
+/// Remove sesame entries from `system_actions`, restoring COSMIC defaults.
+fn remove_system_actions(layout: &Layout) -> core_types::Result<()> {
+    let path = cosmic_system_actions_path(layout)?;
+    if !exists(&path)? {
         return Ok(());
     }
 
-    let content = read_system_actions()?;
+    let content = read_system_actions(layout)?;
 
     // Remove WindowSwitcher entries that point to sesame.
     let new_content: String = content
@@ -254,10 +249,12 @@ fn remove_system_actions() -> core_types::Result<()> {
     // system defaults (installed at /usr/share/cosmic/...).
     let trimmed = new_content.trim();
     if trimmed.is_empty() || trimmed == "{}" || trimmed == "{\n}" {
-        let _ = fs::remove_file(&path);
+        fs::remove_file(&path).map_err(|e| {
+            core_types::Error::Platform(format!("failed to remove {}: {e}", path.display()))
+        })?;
         tracing::info!("removed empty system_actions override (COSMIC will use system defaults)");
     } else {
-        write_system_actions(&new_content)?;
+        write_system_actions(layout, &new_content)?;
     }
     Ok(())
 }
@@ -265,37 +262,31 @@ fn remove_system_actions() -> core_types::Result<()> {
 /// Setup all sesame keybindings in COSMIC.
 ///
 /// Configures:
-/// - Alt+Tab / Super+Tab: overrides COSMIC's built-in WindowSwitcher command
+/// - Alt+Tab / Super+Tab: overrides COSMIC's built-in `WindowSwitcher` command
 ///   via `system_actions` so the compositor's own binding runs sesame. This
 ///   ensures the Alt modifier is consumed at compositor level (no leak to apps).
 /// - Launcher key (configurable, default alt+space): custom `Spawn(...)` binding
 ///   for full overlay with hints.
-pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
-    let (launcher_mods, launcher_key) = parse_key_combo(launcher_key_combo)?;
-
+///
+/// # Errors
+///
+/// A COSMIC config file that cannot be read, backed up, or written.
+pub fn setup_keybinding(layout: &Layout, launcher: &KeyCombo) -> core_types::Result<()> {
     // -- Step 1: Override system_actions so COSMIC's built-in Alt+Tab runs sesame --
-    setup_system_actions()?;
+    setup_system_actions(layout)?;
 
-    // -- Step 2: Add launcher key as a custom Spawn binding --
-    // (Alt+Tab is handled by the system_actions override above, not a custom binding.)
+    // -- Step 2: the launcher requests as custom Spawn bindings (the
+    // window switcher is the system_actions override above).
     let launcher_binding = format_keybinding(
-        &launcher_mods,
-        &launcher_key,
-        "sesame wm overlay --launcher",
+        &OverlayRequest::Launcher.trigger(launcher),
+        OverlayRequest::Launcher,
     );
-
-    // Add a backward variant with Shift for the launcher key (e.g. Alt+Shift+Space).
-    let mut backward_mods = launcher_mods.clone();
-    if !backward_mods.contains(&"Shift".to_string()) {
-        backward_mods.push("Shift".to_string());
-    }
     let launcher_backward_binding = format_keybinding(
-        &backward_mods,
-        &launcher_key,
-        "sesame wm overlay --launcher --backward",
+        &OverlayRequest::LauncherBackward.trigger(launcher),
+        OverlayRequest::LauncherBackward,
     );
 
-    let mut content = read_shortcuts()?;
+    let mut content = read_shortcuts(layout)?;
 
     if content.contains("sesame") {
         tracing::info!("removing existing sesame keybindings");
@@ -304,45 +295,58 @@ pub fn setup_keybinding(launcher_key_combo: &str) -> core_types::Result<()> {
 
     let content = add_binding(&content, &launcher_binding);
     let new_content = add_binding(&content, &launcher_backward_binding);
-    write_shortcuts(&new_content)?;
+    write_shortcuts(layout, &new_content)?;
 
-    tracing::info!("configured COSMIC keybindings: system_actions override + {launcher_key_combo}");
-    let backward_combo = format!("shift+{launcher_key_combo}");
-    println!("Keybindings configured:");
-    println!("    alt+tab       -> sesame wm overlay (via system_actions override)");
-    println!("    alt+shift+tab -> sesame wm overlay --backward (via system_actions override)");
-    println!("    super+tab     -> sesame wm overlay (via system_actions override)");
-    println!("    {launcher_key_combo:<14}-> sesame wm overlay --launcher");
-    println!("    {backward_combo:<14}-> sesame wm overlay --launcher --backward");
+    tracing::info!(%launcher, "configured COSMIC keybindings: system_actions override and the launcher key");
+    println!("Keybindings configured (COSMIC):");
+    for request in OverlayRequest::ALL {
+        let via = match request {
+            OverlayRequest::Forward => " (COSMIC's WindowSwitcher)",
+            OverlayRequest::Backward => " (COSMIC's WindowSwitcherPrevious)",
+            OverlayRequest::Launcher | OverlayRequest::LauncherBackward => "",
+        };
+        println!(
+            "    {:<18}-> {}{via}",
+            request.trigger(launcher).to_string(),
+            command(request)
+        );
+    }
     println!(
         "  System actions: {}",
-        cosmic_system_actions_path()?.display()
+        cosmic_system_actions_path(layout)?.display()
     );
-    println!("  Custom keys:    {}", cosmic_shortcuts_path()?.display());
+    println!(
+        "  Custom keys:    {}",
+        cosmic_shortcuts_path(layout)?.display()
+    );
 
     Ok(())
 }
 
 /// Remove sesame keybindings from COSMIC.
-pub fn remove_keybinding() -> core_types::Result<()> {
+///
+/// # Errors
+///
+/// A COSMIC config file that cannot be read, backed up, written, or removed.
+pub fn remove_keybinding(layout: &Layout) -> core_types::Result<()> {
     let mut found = false;
 
     // Remove system_actions override.
-    let sa_path = cosmic_system_actions_path()?;
-    if sa_path.exists() {
-        let sa_content = read_system_actions()?;
+    let sa_path = cosmic_system_actions_path(layout)?;
+    if exists(&sa_path)? {
+        let sa_content = read_system_actions(layout)?;
         if sa_content.contains("sesame") {
-            remove_system_actions()?;
+            remove_system_actions(layout)?;
             println!("Removed sesame system_actions override.");
             found = true;
         }
     }
 
     // Remove custom shortcuts.
-    let content = read_shortcuts()?;
+    let content = read_shortcuts(layout)?;
     if content.contains("sesame") {
         let new_content = remove_sesame_bindings(&content);
-        write_shortcuts(&new_content)?;
+        write_shortcuts(layout, &new_content)?;
         println!("Removed sesame custom keybindings.");
         found = true;
     }
@@ -354,13 +358,17 @@ pub fn remove_keybinding() -> core_types::Result<()> {
 }
 
 /// Show current keybinding status.
-pub fn keybinding_status() -> core_types::Result<()> {
+///
+/// # Errors
+///
+/// A COSMIC config file whose presence or contents cannot be read.
+pub fn keybinding_status(layout: &Layout) -> core_types::Result<()> {
     let mut found = false;
 
     // Check system_actions override.
-    let sa_path = cosmic_system_actions_path()?;
-    if sa_path.exists() {
-        let sa_content = read_system_actions()?;
+    let sa_path = cosmic_system_actions_path(layout)?;
+    if exists(&sa_path)? {
+        let sa_content = read_system_actions(layout)?;
         if sa_content.contains("sesame") {
             println!("  System actions override ({}):", sa_path.display());
             for line in sa_content.lines() {
@@ -373,9 +381,9 @@ pub fn keybinding_status() -> core_types::Result<()> {
     }
 
     // Check custom shortcuts.
-    let path = cosmic_shortcuts_path()?;
-    if path.exists() {
-        let content = read_shortcuts()?;
+    let path = cosmic_shortcuts_path(layout)?;
+    if exists(&path)? {
+        let content = read_shortcuts(layout)?;
         if content.contains("sesame") {
             println!("  Custom shortcuts ({}):", path.display());
             for line in content.lines() {
@@ -398,33 +406,96 @@ pub fn keybinding_status() -> core_types::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_key_combo_super_space() {
-        let (mods, key) = parse_key_combo("super+space").unwrap();
-        assert_eq!(mods, vec!["Super"]);
-        assert_eq!(key, "space");
+    fn combo(written: &str) -> KeyCombo {
+        written.parse().unwrap()
     }
 
     #[test]
-    fn parse_key_combo_alt_tab() {
-        let (mods, key) = parse_key_combo("alt+tab").unwrap();
-        assert_eq!(mods, vec!["Alt"]);
-        assert_eq!(key, "tab");
+    fn bindings_render_cosmic_modifiers_lowercase_keys_and_the_request_command() {
+        assert_eq!(
+            format_keybinding(&combo("shift+ctrl+Tab"), OverlayRequest::LauncherBackward),
+            "    (modifiers: [Ctrl, Shift], key: \"tab\"): Spawn(\"sesame wm overlay --launcher --backward\"),"
+        );
+        assert_eq!(
+            format_keybinding(&combo("F12"), OverlayRequest::Launcher),
+            "    (modifiers: [], key: \"f12\"): Spawn(\"sesame wm overlay --launcher\"),"
+        );
     }
 
     #[test]
-    fn parse_key_combo_triple() {
-        let (mods, key) = parse_key_combo("ctrl+shift+a").unwrap();
-        assert_eq!(mods, vec!["Ctrl", "Shift"]);
-        assert_eq!(key, "a");
+    fn commands_are_the_request_arguments() {
+        for request in OverlayRequest::ALL {
+            assert_eq!(
+                command(request),
+                format!("sesame {}", request.command_args().join(" "))
+            );
+        }
     }
 
     #[test]
-    fn format_keybinding_basic() {
-        let result = format_keybinding(&["Super".to_string()], "space", "sesame");
-        assert!(result.contains("modifiers: [Super]"));
-        assert!(result.contains("key: \"space\""));
-        assert!(result.contains("Spawn(\"sesame\")"));
+    fn write_config_backs_up_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom");
+        std::fs::write(&path, "old").unwrap();
+        write_config(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("bak")).unwrap(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn write_config_refuses_to_overwrite_without_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom");
+        std::fs::write(&path, "old").unwrap();
+        // A directory at the backup path makes the copy fail.
+        std::fs::create_dir(path.with_extension("bak")).unwrap();
+        assert!(write_config(&path, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    }
+
+    #[test]
+    fn shortcut_files_live_under_the_cosmic_config_dir() {
+        let layout = Layout::under(Path::new("/r"));
+        let dir = layout
+            .cosmic_config_dir()
+            .unwrap()
+            .join("com.system76.CosmicSettings.Shortcuts/v1");
+        assert_eq!(cosmic_shortcuts_path(&layout).unwrap(), dir.join("custom"));
+        assert_eq!(
+            cosmic_system_actions_path(&layout).unwrap(),
+            dir.join("system_actions")
+        );
+    }
+
+    #[test]
+    fn setup_then_remove_round_trips_under_a_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = Layout::under(root.path());
+        setup_keybinding(&layout, &combo("alt+space")).unwrap();
+        let shortcuts = read_shortcuts(&layout).unwrap();
+        assert!(shortcuts.contains(&format_keybinding(
+            &combo("alt+space"),
+            OverlayRequest::Launcher
+        )));
+        assert!(shortcuts.contains(&format_keybinding(
+            &combo("alt+shift+space"),
+            OverlayRequest::LauncherBackward
+        )));
+        let actions = read_system_actions(&layout).unwrap();
+        assert!(actions.contains("WindowSwitcher: \"sesame wm overlay\""));
+        assert!(actions.contains("WindowSwitcherPrevious: \"sesame wm overlay --backward\""));
+        remove_keybinding(&layout).unwrap();
+        assert!(!read_shortcuts(&layout).unwrap().contains("sesame"));
+        assert!(!exists(&cosmic_system_actions_path(&layout).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn read_config_absent_is_empty_map() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_config(&dir.path().join("absent")).unwrap(), "{\n}");
     }
 
     #[test]

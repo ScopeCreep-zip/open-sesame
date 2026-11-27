@@ -5,14 +5,11 @@
 //! Flush zeroes all cached secrets — called on profile deactivation.
 
 use core_crypto::SecureBytes;
+use core_types::BoxFuture;
 
-use crate::SecretsStore;
+use crate::store::SecretsStore;
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
-
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 struct CachedSecret {
     value: SecureBytes,
@@ -31,6 +28,8 @@ pub struct JitDelivery<S: SecretsStore> {
 }
 
 impl<S: SecretsStore> JitDelivery<S> {
+    /// Cache `store`'s secrets for `ttl` after each fetch.
+    #[must_use]
     pub fn new(store: S, ttl: Duration) -> Self {
         Self {
             store,
@@ -71,7 +70,7 @@ impl<S: SecretsStore> JitDelivery<S> {
         })
     }
 
-    /// Flush all cached secrets. SecureBytes are zeroed on drop.
+    /// Flush all cached secrets. `SecureBytes` are zeroed on drop.
     /// Called on profile deactivation (ADR-SEC-002).
     pub async fn flush(&self) {
         let mut cache = self.cache.write().await;
@@ -91,10 +90,10 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_caches_value() {
-        let store = InMemoryStore::new();
+        let store = InMemoryStore::default();
         store.set("key1", b"secret").await.unwrap();
 
-        let jit = JitDelivery::new(store, Duration::from_secs(60));
+        let jit = JitDelivery::new(store, Duration::from_mins(1));
         let v1 = jit.resolve("key1").await.unwrap();
         assert_eq!(v1.as_bytes(), b"secret");
 
@@ -106,10 +105,10 @@ mod tests {
 
     #[tokio::test]
     async fn flush_clears_cache() {
-        let store = InMemoryStore::new();
+        let store = InMemoryStore::default();
         store.set("key1", b"secret").await.unwrap();
 
-        let jit = JitDelivery::new(store, Duration::from_secs(60));
+        let jit = JitDelivery::new(store, Duration::from_mins(1));
         let _ = jit.resolve("key1").await.unwrap();
 
         // Modify underlying, then flush
@@ -122,7 +121,7 @@ mod tests {
 
     #[tokio::test]
     async fn ttl_expiry_refetches() {
-        let store = InMemoryStore::new();
+        let store = InMemoryStore::default();
         store.set("key1", b"v1").await.unwrap();
 
         let jit = JitDelivery::new(store, Duration::from_millis(1));

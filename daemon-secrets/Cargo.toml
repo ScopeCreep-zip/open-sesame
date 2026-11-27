@@ -1,30 +1,32 @@
 [package]
 name = "daemon-secrets"
-description = "Secrets broker daemon: JIT delivery, keyring integration, profile-scoped access"
+description = "Secrets broker daemon: SQLCipher vaults, multi-factor unlock, profile-scoped access"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-core-types   = { workspace = true }
-core-config  = { workspace = true }
-core-ipc     = { workspace = true }
-core-crypto  = { workspace = true }
-core-auth    = { workspace = true }
+core-types = { workspace = true }
+core-config = { workspace = true }
+core-daemon = { workspace = true }
+core-layout = { workspace = true }
+core-ipc = { workspace = true }
+core-crypto = { workspace = true }
+core-auth = { workspace = true }
 core-secrets = { workspace = true }
-core-profile = { workspace = true }
-tokio        = { workspace = true }
-tracing      = { workspace = true }
-tracing-subscriber = { workspace = true }
-clap         = { workspace = true }
-anyhow       = { workspace = true }
-serde        = { workspace = true }
-blake3       = { workspace = true }
-getrandom    = { workspace = true }
-snow         = { workspace = true }
-zeroize      = { workspace = true }
-governor     = { workspace = true }
+# rt-multi-thread: `#[tokio::main]` runs on the multi-threaded runtime.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+governor = { workspace = true }
 
 [features]
 ## Per-field AES-256-GCM encryption of secret values on the IPC bus,
@@ -35,16 +37,7 @@ governor     = { workspace = true }
 ipc-field-encryption = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux      = { workspace = true }
-tracing-journald    = { workspace = true }
-libc                = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-platform-macos  = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-platform-windows = { workspace = true }
+platform-linux = { workspace = true }
 
 [dev-dependencies]
-tempfile    = { workspace = true }
-tokio-test  = { workspace = true }
+tempfile = { workspace = true }

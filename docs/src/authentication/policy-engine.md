@@ -104,7 +104,7 @@ multi-factor unlocks. At most one `PartialUnlock` exists per profile, stored in
 ### State
 
 | Field | Type | Purpose |
-|-------|------|---------|
+| --- | --- | --- |
 | `received_factors` | `HashMap<AuthFactorId, SecureBytes>` | Factor keys received so far |
 | `remaining_required` | `HashSet<AuthFactorId>` | Factors still needed |
 | `remaining_additional` | `u32` | Additional factors still needed beyond required |

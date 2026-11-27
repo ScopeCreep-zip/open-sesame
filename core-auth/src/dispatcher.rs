@@ -1,179 +1,118 @@
-//! Authentication backend dispatcher.
+//! The registry of authentication backends, one per factor.
 //!
-//! Dispatches vault unlock across registered authentication backends.
-//! Tries non-interactive backends first, falling back to password entry
-//! when no automatic method is available.
+//! An unlock walks the factors daemon-secrets reports a vault still
+//! requires (`crate::remaining_factors`) and looks each up here: the
+//! backend's `requires_interaction()` tells the client what the factor
+//! needs (nothing, a password, a touch). daemon-secrets, not the client,
+//! applies the vault's policy to the factors submitted.
 
-use crate::backend::{AuthInteraction, VaultAuthBackend};
+use crate::backend::VaultAuthBackend;
+use crate::keyring::PlatformKeyringBackend;
 use crate::password::PasswordBackend;
 use crate::ssh::SshAgentBackend;
-use crate::vault_meta::VaultMetadata;
-use core_types::{AuthCombineMode, TrustProfileName};
-use std::path::Path;
+use core_types::{AuthFactorId, CredentialStore};
+use std::sync::Arc;
 
-/// Dispatches vault unlock across registered authentication backends.
-///
-/// Backend priority order:
-/// 1. SSH-agent (non-interactive, if enrolled and agent available)
-/// 2. Password (interactive fallback)
+/// The registered authentication backends.
 pub struct AuthDispatcher {
     backends: Vec<Box<dyn VaultAuthBackend>>,
 }
 
 impl AuthDispatcher {
+    /// The SSH agent and password backends, and the platform keyring
+    /// backend over `credential_store` when the platform has one.
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            backends: vec![
-                Box::new(SshAgentBackend::new()),
-                Box::new(PasswordBackend::new()),
-            ],
+    pub fn new(credential_store: Option<Arc<dyn CredentialStore>>) -> Self {
+        let mut backends: Vec<Box<dyn VaultAuthBackend>> = vec![
+            Box::new(SshAgentBackend::new()),
+            Box::new(PasswordBackend::new()),
+        ];
+        if let Some(store) = credential_store {
+            backends.push(Box::new(PlatformKeyringBackend::new(store)));
         }
+        Self { backends }
     }
 
-    /// Access all registered backends.
+    /// The backend that provides `factor`; `None` when no registered backend
+    /// implements it.
     #[must_use]
-    pub fn backends(&self) -> &[Box<dyn VaultAuthBackend>] {
-        &self.backends
-    }
-
-    /// Determine which backends are applicable for a vault given its metadata.
-    ///
-    /// A backend is applicable if it is enrolled in the vault metadata AND
-    /// can currently perform an unlock.
-    pub async fn applicable_backends(
-        &self,
-        profile: &TrustProfileName,
-        config_dir: &Path,
-        meta: &VaultMetadata,
-    ) -> Vec<&dyn VaultAuthBackend> {
-        let mut applicable = Vec::new();
-        for backend in &self.backends {
-            if meta.has_factor(backend.factor_id()) && backend.can_unlock(profile, config_dir).await
-            {
-                applicable.push(backend.as_ref());
-            }
-        }
-        applicable
-    }
-
-    /// Find the first non-interactive backend that is enrolled AND available.
-    pub async fn find_auto_backend(
-        &self,
-        profile: &TrustProfileName,
-        config_dir: &Path,
-    ) -> Option<&dyn VaultAuthBackend> {
-        for backend in &self.backends {
-            if backend.requires_interaction() == AuthInteraction::None
-                && backend.is_enrolled(profile, config_dir)
-                && backend.can_unlock(profile, config_dir).await
-            {
-                return Some(backend.as_ref());
-            }
-        }
-        None
-    }
-
-    /// Determine if all required factors for a policy can be satisfied
-    /// without interaction (auto-unlock feasibility check).
-    pub async fn can_auto_unlock(
-        &self,
-        profile: &TrustProfileName,
-        config_dir: &Path,
-        meta: &VaultMetadata,
-    ) -> bool {
-        match &meta.auth_policy {
-            AuthCombineMode::Any => {
-                // Any single non-interactive backend suffices.
-                self.find_auto_backend(profile, config_dir).await.is_some()
-            }
-            AuthCombineMode::All | AuthCombineMode::Policy(_) => {
-                // All required factors must be non-interactive.
-                // Conservative: return false if any required factor needs interaction.
-                let applicable = self.applicable_backends(profile, config_dir, meta).await;
-                if applicable.is_empty() {
-                    return false;
-                }
-                applicable
-                    .iter()
-                    .all(|b| b.requires_interaction() == AuthInteraction::None)
-            }
-        }
-    }
-
-    /// Get the password backend (always available as fallback).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the password backend was not registered (this is a programming
-    /// error — the constructor always registers it).
-    #[must_use]
-    pub fn password_backend(&self) -> &dyn VaultAuthBackend {
+    pub fn backend(&self, factor: AuthFactorId) -> Option<&dyn VaultAuthBackend> {
         self.backends
             .iter()
-            .find(|b| b.backend_id() == "password")
-            .map(std::convert::AsRef::as_ref)
-            .expect("password backend is always registered")
-    }
-}
-
-impl Default for AuthDispatcher {
-    fn default() -> Self {
-        Self::new()
+            .find(|backend| backend.factor_id() == factor)
+            .map(AsRef::as_ref)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::AuthInteraction;
+    use core_types::{
+        BoxFuture, CredentialError, CredentialId, CredentialPersistence, SensitiveBytes,
+    };
 
-    fn test_profile() -> TrustProfileName {
-        TrustProfileName::try_from("test-profile").unwrap()
-    }
+    /// A store that holds nothing: the dispatcher only registers it.
+    struct EmptyStore;
 
-    #[tokio::test]
-    async fn find_auto_backend_returns_none_without_enrollment() {
-        let dispatcher = AuthDispatcher::new();
-        let profile = test_profile();
-        let result = dispatcher
-            .find_auto_backend(&profile, std::path::Path::new("/nonexistent"))
-            .await;
-        assert!(result.is_none());
+    impl CredentialStore for EmptyStore {
+        fn vendor(&self) -> &'static str {
+            "empty"
+        }
+        fn persistence(&self) -> CredentialPersistence {
+            CredentialPersistence::UntilDelete
+        }
+        fn get<'a>(
+            &'a self,
+            _: &'a CredentialId,
+        ) -> BoxFuture<'a, Result<Option<SensitiveBytes>, CredentialError>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn set<'a>(
+            &'a self,
+            _: &'a CredentialId,
+            _: &'a str,
+            _: &'a [u8],
+        ) -> BoxFuture<'a, Result<(), CredentialError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn delete<'a>(
+            &'a self,
+            _: &'a CredentialId,
+        ) -> BoxFuture<'a, Result<bool, CredentialError>> {
+            Box::pin(async { Ok(false) })
+        }
     }
 
     #[test]
-    fn password_backend_always_available() {
-        let dispatcher = AuthDispatcher::new();
-        let backend = dispatcher.password_backend();
-        assert_eq!(backend.backend_id(), "password");
+    fn each_factor_has_its_backend_and_interaction() {
+        let dispatcher = AuthDispatcher::new(Some(Arc::new(EmptyStore)));
+        let interaction = |factor| {
+            dispatcher
+                .backend(factor)
+                .map(VaultAuthBackend::requires_interaction)
+        };
         assert_eq!(
-            backend.requires_interaction(),
-            AuthInteraction::PasswordEntry
+            interaction(AuthFactorId::SshAgent),
+            Some(AuthInteraction::None)
         );
+        assert_eq!(
+            interaction(AuthFactorId::Password),
+            Some(AuthInteraction::PasswordEntry)
+        );
+        assert_eq!(
+            interaction(AuthFactorId::PlatformKeyring),
+            Some(AuthInteraction::None)
+        );
+        assert_eq!(interaction(AuthFactorId::Fido2), None);
     }
 
-    #[tokio::test]
-    async fn applicable_backends_empty_when_no_enrollment() {
-        let dispatcher = AuthDispatcher::new();
-        let profile = test_profile();
-        let meta = VaultMetadata::new_password(AuthCombineMode::Any);
-        // PasswordBackend.can_unlock requires .password-wrap file to exist.
-        let applicable = dispatcher
-            .applicable_backends(&profile, std::path::Path::new("/nonexistent"), &meta)
-            .await;
-        // Password has no .password-wrap at /nonexistent, so it's not applicable.
-        assert!(applicable.is_empty());
-    }
-
-    #[tokio::test]
-    async fn can_auto_unlock_false_without_enrollment() {
-        let dispatcher = AuthDispatcher::new();
-        let profile = test_profile();
-        let meta = VaultMetadata::new_password(AuthCombineMode::Any);
+    #[test]
+    fn without_a_credential_store_the_keyring_factor_has_no_backend() {
         assert!(
-            !dispatcher
-                .can_auto_unlock(&profile, std::path::Path::new("/nonexistent"), &meta)
-                .await
+            AuthDispatcher::new(None)
+                .backend(AuthFactorId::PlatformKeyring)
+                .is_none()
         );
     }
 }

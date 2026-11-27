@@ -4,13 +4,15 @@
 //! to `MatchItem` for injection into the fuzzy matcher. Filters out entries
 //! with `NoDisplay=true`, `Hidden=true`, or missing `Exec=` fields (ADR-LNC-003).
 //!
-//! The `scan()` function is synchronous (freedesktop-desktop-entry is sync)
-//! and must be called via `tokio::task::spawn_blocking`.
+//! [`scan_all`] is synchronous (freedesktop-desktop-entry is sync) and
+//! must be called via `tokio::task::spawn_blocking`.
 
 use core_fuzzy::MatchItem;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
-/// A cached desktop entry with the Exec line preserved for post-sandbox launching.
+/// A cached desktop entry: its Exec line, preserved for launching after
+/// the scan.
 #[derive(Debug, Clone)]
 pub struct CachedEntry {
     pub id: String,
@@ -36,7 +38,10 @@ pub fn scan_all() -> (Vec<MatchItem>, Vec<CachedEntry>) {
     let mut cached = Vec::new();
 
     for e in entries {
-        if e.no_display() || e.hidden() || e.exec().is_none() {
+        let Some(exec) = e.exec() else {
+            continue;
+        };
+        if e.no_display() || e.hidden() {
             continue;
         }
         let id = e.id().to_owned();
@@ -44,38 +49,26 @@ pub fn scan_all() -> (Vec<MatchItem>, Vec<CachedEntry>) {
             continue;
         }
 
-        let exec = e.exec().unwrap().to_owned();
         cached.push(CachedEntry {
             id: id.clone(),
-            exec,
+            exec: exec.to_owned(),
         });
 
-        let name = e
-            .name(&locales)
-            .map(|c| c.into_owned())
-            .unwrap_or_else(|| id.clone());
-
-        let mut extra_parts: Vec<String> = Vec::new();
-        if let Some(keywords) = e.keywords(&locales) {
-            for kw in keywords {
-                let s = kw.into_owned();
-                if !s.is_empty() {
-                    extra_parts.push(s);
-                }
-            }
-        }
-        if let Some(categories) = e.categories() {
-            for cat in categories {
-                if !cat.is_empty() {
-                    extra_parts.push(cat.to_owned());
-                }
-            }
-        }
+        let name = e.name(&locales).map_or_else(|| id.clone(), Cow::into_owned);
+        let keywords = e.keywords(&locales).unwrap_or_default();
+        let categories = e.categories().unwrap_or_default();
+        let extra: Vec<&str> = keywords
+            .iter()
+            .map(AsRef::as_ref)
+            .chain(categories)
+            .filter(|part| !part.is_empty())
+            .collect();
 
         items.push(MatchItem {
             id,
             name,
-            extra: extra_parts.join(" "),
+            extra: extra.join(" "),
+            icon: e.icon().map(str::to_owned),
         });
     }
 
@@ -114,15 +107,15 @@ pub fn strip_field_codes(exec: &str) -> String {
     }
 
     // Collapse multiple spaces from removed codes.
-    let collapsed: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Tokenize an Exec value per freedesktop Desktop Entry Specification.
 ///
-/// Handles double-quote escaping (the spec only defines `\"`, `\``, `\\`,
-/// `\$` as escape sequences inside double quotes). Does NOT invoke a shell.
-/// Field codes should be stripped via `strip_field_codes()` before calling.
+/// Handles double-quote escaping (the spec only defines `\"`, `` \` ``,
+/// `\\`, `\$` as escape sequences inside double quotes); any other
+/// backslash is literal. Does NOT invoke a shell. Field codes should be
+/// stripped via [`strip_field_codes`] before calling.
 pub fn tokenize_exec(exec: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -132,18 +125,13 @@ pub fn tokenize_exec(exec: &str) -> Vec<String> {
     while let Some(c) = chars.next() {
         match c {
             '"' => in_quotes = !in_quotes,
-            '\\' if in_quotes => {
-                if let Some(&next) = chars.peek() {
-                    match next {
-                        '"' | '\\' | '$' | '`' => {
-                            current.push(chars.next().unwrap());
-                        }
-                        _ => {
-                            current.push('\\');
-                        }
-                    }
+            '\\' if in_quotes => match chars.peek() {
+                Some(&next @ ('"' | '\\' | '$' | '`')) => {
+                    chars.next();
+                    current.push(next);
                 }
-            }
+                _ => current.push('\\'),
+            },
             ' ' | '\t' if !in_quotes => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
@@ -229,6 +217,14 @@ mod tests {
         assert_eq!(
             tokenize_exec(r#"/usr/bin/app "path\\dir""#),
             vec!["/usr/bin/app", r"path\dir"]
+        );
+    }
+
+    #[test]
+    fn unspecified_and_trailing_backslashes_are_literal() {
+        assert_eq!(
+            tokenize_exec(r#"/usr/bin/app "a\nb" "tail\"#),
+            vec!["/usr/bin/app", r"a\nb", r"tail\"]
         );
     }
 

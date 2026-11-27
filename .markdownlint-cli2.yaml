@@ -8,6 +8,7 @@ config: .markdownlint.yaml
 ignores:
   - "node_modules/**"
   - "target/**"
+  - ".direnv/**"
   - "tmp/**"
   - "TASKS*.md"
   - "CHANGELOG.md"

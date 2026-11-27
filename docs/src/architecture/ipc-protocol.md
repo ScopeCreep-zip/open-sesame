@@ -22,15 +22,25 @@ Per-connection state is tracked in `ConnectionState`, which holds:
 - A registry-verified daemon name (`verified_name`, from Noise IK
   handshake)
 - An outbound `mpsc::Sender<Vec<u8>>` channel (capacity 256)
-- `PeerCredentials` (PID and UID)
 - `SecurityLevel` clearance
-- Subscription filters
 - An optional `TrustVector` computed at connection time
 
 An atomic `u64` counter assigns monotonically increasing connection IDs.
-Connection state is registered only after the Noise handshake succeeds,
-preventing a race where broadcast frames arrive on the outbound channel
-before the writer task is ready.
+Each connection runs three stages in `handle_connection`:
+
+1. **Accept and identify.** `noise::Connection::server` performs the
+   handshake; `identify` looks the client's static key up in the
+   registry and logs the outcome. Connection state is registered only
+   after the handshake succeeds, so no frame is routed to a connection
+   before a transport exists to encrypt it.
+2. **Serve.** `serve` multiplexes encrypted reads (routed through
+   `route_frame`) and writes of the frames routed to the connection.
+3. **Close.** `close` removes the connection's state, its unanswered
+   requests, and its daemon name.
+
+Clients and the server share one `noise::Connection` type (transport,
+buffered reader, buffered writer), constructed by `Connection::client`
+or `Connection::server`.
 
 On `BusServer::drop`, the socket file is removed from the filesystem.
 
@@ -93,8 +103,8 @@ mismatch causes the Noise handshake to fail cryptographically.
 - `local_credentials()`: calls `rustix::process::getuid()` and
   `std::process::id()` for the local process.
 
-An in-process sentinel (`PeerCredentials::in_process()`) uses
-`u32::MAX` as the UID, which never matches a real `UCred` check.
+In-process subscribers (`BusServer::register`, used by daemon-profile for
+its own host channel) perform no handshake and carry no peer credentials.
 
 ## Encrypted Transport
 
@@ -185,21 +195,22 @@ prefixes.
 ## Message Envelope
 
 Every IPC message is wrapped in `Message<T>` (`message.rs`). The current
-wire version is **3** (`WIRE_VERSION = 3`).
+wire version is **4** (`WIRE_VERSION = 4`).
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `wire_version` | `u8` | Wire format version, always serialized first. |
 | `msg_id` | `Uuid` (v7) | Unique message identifier, time-ordered. |
 | `correlation_id` | `Option<Uuid>` | Links a response to its originating request's `msg_id`. |
 | `sender` | `DaemonId` | Sender daemon identity (UUID v7, `dmon-` prefix). |
-| `timestamp` | `Timestamp` | Dual-clock timestamp (wall + monotonic). |
+| `timestamp` | `Timestamp` | Dual-clock timestamp: `monotonic_ns` since the sender started, and `wall_ms` since the Unix epoch (`None` when the sender's clock reads before the epoch). |
 | `payload` | `T` | The event or request payload (typically `EventKind`). |
 | `security_level` | `SecurityLevel` | Access control level for routing decisions. |
 | `verified_sender_name` | `Option<String>` | Server-stamped name from Noise IK registry lookup. |
 | `origin_installation` | `Option<InstallationId>` | v3: sender's installation identity. |
 | `agent_id` | `Option<AgentId>` | v3: sender's agent identity. |
 | `trust_snapshot` | `Option<TrustVector>` | v3: trust assessment at message creation time. |
+| `expects_response` | `bool` | v4: the sender waits for a correlated response (`BusClient::request`). |
 
 `MessageContext` carries per-client identity state so `Message::new()`
 can populate all fields. A minimal context requires only a `DaemonId`;
@@ -211,9 +222,11 @@ unregistered client. Postcard uses positional encoding, so all `Option`
 fields must always be present on the wire; `skip_serializing_if` is
 deliberately not used.
 
-`Message::new()` generates a UUID v7 for `msg_id` (time-ordered) and
-leaves `correlation_id` at `None`. The `with_correlation(id)` builder
-method sets it for response messages.
+`Message::new()` generates a UUID v7 for `msg_id` (time-ordered),
+leaves `correlation_id` at `None`, and sets `expects_response` to
+`false`. The `with_correlation(id)` builder method sets the correlation
+for response messages; `expecting_response()` marks a request whose
+sender waits for its response.
 
 ## Clearance Model
 
@@ -224,7 +237,7 @@ sensitivity for bus routing. The variants, ordered from lowest to highest
 by their derived `Ord`:
 
 | Level | Description |
-|---|---|
+| --- | --- |
 | `Open` | Visible to all subscribers including extensions. |
 | `Internal` | Visible to authenticated daemons only. This is the default. |
 | `ProfileScoped` | Visible only to daemons holding the current profile's security context. |
@@ -255,8 +268,8 @@ The registry is populated by `daemon-profile` at startup from per-daemon
 keypairs. It is wrapped in `RwLock<ClearanceRegistry>` inside
 `ServerState` to allow runtime mutation.
 
-After the Noise IK handshake, the server extracts the client's static
-public key via `NoiseTransport::remote_static()` (which calls
+After the Noise IK handshake, the server reads the client's static
+public key with `Connection::remote_static_key()` (which calls
 `TransportState::get_remote_static()`). The Noise IK pattern guarantees
 the remote static key is available after handshake. The 32-byte key is
 looked up in the registry:
@@ -274,7 +287,11 @@ daemons).
 
 ### Routing Enforcement
 
-`route_frame()` enforces two clearance rules:
+`route_frame()` decodes the frame, admits it (`admit`: identity binding
+and sender clearance under one lock acquisition), binds the daemon name
+on `DaemonStarted` (`bind_name`), stamps the verified identity, and
+delivers the frame as a response (`deliver_response`) or as a request or
+broadcast (`broadcast`). It enforces two clearance rules:
 
 1. **Sender clearance:** A daemon may only emit messages at or below its
    own clearance level. If
@@ -329,7 +346,7 @@ ownership using `mem::take` to zero the wrapper's copy.
 Keys are stored under `$XDG_RUNTIME_DIR/pds/`:
 
 | File | Permissions | Content |
-|---|---|---|
+| --- | --- | --- |
 | `bus.pub` | `0644` | Bus server X25519 public key (32 bytes). |
 | `bus.key` | `0600` | Bus server private key (32 bytes). |
 | `bus.checksum` | default | BLAKE3 keyed hash (32 bytes). |
@@ -399,26 +416,33 @@ The bus supports three message routing patterns.
 
 ### Request-Response (Unicast Reply)
 
-When a message arrives without a `correlation_id`, `route_frame()`
-records `(msg_id -> sender_conn_id)` in the `pending_requests` table.
-The message is then broadcast to eligible subscribers. When a response
-arrives (identified by having a `correlation_id`), the server removes the
-matching entry from `pending_requests` and delivers the response only to
-the originating connection.
+When a message without a `correlation_id` has `expects_response` set,
+`route_frame()` records `msg_id -> (sender_conn_id, sent_at)` in the
+`pending_requests` table; the message is then broadcast to eligible
+subscribers. Broadcasts (`expects_response` false) are never recorded,
+so long-lived publishers such as `daemon-input` add no entries. Each
+insertion first forgets requests older than `PENDING_REQUEST_TTL`
+(2 minutes, longer than any client request timeout), so requests whose
+answer never arrives do not accumulate. When a response arrives
+(identified by having a `correlation_id`), the server removes the
+matching entry and delivers the response only to the originating
+connection. A closing connection's entries are removed with it.
 
-On the client side, `BusClient::request()` creates a message, registers
-a `oneshot::channel` waiter keyed by `msg_id`, sends the message, and
-awaits the response with a caller-specified timeout. If the timeout
-expires, the waiter is cleaned up and an error is returned.
+On the client side, `BusClient::request()` marks the message with
+`expecting_response()`, registers a `oneshot::channel` waiter keyed by
+`msg_id`, sends the message, and awaits the response with a
+caller-specified timeout. If the timeout expires, the waiter is cleaned
+up and a typed `Timeout` error is returned.
 
 ### Confirmed RPC
 
 The server provides
 `register_confirmation(correlation_id, mpsc::Sender)`, which returns an
 RAII `ConfirmationGuard`. When a correlated response matching the
-registered `correlation_id` arrives at `route_frame()`, the raw frame is
-sent to the confirmation channel instead of (or in addition to) the
-normal routing path. The `ConfirmationGuard` deregisters the route on
+registered `correlation_id` arrives at `route_frame()`, the stamped
+frame is sent to the confirmation channel, and also to the requesting
+connection when one waits for it. A dropped confirmation or response
+frame (full channel) is logged. The `ConfirmationGuard` deregisters the route on
 drop, preventing stale entries from accumulating if the caller times out
 or encounters an error.
 
@@ -445,7 +469,7 @@ connection ID for O(1) unicast delivery without broadcasting.
 socket path:
 
 | Platform | Path |
-|---|---|
+| --- | --- |
 | Linux | `$XDG_RUNTIME_DIR/pds/bus.sock` |
 | macOS | `~/Library/Application Support/pds/bus.sock` |
 | Windows | `\\.\pipe\pds\bus` |

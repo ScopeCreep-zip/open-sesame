@@ -172,7 +172,7 @@ value generated at enrollment time and stored behind the biometric gate.
 Fingerprint sensors vary in their resistance to spoofing:
 
 | Sensor Type | Spoofing Resistance | Notes |
-|------------|-------------------|-------|
+| --- | --- | --- |
 | **Capacitive** (most laptop sensors) | Moderate | Detects electrical properties of skin. Gummy fingerprints with conductive material can sometimes fool them. |
 | **Ultrasonic** (e.g., Qualcomm 3D Sonic) | High | Measures sub-dermal features. More resistant to printed or molded replicas. |
 | **Optical** (common in USB readers) | Low | Easiest to spoof with printed or molded fingerprints. |
@@ -197,7 +197,7 @@ factor via `AuthCombineMode::Policy`.
 ## Integration Dependencies
 
 | Dependency | Type | Purpose |
-|-----------|------|---------|
+| --- | --- | --- |
 | `fprintd` >= 1.94 | System service | Fingerprint verification via D-Bus |
 | `libfprint` >= 1.94 | System library | Sensor driver layer (used by fprintd) |
 | Rust crate: `zbus` | Cargo dependency | D-Bus client for fprintd communication |

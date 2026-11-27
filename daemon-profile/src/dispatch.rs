@@ -1,548 +1,554 @@
-//! IPC message dispatch: handles all EventKind messages received on the bus,
-//! and periodic reconciliation with daemon-secrets.
+//! The bus-facing state of daemon-profile: the handler for every message
+//! addressed to it, the context engine, configuration reloads, and
+//! periodic reconciliation with daemon-secrets.
 
-use core_ipc::{BusServer, Message};
-use core_profile::{AuditAction, AuditLogger, ContextEngine};
-use core_types::{DaemonId, EventKind, SecurityLevel, TrustProfileName};
+use core_ipc::{BusServer, Message, MessageContext};
+use core_layout::Layout;
+use core_profile::{AuditAction, AuditLogger, ContextEngine, ContextSignal};
+use core_types::{Daemon, DaemonId, EventKind, ProfileId, TrustProfileName};
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 
+use crate::activation::{Transition, TransitionError};
+use crate::key_rotation::PendingRotation;
 use crate::{DaemonTracker, KEY_ROTATION_GRACE, KNOWN_DAEMONS};
 
-/// Handle a message received on the bus that daemon-profile is responsible for.
-///
-/// Returns `Some(response_event)` for RPC requests, `None` for broadcast events.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_bus_message<W: std::io::Write>(
-    msg: &Message<EventKind>,
-    active_profiles: &mut HashSet<TrustProfileName>,
-    _context_engine: &mut ContextEngine,
-    audit: &mut AuditLogger<W>,
-    default_profile_name: &mut TrustProfileName,
-    daemon_id: DaemonId,
-    bus: &BusServer,
-    daemon_tracker: &mut DaemonTracker,
-    locked: &mut bool,
-    confirm_tx: &mpsc::Sender<Vec<u8>>,
-    confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
-    config_profile_names: &[TrustProfileName],
-    install_ns: &uuid::Uuid,
-    rotation_done_tx: &mpsc::Sender<()>,
-) -> Option<EventKind> {
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    match &msg.payload {
-        // Track daemon start/restart for key revocation.
-        EventKind::DaemonStarted {
-            daemon_id: announced_id,
-            ..
-        } => {
-            // Require server-verified name from Noise IK registry. Never fall back
-            // to self-declared capabilities -- those are spoofable by any client.
-            let Some(name) = msg.verified_sender_name.clone() else {
-                tracing::warn!(
-                    audit = "security",
-                    sender = %announced_id,
-                    "DaemonStarted from unverified sender — ignoring (no verified_sender_name)"
-                );
-                return None;
-            };
-            if let Some(old_id) = daemon_tracker.track(&name, *announced_id) {
-                tracing::warn!(
-                    audit = "security",
-                    event_type = "daemon-restart-detected",
-                    daemon_name = %name,
-                    old_id = %old_id,
-                    new_id = %announced_id,
-                    "daemon restart detected — revoking old key and generating new keypair"
-                );
+/// The hash-chained audit log daemon-profile appends to.
+pub(crate) type AuditLog = AuditLogger<std::io::BufWriter<std::fs::File>>;
 
-                // daemon-secrets restarts locked with no active profiles.
-                if name == "daemon-secrets" {
-                    *locked = true;
-                    active_profiles.clear();
-                    tracing::warn!(
-                        audit = "security",
-                        event_type = "daemon-secrets-restart",
-                        "daemon-secrets restarted — resetting lock state and clearing active profiles"
-                    );
-                }
-
-                // Find the KNOWN_DAEMONS entry for this name.
-                if let Some(&(daemon_name, security_level)) =
-                    KNOWN_DAEMONS.iter().find(|(n, _)| *n == name)
-                {
-                    // Revoke old key, generate and register new one.
-                    let noise_params: snow::params::NoiseParams =
-                        "Noise_IK_25519_ChaChaPoly_BLAKE2s"
-                            .parse()
-                            .expect("valid noise params");
-                    let builder = snow::Builder::new(noise_params);
-                    match builder.generate_keypair() {
-                        Ok(raw_keypair) => {
-                            let new_keypair = core_ipc::ZeroizingKeypair::new(raw_keypair);
-                            let mut new_pubkey = [0u8; 32];
-                            new_pubkey.copy_from_slice(new_keypair.public());
-
-                            // Write new keypair to disk.
-                            if let Err(e) = core_ipc::noise::write_daemon_keypair(
-                                daemon_name,
-                                new_keypair.as_inner(),
-                            )
-                            .await
-                            {
-                                tracing::error!(error = %e, daemon = daemon_name, "failed to write revocation keypair");
-                            } else {
-                                // Revoke all keys for this daemon (handles dual-key
-                                // state during rotation) and re-register with
-                                // incremented generation.
-                                let mut reg = bus.registry_mut().await;
-                                let next_gen = reg
-                                    .revoke_by_name(daemon_name)
-                                    .map_or(0, |id| id.generation + 1);
-                                reg.register_with_generation(
-                                    daemon_name.into(),
-                                    new_pubkey,
-                                    security_level,
-                                    next_gen,
-                                );
-                                drop(reg); // Release lock before I/O.
-                                tracing::info!(
-                                    audit = "security",
-                                    event_type = "key-revocation",
-                                    daemon = daemon_name,
-                                    generation = next_gen,
-                                    "old key revoked, new key registered"
-                                );
-                                let _ = audit.append(AuditAction::KeyRevoked {
-                                    daemon_name: daemon_name.into(),
-                                    reason: "crash-restart-detected".into(),
-                                    generation: next_gen,
-                                });
-
-                                // Announce KeyRotationPending so the restarted daemon
-                                // reconnects with the new key.
-                                let rotation_event = EventKind::KeyRotationPending {
-                                    daemon_name: daemon_name.into(),
-                                    new_pubkey,
-                                    grace_period_s: KEY_ROTATION_GRACE,
-                                };
-                                let rotation_msg = Message::new(
-                                    &msg_ctx,
-                                    rotation_event,
-                                    SecurityLevel::Internal,
-                                    bus.epoch(),
-                                );
-                                if let Ok(payload) = core_ipc::encode_frame(&rotation_msg) {
-                                    bus.publish(&payload, SecurityLevel::Internal).await;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, daemon = daemon_name, "failed to generate revocation keypair");
-                        }
-                    }
-                }
-            }
+/// The message in `frame` from a host channel, unless it is malformed
+/// (logged) or `own` sent it: `bus.publish()` delivers to every connection,
+/// this host channel included, and re-processing daemon-profile's own
+/// broadcasts (activation's `ProfileActivate`) would loop forever.
+pub(crate) fn decode_host_frame(frame: &[u8], own: DaemonId) -> Option<Message<EventKind>> {
+    match core_ipc::decode_frame::<Message<EventKind>>(frame) {
+        Ok(msg) => (msg.sender != own).then_some(msg),
+        Err(e) => {
+            tracing::warn!(error = %e, "malformed frame on host channel");
             None
         }
+    }
+}
 
-        EventKind::StatusRequest => {
-            // Query daemon-secrets for authoritative lock + active profile state
-            // rather than relying on shadow state that may be stale.
-            match crate::activation::confirmed_rpc(
-                bus,
-                daemon_id,
-                EventKind::SecretsStateRequest,
-                confirm_tx,
-                confirm_rx,
-            )
-            .await
-            {
-                Ok(response) => {
-                    if let EventKind::SecretsStateResponse {
-                        locked: auth_locked,
-                        active_profiles: auth_profiles,
-                        lock_state: auth_lock_state,
-                    } = response.payload
-                    {
-                        // Warm the shadow state from the authoritative source.
-                        *locked = auth_locked;
-                        *active_profiles = auth_profiles.iter().cloned().collect();
-                        Some(EventKind::StatusResponse {
-                            active_profiles: auth_profiles,
-                            default_profile: default_profile_name.clone(),
-                            daemon_uptimes_ms: vec![(daemon_id, 0)],
-                            locked: auth_locked,
-                            lock_state: auth_lock_state,
-                        })
-                    } else {
-                        tracing::warn!(
-                            "unexpected response to SecretsStateRequest: {:?}",
-                            response.payload
-                        );
-                        Some(EventKind::StatusResponse {
-                            active_profiles: active_profiles.iter().cloned().collect(),
-                            default_profile: default_profile_name.clone(),
-                            daemon_uptimes_ms: vec![(daemon_id, 0)],
-                            locked: *locked,
-                            lock_state: std::collections::BTreeMap::new(),
-                        })
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to query daemon-secrets for status, using shadow state");
-                    Some(EventKind::StatusResponse {
-                        active_profiles: active_profiles.iter().cloned().collect(),
-                        default_profile: default_profile_name.clone(),
-                        daemon_uptimes_ms: vec![(daemon_id, 0)],
-                        locked: *locked,
-                        lock_state: std::collections::BTreeMap::new(),
-                    })
-                }
+/// Encode `reply` and unicast it to the connection that sent request
+/// `msg_id`. Never broadcasts: the reply may carry secret values
+/// (`SecretGetResponse`). A requester that disconnected before its reply
+/// (it gave up waiting) is expected; a reply to a request the bus never
+/// tracked is an error. Either way nothing is delivered.
+pub(crate) async fn send_reply(bus: &BusServer, msg_id: &uuid::Uuid, reply: &Message<EventKind>) {
+    let mut reply_bytes = match core_ipc::encode_frame(reply) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!(error = %e, %msg_id, "failed to encode response");
+            return;
+        }
+    };
+    match bus.take_pending_request(msg_id).await {
+        core_ipc::Requester::Connected(origin_conn) => {
+            if !bus.send_to(origin_conn, &reply_bytes).await {
+                tracing::warn!(
+                    conn_id = origin_conn,
+                    %msg_id,
+                    "unicast response failed: connection gone or channel full"
+                );
             }
         }
-
-        EventKind::ProfileList => {
-            // Iterate config profiles (not just active_profiles) so that
-            // `sesame profile list` shows all configured profiles.
-            // Use deterministic UUIDs (UUID v5) so ProfileIds are stable across
-            // calls and restarts, matching the IDs used in build_activation_rules().
-            let profiles = config_profile_names
-                .iter()
-                .map(|name| {
-                    let id = core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
-                        install_ns,
-                        format!("profile:{}", name).as_bytes(),
-                    ));
-                    core_types::ProfileSummary {
-                        id,
-                        name: name.clone(),
-                        is_active: active_profiles.contains(name),
-                        is_default: name == &*default_profile_name,
-                    }
-                })
-                .collect();
-            Some(EventKind::ProfileListResponse { profiles })
+        core_ipc::Requester::Disconnected => {
+            tracing::info!(%msg_id, "requester disconnected before its response; not delivered");
         }
-
-        EventKind::ProfileActivate {
-            profile_name,
-            target,
-        } => {
-            if !config_profile_names.contains(profile_name) {
-                tracing::warn!(profile = %profile_name, "activate requested but profile not in config");
-                return Some(EventKind::ProfileActivateResponse { success: false });
-            }
-            match crate::activation::activate(
-                *target,
-                profile_name,
-                bus,
-                audit,
-                daemon_id,
-                confirm_tx,
-                confirm_rx,
-            )
-            .await
-            {
-                Ok(duration_ms) => {
-                    active_profiles.insert(profile_name.clone()); // TrustProfileName: Clone
-                    tracing::info!(
-                        profile = %profile_name,
-                        duration_ms,
-                        "profile activated"
-                    );
-                    Some(EventKind::ProfileActivateResponse { success: true })
-                }
-                Err(e) => {
-                    tracing::error!(
-                        profile = %profile_name,
-                        error = %e,
-                        "profile activation failed"
-                    );
-                    Some(EventKind::ProfileActivateResponse { success: false })
-                }
-            }
-        }
-
-        EventKind::ProfileDeactivate {
-            profile_name,
-            target,
-        } => {
-            if !config_profile_names.contains(profile_name) {
-                tracing::warn!(profile = %profile_name, "deactivate requested but profile not in config");
-                return Some(EventKind::ProfileDeactivateResponse { success: false });
-            }
-            if !active_profiles.contains(profile_name) {
-                tracing::warn!(profile = %profile_name, "deactivate requested but profile not active");
-                return Some(EventKind::ProfileDeactivateResponse { success: false });
-            }
-
-            match crate::activation::deactivate(
-                *target,
-                profile_name,
-                bus,
-                audit,
-                daemon_id,
-                confirm_tx,
-                confirm_rx,
-            )
-            .await
-            {
-                Ok(duration_ms) => {
-                    active_profiles.remove(profile_name);
-                    tracing::info!(
-                        profile = %profile_name,
-                        duration_ms,
-                        "profile deactivated"
-                    );
-                    Some(EventKind::ProfileDeactivateResponse { success: true })
-                }
-                Err(e) => {
-                    tracing::error!(
-                        profile = %profile_name,
-                        error = %e,
-                        "profile deactivation failed — triggering immediate reconciliation"
-                    );
-                    reconcile_secrets_state(
-                        bus,
-                        daemon_id,
-                        locked,
-                        active_profiles,
-                        confirm_tx,
-                        confirm_rx,
-                    )
-                    .await;
-                    Some(EventKind::ProfileDeactivateResponse { success: false })
-                }
-            }
-        }
-
-        EventKind::SetDefaultProfile { profile_name } => {
-            if !config_profile_names.contains(profile_name) {
-                tracing::warn!(profile = %profile_name, "set default requested but profile not in config");
-                return Some(EventKind::SetDefaultProfileResponse { success: false });
-            }
-            tracing::info!(
-                previous = %default_profile_name,
-                new = %profile_name,
-                "set default profile requested"
+        core_ipc::Requester::Unknown => {
+            tracing::error!(
+                %msg_id,
+                "response to an untracked request -- dropping to prevent potential secret broadcast"
             );
-            *default_profile_name = profile_name.clone();
-            Some(EventKind::SetDefaultProfileResponse { success: true })
         }
+    }
+    // The postcard buffer may hold serialized secret values.
+    zeroize::Zeroize::zeroize(&mut reply_bytes);
+}
 
-        EventKind::UnlockResponse {
-            success: true,
-            profile,
-        } => {
-            *locked = false; // At least one vault is unlocked.
-            tracing::info!(profile = %profile, "vault unlocked, shadow state updated");
-            None
+/// Profile, lock, and key state served over the bus.
+pub(crate) struct Hub {
+    /// Daemon keypair locations.
+    pub(crate) layout: Layout,
+    pub(crate) bus: BusServer,
+    /// daemon-profile's sender identity on the bus and the installation
+    /// and agent identity its messages carry.
+    pub(crate) ctx: MessageContext,
+    pub(crate) audit: AuditLog,
+    /// Shadow of daemon-secrets' authorized profiles, refreshed by
+    /// reconciliation.
+    pub(crate) active_profiles: HashSet<TrustProfileName>,
+    /// Shadow of daemon-secrets' lock state.
+    pub(crate) locked: bool,
+    pub(crate) default_profile_name: TrustProfileName,
+    /// The configured profile names that may be activated.
+    pub(crate) config_profile_names: Vec<TrustProfileName>,
+    pub(crate) install_ns: uuid::Uuid,
+    /// Selects the default profile from context signals.
+    pub(crate) context_engine: ContextEngine,
+    pub(crate) daemon_tracker: DaemonTracker,
+    /// Confirmed-RPC route for daemon-secrets' responses.
+    pub(crate) confirm_tx: mpsc::Sender<Vec<u8>>,
+    pub(crate) confirm_rx: mpsc::Receiver<Vec<u8>>,
+    /// Signals the event loop to run key rotation phase 2.
+    pub(crate) rotation_done_tx: mpsc::Sender<()>,
+    /// The rotation between its phases, if one is.
+    pub(crate) pending_rotation: Option<PendingRotation>,
+}
+
+impl Hub {
+    /// Run key rotation phase 2 after the grace period, through the event
+    /// loop's rotation channel.
+    pub(crate) fn schedule_rotation_phase2(&self) {
+        let tx = self.rotation_done_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(u64::from(
+                KEY_ROTATION_GRACE,
+            )))
+            .await;
+            if tx.send(()).await.is_err() {
+                tracing::warn!("event loop gone, key rotation phase 2 not run");
+            }
+        });
+    }
+
+    /// Handle a frame from the host channel: a request is answered by
+    /// unicast to its sender (a broadcast would leak secret values to
+    /// non-requesting clients).
+    pub(crate) async fn host_frame(&mut self, frame: &[u8]) {
+        let Some(msg) = decode_host_frame(frame, self.ctx.sender) else {
+            return;
+        };
+        if let Some(response) = self.handle(&msg).await {
+            let reply = Message::new(&self.ctx, response, msg.security_level, self.bus.epoch())
+                .with_correlation(msg.msg_id);
+            send_reply(&self.bus, &msg.msg_id, &reply).await;
         }
+    }
 
-        EventKind::LockResponse {
-            success: true,
-            profiles_locked,
-        } => {
-            if profiles_locked.is_empty() {
-                // Lock-all: clear everything.
-                *locked = true;
-                active_profiles.clear();
+    /// Rebuild the context engine, the default profile, and the
+    /// activatable profile names from the live configuration. Shared by
+    /// the configuration watcher and SIGHUP (`systemctl reload`).
+    pub(crate) fn reload(&mut self, live: &std::sync::RwLock<core_config::Config>) {
+        let config = match live.read() {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::error!(error = %e, "config state lock poisoned, context engine not rebuilt");
+                return;
+            }
+        };
+        self.context_engine = crate::context::context_engine(&config, &self.install_ns);
+        self.default_profile_name = config.global.default_profile.clone();
+        self.config_profile_names = crate::context::profile_names(&config);
+        tracing::info!(
+            default_profile = %self.default_profile_name,
+            "context engine rebuilt from reloaded config"
+        );
+    }
+
+    /// Evaluate a context signal: a changed default profile is the default
+    /// `status` reports, audited and announced.
+    pub(crate) async fn context_changed(&mut self, signal: &ContextSignal) {
+        let previous = self.context_engine.default_profile();
+        let Some(current) = self
+            .context_engine
+            .evaluate(signal)
+            .filter(|&current| current != previous)
+        else {
+            return;
+        };
+        tracing::info!(%previous, new_default = %current, ?signal, "default profile changed by context engine");
+        if let Some(name) =
+            crate::context::profile_named(&self.config_profile_names, &self.install_ns, current)
+        {
+            self.default_profile_name = name.clone();
+        } else {
+            tracing::error!(
+                profile = %current,
+                "context engine chose a profile that is not configured"
+            );
+        }
+        self.default_changed(previous, current).await;
+    }
+
+    /// Audit and announce the default profile's change from `previous` to
+    /// `current` (`DefaultProfileChanged`: daemon-clipboard files new
+    /// entries under the default).
+    async fn default_changed(&mut self, previous: ProfileId, current: ProfileId) {
+        self.record(&AuditAction::DefaultProfileChanged { previous, current });
+        self.announce(EventKind::DefaultProfileChanged { previous, current })
+            .await;
+    }
+
+    /// Handle a message on the bus that daemon-profile is responsible for.
+    ///
+    /// Returns `Some(response_event)` for RPC requests, `None` for broadcast
+    /// events.
+    async fn handle(&mut self, msg: &Message<EventKind>) -> Option<EventKind> {
+        match &msg.payload {
+            EventKind::DaemonStarted { daemon_id, .. } => {
+                self.daemon_started(msg, *daemon_id).await;
+                None
+            }
+            EventKind::StatusRequest => Some(self.status().await),
+            EventKind::ProfileList => Some(self.profile_list()),
+            EventKind::ProfileActivate {
+                profile_name,
+                target,
+            } => Some(EventKind::ProfileActivateResponse {
+                success: self.activate(*target, profile_name).await,
+            }),
+            EventKind::ProfileDeactivate {
+                profile_name,
+                target,
+            } => Some(EventKind::ProfileDeactivateResponse {
+                success: self.deactivate(*target, profile_name).await,
+            }),
+            EventKind::SetDefaultProfile { profile_name } => {
+                Some(EventKind::SetDefaultProfileResponse {
+                    success: self.set_default(profile_name).await,
+                })
+            }
+            EventKind::VaultUnlocked { .. } | EventKind::VaultsLocked { .. } => {
+                self.lock_state_changed(msg);
+                None
+            }
+            // Secret operation audit events from daemon-secrets, persisted in
+            // the hash-chained audit log.
+            EventKind::SecretOperationAudit {
+                action,
+                profile,
+                key,
+                requester,
+                requester_name,
+                outcome,
+            } => {
+                self.record(&AuditAction::SecretOperationAudited {
+                    action: action.clone(),
+                    profile: profile.clone(),
+                    key: key.clone(),
+                    requester: *requester,
+                    requester_name: requester_name.clone(),
+                    outcome: outcome.clone(),
+                });
+                None
+            }
+            EventKind::KeyRotationRequest => Some(self.rotate_on_request().await),
+            // Every other event is addressed to another daemon.
+            _ => None,
+        }
+    }
+
+    /// A daemon announced itself as `announced_id`: a known name under a new
+    /// id is a restart. Only the server-verified name from the Noise IK
+    /// registry counts; self-declared capabilities are spoofable by any
+    /// client.
+    async fn daemon_started(&mut self, msg: &Message<EventKind>, announced_id: DaemonId) {
+        let Some(name) = msg.verified_sender_name.as_deref() else {
+            tracing::warn!(
+                audit = "security",
+                sender = %announced_id,
+                "DaemonStarted from unverified sender — ignoring (no verified_sender_name)"
+            );
+            return;
+        };
+        if let Some(old_id) = self.daemon_tracker.track(name, announced_id) {
+            self.daemon_restarted(name, old_id, announced_id).await;
+        }
+    }
+
+    /// Every configured profile, with installation-scoped IDs matching the
+    /// context engine's activation rules.
+    fn profile_list(&self) -> EventKind {
+        let profiles = self
+            .config_profile_names
+            .iter()
+            .map(|name| core_types::ProfileSummary {
+                id: ProfileId::of_profile(&self.install_ns, name.as_ref()),
+                name: name.clone(),
+                is_active: self.active_profiles.contains(name),
+                is_default: *name == self.default_profile_name,
+            })
+            .collect();
+        EventKind::ProfileListResponse { profiles }
+    }
+
+    /// Whether `profile_name` is configured; a request naming another is
+    /// logged and refused.
+    fn configured(&self, profile_name: &TrustProfileName, request: &str) -> bool {
+        let configured = self.config_profile_names.contains(profile_name);
+        if !configured {
+            tracing::warn!(profile = %profile_name, request, "profile not in config");
+        }
+        configured
+    }
+
+    /// Activate a configured profile: whether it is now active.
+    async fn activate(&mut self, target: ProfileId, profile_name: &TrustProfileName) -> bool {
+        self.configured(profile_name, "activate")
+            && self.apply(Transition::Activate, target, profile_name).await
+    }
+
+    /// Deactivate a configured, active profile: whether it is now inactive.
+    async fn deactivate(&mut self, target: ProfileId, profile_name: &TrustProfileName) -> bool {
+        if !self.configured(profile_name, "deactivate") {
+            return false;
+        }
+        if !self.active_profiles.contains(profile_name) {
+            tracing::warn!(profile = %profile_name, "deactivate requested but profile not active");
+            return false;
+        }
+        self.apply(Transition::Deactivate, target, profile_name)
+            .await
+    }
+
+    /// Make a configured profile the default: the context engine's default
+    /// and the one `status` reports, audited and announced when it changed.
+    async fn set_default(&mut self, profile_name: &TrustProfileName) -> bool {
+        if !self.configured(profile_name, "set default") {
+            return false;
+        }
+        tracing::info!(previous = %self.default_profile_name, new = %profile_name, "set default profile requested");
+        self.default_profile_name = profile_name.clone();
+        let current = ProfileId::of_profile(&self.install_ns, profile_name.as_ref());
+        if let Some(previous) = self.context_engine.set_default(current) {
+            self.default_changed(previous, current).await;
+        }
+        true
+    }
+
+    /// Update the shadow lock state from daemon-secrets' `VaultUnlocked` or
+    /// `VaultsLocked`. Only the server-verified daemon-secrets identity
+    /// counts; any other sender is ignored.
+    fn lock_state_changed(&mut self, msg: &Message<EventKind>) {
+        if msg.verified_sender_name.as_deref() != Some(Daemon::Secrets.name()) {
+            tracing::warn!(
+                audit = "security",
+                sender = %msg.sender,
+                "lock-state announcement from a sender other than daemon-secrets ignored"
+            );
+            return;
+        }
+        match &msg.payload {
+            EventKind::VaultUnlocked { profile } => {
+                self.locked = false; // At least one vault is unlocked.
+                tracing::info!(%profile, "vault unlocked, shadow state updated");
+            }
+            EventKind::VaultsLocked { profiles } if profiles.is_empty() => {
+                self.fail_closed();
                 tracing::info!(
                     audit = "security",
                     "all vaults locked, active profiles cleared"
                 );
-            } else {
-                // Per-profile lock: remove locked profiles from active set.
-                for p in profiles_locked {
-                    active_profiles.remove(p);
-                }
-                tracing::info!(audit = "security", profiles = ?profiles_locked, "vault(s) locked");
             }
-            None
+            EventKind::VaultsLocked { profiles } => {
+                for profile in profiles {
+                    self.active_profiles.remove(profile);
+                }
+                tracing::info!(audit = "security", ?profiles, "vault(s) locked");
+            }
+            _ => {}
         }
+    }
 
-        // Receive secret operation audit events from daemon-secrets and
-        // persist them in the hash-chained audit log.
-        EventKind::SecretOperationAudit {
-            action,
-            profile,
-            key,
-            requester,
-            requester_name,
-            outcome,
-        } => {
-            if let Err(e) = audit.append(AuditAction::SecretOperationAudited {
-                action: action.clone(),
-                profile: profile.clone(),
-                key: key.clone(),
-                requester: *requester,
-                requester_name: requester_name.clone(),
-                outcome: outcome.clone(),
-            }) {
+    /// Run rotation phase 1 on request: the response, carrying the error.
+    async fn rotate_on_request(&mut self) -> EventKind {
+        tracing::info!(
+            audit = "key-management",
+            "on-demand key rotation requested via IPC"
+        );
+        let error = self.begin_key_rotation().await.err().map(|e| {
+            tracing::error!(error = %e, "on-demand key rotation failed");
+            format!("{e:#}")
+        });
+        EventKind::KeyRotationRequestResponse {
+            success: error.is_none(),
+            error,
+        }
+    }
+
+    /// Apply `transition` to `profile_name` and update the shadow state:
+    /// whether the profile is now in the requested state.
+    ///
+    /// When daemon-secrets did not confirm the transition, its state is
+    /// unknown: the shadow state is reconciled with daemon-secrets'
+    /// authoritative state, which then answers.
+    async fn apply(
+        &mut self,
+        transition: Transition,
+        target: ProfileId,
+        profile_name: &TrustProfileName,
+    ) -> bool {
+        let wanted_active = transition == Transition::Activate;
+        match self.transition(transition, target, profile_name).await {
+            Ok(duration_ms) => {
+                if wanted_active {
+                    self.active_profiles.insert(profile_name.clone());
+                } else {
+                    self.active_profiles.remove(profile_name);
+                }
+                tracing::info!(profile = %profile_name, ?transition, duration_ms, "profile transition applied");
+                true
+            }
+            Err(e @ TransitionError::Rejected) => {
+                tracing::error!(profile = %profile_name, ?transition, error = %e, "profile transition rejected");
+                false
+            }
+            Err(e @ TransitionError::Unconfirmed(_)) => {
                 tracing::error!(
+                    profile = %profile_name,
+                    ?transition,
                     error = %e,
-                    action = %action,
-                    profile = %profile,
-                    "failed to write secret operation audit entry"
+                    "profile transition unconfirmed, reconciling with daemon-secrets"
                 );
+                self.reconcile_secrets_state().await;
+                self.active_profiles.contains(profile_name) == wanted_active
             }
-            None
         }
+    }
 
-        // Agent and federation lifecycle events — no action needed in profile daemon.
-        EventKind::AgentConnected { .. } => None,
-        EventKind::AgentDisconnected { .. } => None,
-        EventKind::InstallationCreated { .. } => None,
-        EventKind::ProfileIdMigrated { .. } => None,
-        EventKind::AuthorizationRequired { .. } => None,
-        EventKind::AuthorizationGrant { .. } => None,
-        EventKind::AuthorizationDenied { .. } => None,
-        EventKind::AuthorizationTimeout { .. } => None,
-        EventKind::DelegationRevoked { .. } => None,
-        EventKind::HeartbeatRenewed { .. } => None,
-        EventKind::FederationSessionEstablished { .. } => None,
-        EventKind::FederationSessionTerminated { .. } => None,
-        EventKind::PostureEvaluated { .. } => None,
+    /// `name` reconnected with a new `DaemonId`: revoke its keys, issue a
+    /// fresh keypair under the next generation, and announce it so the
+    /// restarted daemon reconnects with the new key.
+    async fn daemon_restarted(&mut self, name: &str, old_id: DaemonId, new_id: DaemonId) {
+        tracing::warn!(
+            audit = "security",
+            event_type = "daemon-restart-detected",
+            daemon_name = %name,
+            old_id = %old_id,
+            new_id = %new_id,
+            "daemon restart detected — revoking old key and generating new keypair"
+        );
 
-        EventKind::KeyRotationRequest => {
-            tracing::info!(
-                audit = "key-management",
-                "on-demand key rotation requested via IPC"
+        let Some(&(daemon, security_level)) =
+            KNOWN_DAEMONS.iter().find(|(known, _)| known.name() == name)
+        else {
+            tracing::warn!(
+                daemon = name,
+                "restarted daemon is not a known daemon, no key issued"
             );
-            match crate::key_rotation::rotate_keys_phase1(bus, daemon_id, audit).await {
-                Ok(()) => {
-                    // Schedule phase 2 via the same channel the timer uses.
-                    // The main event loop's rotation_done_rx arm runs phase 2.
-                    let tx = rotation_done_tx.clone();
-                    let grace = crate::KEY_ROTATION_GRACE;
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(u64::from(grace))).await;
-                        let _ = tx.send(()).await;
-                    });
-                    Some(EventKind::KeyRotationRequestResponse {
-                        success: true,
-                        error: None,
-                    })
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "on-demand key rotation failed");
-                    Some(EventKind::KeyRotationRequestResponse {
-                        success: false,
-                        error: Some(e.to_string()),
-                    })
-                }
-            }
-        }
-
-        _ => None,
-    }
-}
-
-/// Reconcile daemon-profile's view of lock/active-profiles with daemon-secrets.
-///
-/// Sends `SecretsStateRequest` via confirmed RPC and overwrites local state with
-/// the authoritative response. On timeout, fails closed: assume locked, empty active set.
-pub(crate) async fn reconcile_secrets_state(
-    bus: &BusServer,
-    daemon_id: DaemonId,
-    locked: &mut bool,
-    active_profiles: &mut HashSet<TrustProfileName>,
-    confirm_tx: &mpsc::Sender<Vec<u8>>,
-    confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
-) {
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    let msg = Message::new(
-        &msg_ctx,
-        EventKind::SecretsStateRequest,
-        SecurityLevel::Internal,
-        bus.epoch(),
-    );
-    let msg_id = msg.msg_id;
-
-    let _guard = bus.register_confirmation(msg_id, confirm_tx.clone()).await;
-
-    // Drain stale messages from confirm_rx to prevent consuming a leftover
-    // response from a previous timed-out confirmed RPC.
-    while confirm_rx.try_recv().is_ok() {}
-
-    let frame = match core_ipc::encode_frame(&msg) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!(error = %e, "reconciliation: failed to encode SecretsStateRequest");
             return;
-        }
-    };
+        };
 
-    if let Err(e) = bus.send_to_named("daemon-secrets", &frame).await {
-        // daemon-secrets not connected — fail closed.
-        tracing::debug!(error = %e, "reconciliation: daemon-secrets not reachable, assuming locked");
-        *locked = true;
-        active_profiles.clear();
-        return;
+        // daemon-secrets restarts locked with no active profiles.
+        if daemon == Daemon::Secrets {
+            self.fail_closed();
+            tracing::warn!(
+                audit = "security",
+                event_type = "daemon-secrets-restart",
+                "daemon-secrets restarted — resetting lock state and clearing active profiles"
+            );
+        }
+
+        let new_pubkey =
+            match core_ipc::noise::issue_daemon_keypair(&self.layout, daemon.name()).await {
+                Ok(public) => public,
+                Err(e) => {
+                    tracing::error!(error = %e, %daemon, "failed to issue revocation keypair");
+                    return;
+                }
+            };
+
+        // Revoke every key of the daemon (covers the dual-key state during
+        // rotation) and register the new one under the next generation.
+        let next_gen = {
+            let mut reg = self.bus.registry_mut().await;
+            let next_gen = reg
+                .revoke_by_name(daemon.name())
+                .map_or(0, |revoked| revoked.generation + 1);
+            reg.register(daemon.name().into(), new_pubkey, security_level, next_gen);
+            next_gen
+        };
+        tracing::info!(
+            audit = "security",
+            event_type = "key-revocation",
+            %daemon,
+            generation = next_gen,
+            "old key revoked, new key registered"
+        );
+        self.record(&AuditAction::KeyRevoked {
+            daemon_name: daemon.name().into(),
+            reason: "crash-restart-detected".into(),
+            generation: next_gen,
+        });
+        self.announce(EventKind::KeyRotationPending {
+            daemon_name: daemon.name().into(),
+            new_pubkey,
+            grace_period_s: KEY_ROTATION_GRACE,
+        })
+        .await;
     }
 
-    const RECONCILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-    match tokio::time::timeout(RECONCILE_TIMEOUT, confirm_rx.recv()).await {
-        Ok(Some(raw_frame)) => {
-            match core_ipc::decode_frame::<Message<EventKind>>(&raw_frame) {
-                Ok(response) => {
-                    // Verify correlation_id matches our request (defense-in-depth).
-                    if response.correlation_id != Some(msg_id) {
-                        tracing::warn!(
-                            expected = %msg_id,
-                            got = ?response.correlation_id,
-                            "reconciliation: correlation_id mismatch, ignoring stale response"
-                        );
-                        return;
-                    }
-                    if let EventKind::SecretsStateResponse {
-                        locked: auth_locked,
-                        active_profiles: auth_profiles,
-                        ..
-                    } = response.payload
-                    {
-                        // Log discrepancies before overwriting.
-                        if *locked != auth_locked {
-                            tracing::warn!(
-                                local_locked = *locked,
-                                authoritative_locked = auth_locked,
-                                "reconciliation: lock state discrepancy corrected"
-                            );
-                        }
-                        let local_set: HashSet<_> = active_profiles.iter().cloned().collect();
-                        let auth_set: HashSet<_> = auth_profiles.iter().cloned().collect();
-                        if local_set != auth_set {
-                            tracing::warn!(
-                                local_profiles = ?local_set,
-                                authoritative_profiles = ?auth_set,
-                                "reconciliation: active profiles discrepancy corrected"
-                            );
-                        }
+    /// The status reply, from the shadow state after reconciling it with
+    /// daemon-secrets' authoritative state, with daemon-secrets'
+    /// per-profile lock state when it answered.
+    async fn status(&mut self) -> EventKind {
+        let lock_state = self.reconcile_secrets_state().await;
+        let uptime_ms = u64::try_from(self.bus.epoch().elapsed().as_millis()).unwrap_or(u64::MAX);
+        EventKind::StatusResponse {
+            active_profiles: self.active_profiles.iter().cloned().collect(),
+            default_profile: self.default_profile_name.clone(),
+            daemon_uptimes_ms: vec![(self.ctx.sender, uptime_ms)],
+            locked: self.locked,
+            lock_state,
+        }
+    }
 
-                        // Overwrite with authoritative state.
-                        *locked = auth_locked;
-                        *active_profiles = auth_set;
-                    } else {
-                        tracing::warn!(
-                            payload = ?response.payload,
-                            "reconciliation: unexpected response type"
-                        );
-                    }
+    /// Overwrite the shadow lock and active-profile state with
+    /// daemon-secrets' authoritative state, returning its per-profile lock
+    /// state. A daemon-secrets that cannot be reached or does not answer
+    /// with its state fails closed: locked, no active profiles, and `None`
+    /// (unknown) per-profile state.
+    pub(crate) async fn reconcile_secrets_state(
+        &mut self,
+    ) -> Option<std::collections::BTreeMap<TrustProfileName, bool>> {
+        match self
+            .confirmed_rpc(EventKind::SecretsStateRequest)
+            .await
+            .map(|response| response.payload)
+        {
+            Ok(EventKind::SecretsStateResponse {
+                locked,
+                active_profiles,
+                lock_state,
+            }) => {
+                let authoritative: HashSet<TrustProfileName> =
+                    active_profiles.into_iter().collect();
+                if self.locked != locked {
+                    tracing::warn!(
+                        local_locked = self.locked,
+                        authoritative_locked = locked,
+                        "reconciliation: lock state discrepancy corrected"
+                    );
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "reconciliation: failed to decode response");
+                if self.active_profiles != authoritative {
+                    tracing::warn!(
+                        local_profiles = ?self.active_profiles,
+                        authoritative_profiles = ?authoritative,
+                        "reconciliation: active profiles discrepancy corrected"
+                    );
                 }
+                self.locked = locked;
+                self.active_profiles = authoritative;
+                Some(lock_state)
+            }
+            Ok(other) => {
+                tracing::warn!(payload = ?other, "reconciliation: unexpected response, assuming locked");
+                self.fail_closed();
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reconciliation: daemon-secrets did not answer, assuming locked");
+                self.fail_closed();
+                None
             }
         }
-        Ok(None) => {
-            tracing::error!("reconciliation: confirmation channel closed");
-        }
-        Err(_) => {
-            // Timeout — fail closed.
-            tracing::warn!("reconciliation: SecretsStateRequest timed out — assuming locked");
-            *locked = true;
-            active_profiles.clear();
-        }
+    }
+
+    /// Assume every vault locked and no profile authorized.
+    fn fail_closed(&mut self) {
+        self.locked = true;
+        self.active_profiles.clear();
     }
 }

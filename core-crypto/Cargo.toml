@@ -1,27 +1,23 @@
 [package]
 name = "core-crypto"
-description = "Cryptographic primitives: AES-256-GCM, Argon2id, SecureBytes, EncryptedStore"
+description = "Cryptographic primitives: AES-256-GCM, Argon2id and PBKDF2, BLAKE3 and HKDF key derivation, SecureBytes and SecureVec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
-# All memory protection is delegated to core-memory. No direct unsafe in this crate.
+[lints]
+workspace = true
 
 [dependencies]
 core-memory = { workspace = true }
-core-types  = { workspace = true }
-aes-gcm     = { workspace = true }
-argon2      = { workspace = true }
-zeroize     = { workspace = true }
-blake3      = { workspace = true }
-thiserror   = { workspace = true }
-tracing     = { workspace = true }
-pbkdf2      = { workspace = true }
-sha2        = { workspace = true }
-hmac        = { workspace = true }
-hkdf        = { workspace = true }
-
-[dev-dependencies]
-proptest    = { workspace = true }
-tempfile    = { workspace = true }
+core-types = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }
+blake3 = { workspace = true }
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+getrandom = { workspace = true }

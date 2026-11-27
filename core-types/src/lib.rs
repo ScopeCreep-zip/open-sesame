@@ -5,33 +5,47 @@
 //! Minimal external deps: serde, uuid, thiserror.
 #![deny(unsafe_code)]
 
-pub mod auth;
-pub mod constants;
-pub mod crypto;
-pub mod denial;
-pub mod error;
-pub mod events;
-pub mod ids;
-pub mod oci;
-pub mod profile;
-pub mod rpc;
-pub mod security;
-pub mod sensitive;
-pub mod window;
+// Every type has one path: the crate root. Its defining module is private.
+// `keysym` and `secret_env` are public namespaces whose items are named
+// through them (`keysym::TAB`, `secret_env::env_var_name`).
+mod auth;
+mod constants;
+mod credential;
+mod crypto;
+mod daemon;
+mod denial;
+mod error;
+mod events;
+mod future;
+mod ids;
+pub mod keysym;
+mod oci;
+mod overlay;
+mod profile;
+mod rpc;
+pub mod secret_env;
+mod security;
+mod sensitive;
+mod shortcut;
+mod window;
 
-// Re-export all public types at crate root for backwards compatibility.
 pub use auth::*;
 pub use constants::*;
+pub use credential::*;
 pub use crypto::*;
+pub use daemon::*;
 pub use denial::*;
 pub use error::*;
 pub use events::*;
+pub use future::*;
 pub use ids::*;
 pub use oci::*;
+pub use overlay::*;
 pub use profile::*;
 pub use rpc::*;
 pub use security::*;
 pub use sensitive::*;
+pub use shortcut::*;
 pub use window::*;
 
 /// Initialize the secure memory subsystem. **Must be called before seccomp
@@ -417,10 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_bytes_postcard_wire_compat_with_vec() {
-        // Verify that the custom Serialize produces the same encoding
-        // as a plain Vec<u8> would. This ensures wire compatibility
-        // with the old #[serde(transparent)] implementation.
+    fn sensitive_bytes_postcard_encoding_is_a_byte_string() {
+        // Serialize writes a length-prefixed byte string, the encoding
+        // the deserializer's `visit_bytes` zero-copy path reads.
         let data = b"wire compat test".to_vec();
         let sb = SensitiveBytes::from_slice(&data);
         let sb_encoded = postcard::to_stdvec(&sb).unwrap();
@@ -470,13 +483,16 @@ mod tests {
 
     #[test]
     fn event_kind_debug_redacts_secrets() {
-        let unlock = EventKind::UnlockRequest {
-            password: SensitiveBytes::from_slice(b"hunter2"),
-            profile: None,
+        let factor = EventKind::FactorSubmit {
+            factor_id: AuthFactorId::Password,
+            key_material: SensitiveBytes::from_slice(b"hunter2"),
+            profile: TrustProfileName::try_from("myprofile").unwrap(),
+            audit_metadata: std::collections::BTreeMap::new(),
         };
-        let debug = format!("{unlock:?}");
+        let debug = format!("{factor:?}");
         assert!(debug.contains("REDACTED"));
         assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("myprofile"), "the profile stays visible");
 
         let get_resp = EventKind::SecretGetResponse {
             key: "api-key".into(),
@@ -500,16 +516,6 @@ mod tests {
         assert!(debug.contains("work"));
     }
 
-    // -- EventKind forward compatibility --
-
-    #[test]
-    fn event_kind_unknown_variant_deserializes() {
-        // Externally-tagged: unknown variant name maps to Unknown via #[serde(other)]
-        let json = r#""FutureEventV99""#;
-        let event: EventKind = serde_json::from_str(json).unwrap();
-        assert!(matches!(event, EventKind::Unknown));
-    }
-
     #[test]
     fn event_kind_known_variant_roundtrips() {
         let event = EventKind::DaemonStarted {
@@ -519,7 +525,6 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: EventKind = serde_json::from_str(&json).unwrap();
-        // Verify it round-trips to the same variant (not Unknown)
         assert!(matches!(decoded, EventKind::DaemonStarted { .. }));
     }
 
@@ -647,7 +652,7 @@ mod tests {
         let install = InstallationId {
             id: Uuid::from_u128(42),
             org_ns: Some(OrganizationNamespace {
-                domain: "braincraft.io".into(),
+                domain: "example.invalid".into(),
                 namespace: Uuid::from_u128(99),
             }),
             namespace: Uuid::from_u128(123),
@@ -674,16 +679,30 @@ mod tests {
         assert_eq!(install, decoded);
     }
 
+    // Reference values computed with Python's uuid.uuid5, independently of
+    // the uuid crate. Persisted installation files hold these derivations.
     #[test]
-    fn installation_namespace_determinism() {
-        // Same org domain produces same namespace UUID via uuid5.
-        let ns1 = Uuid::new_v5(&Uuid::NAMESPACE_URL, b"braincraft.io");
-        let ns2 = Uuid::new_v5(&Uuid::NAMESPACE_URL, b"braincraft.io");
-        assert_eq!(ns1, ns2);
+    fn organization_namespace_is_pinned() {
+        let org = OrganizationNamespace::for_domain("example.invalid");
+        assert_eq!(org.domain, "example.invalid");
+        assert_eq!(
+            org.namespace,
+            Uuid::parse_str("fcd83bf9-93b6-5abd-9df1-5368ff40358a").unwrap()
+        );
+    }
 
-        // Different domains produce different namespaces.
-        let ns3 = Uuid::new_v5(&Uuid::NAMESPACE_URL, b"example.com");
-        assert_ne!(ns1, ns3);
+    #[test]
+    fn installation_namespace_is_pinned() {
+        let id = Uuid::from_u128(42);
+        assert_eq!(
+            InstallationId::derive_namespace(&id, None),
+            Uuid::parse_str("c6c2be52-03c3-5ca9-a79b-92db5d5d5715").unwrap()
+        );
+        let org = OrganizationNamespace::for_domain("example.invalid");
+        assert_eq!(
+            InstallationId::derive_namespace(&id, Some(&org)),
+            Uuid::parse_str("9c78f7f8-136e-5d7b-ad0c-1853a1ea94cd").unwrap()
+        );
     }
 
     // -- OciReference --
@@ -809,8 +828,8 @@ mod tests {
         let grant = DelegationGrant {
             delegator: AgentId::from_uuid(Uuid::from_u128(1)),
             scope: CapabilitySet::empty(),
-            initial_ttl: Duration::from_secs(3600),
-            heartbeat_interval: Duration::from_secs(60),
+            initial_ttl: Duration::from_hours(1),
+            heartbeat_interval: Duration::from_mins(1),
             nonce: [0xAA; 16],
             point_of_use_filter: None,
             signature: vec![0xBB; 64],
@@ -1097,53 +1116,63 @@ mod tests {
     // -- Per-vault unlock IPC protocol tests --
 
     #[test]
-    fn test_unlock_request_roundtrip_with_profile() {
-        let event = EventKind::UnlockRequest {
-            password: SensitiveBytes::from_slice(b"secret"),
-            profile: Some(TrustProfileName::try_from("work").unwrap()),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: EventKind = serde_json::from_str(&json).unwrap();
-        match decoded {
-            EventKind::UnlockRequest { profile, .. } => {
-                assert_eq!(
-                    profile.unwrap(),
-                    TrustProfileName::try_from("work").unwrap()
-                );
-            }
-            other => panic!("wrong variant: {other:?}"),
+    fn vault_state_announcements_roundtrip_postcard() {
+        let work = TrustProfileName::try_from("work").unwrap();
+        for event in [
+            EventKind::VaultUnlocked {
+                profile: work.clone(),
+            },
+            EventKind::VaultsLocked {
+                profiles: vec![work],
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&event).unwrap();
+            let decoded: EventKind = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(format!("{decoded:?}"), format!("{event:?}"));
         }
     }
 
     #[test]
-    fn test_unlock_request_profile_none_deserializes() {
-        // Simulate old format without profile field
-        let json = r#"{"UnlockRequest":{"password":[1,2,3]}}"#;
-        let decoded: EventKind = serde_json::from_str(json).unwrap();
-        match decoded {
-            EventKind::UnlockRequest { profile, .. } => {
-                assert!(
-                    profile.is_none(),
-                    "missing profile field should default to None"
-                );
+    fn launch_outcomes_roundtrip_postcard() {
+        for outcome in [
+            LaunchOutcome::Launched { pid: 7 },
+            LaunchOutcome::Denied(LaunchDenial::ProtectedVariable {
+                variable: "LD_PRELOAD".into(),
+            }),
+            LaunchOutcome::Failed {
+                reason: "spawn failed".into(),
+            },
+        ] {
+            let event = EventKind::LaunchExecuteResponse {
+                outcome: outcome.clone(),
+            };
+            let bytes = postcard::to_allocvec(&event).unwrap();
+            match postcard::from_bytes::<EventKind>(&bytes).unwrap() {
+                EventKind::LaunchExecuteResponse { outcome: decoded } => {
+                    assert_eq!(decoded, outcome);
+                }
+                other => panic!("wrong variant: {other:?}"),
             }
-            other => panic!("wrong variant: {other:?}"),
         }
     }
 
     #[test]
-    fn test_lock_request_profile_none_deserializes() {
-        let json = r#"{"LockRequest":{}}"#;
-        let decoded: EventKind = serde_json::from_str(json).unwrap();
-        match decoded {
-            EventKind::LockRequest { profile } => {
-                assert!(
-                    profile.is_none(),
-                    "missing profile field should default to None"
-                );
-            }
-            other => panic!("wrong variant: {other:?}"),
+    fn a_missing_required_field_is_a_decode_error() {
+        // serde decodes an absent `Option` field as `None`; every other
+        // field must be present.
+        for json in [
+            r#"{"SecretSetResponse":{"denial":null}}"#,
+            r#"{"StatusResponse":{"active_profiles":["work"],"default_profile":"work","daemon_uptimes_ms":[],"lock_state":null}}"#,
+        ] {
+            assert!(serde_json::from_str::<EventKind>(json).is_err(), "{json}");
         }
+    }
+
+    #[test]
+    fn an_unknown_variant_is_a_decode_error() {
+        assert!(serde_json::from_str::<EventKind>(r#""FutureEventV99""#).is_err());
+        let past_last = postcard::to_allocvec(&u32::MAX).unwrap();
+        assert!(postcard::from_bytes::<EventKind>(&past_last).is_err());
     }
 
     #[test]
@@ -1157,49 +1186,33 @@ mod tests {
             default_profile: TrustProfileName::try_from("work").unwrap(),
             daemon_uptimes_ms: vec![],
             locked: false,
-            lock_state: lock_state.clone(),
+            lock_state: Some(lock_state.clone()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: EventKind = serde_json::from_str(&json).unwrap();
         match decoded {
             EventKind::StatusResponse { lock_state: ls, .. } => {
-                assert_eq!(ls, lock_state);
+                assert_eq!(ls, Some(lock_state));
             }
             other => panic!("wrong variant: {other:?}"),
         }
     }
 
     #[test]
-    fn test_status_response_missing_lock_state_defaults_empty() {
-        // Old format without lock_state
-        let json = r#"{"StatusResponse":{"active_profiles":["work"],"default_profile":"work","daemon_uptimes_ms":[],"locked":false}}"#;
-        let decoded: EventKind = serde_json::from_str(json).unwrap();
-        match decoded {
-            EventKind::StatusResponse { lock_state, .. } => {
-                assert!(
-                    lock_state.is_empty(),
-                    "missing lock_state should default to empty BTreeMap"
-                );
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_unlock_request_debug_redacts_password_shows_profile() {
-        let event = EventKind::UnlockRequest {
-            password: SensitiveBytes::from_slice(b"super-secret"),
-            profile: Some(TrustProfileName::try_from("myprofile").unwrap()),
+    fn an_unanswered_lock_state_is_distinct_from_no_vaults() {
+        let status = |lock_state| EventKind::StatusResponse {
+            active_profiles: vec![],
+            default_profile: TrustProfileName::try_from("work").unwrap(),
+            daemon_uptimes_ms: vec![],
+            locked: true,
+            lock_state,
         };
-        let debug = format!("{event:?}");
-        assert!(debug.contains("REDACTED"), "password should be redacted");
-        assert!(
-            !debug.contains("super-secret"),
-            "password plaintext must not appear"
-        );
-        assert!(
-            debug.contains("myprofile"),
-            "profile name should be visible"
-        );
+        for lock_state in [None, Some(std::collections::BTreeMap::new())] {
+            let wire = postcard::to_allocvec(&status(lock_state.clone())).unwrap();
+            match postcard::from_bytes::<EventKind>(&wire).unwrap() {
+                EventKind::StatusResponse { lock_state: ls, .. } => assert_eq!(ls, lock_state),
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
     }
 }

@@ -1,28 +1,29 @@
+# shellcheck shell=bash
 # %postinst for open-sesame-desktop -- deb
 case "$1" in
-    configure)
-        sesame_require_systemd
+configure)
+    sesame_require_systemd
 
-        systemctl --global enable \
-            open-sesame-wm.service \
-            open-sesame-clipboard.service \
-            open-sesame-input.service \
-            open-sesame-desktop.target \
-            2>/dev/null || true
+    systemctl --global enable \
+        open-sesame-wm.service \
+        open-sesame-clipboard.service \
+        open-sesame-input.service \
+        open-sesame-desktop.target \
+        2>/dev/null || true
 
-        for uid in $(sesame_active_user_uids); do
-            sesame_user_systemctl "$uid" daemon-reload
-            sesame_user_systemctl "$uid" restart open-sesame-wm.service
-            sesame_user_systemctl "$uid" restart open-sesame-clipboard.service
-            sesame_user_systemctl "$uid" restart open-sesame-input.service
-        done
+    for uid in $(sesame_active_user_uids); do
+        sesame_user_systemctl "$uid" daemon-reload
+        sesame_user_systemctl "$uid" restart open-sesame-wm.service
+        sesame_user_systemctl "$uid" restart open-sesame-clipboard.service
+        sesame_user_systemctl "$uid" restart open-sesame-input.service
+    done
 
-        echo ""
-        echo ":: open-sesame-desktop installed"
-        echo "   Enable services: systemctl --user enable --now open-sesame-desktop.target"
-        echo ""
-        #DEBHELPER#
-        ;;
+    echo ""
+    echo ":: open-sesame-desktop installed"
+    echo "   Enable services: systemctl --user enable --now open-sesame-desktop.target"
+    echo ""
+    #DEBHELPER#
+    ;;
 esac
 
 exit 0

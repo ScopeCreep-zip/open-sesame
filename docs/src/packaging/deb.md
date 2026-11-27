@@ -11,7 +11,7 @@ for COSMIC/Wayland.
 Defined in `open-sesame/Cargo.toml` under `[package.metadata.deb]`.
 
 | Field | Value |
-|-------|-------|
+| --- | --- |
 | Package name | `open-sesame` |
 | Section | `utils` |
 | Priority | `optional` |
@@ -50,7 +50,7 @@ Maintainer scripts are sourced from `scripts/`.
 Defined in `daemon-wm/Cargo.toml` under `[package.metadata.deb]`.
 
 | Field | Value |
-|-------|-------|
+| --- | --- |
 | Package name | `open-sesame-desktop` |
 | Section | `utils` |
 | Priority | `optional` |

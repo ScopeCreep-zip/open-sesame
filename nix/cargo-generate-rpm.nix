@@ -2,25 +2,33 @@
   lib,
   rustPlatform,
   fetchFromGitHub,
+  pkg-config,
+  zstd,
 }:
 
 rustPlatform.buildRustPackage {
   pname = "cargo-generate-rpm";
-  version = "0.21.0";
+  version = "0.21.1";
 
   src = fetchFromGitHub {
     owner = "cat-in-136";
     repo = "cargo-generate-rpm";
-    rev = "v0.21.0";
-    hash = "sha256-Ok/ATMI2Z9hQPMVaFgngdc/UmaIX4KXhHwyKZZ53zfc=";
+    rev = "v0.21.1";
+    hash = "sha256-7E3p1p2hsoJRromyZaMz2FsHMleqbzVJBj93akOUfjA=";
   };
 
   # Upstream does not commit Cargo.lock — generated via cargo generate-lockfile
-  # against v0.21.0 source and checked in as cargo-generate-rpm.lock.
+  # against v0.21.1 source and checked in as cargo-generate-rpm.lock.
   cargoLock.lockFile = ./cargo-generate-rpm.lock;
   postPatch = ''
     cp ${./cargo-generate-rpm.lock} Cargo.lock
   '';
+
+  # rpm's zstd-compression feature builds zstd-sys, which links the system
+  # zstd found through pkg-config.
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ zstd ];
+  env.ZSTD_SYS_USE_PKG_CONFIG = true;
 
   doCheck = false;
 

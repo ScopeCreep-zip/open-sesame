@@ -30,7 +30,7 @@ without additional sanitization.
 **Filesystem mappings:**
 
 | Resource | Path pattern |
-|---|---|
+| --- | --- |
 | SQLCipher vault | `vaults/{name}.db` |
 | BLAKE3 KDF context | `"pds v2 vault-key {name}"` |
 | Frecency database | `launcher/{name}.frecency.db` |
@@ -46,7 +46,7 @@ message handlers, config file loaders -- validates at entry.
 Each trust profile isolates the following resources:
 
 | Resource | Isolation mechanism |
-|---|---|
+| --- | --- |
 | **Secrets** | Per-profile SQLCipher vault file. Vault keys are derived via BLAKE3 KDF with profile-specific context strings. |
 | **Clipboard** | Cross-profile clipboard access is denied and logged as `AuditAction::IsolationViolationAttempt`. |
 | **Frecency** | Per-profile SQLite database for launch frecency ranking. Profile switch in daemon-launcher triggers `engine.switch_profile()`. |
@@ -87,9 +87,9 @@ active profiles.
 Signals that trigger rule evaluation:
 
 | Signal | Source |
-|---|---|
+| --- | --- |
 | `SsidChanged(String)` | WiFi network change via D-Bus SSID monitor (`platform_linux::dbus::ssid_monitor`). |
-| `AppFocused(AppId)` | Wayland compositor focus change via `platform_linux::compositor::focus_monitor`. |
+| `AppFocused(AppId)` | Wayland compositor focus change via `platform_linux::focus_monitor::spawn`. |
 | `UsbDeviceAttached(String)` | USB device insertion (vendor:product identifier). |
 | `UsbDeviceDetached(String)` | USB device removal. |
 | `HardwareKeyPresent(String)` | Hardware security key detection (e.g., YubiKey). |

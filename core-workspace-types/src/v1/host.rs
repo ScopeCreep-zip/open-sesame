@@ -99,14 +99,11 @@ impl GitHost {
             });
         }
 
-        // FQDN: reject invalid characters, normalize to lowercase.
-        if input.contains(INVALID_HOST_CHARS) {
-            return Err(ValidationError::InvalidHostname {
-                value: input.into(),
-            });
-        }
-
-        if input.len() > 253 {
+        // FQDN: ASCII only (internationalized names are given in their
+        // punycode A-label form), no URI-significant characters,
+        // normalized to lowercase. ASCII-only input makes lowercasing a
+        // length-preserving, collision-free mapping for placement.
+        if !input.is_ascii() || input.contains(INVALID_HOST_CHARS) || input.len() > 253 {
             return Err(ValidationError::InvalidHostname {
                 value: input.into(),
             });
@@ -146,24 +143,38 @@ impl GitHost {
         }
     }
 
-    /// Decode a filesystem directory name back into a `GitHost`.
+    /// Parse a server directory name read from disk.
     ///
-    /// Reverses `as_dir_name`. Returns None if the input does not
-    /// correspond to a valid encoded host.
-    #[must_use]
-    pub fn from_dir_name(name: &str) -> Option<Self> {
-        if let Some(rest) = name.strip_prefix("_ipv6_") {
-            let addr_str = rest.replace('-', ":");
-            let addr: Ipv6Addr = addr_str.parse().ok()?;
-            return Some(Self::Ipv6(addr));
+    /// Reverses `as_dir_name` strictly: the name must decode to a host
+    /// and must equal that host's canonical directory name.
+    ///
+    /// # Errors
+    ///
+    /// - `ValidationError::InvalidHostname` if the name does not decode
+    ///   to a host.
+    /// - `ValidationError::NonCanonicalCase` if it decodes but is not the
+    ///   canonical directory name (`GitHub.com`, `_ipv6_2001-DB8--25`),
+    ///   carrying the canonical form.
+    pub fn from_dir_name(name: &str) -> Result<Self, ValidationError> {
+        let invalid = || ValidationError::InvalidHostname { value: name.into() };
+        let host = if let Some(rest) = name.strip_prefix("_ipv6_") {
+            Self::Ipv6(rest.replace('-', ":").parse().map_err(|_| invalid())?)
+        } else if let Ok(addr) = name.parse::<Ipv4Addr>() {
+            Self::Ipv4(addr)
+        } else if name.contains(':') {
+            return Err(invalid());
+        } else {
+            Self::new(name).map_err(|_| invalid())?
+        };
+        let canonical = host.as_dir_name();
+        if canonical != name {
+            return Err(ValidationError::NonCanonicalCase {
+                kind: "server directory",
+                value: name.into(),
+                canonical,
+            });
         }
-        if let Ok(addr) = name.parse::<Ipv4Addr>() {
-            return Some(Self::Ipv4(addr));
-        }
-        if name.is_empty() || name.contains(INVALID_HOST_CHARS) {
-            return None;
-        }
-        Some(Self::Fqdn(name.to_ascii_lowercase()))
+        Ok(host)
     }
 
     /// Whether this host contains a dot, indicating a fully qualified
@@ -385,12 +396,52 @@ mod tests {
 
     #[test]
     fn from_dir_name_rejects_empty() {
-        assert!(GitHost::from_dir_name("").is_none());
+        assert!(matches!(
+            GitHost::from_dir_name(""),
+            Err(ValidationError::InvalidHostname { .. })
+        ));
     }
 
     #[test]
     fn from_dir_name_rejects_invalid_ipv6() {
-        assert!(GitHost::from_dir_name("_ipv6_not-valid").is_none());
+        assert!(matches!(
+            GitHost::from_dir_name("_ipv6_not-valid"),
+            Err(ValidationError::InvalidHostname { .. })
+        ));
+    }
+
+    #[test]
+    fn from_dir_name_rejects_non_canonical() {
+        for (name, canonical) in [
+            ("GitHub.com", "github.com"),
+            ("_ipv6_2001-DB8--25", "_ipv6_2001-db8--25"),
+            ("_ipv6_2001-0db8-0-0-0-0-0-25", "_ipv6_2001-db8--25"),
+        ] {
+            assert_eq!(
+                GitHost::from_dir_name(name),
+                Err(ValidationError::NonCanonicalCase {
+                    kind: "server directory",
+                    value: name.into(),
+                    canonical: canonical.into(),
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_dir_name_rejects_port_and_non_ascii() {
+        assert!(GitHost::from_dir_name("host:22").is_err());
+        assert!(GitHost::from_dir_name("gİthub.com").is_err());
+    }
+
+    #[test]
+    fn rejects_non_ascii_fqdn() {
+        // `İ` (U+0130) is untouched by ASCII lowercasing; placement must
+        // stay lowercase ASCII.
+        assert!(GitHost::new("GİTHUB.com").is_err());
+        assert!(GitHost::new("bücher.example").is_err());
+        assert!(GitHost::new("xn--bcher-kva.example").is_ok());
     }
 
     #[test]

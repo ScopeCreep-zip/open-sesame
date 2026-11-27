@@ -8,6 +8,7 @@
 //! guarantees as [`SecureBytes`]: guard pages, mlock, canary, volatile zeroize.
 
 use core_memory::ProtectedAlloc;
+use zeroize::Zeroize;
 
 /// Maximum password buffer size in bytes (UTF-8 encoded).
 /// 512 bytes accommodates passwords up to ~128 4-byte Unicode characters.
@@ -50,20 +51,15 @@ impl SecureVec {
     /// Create a pre-allocated `SecureVec` for password collection.
     ///
     /// Allocates 512 bytes in page-aligned, mlock'd, guard-page-protected
-    /// memory. No reallocation ever occurs — push_char panics if the buffer
-    /// is full.
+    /// memory. No reallocation ever occurs — `push_char` panics if the
+    /// buffer is full.
     ///
     /// # Panics
     ///
     /// Panics if mlock or mmap fails.
     #[must_use]
     pub fn for_password() -> Self {
-        let alloc = ProtectedAlloc::new(MAX_PASSWORD_BYTES)
-            .unwrap_or_else(|e| panic!("SecureVec::for_password allocation failed: {e}"));
-        SecureVec {
-            inner: Some(alloc),
-            cursor: 0,
-        }
+        Self::with_capacity(MAX_PASSWORD_BYTES)
     }
 
     /// Create a new `SecureVec` with specified capacity.
@@ -100,7 +96,14 @@ impl SecureVec {
 
     /// Capacity of the backing allocation in bytes, or 0 if unallocated.
     fn capacity(&self) -> usize {
-        self.alloc().map_or(0, |a| a.len())
+        self.alloc().map_or(0, ProtectedAlloc::len)
+    }
+
+    /// Zeroize `range` of the data region (a no-op when unallocated).
+    fn zeroize_range(&mut self, range: std::ops::Range<usize>) {
+        if let Some(alloc) = self.inner.as_mut() {
+            alloc.as_bytes_mut()[range].zeroize();
+        }
     }
 
     /// Append a Unicode character encoded as UTF-8 bytes.
@@ -136,8 +139,7 @@ impl SecureVec {
         }
 
         let cur = self.cursor;
-        let alloc = self.alloc_mut();
-        let data = &alloc.as_bytes()[..cur];
+        let data = self.as_bytes();
 
         // Find the start of the last UTF-8 character by scanning backwards.
         let mut start = cur - 1;
@@ -151,9 +153,7 @@ impl SecureVec {
             .and_then(|s| s.chars().next());
 
         // Zeroize the removed bytes in the protected allocation.
-        for byte in &mut alloc.as_bytes_mut()[start..cur] {
-            *byte = 0;
-        }
+        self.zeroize_range(start..cur);
         self.cursor = start;
 
         ch
@@ -197,13 +197,7 @@ impl SecureVec {
     /// Does NOT deallocate — the buffer can be reused for the next password
     /// entry (e.g., multi-profile sequential unlock).
     pub fn clear(&mut self) {
-        if self.cursor > 0
-            && let Some(alloc) = self.inner.as_mut()
-        {
-            for byte in &mut alloc.as_bytes_mut()[..self.cursor] {
-                *byte = 0;
-            }
-        }
+        self.zeroize_range(0..self.cursor);
         self.cursor = 0;
     }
 }
@@ -216,16 +210,9 @@ impl Default for SecureVec {
 
 impl Drop for SecureVec {
     fn drop(&mut self) {
-        // Zeroize any data in the buffer before ProtectedAlloc::drop
-        // performs its own volatile zero + canary check + munmap.
-        if self.cursor > 0
-            && let Some(alloc) = self.inner.as_mut()
-        {
-            for byte in &mut alloc.as_bytes_mut()[..self.cursor] {
-                *byte = 0;
-            }
-        }
-        // ProtectedAlloc::drop handles the rest (if inner is Some).
+        // Zeroize the contents before ProtectedAlloc::drop performs its own
+        // volatile zero, canary check, and munmap.
+        self.clear();
     }
 }
 

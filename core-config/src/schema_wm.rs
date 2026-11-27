@@ -49,18 +49,13 @@ pub struct LaunchProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WmConfig {
-    /// Characters used for Vimium-style window hints (each char = one hint key).
+    /// Hint keys for apps without a mnemonic one (no key binding and no
+    /// letter in their name), taken in order, each at most once.
     pub hint_keys: String,
     /// Delay (ms) before transitioning from border-only to full overlay.
     pub overlay_delay_ms: u32,
-    /// Delay (ms) after activation before dismissing the overlay.
-    pub activation_delay_ms: u32,
-    /// Border width (px) for the focused window indicator.
-    pub border_width: f32,
-    /// Border color as hex (e.g., "#89b4fa").
+    /// Card border color as hex (e.g., "#89b4fa").
     pub border_color: String,
-    /// Background overlay color (hex, with optional alpha: "#RRGGBBAA").
-    pub background_color: String,
     /// Card background color (hex).
     pub card_color: String,
     /// Primary text color (hex).
@@ -88,10 +83,7 @@ impl Default for WmConfig {
         Self {
             hint_keys: "asdfghjkl".into(),
             overlay_delay_ms: 150,
-            activation_delay_ms: 200,
-            border_width: 4.0,
             border_color: "#89b4fa".into(),
-            background_color: "#000000c8".into(),
             card_color: "#1e1e1ef0".into(),
             text_color: "#ffffff".into(),
             hint_color: "#646464".into(),
@@ -202,12 +194,12 @@ mod tests {
         let toml_str = r#"
             env = { RUST_LOG = "debug" }
             secrets = ["github-token"]
-            cwd = "/workspace/usrbinkat/github.com/org/repo"
+            cwd = "/workspace/alice/github.com/org/repo"
         "#;
         let lp: LaunchProfile = toml::from_str(toml_str).unwrap();
         assert_eq!(
             lp.cwd.as_deref(),
-            Some("/workspace/usrbinkat/github.com/org/repo")
+            Some("/workspace/alice/github.com/org/repo")
         );
     }
 }

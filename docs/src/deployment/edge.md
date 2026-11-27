@@ -18,7 +18,7 @@ management are not needed.
 ### Resource Profile
 
 | Resource | Desktop Default | Edge Target |
-|----------|----------------|-------------|
+| --- | --- | --- |
 | `LimitMEMLOCK` | 64M | 8M--16M (configurable) |
 | `MemoryMax` (profile) | 128M | 32M |
 | `MemoryMax` (secrets) | 256M | 64M |
@@ -43,7 +43,7 @@ performance and correctness risks of emulated builds.
 ### Supported Targets
 
 | Target | Status | Use Case |
-|--------|--------|----------|
+| --- | --- | --- |
 | `x86_64-linux` | Supported | Desktop, server, cloud |
 | `aarch64-linux` | Supported | Edge, embedded, ARM servers, Raspberry Pi |
 

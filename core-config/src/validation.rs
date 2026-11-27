@@ -27,9 +27,11 @@ pub struct ConfigDiagnostic {
 /// Validate a loaded configuration and return any diagnostics.
 ///
 /// Checks:
+/// - Profile map keys are valid trust profile names
 /// - Circular profile inheritance (`extends` chains must be acyclic)
 /// - Referenced profiles in `extends` fields exist
-/// - Policy-locked fields are not overridden
+/// - `wm.hint_keys` is a non-empty set; `wm.overlay_delay_ms` is in range
+/// - Key binding tags name defined launch profiles, at most one devshell
 #[must_use]
 pub fn validate(config: &Config) -> Vec<ConfigDiagnostic> {
     let mut diagnostics = Vec::new();
@@ -144,34 +146,6 @@ fn check_wm_config(config: &Config, diagnostics: &mut Vec<ConfigDiagnostic>) {
                     wm.overlay_delay_ms
                 ),
                 remediation: Some("set wm.overlay_delay_ms between 10 and 2000".into()),
-            });
-        }
-
-        if !(10..=2000).contains(&wm.activation_delay_ms) {
-            diagnostics.push(ConfigDiagnostic {
-                severity: DiagnosticSeverity::Warning,
-                file: None,
-                line: None,
-                column: None,
-                message: format!(
-                    "profile '{name}': wm.activation_delay_ms={} outside recommended range [10, 2000]",
-                    wm.activation_delay_ms
-                ),
-                remediation: Some("set wm.activation_delay_ms between 10 and 2000".into()),
-            });
-        }
-
-        if !(1.0..=20.0).contains(&wm.border_width) {
-            diagnostics.push(ConfigDiagnostic {
-                severity: DiagnosticSeverity::Warning,
-                file: None,
-                line: None,
-                column: None,
-                message: format!(
-                    "profile '{name}': wm.border_width={} outside recommended range [1.0, 20.0]",
-                    wm.border_width
-                ),
-                remediation: Some("set wm.border_width between 1.0 and 20.0".into()),
             });
         }
     }
@@ -359,6 +333,59 @@ mod tests {
             .filter(|d| d.severity == DiagnosticSeverity::Error)
             .collect();
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    /// The diagnostics of a configuration with one profile, `test`, whose
+    /// window-manager settings `edit` changes.
+    fn wm_diagnostics(edit: impl FnOnce(&mut crate::schema::WmConfig)) -> Vec<ConfigDiagnostic> {
+        let mut profile = ProfileConfig {
+            name: tpn("test"),
+            ..Default::default()
+        };
+        edit(&mut profile.wm);
+        let mut config = Config::default();
+        config.profiles.insert("test".into(), profile);
+        validate(&config)
+    }
+
+    #[test]
+    fn the_default_configuration_is_valid() {
+        let errors: Vec<_> = validate(&Config::default())
+            .into_iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(wm_diagnostics(|_| {}).is_empty());
+    }
+
+    #[test]
+    fn hint_keys_must_be_a_nonempty_set() {
+        let empty = wm_diagnostics(|wm| wm.hint_keys.clear());
+        assert!(
+            empty
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Error && d.message.contains("hint_keys")),
+            "{empty:?}"
+        );
+        let repeated = wm_diagnostics(|wm| wm.hint_keys = "aasdf".into());
+        assert!(
+            repeated
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Error && d.message.contains("duplicate")),
+            "{repeated:?}"
+        );
+    }
+
+    #[test]
+    fn an_extreme_overlay_delay_warns() {
+        let diags = wm_diagnostics(|wm| wm.overlay_delay_ms = 5000);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Warning
+                    && d.message.contains("overlay_delay_ms")),
+            "{diags:?}"
+        );
     }
 
     #[test]

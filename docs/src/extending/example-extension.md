@@ -127,7 +127,7 @@ ghcr.io/my-org/greeting-extension:0.1.0@sha256:abcdef1234567890
 The `OciReference` struct parses this into five fields:
 
 | Field | Example | Required |
-|---|---|---|
+| --- | --- | --- |
 | `registry` | `ghcr.io` | Yes |
 | `principal` | `my-org` | Yes |
 | `scope` | `greeting-extension` | Yes |

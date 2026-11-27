@@ -9,10 +9,17 @@
 //!
 //! File format: one window ID per line, most recent first. Capped at 64
 //! entries. Uses advisory file locking (flock) for atomic read-modify-write.
+//!
+//! The MRU stack orders the overlay; it is not authoritative state. The
+//! [`MruStore`] methods log every I/O failure at `warn` and degrade to an
+//! empty stack (load) or an unchanged file (save, prune). The path-based
+//! functions they wrap return the error.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use core_layout::Layout;
 
 /// Maximum entries in the MRU stack.
 const MAX_ENTRIES: usize = 64;
@@ -26,116 +33,134 @@ pub struct MruState {
 
 impl MruState {
     /// The currently focused window (top of stack).
+    #[must_use]
     pub fn current(&self) -> Option<&str> {
-        self.stack.first().map(|s| s.as_str())
+        self.stack.first().map(String::as_str)
     }
 
     /// The previously focused window (second in stack).
+    #[must_use]
     pub fn previous(&self) -> Option<&str> {
-        self.stack.get(1).map(|s| s.as_str())
+        self.stack.get(1).map(String::as_str)
     }
 
     /// Position of a window ID in the MRU stack (0 = most recent).
+    #[must_use]
     pub fn position(&self, id: &str) -> Option<usize> {
         self.stack.iter().position(|s| s == id)
     }
 }
 
-/// Resolve the MRU state file path.
-///
-/// `~/.cache/open-sesame/mru`, with directory created at 0o700 if missing.
-fn mru_path() -> Option<PathBuf> {
-    let cache = dirs::cache_dir()?.join("open-sesame");
-    if !cache.exists() {
-        #[cfg(unix)]
-        {
-            use std::fs::DirBuilder;
-            use std::os::unix::fs::DirBuilderExt;
-            if DirBuilder::new()
-                .mode(0o700)
-                .recursive(true)
-                .create(&cache)
-                .is_err()
-            {
-                return None;
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            if std::fs::create_dir_all(&cache).is_err() {
-                return None;
-            }
-        }
-    }
-    Some(cache.join("mru"))
+/// The MRU stack file. Its directory is created by `Layout::bootstrap`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MruStore {
+    path: PathBuf,
 }
 
-/// Load MRU state from disk with shared lock.
-#[must_use]
-pub fn load() -> MruState {
-    let Some(path) = mru_path() else {
-        tracing::debug!("mru: no cache path available");
-        return MruState::default();
-    };
-    let Ok(mut file) = File::open(&path) else {
-        tracing::debug!("mru: file not found, returning empty state");
-        return MruState::default();
-    };
-
-    if !lock_shared(&file) {
-        tracing::warn!("mru: failed to acquire shared lock");
-        return MruState::default();
+impl MruStore {
+    /// The store at `path`.
+    #[must_use]
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
     }
 
+    /// The store at `Layout::mru_file`.
+    ///
+    /// # Errors
+    ///
+    /// The `Layout::mru_file` errors.
+    pub fn from_layout(layout: &Layout) -> core_layout::Result<Self> {
+        Ok(Self::new(layout.mru_file()?))
+    }
+
+    /// The stack, read under a shared lock.
+    #[must_use]
+    pub fn load(&self) -> MruState {
+        match load_from(&self.path) {
+            Ok(state) => {
+                tracing::debug!(
+                    stack_len = state.stack.len(),
+                    current = state.current().unwrap_or("<none>"),
+                    previous = state.previous().unwrap_or("<none>"),
+                    "mru: loaded state"
+                );
+                state
+            }
+            Err(e) => {
+                tracing::warn!(path = %self.path.display(), error = %e, "mru: load failed, using empty state");
+                MruState::default()
+            }
+        }
+    }
+
+    /// Promote a window to the top of the MRU stack.
+    ///
+    /// `target` moves to position 0. If it was already in the stack, it is
+    /// removed from its old position first. Stack is capped at
+    /// [`MAX_ENTRIES`]. No-op if target is already at position 0.
+    pub fn save(&self, target: &str) {
+        if let Err(e) = save_to(&self.path, target) {
+            tracing::warn!(target, path = %self.path.display(), error = %e, "mru: save failed");
+        }
+    }
+
+    /// Remove MRU entries that no longer correspond to live windows.
+    ///
+    /// Called during overlay activation to keep the MRU file accurate.
+    /// `live_ids` is the set of window ID strings currently reported by the
+    /// compositor. Any MRU entry not in this set is removed.
+    pub fn prune(&self, live_ids: &std::collections::HashSet<String>) {
+        if let Err(e) = prune_from(&self.path, live_ids) {
+            tracing::warn!(path = %self.path.display(), error = %e, "mru: prune failed");
+        }
+    }
+
+    /// Seed the stack from a window list if it is empty: the focused
+    /// window (or the first, when none is focused) goes on top. No-op when
+    /// the stack already has entries or `windows` is empty.
+    pub fn seed_if_empty(&self, windows: &[core_types::Window]) {
+        if !self.load().stack.is_empty() {
+            tracing::debug!("mru: seed_if_empty skipped, state already populated");
+            return;
+        }
+        let Some(seed) = windows.iter().find(|w| w.is_focused).or(windows.first()) else {
+            tracing::warn!("mru: seed_if_empty called with empty window list");
+            return;
+        };
+        self.save(&seed.id.to_string());
+        tracing::info!(current = %seed.app_id, focused = seed.is_focused, "mru: seeded");
+    }
+}
+
+/// Read the stack at `path` under a shared lock. A missing file is an
+/// empty stack.
+fn load_from(path: &Path) -> std::io::Result<MruState> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(MruState::default()),
+        Err(e) => return Err(e),
+    };
+    lock_shared(&file)?;
     let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_err() {
-        tracing::warn!("mru: failed to read file");
-        return MruState::default();
-    }
-
-    let state = parse(&contents);
-    tracing::debug!(
-        stack_len = state.stack.len(),
-        current = state.current().unwrap_or("<none>"),
-        previous = state.previous().unwrap_or("<none>"),
-        "mru: loaded state"
-    );
-    state
+    file.read_to_string(&mut contents)?;
+    Ok(parse(&contents))
 }
 
-/// Promote a window to the top of the MRU stack.
-///
-/// `target` moves to position 0. If it was already in the stack, it is
-/// removed from its old position first. Stack is capped at MAX_ENTRIES.
-/// No-op if target is already at position 0.
-pub fn save(target: &str) {
-    let Some(path) = mru_path() else {
-        return;
-    };
-
-    let Ok(mut file) = OpenOptions::new()
+/// Promote `target` in the stack at `path` under an exclusive lock,
+/// creating the file if absent.
+fn save_to(path: &Path, target: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
-    else {
-        return;
-    };
+        .open(path)?;
+    lock_exclusive(&file)?;
+    let mut state = read_locked(&mut file)?;
 
-    if !lock_exclusive(&file) {
-        return;
-    }
-
-    // Read existing stack.
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    let mut state = parse(&contents);
-
-    // Already at top — no-op.
     if state.current() == Some(target) {
         tracing::debug!(target, "mru: already at top, skipping");
-        return;
+        return Ok(());
     }
 
     tracing::info!(
@@ -143,108 +168,66 @@ pub fn save(target: &str) {
         stack_len = state.stack.len(),
         "mru: promoting to top"
     );
-
-    // Remove target from current position (if present) and insert at front.
     state.stack.retain(|s| s != target);
     state.stack.insert(0, target.to_string());
     state.stack.truncate(MAX_ENTRIES);
-
-    // Write back.
-    let serialized = state.stack.join("\n");
-    let _ = file.seek(std::io::SeekFrom::Start(0));
-    let _ = file.set_len(0);
-    let _ = file.write_all(serialized.as_bytes());
+    write_locked(&mut file, &state)
 }
 
-/// Remove MRU entries that no longer correspond to live windows.
-///
-/// Called during overlay activation to keep the MRU file accurate.
-/// `live_ids` is the set of window ID strings currently reported by the
-/// compositor. Any MRU entry not in this set is removed.
-pub fn prune(live_ids: &std::collections::HashSet<String>) {
-    let Some(path) = mru_path() else {
-        return;
-    };
-
-    let Ok(mut file) = OpenOptions::new()
+/// Drop entries absent from `live_ids` in the stack at `path` under an
+/// exclusive lock. A missing file is left absent.
+fn prune_from(path: &Path, live_ids: &std::collections::HashSet<String>) -> std::io::Result<()> {
+    let mut file = match OpenOptions::new()
         .read(true)
         .write(true)
         .create(false)
         .truncate(false)
-        .open(&path)
-    else {
-        return;
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
     };
-
-    if !lock_exclusive(&file) {
-        return;
-    }
-
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    let mut state = parse(&contents);
+    lock_exclusive(&file)?;
+    let mut state = read_locked(&mut file)?;
 
     let before = state.stack.len();
     state.stack.retain(|id| live_ids.contains(id));
     let removed = before - state.stack.len();
-
-    if removed > 0 {
-        tracing::info!(
-            removed,
-            remaining = state.stack.len(),
-            "mru: pruned dead entries"
-        );
-        let serialized = state.stack.join("\n");
-        let _ = file.seek(std::io::SeekFrom::Start(0));
-        let _ = file.set_len(0);
-        let _ = file.write_all(serialized.as_bytes());
+    if removed == 0 {
+        return Ok(());
     }
+    tracing::info!(
+        removed,
+        remaining = state.stack.len(),
+        "mru: pruned dead entries"
+    );
+    write_locked(&mut file, &state)
 }
 
-/// Seed MRU stack from a window list if empty.
-///
-/// Sets focused window at top, all others in compositor order below.
-/// No-op if MRU state already has entries.
-pub fn seed_if_empty(windows: &[core_types::Window]) {
-    let state = load();
-    if !state.stack.is_empty() {
-        tracing::debug!("mru: seed_if_empty skipped, state already populated");
-        return;
-    }
+fn read_locked(file: &mut File) -> std::io::Result<MruState> {
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(parse(&contents))
+}
 
-    if windows.is_empty() {
-        tracing::warn!("mru: seed_if_empty called with empty window list");
-        return;
-    }
-
-    // Focused window goes first, then the rest.
-    let focused = windows.iter().find(|w| w.is_focused);
-    if let Some(f) = focused {
-        save(&f.id.to_string());
-        tracing::info!(current = %f.app_id, "mru: seeded with focused window");
-    } else {
-        save(&windows[0].id.to_string());
-        tracing::info!(current = %windows[0].app_id, "mru: seeded with first window (none focused)");
-    }
+fn write_locked(file: &mut File, state: &MruState) -> std::io::Result<()> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(state.stack.join("\n").as_bytes())
 }
 
 /// Reorder a window list by MRU stack position.
 ///
 /// Windows in the MRU stack are sorted by their stack position (most recent
 /// first). Windows not in the stack are placed after all MRU-tracked windows,
-/// preserving their relative compositor order.
-///
-/// After sorting, the origin (MRU position 0 / currently focused) is at
-/// position 0 in the result. The caller (Snapshot::build) records
-/// `origin_index` and the controller skips it for initial selection.
+/// preserving their relative compositor order. The currently focused window
+/// (stack position 0) sorts first; the overlay snapshot moves it last.
 ///
 /// The closure returns a `String` rather than `&str` because ID types
 /// (e.g. `WindowId`) format via `Display` without storing a `String` field
-/// that could be borrowed.
-///
-/// Accepts a pre-loaded `MruState` to avoid redundant file I/O — the caller
-/// is responsible for loading the state (ideally off the async runtime via
-/// `spawn_blocking`).
+/// that could be borrowed. `state` is loaded once by the caller and shared
+/// by every comparison.
 pub fn reorder<T, F>(windows: &mut [T], get_id: F, state: &MruState)
 where
     F: Fn(&T) -> String,
@@ -269,106 +252,23 @@ fn parse(contents: &str) -> MruState {
     MruState { stack }
 }
 
-#[cfg(unix)]
-fn lock_shared(file: &File) -> bool {
-    use std::os::unix::io::AsRawFd;
-    // LOCK_NB: never block the tokio thread waiting for another process.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) == 0 }
+// Non-blocking (`flock` with `LOCK_NB` on Unix): the tokio thread never
+// waits for another process; a held lock surfaces as `WouldBlock`.
+fn lock_shared(file: &File) -> std::io::Result<()> {
+    Ok(file.try_lock_shared()?)
 }
 
-#[cfg(unix)]
-fn lock_exclusive(file: &File) -> bool {
-    use std::os::unix::io::AsRawFd;
-    // LOCK_NB: never block the tokio thread waiting for another process.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
-}
-
-#[cfg(not(unix))]
-fn lock_shared(_file: &File) -> bool {
-    true
-}
-
-#[cfg(not(unix))]
-fn lock_exclusive(_file: &File) -> bool {
-    true
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-fn load_from(path: &std::path::Path) -> MruState {
-    let Ok(mut file) = File::open(path) else {
-        return MruState::default();
-    };
-    let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_err() {
-        return MruState::default();
-    }
-    parse(&contents)
-}
-
-#[cfg(test)]
-fn save_to(path: &std::path::Path, target: &str) {
-    let Ok(mut file) = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-    else {
-        return;
-    };
-    if !lock_exclusive(&file) {
-        return;
-    }
-
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    let mut state = parse(&contents);
-
-    if state.current() == Some(target) {
-        return;
-    }
-
-    state.stack.retain(|s| s != target);
-    state.stack.insert(0, target.to_string());
-    state.stack.truncate(MAX_ENTRIES);
-
-    let serialized = state.stack.join("\n");
-    let _ = file.seek(std::io::SeekFrom::Start(0));
-    let _ = file.set_len(0);
-    let _ = file.write_all(serialized.as_bytes());
-}
-
-#[cfg(test)]
-fn prune_from(path: &std::path::Path, live_ids: &std::collections::HashSet<String>) {
-    let Ok(mut file) = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(false)
-        .truncate(false)
-        .open(path)
-    else {
-        return;
-    };
-    if !lock_exclusive(&file) {
-        return;
-    }
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    let mut state = parse(&contents);
-    state.stack.retain(|id| live_ids.contains(id));
-    let serialized = state.stack.join("\n");
-    let _ = file.seek(std::io::SeekFrom::Start(0));
-    let _ = file.set_len(0);
-    let _ = file.write_all(serialized.as_bytes());
+fn lock_exclusive(file: &File) -> std::io::Result<()> {
+    Ok(file.try_lock()?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stack(path: &Path) -> Vec<String> {
+        load_from(path).unwrap().stack
+    }
 
     #[test]
     fn parse_empty() {
@@ -406,18 +306,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
 
-        save_to(&path, "A");
-        assert_eq!(load_from(&path).stack, vec!["A"]);
+        save_to(&path, "A").unwrap();
+        assert_eq!(stack(&path), vec!["A"]);
 
-        save_to(&path, "B");
-        assert_eq!(load_from(&path).stack, vec!["B", "A"]);
+        save_to(&path, "B").unwrap();
+        assert_eq!(stack(&path), vec!["B", "A"]);
 
-        save_to(&path, "C");
-        assert_eq!(load_from(&path).stack, vec!["C", "B", "A"]);
+        save_to(&path, "C").unwrap();
+        assert_eq!(stack(&path), vec!["C", "B", "A"]);
 
         // Re-promote A: moves from position 2 to 0.
-        save_to(&path, "A");
-        assert_eq!(load_from(&path).stack, vec!["A", "C", "B"]);
+        save_to(&path, "A").unwrap();
+        assert_eq!(stack(&path), vec!["A", "C", "B"]);
     }
 
     #[test]
@@ -425,10 +325,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
 
-        save_to(&path, "A");
-        save_to(&path, "B");
-        save_to(&path, "B"); // already at top
-        assert_eq!(load_from(&path).stack, vec!["B", "A"]);
+        save_to(&path, "A").unwrap();
+        save_to(&path, "B").unwrap();
+        save_to(&path, "B").unwrap(); // already at top
+        assert_eq!(stack(&path), vec!["B", "A"]);
     }
 
     #[test]
@@ -437,64 +337,50 @@ mod tests {
         let path = dir.path().join("mru");
 
         // Start: A focused, B and C exist.
-        save_to(&path, "C");
-        save_to(&path, "B");
-        save_to(&path, "A");
-        assert_eq!(load_from(&path).stack, vec!["A", "B", "C"]);
+        save_to(&path, "C").unwrap();
+        save_to(&path, "B").unwrap();
+        save_to(&path, "A").unwrap();
+        assert_eq!(stack(&path), vec!["A", "B", "C"]);
 
         // Alt+Tab: switch to B (MRU previous).
-        save_to(&path, "B");
-        assert_eq!(load_from(&path).stack, vec!["B", "A", "C"]);
+        save_to(&path, "B").unwrap();
+        assert_eq!(stack(&path), vec!["B", "A", "C"]);
 
         // Alt+Tab again: switch back to A.
-        save_to(&path, "A");
-        assert_eq!(load_from(&path).stack, vec!["A", "B", "C"]);
+        save_to(&path, "A").unwrap();
+        assert_eq!(stack(&path), vec!["A", "B", "C"]);
 
         // 500 more times: still ping-ponging A↔B, C stays at position 2.
         for _ in 0..500 {
-            save_to(&path, "B");
-            assert_eq!(load_from(&path).current(), Some("B"));
-            assert_eq!(load_from(&path).previous(), Some("A"));
+            save_to(&path, "B").unwrap();
+            let state = load_from(&path).unwrap();
+            assert_eq!(state.current(), Some("B"));
+            assert_eq!(state.previous(), Some("A"));
 
-            save_to(&path, "A");
-            assert_eq!(load_from(&path).current(), Some("A"));
-            assert_eq!(load_from(&path).previous(), Some("B"));
+            save_to(&path, "A").unwrap();
+            let state = load_from(&path).unwrap();
+            assert_eq!(state.current(), Some("A"));
+            assert_eq!(state.previous(), Some("B"));
         }
         // C never moved.
-        assert_eq!(load_from(&path).stack[2], "C");
+        assert_eq!(stack(&path)[2], "C");
     }
 
     #[test]
     fn reorder_sorts_by_mru() {
-        // Simulate reorder logic directly (since reorder() calls load()
-        // which reads from the real path, not testable here).
         let state = parse("B\nA\nC");
-
         let mut items = vec!["A", "C", "B"]; // arbitrary compositor order
-        items.sort_by(|a, b| {
-            let pa = state.position(a).unwrap_or(usize::MAX);
-            let pb = state.position(b).unwrap_or(usize::MAX);
-            pa.cmp(&pb)
-        });
+        reorder(&mut items, |s| (*s).to_string(), &state);
         assert_eq!(items, vec!["B", "A", "C"]); // MRU order
     }
 
     #[test]
     fn reorder_unknown_windows_go_last() {
         let state = parse("B\nA");
-
         let mut items = ["X", "A", "B", "Y"];
-        items.sort_by(|a, b| {
-            let pa = state.position(a).unwrap_or(usize::MAX);
-            let pb = state.position(b).unwrap_or(usize::MAX);
-            pa.cmp(&pb)
-        });
-        // B(0), A(1), then X and Y (both MAX, stable relative order).
-        assert_eq!(items[0], "B");
-        assert_eq!(items[1], "A");
-        // X and Y are after, order between them is stable.
-        assert!(items[2..].contains(&"X"));
-        assert!(items[2..].contains(&"Y"));
+        reorder(&mut items, |s| (*s).to_string(), &state);
+        // B(0), A(1), then X and Y in stable compositor order.
+        assert_eq!(items, ["B", "A", "X", "Y"]);
     }
 
     #[test]
@@ -503,9 +389,9 @@ mod tests {
         let path = dir.path().join("mru");
 
         for i in 0..100 {
-            save_to(&path, &format!("win-{i}"));
+            save_to(&path, &format!("win-{i}")).unwrap();
         }
-        let state = load_from(&path);
+        let state = load_from(&path).unwrap();
         assert_eq!(state.stack.len(), MAX_ENTRIES);
         assert_eq!(state.current(), Some("win-99"));
     }
@@ -515,16 +401,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
 
-        save_to(&path, "A");
-        save_to(&path, "B");
-        save_to(&path, "C");
-        assert_eq!(load_from(&path).stack, vec!["C", "B", "A"]);
+        save_to(&path, "A").unwrap();
+        save_to(&path, "B").unwrap();
+        save_to(&path, "C").unwrap();
+        assert_eq!(stack(&path), vec!["C", "B", "A"]);
 
         // B was closed — only A and C are live.
         let live: std::collections::HashSet<String> =
-            ["A", "C"].iter().map(|s| s.to_string()).collect();
-        prune_from(&path, &live);
-        assert_eq!(load_from(&path).stack, vec!["C", "A"]);
+            ["A", "C"].iter().map(ToString::to_string).collect();
+        prune_from(&path, &live).unwrap();
+        assert_eq!(stack(&path), vec!["C", "A"]);
     }
 
     #[test]
@@ -532,15 +418,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
 
-        save_to(&path, "A");
-        save_to(&path, "B");
-        save_to(&path, "C");
-        save_to(&path, "D");
+        save_to(&path, "A").unwrap();
+        save_to(&path, "B").unwrap();
+        save_to(&path, "C").unwrap();
+        save_to(&path, "D").unwrap();
         // Stack: D, C, B, A. Remove C and A.
         let live: std::collections::HashSet<String> =
-            ["D", "B"].iter().map(|s| s.to_string()).collect();
-        prune_from(&path, &live);
-        assert_eq!(load_from(&path).stack, vec!["D", "B"]);
+            ["D", "B"].iter().map(ToString::to_string).collect();
+        prune_from(&path, &live).unwrap();
+        assert_eq!(stack(&path), vec!["D", "B"]);
     }
 
     #[test]
@@ -548,12 +434,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
 
-        save_to(&path, "A");
-        save_to(&path, "B");
+        save_to(&path, "A").unwrap();
+        save_to(&path, "B").unwrap();
 
         let live: std::collections::HashSet<String> = std::collections::HashSet::new();
-        prune_from(&path, &live);
-        assert!(load_from(&path).stack.is_empty());
+        prune_from(&path, &live).unwrap();
+        assert!(stack(&path).is_empty());
     }
 
     #[test]
@@ -561,23 +447,75 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
 
-        save_to(&path, "A");
-        save_to(&path, "B");
-        save_to(&path, "C");
+        save_to(&path, "A").unwrap();
+        save_to(&path, "B").unwrap();
+        save_to(&path, "C").unwrap();
 
         let live: std::collections::HashSet<String> =
-            ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
-        prune_from(&path, &live);
-        assert_eq!(load_from(&path).stack, vec!["C", "B", "A"]);
+            ["A", "B", "C"].iter().map(ToString::to_string).collect();
+        prune_from(&path, &live).unwrap();
+        assert_eq!(stack(&path), vec!["C", "B", "A"]);
     }
 
     #[test]
     fn prune_no_file_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mru");
-        // File doesn't exist — prune should not panic or create it.
-        let live: std::collections::HashSet<String> = ["A"].iter().map(|s| s.to_string()).collect();
-        prune_from(&path, &live);
-        assert!(load_from(&path).stack.is_empty());
+        // File doesn't exist — prune must not fail or create it.
+        let live: std::collections::HashSet<String> =
+            ["A"].iter().map(ToString::to_string).collect();
+        prune_from(&path, &live).unwrap();
+        assert!(!path.exists());
+        assert!(stack(&path).is_empty());
+    }
+
+    fn window(app: &str, focused: bool) -> core_types::Window {
+        core_types::Window::new(
+            core_types::WindowId::new(),
+            core_types::AppId::new(app),
+            app.into(),
+            focused,
+        )
+    }
+
+    #[test]
+    fn seed_puts_the_focused_window_on_an_empty_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MruStore::new(dir.path().join("mru"));
+        let windows = [window("a", false), window("b", true)];
+        store.seed_if_empty(&windows);
+        assert_eq!(store.load().stack, [windows[1].id.to_string()]);
+        // A populated stack is left as it is.
+        store.seed_if_empty(&[window("c", true)]);
+        assert_eq!(store.load().stack, [windows[1].id.to_string()]);
+    }
+
+    #[test]
+    fn seed_without_focus_uses_the_first_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MruStore::new(dir.path().join("mru"));
+        let windows = [window("a", false), window("b", false)];
+        store.seed_if_empty(&windows);
+        assert_eq!(store.load().stack, [windows[0].id.to_string()]);
+    }
+
+    #[test]
+    fn load_reports_unreadable_path() {
+        // A directory at the MRU path is an I/O error, not an empty stack.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_from(dir.path()).is_err());
+    }
+
+    #[test]
+    fn save_reports_held_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mru");
+        save_to(&path, "A").unwrap();
+        let holder = File::open(&path).unwrap();
+        lock_exclusive(&holder).unwrap();
+        let err = save_to(&path, "B").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        drop(holder);
+        assert_eq!(stack(&path), vec!["A"]);
     }
 }

@@ -1,415 +1,369 @@
-//! Profile activation/deactivation transaction with confirmed RPC and rollback.
+//! Profile activation and deactivation, and the confirmed RPC to
+//! daemon-secrets they are made of.
 //!
-//! Coordinates the multi-step process of activating or deactivating a profile
-//! across daemons. Uses confirmed RPC instead of fire-and-forget broadcast
-//! for security-critical steps — daemon-profile waits for daemon-secrets to confirm
-//! each operation before proceeding.
+//! A transition changes one piece of state: whether daemon-secrets serves
+//! the profile's vault. daemon-profile announces the transition, asks
+//! daemon-secrets to apply it through a confirmed RPC (unicast, then wait
+//! for the correlated response), and announces and audits the outcome.
 //!
-//! Activation:
-//!   1. Emit `ProfileActivationBegun` on IPC bus (informational, fire-and-forget)
-//!   2. Send `ProfileActivate` to daemon-secrets via confirmed RPC (unicast + wait)
-//!   3. Emit `ProfileActivated` on IPC bus (informational, fire-and-forget)
-//!   4. Append audit entry
-//!
-//! Deactivation:
-//!   1. Emit `ProfileDeactivationBegun` on IPC bus (informational, fire-and-forget)
-//!   2. Send `ProfileDeactivate` to daemon-secrets via confirmed RPC (unicast + wait)
-//!   3. Emit `ProfileDeactivated` on IPC bus (informational, fire-and-forget)
-//!   4. Append audit entry
-//!
-//! If a confirmed RPC times out, the operation fails closed — no state change
-//! is committed locally. Rollback steps also use confirmed RPC.
+//! The RPC ends in one of three ways:
+//! - confirmed: daemon-secrets applied the transition;
+//! - rejected: daemon-secrets answered that it did not, and its state is
+//!   unchanged;
+//! - unconfirmed: no valid answer arrived (daemon-secrets not connected, a
+//!   timeout, an answer of another kind), so daemon-secrets may or may not
+//!   have applied it. The caller reconciles its shadow state with
+//!   daemon-secrets' authoritative state; a compensating request could
+//!   undo a transition that never happened.
 
-use core_ipc::{BusServer, Message};
-use core_profile::AuditLogger;
-use core_types::{DaemonId, EventKind, ProfileId, SecurityLevel, TrustProfileName};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-/// Timeout for confirmed RPC calls to daemon-secrets.
+
+use anyhow::Context;
+use core_ipc::Message;
+use core_profile::AuditAction;
+use core_types::{Daemon, EventKind, ProfileId, SecurityLevel, TrustProfileName};
+
+use crate::dispatch::Hub;
+
+/// How long a confirmed RPC waits for its response.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Steps completed during an activation/deactivation, for rollback tracking.
+/// Unicast attempts to daemon-secrets: after a restart it is unreachable
+/// until it has completed its handshake and announced itself.
+const SEND_ATTEMPTS: u32 = 5;
+
+/// The delay before the second attempt, doubled before each later one.
+const SEND_BACKOFF: Duration = Duration::from_millis(100);
+
+/// A change of whether daemon-secrets serves a profile's vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompletedStep {
-    ActivationBegunEmitted,
-    SecretsVaultOpened,
-    SecretsJitFlushed,
-    SecretsVaultClosed,
-    ActivationCompletedEmitted,
+pub(crate) enum Transition {
+    Activate,
+    Deactivate,
 }
 
-/// Execute a profile activation transaction with confirmed RPC.
-///
-/// Coordinates with daemon-secrets via unicast confirmed RPC to open the vault,
-/// then emits informational bus events and writes an audit entry. Returns the
-/// elapsed duration on success, or an error with best-effort rollback on failure.
-///
-/// Fails closed: if daemon-secrets does not confirm within [`CONFIRM_TIMEOUT`],
-/// activation is NOT committed locally.
-pub async fn activate<W: std::io::Write>(
-    target: ProfileId,
-    profile_name: &TrustProfileName,
-    bus: &BusServer,
-    audit: &mut AuditLogger<W>,
-    daemon_id: DaemonId,
-    confirm_tx: &mpsc::Sender<Vec<u8>>,
-    confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
-) -> Result<u32, String> {
-    let start = Instant::now();
-    let mut completed: Vec<CompletedStep> = Vec::new();
-
-    // Step 1: Emit ActivationBegun broadcast (informational, fire-and-forget).
-    let begun_event = EventKind::ProfileActivationBegun {
-        target,
-        trigger: format!("explicit activation of {profile_name}"),
-    };
-    if let Err(e) = broadcast(bus, daemon_id, begun_event).await {
-        return Err(format!("failed to emit ActivationBegun: {e}"));
-    }
-    completed.push(CompletedStep::ActivationBegunEmitted);
-
-    // Step 2: Send ProfileActivate to daemon-secrets via confirmed RPC.
-    let activate_event = EventKind::ProfileActivate {
-        profile_name: profile_name.clone(),
-        target,
-    };
-    match confirmed_rpc(bus, daemon_id, activate_event, confirm_tx, confirm_rx).await {
-        Ok(response) => match response.payload {
-            EventKind::ProfileActivateResponse { success: true } => {
-                completed.push(CompletedStep::SecretsVaultOpened);
-            }
-            EventKind::ProfileActivateResponse { success: false } => {
-                rollback(
-                    &completed,
-                    target,
-                    profile_name,
-                    bus,
-                    audit,
-                    daemon_id,
-                    confirm_tx,
-                    confirm_rx,
-                )
-                .await;
-                return Err("daemon-secrets rejected ProfileActivate".into());
-            }
-            other => {
-                rollback(
-                    &completed,
-                    target,
-                    profile_name,
-                    bus,
-                    audit,
-                    daemon_id,
-                    confirm_tx,
-                    confirm_rx,
-                )
-                .await;
-                return Err(format!("unexpected response to ProfileActivate: {other:?}"));
-            }
-        },
-        Err(e) => {
-            rollback(
-                &completed,
+impl Transition {
+    /// The request daemon-secrets applies.
+    fn request(self, target: ProfileId, profile_name: &TrustProfileName) -> EventKind {
+        let profile_name = profile_name.clone();
+        match self {
+            Self::Activate => EventKind::ProfileActivate {
                 target,
                 profile_name,
-                bus,
-                audit,
-                daemon_id,
-                confirm_tx,
-                confirm_rx,
-            )
+            },
+            Self::Deactivate => EventKind::ProfileDeactivate {
+                target,
+                profile_name,
+            },
+        }
+    }
+
+    /// The announcement that the transition began.
+    fn begun(self, target: ProfileId, profile_name: &TrustProfileName) -> EventKind {
+        match self {
+            Self::Activate => EventKind::ProfileActivationBegun {
+                target,
+                trigger: format!("explicit activation of {profile_name}"),
+            },
+            Self::Deactivate => EventKind::ProfileDeactivationBegun { target },
+        }
+    }
+
+    /// Whether `response` answers this transition's request, and if so
+    /// whether daemon-secrets applied it.
+    fn applied(self, response: &EventKind) -> Option<bool> {
+        match (self, response) {
+            (Self::Activate, EventKind::ProfileActivateResponse { success })
+            | (Self::Deactivate, EventKind::ProfileDeactivateResponse { success }) => {
+                Some(*success)
+            }
+            _ => None,
+        }
+    }
+
+    /// The announcement and audit entry of a completed transition.
+    fn completed(self, target: ProfileId, duration_ms: u32) -> (EventKind, AuditAction) {
+        match self {
+            Self::Activate => (
+                EventKind::ProfileActivated {
+                    target,
+                    duration_ms,
+                },
+                AuditAction::ProfileActivated {
+                    target,
+                    duration_ms,
+                },
+            ),
+            Self::Deactivate => (
+                EventKind::ProfileDeactivated {
+                    target,
+                    duration_ms,
+                },
+                AuditAction::ProfileDeactivated {
+                    target,
+                    duration_ms,
+                },
+            ),
+        }
+    }
+
+    /// The announcement and audit entry of a failed transition.
+    fn failed(self, target: ProfileId, reason: &str) -> (EventKind, AuditAction) {
+        let reason = reason.to_owned();
+        match self {
+            Self::Activate => (
+                EventKind::ProfileActivationFailed {
+                    target,
+                    reason: reason.clone(),
+                },
+                AuditAction::ProfileActivationFailed { target, reason },
+            ),
+            Self::Deactivate => (
+                EventKind::ProfileDeactivationFailed {
+                    target,
+                    reason: reason.clone(),
+                },
+                AuditAction::ProfileDeactivationFailed { target, reason },
+            ),
+        }
+    }
+}
+
+/// Why a transition did not complete.
+#[derive(Debug)]
+pub(crate) enum TransitionError {
+    /// daemon-secrets answered that it did not apply the transition: its
+    /// state is unchanged.
+    Rejected,
+    /// No valid answer arrived: daemon-secrets' state is unknown until
+    /// reconciled.
+    Unconfirmed(anyhow::Error),
+}
+
+impl std::fmt::Display for TransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secrets = Daemon::Secrets;
+        match self {
+            Self::Rejected => write!(f, "{secrets} rejected the request"),
+            Self::Unconfirmed(e) => write!(f, "{secrets} did not confirm the request: {e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for TransitionError {}
+
+/// `elapsed` in whole milliseconds, saturating at `u32::MAX` (the wire and
+/// audit fields are `u32`; a transition is bounded by the RPC timeouts).
+fn millis(elapsed: Duration) -> u32 {
+    u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX)
+}
+
+impl Hub {
+    /// Apply `transition` to `profile_name` (`target`) in daemon-secrets,
+    /// announcing and auditing it: the elapsed milliseconds on success.
+    ///
+    /// # Errors
+    ///
+    /// [`TransitionError::Rejected`] when daemon-secrets refuses it, and
+    /// [`TransitionError::Unconfirmed`] when no valid answer arrives. Both
+    /// are announced and audited before they are returned.
+    pub(crate) async fn transition(
+        &mut self,
+        transition: Transition,
+        target: ProfileId,
+        profile_name: &TrustProfileName,
+    ) -> Result<u32, TransitionError> {
+        let start = Instant::now();
+        self.announce(transition.begun(target, profile_name)).await;
+        let outcome = match self
+            .confirmed_rpc(transition.request(target, profile_name))
+            .await
+        {
+            Ok(response) => match transition.applied(&response.payload) {
+                Some(true) => Ok(()),
+                Some(false) => Err(TransitionError::Rejected),
+                None => Err(TransitionError::Unconfirmed(anyhow::anyhow!(
+                    "unexpected response {:?}",
+                    response.payload
+                ))),
+            },
+            Err(e) => Err(TransitionError::Unconfirmed(e)),
+        };
+        let duration_ms = millis(start.elapsed());
+        let (event, action) = match &outcome {
+            Ok(()) => transition.completed(target, duration_ms),
+            Err(e) => transition.failed(target, &e.to_string()),
+        };
+        self.announce(event).await;
+        self.record(&action);
+        outcome.map(|()| duration_ms)
+    }
+
+    /// Send `event` to daemon-secrets and wait for its correlated response.
+    ///
+    /// A response to an earlier request whose wait ended is discarded.
+    ///
+    /// # Errors
+    ///
+    /// When the request cannot be encoded, daemon-secrets cannot be reached
+    /// after [`SEND_ATTEMPTS`] attempts, no correlated response arrives
+    /// within [`CONFIRM_TIMEOUT`], or the response cannot be decoded.
+    pub(crate) async fn confirmed_rpc(
+        &mut self,
+        event: EventKind,
+    ) -> anyhow::Result<Message<EventKind>> {
+        let mut msg = Message::new(
+            &self.ctx,
+            event,
+            SecurityLevel::SecretsOnly,
+            self.bus.epoch(),
+        );
+        // Unicast past the server's routing, which stamps every other
+        // frame with its sender's registry name.
+        msg.verified_sender_name = Some(Daemon::Profile.name().into());
+        let msg_id = msg.msg_id;
+        let frame = core_ipc::encode_frame(&msg).context("failed to encode the request")?;
+
+        // Routed here until dropped.
+        let _route = self
+            .bus
+            .register_confirmation(msg_id, self.confirm_tx.clone())
             .await;
-            return Err(format!("confirmed RPC failed for ProfileActivate: {e}"));
-        }
-    }
+        while self.confirm_rx.try_recv().is_ok() {}
+        self.send_to_secrets(&frame).await?;
 
-    // Step 3: Emit ProfileActivated broadcast (informational, fire-and-forget).
-    let duration_ms = start.elapsed().as_millis() as u32;
-    let activated_event = EventKind::ProfileActivated {
-        target,
-        duration_ms,
-    };
-    if let Err(e) = broadcast(bus, daemon_id, activated_event).await {
-        // Informational broadcast failure is not security-critical — log and continue.
-        tracing::warn!(error = %e, "failed to emit ProfileActivated broadcast (non-critical)");
-    }
-    completed.push(CompletedStep::ActivationCompletedEmitted);
-
-    // Step 4: Append audit entry.
-    if let Err(e) = audit.append(core_profile::AuditAction::ProfileActivated {
-        target,
-        duration_ms,
-    }) {
-        tracing::error!(error = %e, "failed to write activation audit entry");
-        // Audit failure is logged but does not trigger rollback —
-        // the activation itself succeeded.
-    }
-
-    Ok(duration_ms)
-}
-
-/// Execute a profile deactivation transaction with confirmed RPC.
-///
-/// Coordinates with daemon-secrets via unicast confirmed RPC to flush JIT cache
-/// and close the vault, then emits bus events and writes an audit entry.
-pub async fn deactivate<W: std::io::Write>(
-    target: ProfileId,
-    profile_name: &TrustProfileName,
-    bus: &BusServer,
-    audit: &mut AuditLogger<W>,
-    daemon_id: DaemonId,
-    confirm_tx: &mpsc::Sender<Vec<u8>>,
-    confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
-) -> Result<u32, String> {
-    let start = Instant::now();
-    let mut completed: Vec<CompletedStep> = Vec::new();
-
-    // Step 1: Emit DeactivationBegun broadcast (informational, fire-and-forget).
-    let begun_event = EventKind::ProfileDeactivationBegun { target };
-    if let Err(e) = broadcast(bus, daemon_id, begun_event).await {
-        return Err(format!("failed to emit DeactivationBegun: {e}"));
-    }
-    completed.push(CompletedStep::ActivationBegunEmitted);
-
-    // Step 2: Send ProfileDeactivate to daemon-secrets via confirmed RPC.
-    let deactivate_event = EventKind::ProfileDeactivate {
-        profile_name: profile_name.clone(),
-        target,
-    };
-    match confirmed_rpc(bus, daemon_id, deactivate_event, confirm_tx, confirm_rx).await {
-        Ok(response) => match response.payload {
-            EventKind::ProfileDeactivateResponse { success: true } => {
-                completed.push(CompletedStep::SecretsJitFlushed);
-                completed.push(CompletedStep::SecretsVaultClosed);
+        let deadline = tokio::time::Instant::now() + CONFIRM_TIMEOUT;
+        loop {
+            let raw = tokio::time::timeout_at(deadline, self.confirm_rx.recv())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("no response within {}ms", CONFIRM_TIMEOUT.as_millis())
+                })?
+                .context("the confirmation channel closed")?;
+            let response: Message<EventKind> =
+                core_ipc::decode_frame(&raw).context("failed to decode the response")?;
+            if response.correlation_id == Some(msg_id) {
+                return Ok(response);
             }
-            EventKind::ProfileDeactivateResponse { success: false } => {
-                rollback(
-                    &completed,
-                    target,
-                    profile_name,
-                    bus,
-                    audit,
-                    daemon_id,
-                    confirm_tx,
-                    confirm_rx,
-                )
-                .await;
-                return Err("daemon-secrets rejected ProfileDeactivate".into());
-            }
-            other => {
-                rollback(
-                    &completed,
-                    target,
-                    profile_name,
-                    bus,
-                    audit,
-                    daemon_id,
-                    confirm_tx,
-                    confirm_rx,
-                )
-                .await;
-                return Err(format!(
-                    "unexpected response to ProfileDeactivate: {other:?}"
-                ));
-            }
-        },
-        Err(e) => {
-            // Deactivation timeout: log error, trigger reconciliation at caller level.
-            tracing::error!(
-                error = %e,
-                profile = %profile_name,
-                "confirmed RPC timeout on ProfileDeactivate — reconciliation needed"
+            tracing::debug!(
+                expected = %msg_id,
+                got = ?response.correlation_id,
+                "discarding a response to an earlier request"
             );
-            return Err(format!("confirmed RPC failed for ProfileDeactivate: {e}"));
         }
     }
 
-    // Step 3: Emit ProfileDeactivated broadcast (informational, fire-and-forget).
-    let duration_ms = start.elapsed().as_millis() as u32;
-    let deactivated_event = EventKind::ProfileDeactivated {
-        target,
-        duration_ms,
-    };
-    if let Err(e) = broadcast(bus, daemon_id, deactivated_event).await {
-        tracing::warn!(error = %e, "failed to emit ProfileDeactivated broadcast (non-critical)");
-    }
-    completed.push(CompletedStep::ActivationCompletedEmitted);
-
-    // Step 4: Append audit entry.
-    if let Err(e) = audit.append(core_profile::AuditAction::ProfileDeactivated {
-        target,
-        duration_ms,
-    }) {
-        tracing::error!(error = %e, "failed to write deactivation audit entry");
-    }
-
-    Ok(duration_ms)
-}
-
-/// Send a confirmed RPC to daemon-secrets and wait for the response.
-///
-/// 1. Encode the event as a Message with a fresh `msg_id`
-/// 2. Register a confirmation route for that `msg_id`
-/// 3. Unicast to daemon-secrets via `send_to_named()`
-/// 4. Wait for the confirmed response with timeout
-/// 5. Decode and return the response Message
-///
-/// The `ConfirmationGuard` automatically deregisters the route on drop,
-/// even on timeout or error paths.
-pub(crate) async fn confirmed_rpc(
-    bus: &BusServer,
-    daemon_id: DaemonId,
-    event: EventKind,
-    confirm_tx: &mpsc::Sender<Vec<u8>>,
-    confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
-) -> Result<Message<EventKind>, String> {
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    let mut msg = Message::new(&msg_ctx, event, SecurityLevel::SecretsOnly, bus.epoch());
-    // Stamp verified identity: send_to_named bypasses route_frame() which
-    // normally stamps this. daemon-profile is the bus host so self-stamping
-    // is safe — the identity is authoritative.
-    msg.verified_sender_name = Some("daemon-profile".into());
-    let msg_id = msg.msg_id;
-
-    // Register confirmation route — guard deregisters on drop.
-    let _guard = bus.register_confirmation(msg_id, confirm_tx.clone()).await;
-
-    // Encode and unicast to daemon-secrets with retry. daemon-secrets may not
-    // yet be in name_to_conn if it is still completing its Noise IK handshake
-    // and DaemonStarted announcement after a concurrent restart.
-    let frame = core_ipc::encode_frame(&msg).map_err(|e| format!("encode failed: {e}"))?;
-    {
-        let max_attempts: u32 = 5;
-        let mut backoff = Duration::from_millis(100);
-        let mut last_err = String::new();
-        let mut sent = false;
-        for attempt in 1..=max_attempts {
-            match bus.send_to_named("daemon-secrets", &frame).await {
-                Ok(()) => {
-                    sent = true;
-                    break;
+    /// Unicast `frame` to daemon-secrets, retrying while it is not
+    /// connected.
+    async fn send_to_secrets(&self, frame: &[u8]) -> anyhow::Result<()> {
+        let mut backoff = SEND_BACKOFF;
+        let mut attempt = 1;
+        loop {
+            match self.bus.send_to_named(Daemon::Secrets.name(), frame).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt == SEND_ATTEMPTS => {
+                    return Err(e).with_context(|| format!("after {SEND_ATTEMPTS} attempts"));
                 }
                 Err(e) => {
-                    last_err = e;
-                    if attempt < max_attempts {
-                        tracing::warn!(
-                            attempt,
-                            max_attempts,
-                            backoff_ms = backoff.as_millis() as u64,
-                            error = %last_err,
-                            "daemon-secrets not yet connected, retrying"
-                        );
-                        tokio::time::sleep(backoff).await;
-                        backoff *= 2;
-                    }
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = SEND_ATTEMPTS,
+                        backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                        error = %e,
+                        "{} not reachable, retrying",
+                        Daemon::Secrets
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                    attempt += 1;
                 }
             }
         }
-        if !sent {
-            return Err(format!(
-                "send_to_named failed after {max_attempts} attempts: {last_err}"
-            ));
+    }
+
+    /// Publish `event` to every connection with Internal clearance, from
+    /// daemon-profile's message context. An event that cannot be encoded
+    /// is logged.
+    pub(crate) async fn announce(&self, event: EventKind) {
+        let msg = Message::new(&self.ctx, event, SecurityLevel::Internal, self.bus.epoch());
+        match core_ipc::encode_frame(&msg) {
+            Ok(frame) => self.bus.publish(&frame, SecurityLevel::Internal).await,
+            Err(e) => {
+                tracing::error!(error = %e, event = ?msg.payload, "failed to encode an announcement");
+            }
         }
     }
 
-    // Wait for confirmed response with timeout.
-    match tokio::time::timeout(CONFIRM_TIMEOUT, confirm_rx.recv()).await {
-        Ok(Some(raw_frame)) => {
-            let response: Message<EventKind> = core_ipc::decode_frame(&raw_frame)
-                .map_err(|e| format!("failed to decode confirmation response: {e}"))?;
-            // Verify the response is actually correlated to our request.
-            if response.correlation_id != Some(msg_id) {
-                return Err(format!(
-                    "confirmation response correlation_id mismatch: expected {msg_id}, got {:?}",
-                    response.correlation_id
-                ));
-            }
-            Ok(response)
+    /// Append `action` to the audit log. A failed append is logged with
+    /// the action: the daemon keeps running, and the chain stays verifiable
+    /// up to the last written entry.
+    pub(crate) fn record(&mut self, action: &AuditAction) {
+        if let Err(e) = self.audit.append(action.clone()) {
+            tracing::error!(error = %e, ?action, "failed to write an audit entry");
         }
-        Ok(None) => Err("confirmation channel closed".into()),
-        Err(_) => Err(format!(
-            "confirmed RPC timed out after {}ms",
-            CONFIRM_TIMEOUT.as_millis()
-        )),
     }
 }
 
-/// Serialize and publish an event on the bus (fire-and-forget, informational).
-async fn broadcast(bus: &BusServer, daemon_id: DaemonId, event: EventKind) -> Result<(), String> {
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    let msg = Message::new(&msg_ctx, event, SecurityLevel::Internal, bus.epoch());
-    let payload = core_ipc::encode_frame(&msg).map_err(|e| e.to_string())?;
-    bus.publish(&payload, SecurityLevel::Internal).await;
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Best-effort rollback of completed steps in reverse order using confirmed RPC.
-///
-/// Emits `ProfileActivationFailed` if rollback is attempted. Writes an
-/// audit entry for the failure. Individual rollback step failures are
-/// logged but do not propagate.
-#[allow(clippy::too_many_arguments)]
-async fn rollback<W: std::io::Write>(
-    completed: &[CompletedStep],
-    target: ProfileId,
-    profile_name: &TrustProfileName,
-    bus: &BusServer,
-    audit: &mut AuditLogger<W>,
-    daemon_id: DaemonId,
-    confirm_tx: &mpsc::Sender<Vec<u8>>,
-    confirm_rx: &mut mpsc::Receiver<Vec<u8>>,
-) {
-    tracing::warn!(
-        target = %target,
-        profile = %profile_name,
-        steps = completed.len(),
-        "rolling back activation/deactivation"
-    );
-
-    for step in completed.iter().rev() {
-        match step {
-            CompletedStep::SecretsVaultOpened => {
-                // Rollback: deactivate the profile we just activated.
-                let event = EventKind::ProfileDeactivate {
-                    profile_name: profile_name.clone(),
-                    target,
-                };
-                match confirmed_rpc(bus, daemon_id, event, confirm_tx, confirm_rx).await {
-                    Ok(_) => tracing::info!("rollback: secrets vault deactivated"),
-                    Err(e) => {
-                        tracing::error!(error = %e, "rollback: failed to deactivate secrets vault (confirmed RPC)")
-                    }
-                }
-            }
-            CompletedStep::SecretsJitFlushed | CompletedStep::SecretsVaultClosed => {
-                // Rollback: re-activate the profile we just deactivated.
-                let event = EventKind::ProfileActivate {
-                    profile_name: profile_name.clone(),
-                    target,
-                };
-                match confirmed_rpc(bus, daemon_id, event, confirm_tx, confirm_rx).await {
-                    Ok(_) => tracing::info!("rollback: secrets vault re-activated"),
-                    Err(e) => {
-                        tracing::error!(error = %e, "rollback: failed to re-activate secrets vault (confirmed RPC)")
-                    }
-                }
-            }
-            CompletedStep::ActivationBegunEmitted | CompletedStep::ActivationCompletedEmitted => {}
-        }
+    fn target() -> ProfileId {
+        ProfileId::from_uuid(uuid::Uuid::from_u128(7))
     }
 
-    // Audit the failure.
-    if let Err(e) = audit.append(core_profile::AuditAction::ProfileActivationFailed {
-        target,
-        reason: "transaction rolled back".into(),
-    }) {
-        tracing::error!(error = %e, "rollback: failed to write audit entry");
+    fn work() -> TrustProfileName {
+        TrustProfileName::try_from("work").unwrap()
     }
 
-    // Emit failure event on bus (best-effort, fire-and-forget).
-    let event = EventKind::ProfileActivationFailed {
-        target,
-        reason: "transaction rolled back".into(),
-    };
-    let _ = broadcast(bus, daemon_id, event).await;
+    #[test]
+    fn each_transition_accepts_only_its_own_response() {
+        let activated = EventKind::ProfileActivateResponse { success: true };
+        let refused = EventKind::ProfileDeactivateResponse { success: false };
+        assert_eq!(Transition::Activate.applied(&activated), Some(true));
+        assert_eq!(Transition::Deactivate.applied(&activated), None);
+        assert_eq!(Transition::Deactivate.applied(&refused), Some(false));
+        assert_eq!(Transition::Activate.applied(&refused), None);
+        assert_eq!(
+            Transition::Activate.applied(&EventKind::StatusRequest),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_deactivation_is_recorded_as_a_deactivation_failure() {
+        let (event, action) = Transition::Deactivate.failed(target(), "timed out");
+        assert!(matches!(
+            event,
+            EventKind::ProfileDeactivationFailed { reason, .. } if reason == "timed out"
+        ));
+        assert!(matches!(
+            action,
+            AuditAction::ProfileDeactivationFailed { reason, .. } if reason == "timed out"
+        ));
+        let (event, action) = Transition::Activate.failed(target(), "rejected");
+        assert!(matches!(event, EventKind::ProfileActivationFailed { .. }));
+        assert!(matches!(
+            action,
+            AuditAction::ProfileActivationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn requests_name_their_profile() {
+        assert!(matches!(
+            Transition::Activate.request(target(), &work()),
+            EventKind::ProfileActivate { profile_name, .. } if profile_name == work()
+        ));
+        assert!(matches!(
+            Transition::Deactivate.request(target(), &work()),
+            EventKind::ProfileDeactivate { profile_name, .. } if profile_name == work()
+        ));
+    }
+
+    #[test]
+    fn durations_saturate() {
+        assert_eq!(millis(Duration::from_millis(42)), 42);
+        assert_eq!(millis(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
 }

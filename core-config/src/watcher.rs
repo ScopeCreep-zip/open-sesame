@@ -1,11 +1,67 @@
 //! Filesystem-based config hot-reload using the `notify` crate.
 
+use core_layout::Layout;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::schema::Config;
+
+/// The canonical form of a watched path; a path that does not exist is
+/// matched by its spelling.
+fn watch_key(path: &PathBuf) -> core_types::Result<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => Ok(canonical),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path.clone()),
+        Err(e) => Err(core_types::Error::Config(format!(
+            "failed to resolve watched config file {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// Decides which filesystem events reload the configuration.
+///
+/// The watcher watches whole parent directories, which also hold
+/// audit.jsonl, vault DBs, and salt files. Reloading on every write there
+/// is a feedback loop (write → reload → IPC publish → more writes) that
+/// pins a CPU, so only events on config files reload.
+struct ChangeFilter {
+    /// Canonical watched config paths (`watch_key`).
+    files: HashSet<PathBuf>,
+    /// Extensions of the watched files: a new drop-in fragment matches.
+    extensions: Vec<String>,
+}
+
+impl ChangeFilter {
+    /// Whether `event` reloads: a rescan (the kernel queue overflowed and
+    /// events were lost, possibly without paths), or a create or modify of
+    /// a config file.
+    fn is_config_change(&self, event: &notify::Event) -> bool {
+        if event.need_rescan() {
+            return true;
+        }
+        if !(event.kind.is_modify() || event.kind.is_create()) {
+            return false;
+        }
+        event.paths.iter().any(|p| {
+            if self.files.contains(p) {
+                return true;
+            }
+            if let Ok(canon) = std::fs::canonicalize(p)
+                && self.files.contains(&canon)
+            {
+                return true;
+            }
+            p.extension().is_some_and(|ext| {
+                let ext = ext.to_string_lossy();
+                self.extensions.iter().any(|we| *we == ext)
+            })
+        })
+    }
+}
 
 /// Watches config file paths for changes and triggers reload + validation.
 pub struct ConfigWatcher {
@@ -21,23 +77,28 @@ impl ConfigWatcher {
     ///
     /// # Errors
     ///
-    /// Returns an error if the filesystem watcher cannot be initialized.
+    /// Returns an error if a watched path cannot be resolved or the
+    /// filesystem watcher cannot be initialized.
     pub fn new(
+        layout: Layout,
         config_paths: &[PathBuf],
         initial_config: Config,
     ) -> core_types::Result<(Self, Arc<RwLock<Config>>)> {
-        Self::with_callback(config_paths, initial_config, None)
+        Self::with_callback(layout, config_paths, initial_config, None)
     }
 
     /// Create a new config watcher with an optional reload notification callback.
     ///
-    /// The callback is invoked on the notify thread after a successful config
-    /// reload. Use this to bridge into async runtimes (e.g. send on a channel).
+    /// Reloads read the configuration from `layout`. The callback is invoked
+    /// on the notify thread after a successful config reload. Use this to
+    /// bridge into async runtimes (e.g. send on a channel).
     ///
     /// # Errors
     ///
-    /// Returns an error if the filesystem watcher cannot be initialized.
+    /// Returns an error if a watched path cannot be resolved or the
+    /// filesystem watcher cannot be initialized.
     pub fn with_callback(
+        layout: Layout,
         config_paths: &[PathBuf],
         initial_config: Config,
         on_reload: Option<Box<dyn Fn() + Send + Sync>>,
@@ -45,51 +106,25 @@ impl ConfigWatcher {
         let current = Arc::new(RwLock::new(initial_config));
         let current_clone = Arc::clone(&current);
 
-        // Collect watched config file paths so the callback can filter out
-        // unrelated changes in the same parent directory (e.g. audit.jsonl,
-        // vault DBs, salt files). Without this filter, ANY write to
-        // ~/.config/pds/ triggers a config reload cascade that causes 100%
-        // CPU via feedback loop: write → reload → IPC publish → more writes.
-        let watched_files: std::collections::HashSet<PathBuf> = config_paths
-            .iter()
-            .filter_map(|p| std::fs::canonicalize(p).ok().or_else(|| Some(p.clone())))
-            .collect();
-        // Also match by filename for drop-in directories where new files may appear.
-        let watched_extensions: Vec<String> = config_paths
-            .iter()
-            .filter_map(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
-            .collect();
+        let filter = ChangeFilter {
+            files: config_paths
+                .iter()
+                .map(watch_key)
+                .collect::<core_types::Result<_>>()?,
+            // Also match by extension for drop-in directories where new files may appear.
+            extensions: config_paths
+                .iter()
+                .filter_map(|p| p.extension().map(|e| e.to_string_lossy().into_owned()))
+                .collect(),
+        };
 
         let watcher =
             notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                 match res {
                     Ok(event) => {
-                        if event.kind.is_modify() || event.kind.is_create() {
-                            // Filter: only react to changes in actual config files.
-                            let is_config_file = event.paths.iter().any(|p| {
-                                // Exact match against known config paths.
-                                if let Ok(canon) = std::fs::canonicalize(p)
-                                    && watched_files.contains(&canon)
-                                {
-                                    return true;
-                                }
-                                if watched_files.contains(p) {
-                                    return true;
-                                }
-                                // Extension match for drop-in fragments.
-                                if let Some(ext) = p.extension() {
-                                    let ext_str = ext.to_string_lossy();
-                                    return watched_extensions
-                                        .iter()
-                                        .any(|we| we == ext_str.as_ref());
-                                }
-                                false
-                            });
-                            if !is_config_file {
-                                return;
-                            }
+                        if filter.is_config_change(&event) {
                             info!(?event, "config file changed, reloading");
-                            match crate::loader::load_config(None) {
+                            match crate::loader::load_config(&layout) {
                                 Ok(new_config) => {
                                     let diags = crate::validation::validate(&new_config);
                                     let has_errors = diags.iter().any(|d| {
@@ -100,11 +135,21 @@ impl ConfigWatcher {
                                         for d in &diags {
                                             warn!(message = %d.message, "config diagnostic");
                                         }
-                                    } else if let Ok(mut guard) = current_clone.write() {
-                                        *guard = new_config;
-                                        info!("config reloaded successfully");
-                                        if let Some(ref cb) = on_reload {
-                                            cb();
+                                    } else {
+                                        match current_clone.write() {
+                                            Ok(mut guard) => {
+                                                *guard = new_config;
+                                                info!("config reloaded successfully");
+                                                if let Some(ref cb) = on_reload {
+                                                    cb();
+                                                }
+                                            }
+                                            // A reader panicked holding the lock: the
+                                            // daemon keeps serving its previous config.
+                                            Err(e) => error!(
+                                                error = %e,
+                                                "config state lock poisoned, reload dropped"
+                                            ),
                                         }
                                     }
                                 }
@@ -142,5 +187,52 @@ impl ConfigWatcher {
     #[must_use]
     pub fn current(&self) -> Arc<RwLock<Config>> {
         Arc::clone(&self.current)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, DataChange, Flag, ModifyKind, RemoveKind, RenameMode};
+    use notify::{Event, EventKind};
+
+    fn filter() -> ChangeFilter {
+        ChangeFilter {
+            files: HashSet::from([PathBuf::from("/cfg/config.toml")]),
+            extensions: vec!["toml".into()],
+        }
+    }
+
+    fn modify_data() -> EventKind {
+        EventKind::Modify(ModifyKind::Data(DataChange::Content))
+    }
+
+    #[test]
+    fn a_rescan_without_paths_reloads() {
+        let event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert!(filter().is_config_change(&event));
+    }
+
+    #[test]
+    fn writes_and_renames_onto_config_files_reload() {
+        let f = filter();
+        let write = Event::new(modify_data()).add_path("/cfg/config.toml".into());
+        let rename = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path("/cfg/config.toml".into());
+        let drop_in = Event::new(EventKind::Create(CreateKind::File))
+            .add_path("/cfg/config.d/10-local.toml".into());
+        assert!(f.is_config_change(&write));
+        assert!(f.is_config_change(&rename));
+        assert!(f.is_config_change(&drop_in));
+    }
+
+    #[test]
+    fn unrelated_files_and_removals_do_not_reload() {
+        let f = filter();
+        let audit = Event::new(modify_data()).add_path("/cfg/audit.jsonl".into());
+        let removal =
+            Event::new(EventKind::Remove(RemoveKind::File)).add_path("/cfg/config.toml".into());
+        assert!(!f.is_config_change(&audit));
+        assert!(!f.is_config_change(&removal));
     }
 }

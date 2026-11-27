@@ -11,7 +11,7 @@ and Nix distributions.
 Split pkgbase producing two packages from release tarballs:
 
 | Package | Description |
-|---------|-------------|
+| --- | --- |
 | `open-sesame-bin` | Headless: sesame CLI, 4 daemon binaries, systemd units, preset, man page, completions |
 | `open-sesame-desktop-bin` | Desktop: 3 GUI daemons, systemd units, preset. Depends on `open-sesame` (satisfied by either `-bin` or source) |
 
@@ -24,7 +24,7 @@ installs `/usr/bin/sesame` at the same path.
 ### Dependencies
 
 | Dependency | Arch package |
-|-----------|-------------|
+| --- | --- |
 | C library | `glibc` |
 | GCC runtime | `gcc-libs` |
 | seccomp | `libseccomp` |
@@ -89,6 +89,7 @@ Arch's `systemd` package ships a pacman hook that runs `systemctl --user daemon-
 for installed user units. No `.install` scriptlet is needed for unit reload.
 
 The `.install` file prints setup instructions:
+
 - `post_install`: `sesame init`, `systemctl --user enable --now open-sesame-headless.target`
 - `post_upgrade`: `systemctl --user restart open-sesame-headless.target`
 - `post_remove`: config preservation note
@@ -101,7 +102,7 @@ Arch policy does not auto-enable services from `.install`. The preset file
 
 Each release produces standalone tarballs with FHS-standard directory layout:
 
-```
+```text
 open-sesame-v<ver>-x86_64.tar.gz
   usr/bin/{sesame,daemon-profile,daemon-secrets,daemon-launcher,daemon-snippets}
   usr/lib/systemd/user/{*.service,*.target}

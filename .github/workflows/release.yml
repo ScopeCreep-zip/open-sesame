@@ -319,7 +319,7 @@ jobs:
 
       - name: Generate source tarball
         run: |
-          git archive --format=tar.gz --prefix=open-sesame-${VERSION}/ \
+          git archive --format=tar.gz "--prefix=open-sesame-${VERSION}/" \
             -o "open-sesame-${VERSION}-source.tar.gz" HEAD
 
       - name: Generate checksums and install instructions
@@ -487,8 +487,8 @@ jobs:
       #   with:
       #     pkgname: open-sesame-bin
       #     asset_dir: aur/open-sesame-bin/
-      #     commit_username: usrbinkat
-      #     commit_email: usrbinkat@braincraft.io
+      #     commit_username: user
+      #     commit_email: user@example.invalid
       #     ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
       #     test: true
       #     test_flags: --clean --cleanbuild --nodeps

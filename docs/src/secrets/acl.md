@@ -31,7 +31,7 @@ The `check_secret_access()` function evaluates the following rules in order. The
 rule determines the outcome:
 
 | Condition | Result | Rationale |
-|---|---|---|
+| --- | --- | --- |
 | Profile not in config, no ACL policy on any profile | **Allow** | Backward compatibility with pre-ACL deployments. |
 | Profile not in config, ACL policy exists on any other profile | **Deny** | Fail-closed. An attacker must not bypass ACL by requesting a nonexistent profile. |
 | Profile in config, empty access map | **Allow** | No ACL policy configured for this profile. |
@@ -47,7 +47,7 @@ The `check_secret_list_access()` function follows the same rules as get/set/dele
 difference at the daemon-level check:
 
 | Condition | Result |
-|---|---|
+| --- | --- |
 | Daemon name present, non-empty allowed list | **Allow** (has at least some access) |
 | Daemon name present, empty allowed list | **Deny** ("no keys allowed" means "cannot even see what keys exist") |
 

@@ -14,7 +14,7 @@ foundations, shared abstractions, platform bindings, daemon binaries, and the ex
 ### Foundation Layer
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `core-memory` | Page-aligned secure memory allocator backed by `memfd_secret(2)` |
 | `core-crypto` | Cryptographic primitives: AES-256-GCM, Argon2id, SecureBytes, EncryptedStore |
 | `core-types` | Shared types, error types, and event schema for the IPC bus |
@@ -22,7 +22,7 @@ foundations, shared abstractions, platform bindings, daemon binaries, and the ex
 ### Abstraction Layer
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `core-config` | Configuration schema, validation, hot-reload, and policy override |
 | `core-ipc` | IPC bus protocol, postcard framing, BusServer/BusClient |
 | `core-fuzzy` | Fuzzy matching (nucleo), frecency scoring, FTS5, and index abstractions |
@@ -33,7 +33,7 @@ foundations, shared abstractions, platform bindings, daemon binaries, and the ex
 ### Platform Layer
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `platform-linux` | Linux API wrappers: evdev, uinput, Wayland protocols, D-Bus, Landlock, seccomp |
 | `platform-macos` | macOS API wrappers: Accessibility, CGEventTap, NSPasteboard, Keychain, LaunchAgent |
 | `platform-windows` | Windows API wrappers: Win32 hooks, UI Automation, Credential Manager, Group Policy |
@@ -41,19 +41,19 @@ foundations, shared abstractions, platform bindings, daemon binaries, and the ex
 ### Daemon Layer
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `daemon-profile` | Profile orchestrator daemon: hosts IPC bus server, context evaluation, concurrent profile activation |
-| `daemon-secrets` | Secrets broker daemon: JIT delivery, keyring integration, profile-scoped access |
-| `daemon-launcher` | Application launcher daemon: fuzzy search, frecency, overlay UI, desktop entry discovery |
-| `daemon-snippets` | Snippet expansion daemon: template rendering, variable substitution, secret injection |
+| `daemon-secrets` | Secrets broker daemon: SQLCipher vaults, multi-factor unlock, profile-scoped access |
+| `daemon-launcher` | Application launcher daemon: desktop entry discovery, fuzzy search, per-profile frecency, profile-scoped launch |
+| `daemon-snippets` | Snippet daemon: per-profile snippets listed, expanded, and added over the IPC bus |
 | `daemon-wm` | Window manager daemon: Wayland overlay window switcher with letter-hint navigation |
-| `daemon-clipboard` | Clipboard manager daemon: history, encryption, sensitivity detection, profile scoping |
-| `daemon-input` | Input remapper daemon: keyboard layers, app-aware rules, macro expansion |
+| `daemon-clipboard` | Clipboard history daemon: per-profile history served from SQLite |
+| `daemon-input` | Input daemon: evdev keyboard capture and XKB translation, forwarded to the overlay |
 
 ### Orchestration and Extension Layer
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `open-sesame` | The `sesame` CLI binary: platform orchestration for multi-agent desktop control |
 | `sesame-workspace` | Workspace-level integration utilities shared across daemons |
 | `extension-host` | WASM extension host: wasmtime runtime, capability sandbox, extension lifecycle |
@@ -69,11 +69,11 @@ These four daemons have no GUI dependencies and run on any system with systemd:
 bare-metal servers, containers, VMs, and desktops alike.
 
 | Daemon | Role |
-|--------|------|
+| --- | --- |
 | **daemon-profile** | The IPC bus host. Manages trust profiles, evaluates context rules (WiFi network, connected hardware), performs atomic profile switching, and hosts the `BusServer` that all other daemons connect to. |
 | **daemon-secrets** | Secrets broker. Manages SQLCipher-encrypted vaults scoped to trust profiles. Delivers secrets just-in-time to authorized callers over the IPC bus. Enforces per-vault ACLs and rate limiting. |
 | **daemon-launcher** | Application launcher. Discovers `.desktop` entries, maintains frecency rankings per profile, and launches applications with optional secret injection as environment variables. |
-| **daemon-snippets** | Snippet expansion engine. Renders templates with variable substitution and secret injection. |
+| **daemon-snippets** | Snippet store. Holds snippets in memory per profile and returns a trigger's template verbatim. |
 
 ### Desktop Daemons (package: `open-sesame-desktop`)
 
@@ -82,10 +82,10 @@ package depends on `open-sesame`, so installing it pulls in all headless daemons
 automatically.
 
 | Daemon | Role |
-|--------|------|
+| --- | --- |
 | **daemon-wm** | Window manager overlay. Renders the Alt+Tab window switcher with letter-hint navigation via Wayland layer-shell protocols. |
-| **daemon-clipboard** | Clipboard manager. Monitors Wayland clipboard events, maintains encrypted history per profile, detects sensitive content (passwords, tokens), and auto-expires sensitive entries. |
-| **daemon-input** | Input remapper. Captures keyboard events via evdev, evaluates compositor-independent shortcut bindings, routes key events to other daemons over the IPC bus. |
+| **daemon-clipboard** | Clipboard history. Serves per-profile history, entry content, and clearing from SQLite; it does not capture clipboard changes. |
+| **daemon-input** | Keyboard capture. Reads keyboard events via evdev, translates them with XKB, and forwards them to daemon-wm while the overlay holds a grab. |
 
 ### Headless/Desktop Split Rationale
 

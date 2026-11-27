@@ -25,7 +25,10 @@ done
 sleep 2
 
 echo "Verifying SSH agent..."
-ssh-add -l || { echo "ERROR: no keys in SSH agent" >&2; exit 1; }
+ssh-add -l || {
+    echo "ERROR: no keys in SSH agent" >&2
+    exit 1
+}
 
 echo "Running sesame init with SSH key..."
 exec /usr/bin/sesame init --ssh-key ~/.ssh/id_ed25519.pub --no-keybinding

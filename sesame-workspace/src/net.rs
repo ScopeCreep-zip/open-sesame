@@ -1,7 +1,8 @@
 //! Centralized proxy policy resolution.
 //!
-//! Reads proxy and `NO_PROXY` environment variables once, then provides
-//! target-aware proxy decisions for different transport adapters.
+//! Reads proxy and `NO_PROXY` environment variables once (through
+//! `crate::env`), then provides target-aware proxy decisions for every
+//! transport adapter; adapters do not resolve proxies themselves.
 //! Proxy credentials are redacted in Display and Debug output.
 
 use std::fmt;
@@ -63,8 +64,9 @@ pub enum ProxyDecision {
     Direct,
     /// Use this proxy endpoint.
     Proxy(ProxyEndpoint),
-    /// No environment proxy found. Transport should fall back to
-    /// its own configuration (e.g. git config http.proxy).
+    /// No environment proxy applies to the target. A transport with a
+    /// configuration source of its own beyond the environment (git's
+    /// `http.proxy`) consults it; any other transport connects directly.
     NoEnvironmentProxy,
 }
 
@@ -85,22 +87,25 @@ impl ProxyPolicy {
     /// Read proxy policy from the current environment.
     ///
     /// Reads `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`,
-    /// `ALL_PROXY`, `all_proxy`, `NO_PROXY`, and `no_proxy`.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let https = read_env_pair("HTTPS_PROXY", "https_proxy").map(|url| ProxyEndpoint { url });
-        let http = read_env_pair("HTTP_PROXY", "http_proxy").map(|url| ProxyEndpoint { url });
-        let all = read_env_pair("ALL_PROXY", "all_proxy").map(|url| ProxyEndpoint { url });
-        let no_proxy = read_env_pair("NO_PROXY", "no_proxy")
-            .map(|val| NoProxyRules::parse(&val))
-            .unwrap_or_default();
-
-        Self {
-            https,
-            http,
-            all,
-            no_proxy,
-        }
+    /// `ALL_PROXY`, `all_proxy`, `NO_PROXY`, and `no_proxy`. An unset
+    /// `NO_PROXY` means no bypass rules.
+    ///
+    /// # Errors
+    ///
+    /// `WorkspaceError::ConfigError` when one of the variables is set to a
+    /// value that is not UTF-8: ignoring it would silently bypass the
+    /// proxy (or the `NO_PROXY` rules).
+    pub fn from_env() -> Result<Self, crate::WorkspaceError> {
+        // Uppercase before lowercase: the curl/git convention.
+        use crate::env::first_set;
+        let endpoint = |url| ProxyEndpoint { url };
+        Ok(Self {
+            https: first_set(&["HTTPS_PROXY", "https_proxy"])?.map(endpoint),
+            http: first_set(&["HTTP_PROXY", "http_proxy"])?.map(endpoint),
+            all: first_set(&["ALL_PROXY", "all_proxy"])?.map(endpoint),
+            no_proxy: first_set(&["NO_PROXY", "no_proxy"])?
+                .map_or_else(NoProxyRules::default, |val| NoProxyRules::parse(&val)),
+        })
     }
 
     /// Determine the proxy decision for a target URL.
@@ -230,31 +235,22 @@ impl NoProxyRules {
     }
 }
 
-/// Read from an uppercase/lowercase env var pair. Uppercase takes
-/// precedence.
-fn read_env_pair(upper: &str, lower: &str) -> Option<String> {
-    std::env::var(upper)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var(lower).ok().filter(|v| !v.is_empty()))
-}
-
-/// Redact credentials from a proxy URL for safe display.
+/// Redact the userinfo of a URL for safe display.
 ///
-/// Replaces the user:password portion between scheme:// and @host
-/// with ***. Handles schemeless URLs by checking for @ presence.
-fn redact_credentials(url: &str) -> String {
-    if let Some(at_pos) = url.find('@') {
-        if let Some(scheme_end) = url.find("://") {
-            let prefix = &url[..scheme_end + 3];
-            let suffix = &url[at_pos..];
-            return format!("{prefix}***{suffix}");
-        }
-        // Schemeless URL with credentials: user:pass@host
-        let suffix = &url[at_pos..];
-        return format!("***{suffix}");
+/// Replaces the `user[:password]` before the authority's last `@` with
+/// `***`, for `scheme://user:pass@host/…`, schemeless `user:pass@host`,
+/// and SCP-style `user@host:path`. An `@` after the authority (in the
+/// path) is not userinfo and is kept.
+pub(crate) fn redact_credentials(url: &str) -> String {
+    let (prefix, rest) = match url.find("://") {
+        Some(scheme_end) => url.split_at(scheme_end + 3),
+        None => ("", url),
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{prefix}***{}", &rest[at..]),
+        None => url.to_string(),
     }
-    url.to_string()
 }
 
 /// Extract the host portion from a URL for `NO_PROXY` matching.
@@ -297,6 +293,26 @@ mod tests {
     #[test]
     fn redact_schemeless_credentials() {
         assert_eq!(redact_credentials("user:pass@proxy:8080"), "***@proxy:8080");
+    }
+
+    #[test]
+    fn redact_keeps_at_sign_in_path() {
+        assert_eq!(
+            redact_credentials("https://github.com/org/repo@v1"),
+            "https://github.com/org/repo@v1"
+        );
+        assert_eq!(
+            redact_credentials("https://user:token@github.com/org/repo@v1"),
+            "https://***@github.com/org/repo@v1"
+        );
+    }
+
+    #[test]
+    fn redact_scp_user() {
+        assert_eq!(
+            redact_credentials("git@github.com:org/repo.git"),
+            "***@github.com:org/repo.git"
+        );
     }
 
     #[test]

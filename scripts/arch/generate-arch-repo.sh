@@ -33,7 +33,7 @@ for arch in x86_64 aarch64; do
     fi
 
     # Generate repo database
-    pushd "${ARCH_DIR}" > /dev/null
+    pushd "${ARCH_DIR}" >/dev/null
     if [ -n "${GPG_KEY_ID}" ]; then
         repo-add --sign --key "${GPG_KEY_ID}" open-sesame.db.tar.gz ./*.pkg.tar.zst
     else
@@ -59,7 +59,7 @@ for arch in x86_64 aarch64; do
         fi
     done
 
-    popd > /dev/null
+    popd >/dev/null
     echo "Arch repo for ${arch}: ${pkg_count} package(s)"
 done
 

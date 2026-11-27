@@ -1,49 +1,37 @@
 # Hint Assignment
 
-The `hints` module (`daemon-wm/src/hints.rs`) assigns letter-based hints to windows for
-keyboard-driven selection. Hints follow a Vimium-style model where each window receives a unique
-string of repeated characters that the user types to select it.
+The `hints` module (`daemon-wm/src/hints.rs`) assigns mnemonic letter hints to windows for
+keyboard-driven selection. Each window's hint repeats its application's key: windows of one
+application take consecutive repetitions (`f`, `ff`, `fff`), which numeric shorthand abbreviates
+(`f2`, `f3`). The same key launches the application when no window of it is open
+(focus-or-launch).
 
-## Hint Assignment Algorithm
+## Hint Assignment
 
-The `assign_hints(count, hint_keys)` function generates hints from a configurable key set string
-(default: `"asdfghjkl"` via `WmConfig`). For `N` windows and `K` available keys in the key set:
+`assign_app_hints(app_ids, key_bindings, hint_keys)` returns one hint per window, in window
+order:
 
-1. The first `K` windows each receive a single character: `a`, `s`, `d`, `f`, ...
-2. The next `K` windows receive doubled characters: `aa`, `ss`, `dd`, `ff`, ...
-3. The pattern continues with tripled characters, and so on.
+1. Each window's key is resolved with `key_for_app()` (see [Key Selection](#key-selection)).
+2. A window takes its key repeated once per earlier window with the same key.
 
-Each key is used once at each repetition level before any key repeats at the next level. For
-example, with `hint_keys = "asd"` and 5 windows, the assigned hints are: `a`, `s`, `d`, `aa`,
-`ss`.
+For a window list of Firefox, Ghostty, Firefox the hints are `f`, `g`, `ff`.
 
-This function is used internally. The primary entry point for daemon-wm is `assign_app_hints()`,
-which groups windows by application before assigning.
+An application without a key (no binding and no letter in its name) takes the first
+`hint_keys` key that no other application on screen uses. When every pool key is taken, it
+takes the first pool key, shared by repetition. With `hint_keys = "asd"`, windows of
+`alacritty`, `org.x.123`, and `org.y.456` receive `a`, `s`, `ss`: `a` belongs to alacritty,
+so both letterless applications share `s`.
 
-## App Grouping
-
-The `assign_app_hints(app_ids, key_bindings)` function groups windows by their resolved base key
-character before assigning hints. Windows sharing the same base key receive consecutive
-repetitions of that character.
-
-For a window list containing two Firefox instances and one Ghostty:
-
-- Firefox window 1: `f`
-- Firefox window 2: `ff`
-- Ghostty window 1: `g`
-
-The function returns `(hint_string, original_index)` pairs sorted by original window index,
-preserving display order.
+`hint_keys` (default `"asdfghjkl"`) must be a non-empty set: configuration validation reports
+an error for an empty pool or a repeated key.
 
 ## Key Selection
 
-The base key for each application is determined by `key_for_app(app_id, key_bindings)` with the
-following priority:
+`key_for_app(app_id, key_bindings)` resolves the base key for each application.
 
-### 1. Explicit Config Override
+### 1. Key Bindings
 
-The `key_bindings` map in `WmConfig` allows explicit key-to-app mapping. Each `WmKeyBinding`
-entry contains an `apps` list of app ID patterns:
+The `key_bindings` map in `WmConfig` maps a key to the application ID patterns it covers:
 
 ```toml
 [profiles.default.wm.key_bindings.f]
@@ -51,34 +39,25 @@ apps = ["firefox", "org.mozilla.firefox"]
 launch = "firefox"
 ```
 
-`key_for_app()` iterates all key bindings and checks each pattern against the app ID using three
-comparisons:
+A pattern matches an application, ignoring case, when it equals the application ID or the
+application's name (the last reverse-DNS segment: `org.mozilla.firefox` is named `firefox`).
+The first binding with a matching pattern supplies the key.
 
-- Exact match: `pattern == app_id`
-- Case-insensitive match: `pattern.to_lowercase() == app_id.to_lowercase()`
-- Last-segment match: the reverse-DNS last segment of `app_id` (lowercased) equals the pattern
-  (lowercased). For `org.mozilla.firefox`, the last segment is `firefox`.
+### 2. Mnemonic Key
 
-The first matching binding's key character is returned.
+Without a matching binding, `auto_key_for_app(app_id)` takes the first ASCII letter of the
+application's name, lowercased:
 
-### 2. Auto-Key Detection
-
-If no explicit binding matches, `auto_key_for_app(app_id)` extracts the first alphabetic
-character from the last segment of the app ID (split on `.`):
-
-- `com.mitchellh.ghostty` -- last segment is `ghostty`, auto-key is `g`.
-- `firefox` -- no dots, the full string is the segment, auto-key is `f`.
-- `microsoft-edge` -- auto-key is `m`.
-
-The character is lowercased. If no alphabetic character is found, `None` is returned and
-`assign_app_hints()` falls back to `'a'`.
+- `com.mitchellh.ghostty` -- named `ghostty`, key `g`.
+- `firefox` -- key `f`.
+- `org.x.123` -- no letter, no key: the window takes a `hint_keys` key.
 
 ### Default Key Bindings
 
 `WmConfig::default()` ships with bindings for common applications:
 
 | Key | Applications | Launch Command |
-|-----|-------------|----------------|
+| --- | --- | --- |
 | `g` | ghostty, com.mitchellh.ghostty | `ghostty` |
 | `f` | firefox, org.mozilla.firefox | `firefox` |
 | `e` | microsoft-edge | `microsoft-edge` |
@@ -92,59 +71,46 @@ The character is lowercased. If no alphabetic character is found, `None` is retu
 
 ## Numeric Shorthand
 
-The `normalize_input()` function expands numeric suffixes before matching. This allows users to
-type `a2` instead of `aa`, or `f3` instead of `fff`:
+`normalize_input()` lowercases the input and expands numeric shorthand before matching: one
+repeated letter followed by a count from 1 to 26 expands to that many repetitions.
 
 - `a2` normalizes to `aa`
-- `a3` normalizes to `aaa`
+- `aa3` normalizes to `aaa`
 - `f1` normalizes to `f`
 
-Expansion rules:
-
-- The input must be at least 2 characters long.
-- The trailing characters must all be ASCII digits.
-- The leading characters must all be the same letter (e.g., `a` or `aa`, but not `ab`).
-- The numeric value must be between 1 and 26 inclusive.
-
-If any rule is violated, the input is returned as-is (lowercased). Mixed-character inputs like
-`ab2` are not expanded because the letter prefix contains non-identical characters.
-
-## Case-Insensitive Matching
-
-All input is lowercased by `normalize_input()` before matching. Typing `S` matches the hint `s`.
-This applies to both direct character matching and numeric shorthand expansion.
+Any other input is only lowercased: `ab2` (mixed letters), `a27` (count beyond 26), `a0`, and
+`42` (no letter) stay as typed. Typing `S` therefore matches the hint `s`.
 
 ## Match Results
 
-The `match_input(input, hints)` function normalizes the input and returns one of three
-`MatchResult` variants:
+`match_input(input, hints)` normalizes the input and returns one of three `MatchResult`
+variants:
 
-- **`Exact(index)`** -- Exactly one hint equals the normalized input, and no other hints share
-  it as a prefix. The controller selects this window.
-- **`Partial(indices)`** -- Multiple hints start with the normalized input. This includes cases
-  where one hint is an exact match but others share the same prefix (e.g., typing `a` with hints
-  `a`, `aa`, `aaa` yields `Partial([0, 1, 2])`). The controller updates the display but does not
-  commit a selection.
-- **`NoMatch`** -- No hint starts with the normalized input. The controller checks for a launch
-  command binding.
+- **`Exact(index)`** -- Exactly one hint starts with the normalized input, and equals it. The
+  controller selects this window.
+- **`Partial(indices)`** -- Several hints start with the normalized input, one of which may
+  equal it (typing `a` with hints `a`, `aa`, `aaa` yields `Partial([0, 1, 2])`). The display
+  narrows to those rows; Enter or the modifier release commits the selection.
+- **`NoMatch`** -- No hint starts with the normalized input, or the input is empty. The
+  controller checks for a launch binding.
 
 ## Focus-or-Launch
 
-When `check_hint_or_launch()` in the controller receives `MatchResult::NoMatch` and the input
-buffer contains exactly one character, it calls `hints::launch_for_key(key, key_bindings)`. If a
-launch command exists for that key:
+When the input matches no hint and is a single character, the controller looks the character
+up with `hints::binding_for_key(key, key_bindings)` (case-insensitive). If the binding has a
+`launch` command:
 
-1. A `PendingLaunch` is staged via `set_pending_launch()`, containing the command string, tags,
-   and launch args from the binding.
-2. The overlay displays the staged intent via `Command::ShowLaunchStaged`.
+1. A pending launch is staged with the binding's command, `tags`, and `launch_args`.
+2. The overlay shows the staged intent (`Launch <command>`).
 3. The launch executes on modifier release or Enter (see
    [Staged Launch](window-manager.md#staged-launch)).
 
-If no launch command is configured for the key, the input is treated as a filter with no matches.
+Without a launch command the input filters to no rows and the overlay shows that nothing
+matches.
 
 ## Tags and Launch Args
 
-Each `WmKeyBinding` can carry `tags` and `launch_args` fields:
+Each `WmKeyBinding` can carry `tags` and `launch_args`:
 
 ```toml
 [profiles.default.wm.key_bindings.g]
@@ -154,12 +120,8 @@ tags = ["dev-rust", "ai-tools"]
 launch_args = ["--working-directory=/workspace"]
 ```
 
-- `tags_for_key(key, key_bindings)` returns the `tags` vector for the matching key. Tags are
-  forwarded to `daemon-launcher` in the `LaunchExecute` IPC message for launch profile
-  composition (environment variable injection, secret fetching, Nix devshell activation). Tags
-  support qualified cross-profile references using colon syntax (e.g., `"work:corp"`).
-- `launch_args_for_key(key, key_bindings)` returns the `launch_args` vector. These are appended
-  to the launched command's argument list.
-
-Both functions perform case-insensitive key lookup by lowercasing the input character before
-looking up the `BTreeMap`.
+- `tags` are forwarded to `daemon-launcher` in the `LaunchExecute` IPC message for launch
+  profile composition (environment variable injection, secret fetching, Nix devshell
+  activation). Tags support qualified cross-profile references using colon syntax (e.g.,
+  `"work:corp"`).
+- `launch_args` are appended to the launched command's argument list.

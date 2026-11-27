@@ -1,428 +1,586 @@
-//! Walk workspace tree to discover git repositories.
+//! Discover the git repositories of the workspace layout.
 //!
-//! Discovery performs filesystem traversal only. It does not open
-//! repositories or read Git metadata. Use the inspection module to
-//! collect branch, commit, remote, and status information from
-//! discovered entries.
+//! Discovery consumes the layout walk (`crate::layout`) and parses every
+//! layout directory name strictly into placement types. It does not read
+//! Git metadata beyond classifying `.git` entries; use the inspection
+//! module for branch, commit, remote, and status.
 //!
-//! The walker recurses through namespace directories at any depth
-//! below each server directory. A directory containing .git is
-//! classified as a git root. If a git root also contains child
-//! directories that are themselves git roots, the parent is a
-//! workspace root (namespace-level entry with sibling repositories).
+//! Every layout entry that cannot be placed (non-canonical case, non-UTF-8
+//! name, undecodable server directory, unreadable layout directory, a
+//! case variant of the user directory) is a `DiscoveryIssue`. Entries the
+//! walk did not follow are listed in `Discovery::skipped`.
 
 use std::path::{Path, PathBuf};
 
 use core_config::WorkspaceConfig;
 use core_workspace_types::{
-    GitHost, NamespacePath, RepositoryName, WorkspaceCoordinate, WorkspaceKind,
+    GitHost, NamespaceDir, RepoDir, ValidationError, WorkspaceCoordinate, WorkspaceKind,
 };
 
 use crate::WorkspaceError;
-use crate::has_git_dir;
+use crate::config::WorkspaceLayout;
+use crate::layout::{Node, Role, Skipped};
 
 /// A discovered workspace entry containing only filesystem facts.
 #[derive(Debug, Clone)]
 pub struct DiscoveredWorkspace {
     /// Filesystem path to the repository or workspace root.
     pub path: PathBuf,
-    /// Parsed coordinate from the filesystem path.
+    /// Placement parsed from the filesystem path.
     pub coordinate: WorkspaceCoordinate,
     /// Linked profile from workspace config link table, if any.
     pub linked_profile: Option<String>,
 }
 
-/// Walk `{root}/{user}/` to discover all git repositories.
-///
-/// Scans server directories, then recursively traverses namespace
-/// directories at any depth. Skips symlinks and `.git` internals.
-/// Does not open repositories or read Git metadata.
+/// A layout entry that discovery could not place.
+#[derive(Debug)]
+pub struct DiscoveryIssue {
+    /// The offending path.
+    pub path: PathBuf,
+    /// Why it could not be placed. Its message names `path` (or the
+    /// `.git` entry inside it), so text output prints the error alone.
+    pub error: WorkspaceError,
+}
+
+/// The result of a discovery walk.
+#[derive(Debug, Default)]
+pub struct Discovery {
+    /// Placed workspace entries, sorted by path.
+    pub workspaces: Vec<DiscoveredWorkspace>,
+    /// Layout entries that could not be placed, sorted by path.
+    pub issues: Vec<DiscoveryIssue>,
+    /// Entries the walk did not follow, sorted by path.
+    pub skipped: Vec<Skipped>,
+}
+
+/// Discover all repositories below `{root}/{user}`.
 ///
 /// # Errors
 ///
-/// Returns `WorkspaceError::Io` if the workspace root cannot be read.
+/// Returns `WorkspaceError::Io` when the root or the user directory
+/// exists but cannot be listed.
 pub fn discover_workspaces(
+    layout: &WorkspaceLayout,
     config: &WorkspaceConfig,
-) -> Result<Vec<DiscoveredWorkspace>, WorkspaceError> {
-    let root = &config.settings.root;
-    let user_dir = root.join(config.settings.user.as_str());
+) -> Result<Discovery, WorkspaceError> {
+    let mut discovery = Discovery::default();
 
-    if !user_dir.is_dir() {
-        return Ok(Vec::new());
+    for variant in crate::config::case_variants(&layout.root, layout.user.as_str())? {
+        // `case_variants` yields UTF-8-named directory entries only.
+        let value = variant
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| {
+                WorkspaceError::PathValidation(format!(
+                    "{}: case variant without a UTF-8 name",
+                    variant.display()
+                ))
+            })?
+            .to_string();
+        discovery.issue(
+            &variant,
+            WorkspaceError::NonCanonical {
+                path: variant.clone(),
+                source: ValidationError::NonCanonicalCase {
+                    kind: "workspace user",
+                    value,
+                    canonical: layout.user.as_str().to_string(),
+                },
+            },
+        );
     }
 
-    let mut results = Vec::new();
-
-    // First level below user: server directories.
-    for entry in read_dir_safe(&user_dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_symlink() {
-            continue;
+    let user_dir = layout.user_dir();
+    match std::fs::symlink_metadata(&user_dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            discovery.sort();
+            return Ok(discovery);
         }
-        let server_path = entry.path();
-        if !server_path.is_dir() {
-            continue;
-        }
-
-        let server_name = match entry.file_name().to_str() {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-
-        let Some(host) = GitHost::from_dir_name(&server_name) else {
-            continue;
-        };
-
-        // Recurse into namespace directories below this server.
-        walk_namespace(&server_path, &host, &[], config, &mut results)?;
+        Err(e) => return Err(e.into()),
     }
 
-    results.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(results)
+    let walk = crate::layout::walk(&user_dir)?;
+    discovery.skipped = walk.skipped;
+    for issue in walk.issues {
+        discovery.issue(&issue.path, issue.error);
+    }
+
+    for server in &walk.servers {
+        let Some(name) = discovery.utf8_name(server) else {
+            continue;
+        };
+        let host = match GitHost::from_dir_name(name) {
+            Ok(host) => host,
+            Err(source) => {
+                discovery.issue(
+                    &server.path,
+                    WorkspaceError::placement(&server.path, source),
+                );
+                continue;
+            }
+        };
+        if server.role != Role::Namespace {
+            discovery.issue(
+                &server.path,
+                WorkspaceError::PathValidation(format!(
+                    "{}: git repository directly under the user directory",
+                    server.path.display()
+                )),
+            );
+            continue;
+        }
+        let mut placer = Placer {
+            host: &host,
+            config,
+            discovery: &mut discovery,
+        };
+        for child in &server.children {
+            placer.place(child, &[]);
+        }
+    }
+
+    discovery.sort();
+    Ok(discovery)
 }
 
-/// Recursively walk namespace directories below a server.
-///
-/// `ns_segments` accumulates the namespace path components seen so
-/// far. At each directory:
-///   - If it has .git and child git dirs, it is a workspace root
-///     (namespace-level entry). Record it and also scan children.
-///   - If it has .git and no child git dirs, it is a regular repo.
-///     Record it and stop recursing.
-///   - If it has no .git, it is a namespace directory. Recurse.
-fn walk_namespace(
-    dir: &Path,
-    host: &GitHost,
-    ns_segments: &[String],
-    config: &WorkspaceConfig,
-    results: &mut Vec<DiscoveredWorkspace>,
-) -> Result<(), WorkspaceError> {
-    let entries: Vec<std::fs::DirEntry> = match read_dir_safe(dir) {
-        Ok(iter) => iter.filter_map(Result::ok).collect(),
-        Err(_) => return Ok(()),
-    };
+impl Discovery {
+    fn issue(&mut self, path: &Path, error: WorkspaceError) {
+        self.issues.push(DiscoveryIssue {
+            path: path.to_path_buf(),
+            error,
+        });
+    }
 
-    // Collect child directories, skipping symlinks and .git internals.
-    let child_dirs: Vec<(std::ffi::OsString, PathBuf)> = entries
-        .iter()
-        .filter(|e| {
-            e.file_type()
-                .is_ok_and(|ft| ft.is_dir() && !ft.is_symlink())
-        })
-        .filter(|e| e.file_name() != ".git")
-        .map(|e| (e.file_name(), e.path()))
-        .collect();
-
-    let this_is_git_root = has_git_dir(dir);
-
-    if this_is_git_root {
-        // Check if any children are also git roots.
-        let has_child_git = child_dirs.iter().any(|(_, p)| has_git_dir(p));
-
-        if has_child_git {
-            // This is a workspace root: a namespace-level directory
-            // that contains .git AND has sibling repositories.
-            if !ns_segments.is_empty()
-                && let Ok(ns) = NamespacePath::from_segments(ns_segments.to_vec())
-            {
-                let coord = WorkspaceCoordinate::new(host.clone(), ns, WorkspaceKind::Organization);
-                let linked = crate::config::resolve_workspace_profile(config, dir);
-                results.push(DiscoveredWorkspace {
-                    path: dir.to_path_buf(),
-                    coordinate: coord,
-                    linked_profile: linked,
-                });
-            }
-
-            // Continue into children to discover sibling repos.
-            for (name, child_path) in &child_dirs {
-                let Some(name_str) = name.to_str().map(ToString::to_string) else {
-                    continue;
-                };
-                let mut child_ns = ns_segments.to_vec();
-                child_ns.push(name_str);
-
-                if has_git_dir(child_path) {
-                    // Child is a regular repository inside the workspace.
-                    record_repository(child_path, host, ns_segments, &child_ns, config, results);
-                } else {
-                    // Child namespace directory, recurse deeper.
-                    walk_namespace(child_path, host, &child_ns, config, results)?;
-                }
-            }
-        } else {
-            // Regular repository with no child git repos.
-            // The last namespace segment is the repository name.
-            if ns_segments.is_empty() {
-                // A git root directly under the server with no namespace
-                // is structurally invalid for the convention. Skip it.
-                return Ok(());
-            }
-            record_repository(
-                dir,
-                host,
-                &ns_segments[..ns_segments.len() - 1],
-                ns_segments,
-                config,
-                results,
+    /// The node's name as UTF-8, or an issue.
+    fn utf8_name<'n>(&mut self, node: &'n Node) -> Option<&'n str> {
+        let name = node.name.to_str();
+        if name.is_none() {
+            self.issue(
+                &node.path,
+                WorkspaceError::PathValidation(format!(
+                    "non-UTF-8 directory name: {}",
+                    node.path.display()
+                )),
             );
         }
-    } else {
-        // Not a git root. Recurse into children as namespace dirs.
-        for (name, child_path) in &child_dirs {
-            let name_str = match name.to_str() {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            let mut child_ns = ns_segments.to_vec();
-            child_ns.push(name_str);
-            walk_namespace(child_path, host, &child_ns, config, results)?;
+        name
+    }
+
+    fn sort(&mut self) {
+        self.workspaces.sort_by(|a, b| a.path.cmp(&b.path));
+        self.issues.sort_by(|a, b| a.path.cmp(&b.path));
+        self.skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+}
+
+/// Places the layout nodes below one server directory.
+struct Placer<'a> {
+    host: &'a GitHost,
+    config: &'a WorkspaceConfig,
+    discovery: &'a mut Discovery,
+}
+
+impl Placer<'_> {
+    /// Place `node`, whose parent's namespace segments are `parent_ns`.
+    ///
+    /// A namespace directory and a workspace root extend the namespace
+    /// with their own name; a repository is named by its directory.
+    fn place(&mut self, node: &Node, parent_ns: &[String]) {
+        let Some(name) = self.discovery.utf8_name(node) else {
+            return;
+        };
+        match node.role {
+            Role::Namespace => {
+                let ns = extend(parent_ns, name);
+                for child in &node.children {
+                    self.place(child, &ns);
+                }
+            }
+            Role::Repository(_) => {
+                if parent_ns.is_empty() {
+                    self.discovery.issue(
+                        &node.path,
+                        WorkspaceError::PathValidation(format!(
+                            "{}: git repository directly under a server directory has no \
+                             namespace",
+                            node.path.display()
+                        )),
+                    );
+                } else {
+                    self.record(&node.path, parent_ns, Some(name));
+                }
+            }
+            Role::WorkspaceRoot(_) => {
+                let ns = extend(parent_ns, name);
+                self.record(&node.path, &ns, None);
+                for child in &node.children {
+                    self.place(child, &ns);
+                }
+            }
         }
     }
 
-    Ok(())
+    /// Record a placed entry: the workspace repository when `repo` is
+    /// `None`, otherwise a regular repository named `repo`.
+    fn record(&mut self, path: &Path, ns_segments: &[String], repo: Option<&str>) {
+        let namespace = match NamespaceDir::parse(ns_segments) {
+            Ok(namespace) => namespace,
+            Err(source) => {
+                self.discovery
+                    .issue(path, WorkspaceError::placement(path, source));
+                return;
+            }
+        };
+        let kind = match repo {
+            None => WorkspaceKind::WorkspaceRepository,
+            Some(name) => match RepoDir::parse(name) {
+                Ok(dir) => WorkspaceKind::Repository(dir),
+                Err(source) => {
+                    self.discovery
+                        .issue(path, WorkspaceError::placement(path, source));
+                    return;
+                }
+            },
+        };
+        let linked_profile = match crate::config::resolve_workspace_profile(self.config, path) {
+            Ok(profile) => profile,
+            Err(e) => {
+                self.discovery.issue(path, e);
+                return;
+            }
+        };
+        self.discovery.workspaces.push(DiscoveredWorkspace {
+            path: path.to_path_buf(),
+            coordinate: WorkspaceCoordinate::new(self.host.clone(), namespace, kind),
+            linked_profile,
+        });
+    }
 }
 
-/// Record a repository entry from its path and namespace context.
-fn record_repository(
-    path: &Path,
-    host: &GitHost,
-    parent_ns_segments: &[String],
-    _full_segments: &[String],
-    config: &WorkspaceConfig,
-    results: &mut Vec<DiscoveredWorkspace>,
-) {
-    let Some(repo_name_str) = path.file_name().and_then(|n| n.to_str()) else {
-        return;
-    };
-
-    if parent_ns_segments.is_empty() {
-        return;
-    }
-    let Ok(ns) = NamespacePath::from_segments(parent_ns_segments.to_vec()) else {
-        return;
-    };
-
-    let Ok(repo) = RepositoryName::new(repo_name_str) else {
-        return;
-    };
-
-    let coord = WorkspaceCoordinate::new(host.clone(), ns, WorkspaceKind::Repository(repo));
-    let linked = crate::config::resolve_workspace_profile(config, path);
-    results.push(DiscoveredWorkspace {
-        path: path.to_path_buf(),
-        coordinate: coord,
-        linked_profile: linked,
-    });
-}
-
-/// Read a directory, returning an error only for non-permission failures.
-/// Permission denied is treated as an empty directory.
-fn read_dir_safe(path: &Path) -> Result<std::fs::ReadDir, WorkspaceError> {
-    match std::fs::read_dir(path) {
-        Ok(e) => Ok(e),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(WorkspaceError::Io(e)),
-        Err(e) => Err(e.into()),
-    }
+fn extend(segments: &[String], name: &str) -> Vec<String> {
+    let mut out = segments.to_vec();
+    out.push(name.to_string());
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::marker::test_repos;
+    use core_workspace_types::WorkspaceUser;
 
-    fn test_config(root: &Path) -> WorkspaceConfig {
-        let mut config = WorkspaceConfig::default();
-        config.settings.root = root.to_path_buf();
-        config.settings.user = core_workspace_types::WorkspaceUser::new("user").unwrap();
-        config
+    fn setup(root: &Path) -> (WorkspaceLayout, WorkspaceConfig) {
+        (
+            WorkspaceLayout {
+                root: root.to_path_buf(),
+                user: WorkspaceUser::new("user").unwrap(),
+            },
+            WorkspaceConfig::default(),
+        )
+    }
+
+    fn git_repo(root: &Path, parts: &[&str]) -> PathBuf {
+        let mut path = root.join("user");
+        path.extend(parts);
+        test_repos::init(&path);
+        path
+    }
+
+    fn discover(root: &Path) -> Discovery {
+        let (layout, config) = setup(root);
+        discover_workspaces(&layout, &config).unwrap()
+    }
+
+    fn repo_name(ws: &DiscoveredWorkspace) -> Option<&str> {
+        ws.coordinate.kind().repository_dir().map(RepoDir::as_str)
+    }
+
+    fn paths(d: &Discovery) -> Vec<&Path> {
+        d.workspaces.iter().map(|w| w.path.as_path()).collect()
     }
 
     #[test]
     fn discovers_flat_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let repo = root
-            .join("user")
-            .join("github.com")
-            .join("org")
-            .join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].path, repo);
-        assert_eq!(workspaces[0].coordinate.namespace().root_segment(), "org");
-        assert_eq!(
-            workspaces[0]
-                .coordinate
-                .kind()
-                .repository_name()
-                .map(|r| r.as_str()),
-            Some("repo")
-        );
-        assert!(workspaces[0].coordinate.kind().is_cloneable());
+        let repo = git_repo(dir.path(), &["github.com", "org", "repo"]);
+        let d = discover(dir.path());
+        assert!(d.issues.is_empty(), "{:?}", d.issues);
+        assert_eq!(paths(&d), vec![repo.as_path()]);
+        assert_eq!(d.workspaces[0].coordinate.namespace().root_segment(), "org");
+        assert_eq!(repo_name(&d.workspaces[0]), Some("repo"));
+        assert!(d.workspaces[0].linked_profile.is_none());
     }
 
     #[test]
     fn discovers_nested_namespace_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let repo = root
-            .join("user")
-            .join("gitlab.com")
-            .join("group")
-            .join("subgroup")
-            .join("project");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert_eq!(workspaces.len(), 1);
+        git_repo(dir.path(), &["gitlab.com", "group", "subgroup", "project"]);
+        let d = discover(dir.path());
+        assert_eq!(d.workspaces.len(), 1);
         assert_eq!(
-            workspaces[0].coordinate.namespace().to_string(),
+            d.workspaces[0].coordinate.namespace().to_string(),
             "group/subgroup"
         );
-        assert_eq!(
-            workspaces[0]
-                .coordinate
-                .kind()
-                .repository_name()
-                .map(|r| r.as_str()),
-            Some("project")
-        );
+        assert_eq!(repo_name(&d.workspaces[0]), Some("project"));
     }
 
     #[test]
     fn discovers_workspace_root_with_siblings() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let org = root.join("user").join("github.com").join("org");
-        // Org has .git (workspace root)
-        std::fs::create_dir_all(org.join(".git")).unwrap();
-        // Sibling repo inside the workspace root
-        std::fs::create_dir_all(org.join("repo-a").join(".git")).unwrap();
-        std::fs::create_dir_all(org.join("repo-b").join(".git")).unwrap();
+        let org = git_repo(dir.path(), &["github.com", "org"]);
+        git_repo(dir.path(), &["github.com", "org", "repo-a"]);
+        git_repo(dir.path(), &["github.com", "org", "repo-b"]);
 
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-
-        // Should find: workspace root (org), repo-a, repo-b
-        assert_eq!(workspaces.len(), 3);
-
-        let ws_root = workspaces.iter().find(|w| w.path == org).unwrap();
-        assert!(!ws_root.coordinate.kind().is_cloneable());
-
-        let repo_a = workspaces
-            .iter()
-            .find(|w| w.path == org.join("repo-a"))
-            .unwrap();
+        let d = discover(dir.path());
+        assert!(d.issues.is_empty(), "{:?}", d.issues);
+        assert_eq!(d.workspaces.len(), 3);
+        let ws_root = d.workspaces.iter().find(|w| w.path == org).unwrap();
         assert_eq!(
-            repo_a
-                .coordinate
-                .kind()
-                .repository_name()
-                .map(|r| r.as_str()),
-            Some("repo-a")
+            ws_root.coordinate.kind(),
+            &WorkspaceKind::WorkspaceRepository
         );
+        for name in ["repo-a", "repo-b"] {
+            let repo = d
+                .workspaces
+                .iter()
+                .find(|w| w.path == org.join(name))
+                .unwrap();
+            assert_eq!(repo_name(repo), Some(name));
+            assert_eq!(repo.coordinate.namespace().to_string(), "org");
+        }
+    }
 
-        let repo_b = workspaces
+    #[test]
+    fn regular_repository_with_submodule_stays_regular() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = git_repo(dir.path(), &["github.com", "org", "app"]);
+        test_repos::add_submodule_checkout(&app, "Vendor", &app.join("Vendor"));
+        let d = discover(dir.path());
+        assert!(d.issues.is_empty(), "{:?}", d.issues);
+        assert_eq!(paths(&d), vec![app.as_path()]);
+        assert_eq!(repo_name(&d.workspaces[0]), Some("app"));
+    }
+
+    #[test]
+    fn linked_worktree_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = git_repo(dir.path(), &["github.com", "org", "main"]);
+        let repo = git2::Repository::open(&main).unwrap();
+        let wt = dir.path().join("user/github.com/org/feature");
+        test_repos::add_worktree(&repo, "feature", &wt);
+        let d = discover(dir.path());
+        assert!(d.issues.is_empty(), "{:?}", d.issues);
+        assert_eq!(paths(&d), vec![wt.as_path(), main.as_path()]);
+    }
+
+    #[test]
+    fn nested_workspace_root_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let org = git_repo(dir.path(), &["github.com", "org"]);
+        git_repo(dir.path(), &["github.com", "org", "team"]);
+        let svc = git_repo(dir.path(), &["github.com", "org", "team", "svc"]);
+        let d = discover(dir.path());
+        assert!(d.issues.is_empty(), "{:?}", d.issues);
+        let team = d
+            .workspaces
             .iter()
-            .find(|w| w.path == org.join("repo-b"))
+            .find(|w| w.path == org.join("team"))
             .unwrap();
+        assert_eq!(team.coordinate.kind(), &WorkspaceKind::WorkspaceRepository);
+        assert_eq!(team.coordinate.namespace().to_string(), "org/team");
+        let svc = d.workspaces.iter().find(|w| w.path == svc).unwrap();
+        assert_eq!(svc.coordinate.namespace().to_string(), "org/team");
+    }
+
+    #[test]
+    fn discovers_leading_dot_repo_standalone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path(), &["github.com", "sesameos", ".github"]);
+        let d = discover(dir.path());
+        assert_eq!(paths(&d), vec![repo.as_path()]);
+        assert_eq!(repo_name(&d.workspaces[0]), Some(".github"));
+    }
+
+    #[test]
+    fn discovers_leading_dot_repo_in_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let org = git_repo(dir.path(), &["github.com", "sesameos"]);
+        git_repo(dir.path(), &["github.com", "sesameos", ".github"]);
+        git_repo(dir.path(), &["github.com", "sesameos", "repo-a"]);
+        let d = discover(dir.path());
+        assert_eq!(d.workspaces.len(), 3);
+        let dot = d
+            .workspaces
+            .iter()
+            .find(|w| w.path == org.join(".github"))
+            .unwrap();
+        assert_eq!(repo_name(dot), Some(".github"));
+        assert_eq!(dot.coordinate.namespace().to_string(), "sesameos");
+    }
+
+    #[test]
+    fn workspace_root_content_is_not_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let org = git_repo(dir.path(), &["github.com", "org"]);
+        git_repo(dir.path(), &["github.com", "org", "member"]);
+        git_repo(dir.path(), &["github.com", "org", "Sub", "proj"]);
+        std::fs::create_dir_all(org.join("node_modules").join("PyYAML.libs")).unwrap();
+        // A repository vendored inside workspace content under a
+        // non-canonical directory leads to a repository root, so the path
+        // to it is layout and its non-canonical name is reported.
+        test_repos::init(&org.join("Vendor").join("lib"));
+
+        let d = discover(dir.path());
+        assert_eq!(paths(&d), vec![org.as_path(), org.join("member").as_path()]);
+        let issue_paths: Vec<PathBuf> = d.issues.iter().map(|i| i.path.clone()).collect();
         assert_eq!(
-            repo_b
-                .coordinate
-                .kind()
-                .repository_name()
-                .map(|r| r.as_str()),
-            Some("repo-b")
+            issue_paths,
+            vec![org.join("Sub").join("proj"), org.join("Vendor").join("lib")]
         );
+    }
+
+    #[test]
+    fn plain_trees_are_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        git_repo(dir.path(), &["github.com", "org", "repo"]);
+        std::fs::create_dir_all(dir.path().join("user/github.com/org/Notes/Meeting Docs")).unwrap();
+        std::fs::create_dir_all(dir.path().join("user/Archive")).unwrap();
+        let d = discover(dir.path());
+        assert!(d.issues.is_empty(), "{:?}", d.issues);
+        assert_eq!(d.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn reports_non_canonical_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_ns = git_repo(dir.path(), &["github.com", "NixOS", "nixpkgs"]);
+        let bad_repo = git_repo(dir.path(), &["github.com", "org", "MyRepo"]);
+        let good = git_repo(dir.path(), &["github.com", "org", "good"]);
+        let bad_host = dir.path().join("user").join("GitHub.com");
+        test_repos::init(&bad_host.join("org").join("repo"));
+
+        let d = discover(dir.path());
+        assert_eq!(paths(&d), vec![good.as_path()]);
+        let issue_paths: Vec<&Path> = d.issues.iter().map(|i| i.path.as_path()).collect();
+        assert_eq!(
+            issue_paths,
+            vec![bad_host.as_path(), bad_ns.as_path(), bad_repo.as_path()]
+        );
+        assert!(
+            d.issues
+                .iter()
+                .all(|i| matches!(i.error, WorkspaceError::NonCanonical { .. }))
+        );
+    }
+
+    #[test]
+    fn reports_user_directory_case_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let variant = dir.path().join("User");
+        test_repos::init(&variant.join("github.com/org/repo"));
+        let d = discover(dir.path());
+        assert!(d.workspaces.is_empty());
+        assert_eq!(d.issues.len(), 1);
+        assert_eq!(d.issues[0].path, variant);
+        assert!(matches!(
+            d.issues[0].error,
+            WorkspaceError::NonCanonical { .. }
+        ));
+    }
+
+    #[test]
+    fn reports_repository_without_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = git_repo(dir.path(), &["github.com", "repo"]);
+        let d = discover(dir.path());
+        assert!(d.workspaces.is_empty());
+        assert_eq!(d.issues.len(), 1);
+        assert_eq!(d.issues[0].path, bad);
+    }
+
+    #[test]
+    fn reports_undecodable_server_directory_leading_to_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("user").join("not:a:host");
+        test_repos::init(&junk.join("org").join("repo"));
+        let d = discover(dir.path());
+        assert_eq!(d.issues.len(), 1);
+        assert_eq!(d.issues[0].path, junk);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_non_utf8_server_without_aborting() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir
+            .path()
+            .join("user")
+            .join(std::ffi::OsStr::from_bytes(b"gh\xff"));
+        test_repos::init(&bad.join("org/repo"));
+        let good = git_repo(dir.path(), &["github.com", "org", "repo"]);
+        let d = discover(dir.path());
+        assert_eq!(paths(&d), vec![good.as_path()]);
+        assert_eq!(d.issues.len(), 1);
+        assert_eq!(d.issues[0].path, bad);
     }
 
     #[test]
     fn skips_non_git_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let not_repo = root
-            .join("user")
-            .join("github.com")
-            .join("org")
-            .join("not-a-repo");
-        std::fs::create_dir_all(&not_repo).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert!(workspaces.is_empty());
+        std::fs::create_dir_all(dir.path().join("user/github.com/org/not-a-repo")).unwrap();
+        let d = discover(dir.path());
+        assert!(d.workspaces.is_empty());
+        assert!(d.issues.is_empty());
     }
 
     #[test]
-    fn empty_workspace_returns_empty() {
+    fn missing_user_dir_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("user")).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert!(workspaces.is_empty());
+        let d = discover(dir.path());
+        assert!(d.workspaces.is_empty());
+        assert!(d.issues.is_empty());
     }
 
     #[test]
     fn deeply_nested_namespace() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let repo = root
-            .join("user")
-            .join("gitlab.com")
-            .join("a")
-            .join("b")
-            .join("c")
-            .join("d")
-            .join("project");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].coordinate.namespace().to_string(), "a/b/c/d");
+        git_repo(dir.path(), &["gitlab.com", "a", "b", "c", "d", "project"]);
+        let d = discover(dir.path());
+        assert_eq!(d.workspaces.len(), 1);
         assert_eq!(
-            workspaces[0]
-                .coordinate
-                .kind()
-                .repository_name()
-                .map(|r| r.as_str()),
-            Some("project")
+            d.workspaces[0].coordinate.namespace().to_string(),
+            "a/b/c/d"
         );
+        assert_eq!(repo_name(&d.workspaces[0]), Some("project"));
     }
 
     #[test]
     fn ipv6_server_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let repo = root.join("user").join("_ipv6_--1").join("org").join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert_eq!(workspaces.len(), 1);
-        assert!(matches!(workspaces[0].coordinate.host(), GitHost::Ipv6(_)));
+        git_repo(dir.path(), &["_ipv6_--1", "org", "repo"]);
+        let d = discover(dir.path());
+        assert_eq!(d.workspaces.len(), 1);
+        assert!(matches!(
+            d.workspaces[0].coordinate.host(),
+            GitHost::Ipv6(_)
+        ));
     }
 
     #[test]
-    fn discovery_contains_no_git_metadata() {
+    fn linked_profile_resolved() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let repo = root
-            .join("user")
-            .join("github.com")
-            .join("org")
-            .join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-
-        let config = test_config(root);
-        let workspaces = discover_workspaces(&config).unwrap();
-        assert_eq!(workspaces.len(), 1);
-        assert!(workspaces[0].linked_profile.is_none());
-        assert!(workspaces[0].coordinate.kind().is_cloneable());
+        let repo = git_repo(dir.path(), &["github.com", "org", "repo"]);
+        let (layout, mut config) = setup(dir.path());
+        config.links.insert(
+            crate::config::physical_path(&repo)
+                .unwrap()
+                .display()
+                .to_string(),
+            "work".into(),
+        );
+        let d = discover_workspaces(&layout, &config).unwrap();
+        assert_eq!(d.workspaces[0].linked_profile.as_deref(), Some("work"));
     }
 }

@@ -3,16 +3,18 @@
 //! Central daemon responsibilities:
 //! 1. Hosts the IPC bus server (all inter-daemon communication routes through here)
 //! 2. Runs the context engine for default profile selection
-//! 3. Executes profile activation/deactivation transactions (atomic, with rollback)
+//! 3. Applies profile activation and deactivation through confirmed RPCs to
+//!    daemon-secrets, reconciling with its state when one is unconfirmed
 //! 4. Manages the hash-chained audit log
-//! 5. Handles systemd/launchd readiness and watchdog
+//! 5. Rotates the per-daemon Noise IK keypairs
+//! 6. Handles systemd readiness and watchdog
 //!
 //! Multiple profiles may be active concurrently. The context engine determines
 //! the default profile for new unscoped launches — changing the default does
 //! NOT deactivate other active profiles.
 //!
-//! Landlock: config (read/write for audit), runtime dir (read/write/socket)
-//! No network access beyond local IPC.
+//! Landlock: see [`sandbox::apply_sandbox`]. No network access beyond local
+//! IPC.
 
 mod activation;
 mod context;
@@ -22,38 +24,41 @@ mod sandbox;
 
 use anyhow::Context;
 use clap::Parser;
-use core_ipc::Message;
-use core_ipc::{BusServer, ClearanceRegistry};
-use core_profile::{AuditAction, AuditLogger, ContextEngine, ContextSignal};
-use core_types::{DaemonId, EventKind, SecurityLevel, TrustProfileName};
-
-/// Known daemons and their security clearance levels.
-const KNOWN_DAEMONS: &[(&str, SecurityLevel)] = &[
-    ("daemon-secrets", SecurityLevel::SecretsOnly),
-    ("daemon-wm", SecurityLevel::Internal),
-    ("daemon-launcher", SecurityLevel::Internal),
-    ("daemon-clipboard", SecurityLevel::Internal),
-    ("daemon-input", SecurityLevel::Internal),
-    ("daemon-snippets", SecurityLevel::Internal),
-];
+use core_daemon::{LogFormat, Shutdown};
+use core_ipc::{BusServer, ClearanceRegistry, Message};
+use core_profile::ContextSignal;
+use core_types::{Daemon, DaemonId, EventKind, SecurityLevel, TrustProfileName};
+use dispatch::{AuditLog, Hub};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Key rotation interval. Default: 1 hour.
-const KEY_ROTATION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Every bus client daemon and its security clearance.
+const KNOWN_DAEMONS: &[(Daemon, SecurityLevel)] = &[
+    (Daemon::Secrets, SecurityLevel::SecretsOnly),
+    (Daemon::Wm, SecurityLevel::Internal),
+    (Daemon::Launcher, SecurityLevel::Internal),
+    (Daemon::Clipboard, SecurityLevel::Internal),
+    (Daemon::Input, SecurityLevel::Internal),
+    (Daemon::Snippets, SecurityLevel::Internal),
+];
+
+/// Key rotation interval.
+const KEY_ROTATION_INTERVAL: Duration = Duration::from_hours(1);
 
 /// Grace period (seconds) for daemons to reconnect with new keys after rotation.
 const KEY_ROTATION_GRACE: u32 = 30;
 
-/// Level 0 namespace seed. Never use directly for ProfileId derivation — use install_ns instead.
-#[allow(dead_code)]
-const PROFILE_NS: uuid::Uuid = core_types::PROFILE_NAMESPACE;
+/// Watchdog notification interval: half of the units' `WatchdogSec=30`.
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How often `installation.toml` is looked for before `sesame init`.
+const INSTALLATION_POLL: Duration = Duration::from_millis(500);
 
 /// Tracks which `DaemonId` is associated with each daemon name.
 /// Detects crash-restarts when a new `DaemonStarted` arrives for an already-registered name.
 pub(crate) struct DaemonTracker {
-    /// daemon_name -> last known `DaemonId`
+    /// Each daemon name's last known `DaemonId`.
     known: HashMap<String, DaemonId>,
 }
 
@@ -66,72 +71,84 @@ impl DaemonTracker {
 
     /// Register or detect restart. Returns `Some(old_id)` if this is a restart.
     pub(crate) fn track(&mut self, name: &str, new_id: DaemonId) -> Option<DaemonId> {
-        if let Some(&old_id) = self.known.get(name)
-            && old_id != new_id
-        {
-            self.known.insert(name.to_owned(), new_id);
-            return Some(old_id);
-        }
-        self.known.insert(name.to_owned(), new_id);
-        None
+        self.known
+            .insert(name.to_owned(), new_id)
+            .filter(|&old_id| old_id != new_id)
     }
 }
 
-/// Reload the context engine from the live config.
-///
-/// Shared by the config watcher (reload_rx) and SIGHUP (systemctl reload) paths.
-/// Rebuilds activation rules, updates the default profile name, and refreshes
-/// the profile name list used by RPC handlers.
-fn reload_config(
-    live_config: &std::sync::RwLock<core_config::Config>,
-    install_ns: &uuid::Uuid,
-    context_engine: &mut ContextEngine,
-    default_profile_name: &mut TrustProfileName,
-    config_profile_names: &mut Vec<TrustProfileName>,
-) {
-    if let Ok(guard) = live_config.read() {
-        let new_default_name: TrustProfileName = guard.global.default_profile.clone();
-        let new_default_id = core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
-            install_ns,
-            format!("profile:{}", new_default_name).as_bytes(),
-        ));
-        let new_rules = context::build_activation_rules(&guard, new_default_id, install_ns);
-        *context_engine = ContextEngine::new(new_rules, new_default_id);
-        *default_profile_name = new_default_name;
-        *config_profile_names = guard
-            .profiles
-            .keys()
-            .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
-            .collect();
-        tracing::info!(
-            default_profile = %default_profile_name,
-            "context engine rebuilt from reloaded config"
-        );
+/// Start the context signal sources (Linux desktop builds: Wi-Fi network
+/// changes on the system bus `layout` names, and compositor focus changes)
+/// feeding `tx`. Headless builds have none, and the context engine keeps
+/// its configured default.
+fn spawn_context_monitors(layout: &core_layout::Layout, tx: mpsc::Sender<ContextSignal>) {
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    {
+        use platform_linux::focus_monitor::FocusEvent;
+
+        match layout.system_bus_socket() {
+            Ok(system_bus) => {
+                let ssid_tx = tx.clone();
+                tokio::spawn(async move {
+                    let (raw_tx, mut raw_rx) = mpsc::channel::<String>(16);
+                    tokio::spawn(platform_linux::dbus::ssid_monitor(system_bus, raw_tx));
+                    while let Some(ssid) = raw_rx.recv().await {
+                        if ssid_tx
+                            .send(ContextSignal::SsidChanged(ssid))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                tracing::info!("SSID monitor spawned");
+            }
+            Err(e) => tracing::warn!(error = %e, "SSID monitor unavailable"),
+        }
+
+        let (raw_tx, mut raw_rx) = mpsc::channel::<FocusEvent>(16);
+        match platform_linux::focus_monitor::spawn(raw_tx) {
+            Ok(()) => tracing::info!("focus monitor spawned"),
+            Err(e) => tracing::warn!(error = %e, "focus monitor unavailable"),
+        }
+        tokio::spawn(async move {
+            while let Some(event) = raw_rx.recv().await {
+                let FocusEvent::Focus(app_id) = event else {
+                    continue;
+                };
+                if tx
+                    .send(ContextSignal::AppFocused(core_types::AppId::new(app_id)))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+    #[cfg(not(all(target_os = "linux", feature = "desktop")))]
+    {
+        let _ = layout;
+        drop(tx);
     }
 }
 
 /// PDS profile orchestrator daemon.
 #[derive(Parser, Debug)]
 #[command(
-    name = "daemon-profile",
+    name = Daemon::Profile.name(),
     about = "PDS profile orchestrator and IPC bus server"
 )]
 struct Cli {
-    /// Config directory override.
-    #[arg(long, env = "PDS_CONFIG_DIR")]
-    config_dir: Option<PathBuf>,
-
-    /// Log format: "json" or "pretty".
-    #[arg(long, default_value = "json", env = "PDS_LOG_FORMAT")]
-    log_format: String,
+    #[arg(long, value_enum, default_value = "json", env = "PDS_LOG_FORMAT")]
+    log_format: LogFormat,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // -- Logging --
-    sandbox::init_logging(&cli.log_format)?;
+    core_daemon::init_logging(cli.log_format)?;
 
     tracing::info!("daemon-profile starting");
 
@@ -145,555 +162,366 @@ async fn main() -> anyhow::Result<()> {
         memlock_bytes: 0,
     });
 
-    // -- Directory bootstrap --
-    core_config::bootstrap_dirs();
-
-    // -- Config --
-    let config = core_config::load_config(None).context("failed to load config")?;
+    // An invalid config fails startup here, before the bus is bound. The
+    // config used at runtime is reloaded once installation.toml exists,
+    // since `sesame init` writes config.toml alongside it.
+    let (layout, startup_config) = core_daemon::startup()?;
 
     // Probe memfd_secret and initialize secure memory BEFORE sandbox.
     core_types::init_secure_memory();
 
-    // -- Sandbox (Linux) --
-    // apply_sandbox() ensures all Landlock target directories exist before
-    // opening PathFd handles. This handles the post-wipe restart case where
-    // systemd restarts daemon-profile before `sesame init` recreates dirs.
+    // The sandbox is applied on the only thread; the runtime's threads
+    // start inside it.
     #[cfg(target_os = "linux")]
-    sandbox::apply_sandbox()?;
+    sandbox::apply_sandbox(&layout)?;
 
-    // -- IPC bus server: generate Noise IK keypair and bind the Unix socket --
-    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
-    let bus_keypair =
-        core_ipc::generate_keypair().context("failed to generate bus Noise IK keypair")?;
-    core_ipc::noise::write_bus_keypair(bus_keypair.as_inner())
-        .await
-        .context("failed to write bus public key")?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?
+        .block_on(run(layout, startup_config))
+}
 
-    // -- Per-daemon keypair generation and clearance registry --
-    core_ipc::noise::create_keys_dir()
+/// A fresh keypair for every known daemon, each public key registered
+/// under its clearance at generation 0.
+async fn issue_keys(layout: &core_layout::Layout) -> anyhow::Result<ClearanceRegistry> {
+    core_ipc::noise::create_keys_dir(layout)
         .await
         .context("failed to create keys directory")?;
-
     let mut registry = ClearanceRegistry::new();
-    let noise_params: snow::params::NoiseParams = "Noise_IK_25519_ChaChaPoly_BLAKE2s"
-        .parse()
-        .expect("valid noise params");
-    let builder = snow::Builder::new(noise_params);
-
-    for &(daemon_name, security_level) in KNOWN_DAEMONS {
-        let keypair = core_ipc::ZeroizingKeypair::new(
-            builder
-                .generate_keypair()
-                .context(format!("failed to generate keypair for {daemon_name}"))?,
-        );
-
-        let mut pubkey = [0u8; 32];
-        pubkey.copy_from_slice(keypair.public());
-
-        core_ipc::noise::write_daemon_keypair(daemon_name, keypair.as_inner())
+    for &(daemon, security_level) in KNOWN_DAEMONS {
+        let pubkey = core_ipc::noise::issue_daemon_keypair(layout, daemon.name())
             .await
-            .context(format!("failed to write keypair for {daemon_name}"))?;
-
-        registry.register(daemon_name.into(), pubkey, security_level);
-
-        tracing::info!(
-            daemon = daemon_name,
-            clearance = ?security_level,
-            "generated and registered keypair"
-        );
+            .with_context(|| format!("failed to issue keypair for {daemon}"))?;
+        registry.register(daemon.name().into(), pubkey, security_level, 0);
+        tracing::info!(%daemon, clearance = ?security_level, "generated and registered keypair");
     }
+    Ok(registry)
+}
 
-    let bus = BusServer::bind(&socket_path, bus_keypair.into_inner(), registry)
-        .context("failed to bind IPC bus server")?;
-    tracing::info!(path = %socket_path.display(), "IPC bus server bound (Noise IK encrypted)");
+/// The bus server bound under the configured Noise suite, its endpoint
+/// published afterwards: clients that see the endpoint find a bound socket.
+/// The server's private key stays in memory.
+async fn bind_bus(
+    layout: &core_layout::Layout,
+    config: &core_config::Config,
+    registry: ClearanceRegistry,
+) -> anyhow::Result<BusServer> {
+    let crypto = config.crypto().context("invalid [crypto] configuration")?;
+    let bus = BusServer::bind(
+        &layout.bus_socket()?,
+        core_ipc::noise::generate_keypair()
+            .context("failed to generate bus Noise IK keypair")?
+            .into_inner(),
+        registry,
+        core_ipc::noise::NoiseSuite::new(crypto.noise_cipher, crypto.noise_hash),
+    )
+    .context("failed to bind IPC bus server")?;
+    core_ipc::noise::publish_bus_endpoint(layout, &bus.endpoint())
+        .await
+        .context("failed to publish the bus endpoint")?;
+    Ok(bus)
+}
 
-    // -- SIGHUP handler: required for Type=notify-reload before first READY=1 --
-    // systemd verifies a SIGHUP handler exists when processing the initial
-    // READY=1 notification. Without this, systemd kills the process with
-    // SERVICE_FAILURE_PROTOCOL.
-    #[cfg(target_os = "linux")]
-    let mut sighup = sandbox::register_sighup();
+/// The installation identity, waiting for `sesame init` to write it while
+/// serving the bus; `None` on a shutdown signal first.
+///
+/// While waiting, a temporary in-process subscriber answers
+/// `StatusRequest` as locked with no active profiles, so `sesame status`
+/// does not time out.
+async fn await_installation(
+    layout: &core_layout::Layout,
+    bus: &BusServer,
+    shutdown: &mut Shutdown,
+    default_profile: &TrustProfileName,
+) -> anyhow::Result<Option<core_config::InstallationConfig>> {
+    if let Some(installation) = core_config::load_installation(layout)? {
+        return Ok(Some(installation));
+    }
+    tracing::info!("waiting for sesame init — installation.toml not found");
 
-    // -- Platform readiness (early): tell systemd we are alive before blocking on installation.toml --
-    #[cfg(target_os = "linux")]
-    platform_linux::systemd::notify_ready();
-
-    // -- Wait for installation.toml (may not exist yet on fresh multi-user VMs) --
-    let install_config = if let Ok(cfg) = core_config::load_installation() {
-        cfg
-    } else {
-        tracing::info!("waiting for sesame init — installation.toml not found");
-
-        // Register a temporary in-process subscriber so we can respond to
-        // StatusRequest RPCs while waiting. Without this, `sesame status`
-        // times out because nobody reads from the bus host channel.
-        let pre_init_id = DaemonId::new();
-        let pre_init_ctx = core_ipc::MessageContext::new(pre_init_id);
-        let (pre_init_tx, mut pre_init_rx) = mpsc::channel::<Vec<u8>>(256);
-        bus.register(
-            pre_init_id,
-            core_ipc::PeerCredentials::in_process(),
-            SecurityLevel::Internal,
-            vec![],
-            pre_init_tx,
-        )
+    let pre_init = core_ipc::MessageContext::new(DaemonId::new());
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(256);
+    bus.register(pre_init.sender, SecurityLevel::Internal, tx)
         .await;
-
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        let mut watchdog_interval = tokio::time::interval(std::time::Duration::from_secs(15));
-        loop {
-            tokio::select! {
-                _ = poll_interval.tick() => {
-                    if let Ok(cfg) = core_config::load_installation() {
-                        tracing::info!("installation.toml found, transitioning to full mode");
-                        #[cfg(target_os = "linux")]
-                        platform_linux::systemd::notify_reloading();
-                        bus.unregister(&pre_init_id).await;
-                        break cfg;
-                    }
-                }
-                _ = watchdog_interval.tick() => {
-                    #[cfg(target_os = "linux")]
-                    platform_linux::systemd::notify_watchdog();
-                }
-                result = bus.run() => {
-                    match result {
-                        Ok(()) => tracing::info!("bus server exited while waiting for init"),
-                        Err(e) => tracing::error!(error = %e, "bus server error while waiting for init"),
-                    }
-                    return Ok(());
-                }
-                Some(frame) = pre_init_rx.recv() => {
-                    if let Ok(msg) = core_ipc::decode_frame::<Message<EventKind>>(&frame) {
-                        if msg.sender == pre_init_id {
-                            continue;
-                        }
-                        if matches!(msg.payload, EventKind::StatusRequest) {
-                            let reply = Message::new(
-                                &pre_init_ctx,
-                                EventKind::StatusResponse {
-                                    active_profiles: vec![],
-                                    default_profile: TrustProfileName::try_from("default").unwrap_or_else(|_| unreachable!()),
-                                    daemon_uptimes_ms: vec![],
-                                    locked: true,
-                                    lock_state: std::collections::BTreeMap::new(),
-                                },
-                                SecurityLevel::Internal,
-                                bus.epoch(),
-                            ).with_correlation(msg.msg_id);
-                            if let Ok(reply_bytes) = core_ipc::encode_frame(&reply)
-                                && let Some(origin) = bus.take_pending_request(&msg.msg_id).await
-                            {
-                                let _ = bus.send_to(origin, &reply_bytes).await;
-                            }
-                        }
-                    }
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("SIGINT received while waiting for installation.toml");
-                    return Ok(());
-                }
-                _ = sandbox::sigterm() => {
-                    tracing::info!("SIGTERM received while waiting for installation.toml");
-                    return Ok(());
-                }
-            }
-        }
-    };
-    let install_ns = install_config.namespace;
-
-    // Reload config after transitioning from pre-init state. The initial
-    // load_config at startup may have returned Config::default() (empty
-    // profiles) because config.toml didn't exist yet. sesame init creates
-    // both config.toml and installation.toml, so by the time we get here
-    // the config file should have the full profile definitions.
-    let config = core_config::load_config(None).unwrap_or(config);
-
-    let mut default_profile_name: TrustProfileName = config.global.default_profile.clone();
-    let mut config_profile_names: Vec<TrustProfileName> = config
-        .profiles
-        .keys()
-        .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
-        .collect();
-    tracing::info!(default_profile = %default_profile_name, "config loaded");
-
-    // -- Default agent identity (needed by audit logger) --
-    let uid = rustix::process::getuid().as_raw();
-    let default_agent_id = core_types::AgentId::from_uuid(uuid::Uuid::new_v5(
-        &install_ns,
-        format!("agent:human:uid{uid}").as_bytes(),
-    ));
-
-    // -- Audit logger --
-    let audit_path = core_config::config_dir().join("audit.jsonl");
-    let (last_hash, sequence) = context::load_audit_state(&audit_path);
-    let audit_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&audit_path)
-        .context("failed to open audit log")?;
-    let audit_writer = std::io::BufWriter::new(audit_file);
-    let mut audit = AuditLogger::new(
-        audit_writer,
-        last_hash,
-        sequence,
-        core_types::AuditHash::Blake3,
-        Some(default_agent_id),
-    );
-    tracing::info!(
-        path = %audit_path.display(),
-        sequence = audit.sequence(),
-        "audit logger initialized"
-    );
-
-    // -- Verify audit chain on startup if log exists --
-    if sequence > 0 {
-        match context::verify_audit_chain(&audit_path) {
-            Ok(count) => tracing::info!(entries = count, "audit chain verified"),
-            Err(e) => tracing::error!(error = %e, "audit chain verification FAILED"),
-        }
-    }
-
-    // -- Context engine --
-    let default_id = core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
-        &install_ns,
-        format!("profile:{}", default_profile_name).as_bytes(),
-    ));
-    let profiles = context::build_activation_rules(&config, default_id, &install_ns);
-    let mut context_engine = ContextEngine::new(profiles, default_id);
-    tracing::info!(
-        profile = %default_id,
-        "context engine initialized with default profile"
-    );
-
-    // -- Active profiles set (concurrent) --
-    let mut active_profiles: HashSet<TrustProfileName> = HashSet::new();
-
-    // -- Lock state: tracks daemon-secrets lock/unlock (S-4) --
-    let mut locked = true;
-
-    // -- Confirmed RPC channel --
-    // Used by activation/deactivation/reconciliation to wait for daemon-secrets responses.
-    let (confirm_tx, mut confirm_rx) = mpsc::channel::<Vec<u8>>(16);
-
-    // -- Register daemon-profile as an in-process bus subscriber --
-    // This lets daemon-profile receive and process messages (StatusRequest,
-    // ProfileActivate, ProfileList, etc.) that clients send to the bus.
-    let daemon_id = DaemonId::new();
-
-    // Build default AgentIdentity representing the human operator.
-    let installation_id = core_types::InstallationId {
-        id: install_config.id,
-        org_ns: None,
-        namespace: install_ns,
-        machine_binding: None,
-    };
-
-    let _default_agent = core_types::AgentIdentity {
-        id: default_agent_id,
-        agent_type: core_types::AgentType::Human,
-        local_id: core_types::LocalAgentId::UnixUid(uid),
-        installation: installation_id.clone(),
-        attestations: vec![],
-        session_scope: core_types::CapabilitySet::all(),
-        delegation_chain: vec![],
-    };
-
-    let msg_ctx = core_ipc::MessageContext {
-        sender: daemon_id,
-        installation: Some(installation_id),
-        agent_id: Some(default_agent_id),
-        trust_snapshot: None,
-    };
-    let (host_tx, mut host_rx) = mpsc::channel::<Vec<u8>>(256);
-    let host_peer = core_ipc::PeerCredentials::in_process();
-    bus.register(
-        daemon_id,
-        host_peer,
-        SecurityLevel::Internal, // host handles StatusRequest/ProfileList — not secrets
-        vec![],
-        host_tx,
-    )
-    .await;
-
-    // -- Context signal sources --
-    let (ctx_tx, mut ctx_rx) = mpsc::channel::<ContextSignal>(64);
-    let _ctx_tx = &ctx_tx; // suppress unused warning in headless builds
-
-    // SSID monitor (Linux desktop only): spawns a long-lived task that sends
-    // SsidChanged signals when the WiFi network changes.
-    #[cfg(all(target_os = "linux", feature = "desktop"))]
-    {
-        let ssid_tx = ctx_tx.clone();
-        tokio::spawn(async move {
-            let (ssid_raw_tx, mut ssid_raw_rx) = mpsc::channel::<String>(16);
-            tokio::spawn(platform_linux::dbus::ssid_monitor(ssid_raw_tx));
-            while let Some(ssid) = ssid_raw_rx.recv().await {
-                if ssid_tx
-                    .send(ContextSignal::SsidChanged(ssid))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        tracing::info!("SSID monitor spawned");
-    }
-
-    // Focused app monitor (Linux desktop only): spawns a long-lived task that sends
-    // AppFocused signals when the Wayland compositor focus changes.
-    #[cfg(all(target_os = "linux", feature = "desktop"))]
-    {
-        let focus_tx = ctx_tx.clone();
-        tokio::spawn(async move {
-            use platform_linux::compositor::FocusEvent;
-            let (focus_raw_tx, mut focus_raw_rx) = mpsc::channel::<FocusEvent>(16);
-            tokio::spawn(platform_linux::compositor::focus_monitor(focus_raw_tx));
-            while let Some(event) = focus_raw_rx.recv().await {
-                let FocusEvent::Focus(app_id) = event else {
-                    continue;
-                };
-                if focus_tx
-                    .send(ContextSignal::AppFocused(core_types::AppId::new(app_id)))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        tracing::info!("focus monitor spawned");
-    }
-
-    // -- Config watcher (hot-reload) --
-    let config_paths = core_config::resolve_config_paths(None);
-    let (reload_tx, mut reload_rx) = mpsc::channel::<()>(4);
-    let reload_notify_tx = reload_tx;
-    let (_watcher, live_config) = core_config::ConfigWatcher::with_callback(
-        &config_paths,
-        config,
-        Some(Box::new(move || {
-            // notify thread -> tokio: blocking_send not available without tokio handle,
-            // but try_send is fine — bounded(4) absorbs bursts, we only need "at least once".
-            let _ = reload_notify_tx.try_send(());
-        })),
-    )
-    .context("failed to start config watcher")?;
-
-    tracing::info!("daemon-profile ready");
-
-    // Signal systemd that the reload cycle (pre-install -> full mode) is complete.
-    // With Type=notify-reload, this second READY=1 transitions the service from
-    // reload-notify back to running, making SubState observable by post-install.sh.
-    #[cfg(target_os = "linux")]
-    platform_linux::systemd::notify_ready();
-
-    // -- Watchdog timer: half the WatchdogSec=30 interval --
-    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(15));
-
-    // -- Reconciliation counter: reconcile every other watchdog tick (30s) --
-    let mut watchdog_tick_count: u64 = 0;
-
-    // -- Key rotation timer --
-    let mut rotation_timer = tokio::time::interval(KEY_ROTATION_INTERVAL);
-    rotation_timer.tick().await; // Consume the first immediate tick.
-
-    // Non-blocking rotation — grace period runs in a spawned task,
-    // completion signaled via channel so the main select! loop stays responsive.
-    let (rotation_done_tx, mut rotation_done_rx) = mpsc::channel::<()>(1);
-
-    // -- Daemon crash-restart tracker --
-    let mut daemon_tracker = DaemonTracker::new();
-
-    // -- Main event loop --
-    loop {
+    let mut poll = tokio::time::interval(INSTALLATION_POLL);
+    let mut watchdog = tokio::time::interval(WATCHDOG_INTERVAL);
+    let installation = loop {
         tokio::select! {
+            _ = poll.tick() => {
+                if let Some(installation) = core_config::load_installation(layout)? {
+                    tracing::info!("installation.toml found, transitioning to full mode");
+                    #[cfg(target_os = "linux")]
+                    platform_linux::systemd::notify_reloading();
+                    break Some(installation);
+                }
+            }
             _ = watchdog.tick() => {
                 #[cfg(target_os = "linux")]
                 platform_linux::systemd::notify_watchdog();
-
-                // Reconcile with daemon-secrets every 30s (every other tick).
-                watchdog_tick_count += 1;
-                if watchdog_tick_count <= 3 || watchdog_tick_count.is_multiple_of(20) {
-                    tracing::debug!(watchdog_tick_count, "watchdog tick");
-                }
-                if watchdog_tick_count.is_multiple_of(2) {
-                    dispatch::reconcile_secrets_state(
-                        &bus,
-                        daemon_id,
-                        &mut locked,
-                        &mut active_profiles,
-                        &confirm_tx,
-                        &mut confirm_rx,
-                    ).await;
-                }
             }
-            _ = rotation_timer.tick() => {
-                // Phase 1: generate keypairs, write to disk, announce pending.
-                // Returns immediately — does NOT block the event loop.
-                if let Err(e) = key_rotation::rotate_keys_phase1(&bus, daemon_id, &mut audit).await {
-                    tracing::error!(error = %e, "key rotation phase 1 failed");
-                } else {
-                    // Schedule phase 2 after grace period in a background task.
-                    let tx = rotation_done_tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(u64::from(KEY_ROTATION_GRACE))).await;
-                        let _ = tx.send(()).await;
-                    });
-                }
-            }
-            Some(()) = rotation_done_rx.recv() => {
-                // Phase 2: atomic registry swap + announce completion.
-                if let Err(e) = key_rotation::rotate_keys_phase2(&bus, daemon_id, &mut audit).await {
-                    tracing::error!(error = %e, "key rotation phase 2 failed");
-                }
-            }
-            result = bus.run() => {
-                match result {
-                    Ok(()) => tracing::info!("bus server exited cleanly"),
-                    Err(e) => tracing::error!(error = %e, "bus server error"),
-                }
-                break;
-            }
-            Some(frame) = host_rx.recv() => {
-                let msg: Message<EventKind> = match core_ipc::decode_frame(&frame) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "malformed frame on host channel");
-                        continue;
-                    }
-                };
-
-                // Skip messages we sent ourselves. bus.publish() delivers to ALL
-                // connections including our own host channel. Without this guard,
-                // activation::activate() broadcasting ProfileActivate creates an
-                // infinite feedback loop (daemon-profile re-processes its own broadcast).
-                if msg.sender == daemon_id {
+            never = bus.run() => match never {},
+            Some(frame) = rx.recv() => {
+                let Some(msg) = dispatch::decode_host_frame(&frame, pre_init.sender) else {
                     continue;
-                }
-
-                if let Some(response_event) = dispatch::handle_bus_message(
-                    &msg,
-                    &mut active_profiles,
-                    &mut context_engine,
-                    &mut audit,
-                    &mut default_profile_name,
-                    daemon_id,
-                    &bus,
-                    &mut daemon_tracker,
-                    &mut locked,
-                    &confirm_tx,
-                    &mut confirm_rx,
-                    &config_profile_names,
-                    &install_ns,
-                    &rotation_done_tx,
-                ).await {
-                    let reply = Message::new(
-                        &msg_ctx,
-                        response_event,
-                        msg.security_level,
-                        bus.epoch(),
-                    ).with_correlation(msg.msg_id);
-
-                    if let Ok(mut reply_bytes) = core_ipc::encode_frame(&reply) {
-                        // Unicast RPC responses to the original requester only.
-                        // bus.publish() would broadcast to ALL connected daemons, leaking
-                        // secret values (e.g., SecretGetResponse) to non-requesting clients.
-                        if let Some(origin_conn) = bus.take_pending_request(&msg.msg_id).await {
-                            if !bus.send_to(origin_conn, &reply_bytes).await {
-                                tracing::warn!(
-                                    conn_id = origin_conn,
-                                    msg_id = %msg.msg_id,
-                                    "unicast response failed: connection gone or channel full"
-                                );
-                            }
-                        } else {
-                            // No pending request found. NEVER broadcast -- the response
-                            // could contain secret values (SecretGetResponse, UnlockResponse).
-                            // Dropping is safe: the requester's RPC call will time out.
-                            tracing::error!(
-                                msg_id = %msg.msg_id,
-                                "response has no tracked origin -- dropping to prevent potential secret broadcast"
-                            );
-                        }
-                        // Zeroize postcard buffer — may contain serialized secret values.
-                        zeroize::Zeroize::zeroize(&mut reply_bytes);
-                    }
-                }
-            }
-            Some(signal) = ctx_rx.recv() => {
-                let previous = context_engine.default_profile();
-                if let Some(new_default) = context_engine.evaluate(&signal)
-                    && new_default != previous
-                {
-                    tracing::info!(
-                        previous = %previous,
-                        new_default = %new_default,
-                        signal = ?signal,
-                        "default profile changed by context engine"
-                    );
-
-                    // Audit the default profile change.
-                    if let Err(e) = audit.append(AuditAction::DefaultProfileChanged {
-                        previous,
-                        current: new_default,
-                    }) {
-                        tracing::error!(error = %e, "failed to write default profile change audit entry");
-                    }
-
-                    // Broadcast the change on the bus.
-                    let event = EventKind::DefaultProfileChanged {
-                        previous,
-                        current: new_default,
+                };
+                if matches!(msg.payload, EventKind::StatusRequest) {
+                    let status = EventKind::StatusResponse {
+                        active_profiles: vec![],
+                        default_profile: default_profile.clone(),
+                        daemon_uptimes_ms: vec![],
+                        locked: true,
+                        // Before `sesame init` no vault exists.
+                        lock_state: Some(std::collections::BTreeMap::new()),
                     };
-                    let msg = Message::new(&msg_ctx, event, SecurityLevel::Internal, bus.epoch());
-                    if let Ok(payload) = core_ipc::encode_frame(&msg) {
-                        bus.publish(&payload, SecurityLevel::Internal).await;
-                    }
+                    let reply = Message::new(&pre_init, status, SecurityLevel::Internal, bus.epoch())
+                        .with_correlation(msg.msg_id);
+                    dispatch::send_reply(bus, &msg.msg_id, &reply).await;
                 }
             }
-            Some(()) = reload_rx.recv() => {
-                tracing::info!("config reload detected");
-                reload_config(
-                    &live_config,
-                    &install_ns,
-                    &mut context_engine,
-                    &mut default_profile_name,
-                    &mut config_profile_names,
-                );
+            signal = shutdown.wait() => {
+                tracing::info!(signal = ?signal?, "shutting down while waiting for installation.toml");
+                break None;
             }
-            _ = sighup.recv() => {
-                // SIGHUP from systemctl reload or manual signal.
-                // Type=notify-reload protocol: RELOADING=1 -> work -> READY=1.
-                tracing::info!("SIGHUP received, triggering config reload");
-                platform_linux::systemd::notify_reloading();
-                reload_config(
-                    &live_config,
-                    &install_ns,
-                    &mut context_engine,
-                    &mut default_profile_name,
-                    &mut config_profile_names,
-                );
-                platform_linux::systemd::notify_ready();
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("SIGINT received");
-                break;
-            }
-            _ = sandbox::sigterm() => {
-                tracing::info!("SIGTERM received");
-                break;
+        }
+    };
+    bus.unregister(&pre_init.sender).await;
+    Ok(installation)
+}
+
+/// The audit log, its chain verified, recording under `agent`.
+///
+/// A failed verification is logged at error and the daemon keeps running:
+/// the log stays tamper-evident (`sesame audit verify` reports the break),
+/// and refusing to start would also stop recording new events.
+fn open_audit(
+    layout: &core_layout::Layout,
+    config: &core_config::Config,
+    agent: core_types::AgentId,
+) -> anyhow::Result<AuditLog> {
+    let audit_hash = config
+        .crypto()
+        .context("invalid [crypto] configuration")?
+        .audit_hash;
+    let path = layout.audit_log()?;
+    let audit = core_profile::open_audit_log(&path, audit_hash, Some(agent))
+        .context("failed to open audit log")?;
+    tracing::info!(path = %path.display(), sequence = audit.sequence(), "audit logger initialized");
+    match core_profile::verify_audit_log(&path, audit_hash) {
+        Ok(Some(count)) => tracing::info!(entries = count, "audit chain verified"),
+        Ok(None) => {}
+        Err(e) => tracing::error!(error = %e, "audit chain verification FAILED"),
+    }
+    Ok(audit)
+}
+
+/// What wakes the full-mode event loop besides the bus and its timers.
+struct Sources {
+    shutdown: Shutdown,
+    /// `systemctl reload` (`Type=notify-reload`).
+    sighup: tokio::signal::unix::Signal,
+    config_watch: core_daemon::ConfigWatch,
+    /// Messages clients send to the bus host.
+    host_rx: mpsc::Receiver<Vec<u8>>,
+    context_rx: mpsc::Receiver<ContextSignal>,
+    /// Key rotation phase 2, signalled after the grace period.
+    rotation_done_rx: mpsc::Receiver<()>,
+}
+
+impl Hub {
+    /// Serve the bus and every source until a shutdown signal, notifying
+    /// the watchdog, reconciling with daemon-secrets every other watchdog
+    /// tick, and rotating keys every [`KEY_ROTATION_INTERVAL`].
+    ///
+    /// # Errors
+    ///
+    /// When the shutdown signal handler fails.
+    async fn serve(&mut self, mut sources: Sources) -> anyhow::Result<()> {
+        let mut watchdog = tokio::time::interval(WATCHDOG_INTERVAL);
+        let mut reconcile_due = false;
+        let mut rotation_timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + KEY_ROTATION_INTERVAL,
+            KEY_ROTATION_INTERVAL,
+        );
+        loop {
+            tokio::select! {
+                _ = watchdog.tick() => {
+                    #[cfg(target_os = "linux")]
+                    platform_linux::systemd::notify_watchdog();
+                    if reconcile_due {
+                        self.reconcile_secrets_state().await;
+                    }
+                    reconcile_due = !reconcile_due;
+                }
+                _ = rotation_timer.tick() => {
+                    // Phase 1 returns immediately; phase 2 is scheduled after
+                    // the grace period so the event loop stays responsive.
+                    if let Err(e) = self.begin_key_rotation().await {
+                        tracing::error!(error = %e, "key rotation phase 1 failed");
+                    }
+                }
+                Some(()) = sources.rotation_done_rx.recv() => self.finish_key_rotation().await,
+                never = self.bus.run() => match never {},
+                Some(frame) = sources.host_rx.recv() => self.host_frame(&frame).await,
+                Some(signal) = sources.context_rx.recv() => self.context_changed(&signal).await,
+                Some(()) = sources.config_watch.reloads.recv() => {
+                    self.reload(&sources.config_watch.state);
+                }
+                Some(()) = sources.sighup.recv() => {
+                    // Type=notify-reload protocol: RELOADING=1 -> work -> READY=1.
+                    tracing::info!("SIGHUP received, triggering config reload");
+                    #[cfg(target_os = "linux")]
+                    platform_linux::systemd::notify_reloading();
+                    self.reload(&sources.config_watch.state);
+                    #[cfg(target_os = "linux")]
+                    platform_linux::systemd::notify_ready();
+                }
+                signal = sources.shutdown.wait() => {
+                    tracing::info!(signal = ?signal?, "shutting down");
+                    return Ok(());
+                }
             }
         }
     }
+}
 
-    // -- Shutdown --
+/// The daemon, from bus bind to shutdown, inside the sandbox.
+async fn run(
+    layout: core_layout::Layout,
+    startup_config: core_config::Config,
+) -> anyhow::Result<()> {
+    let mut shutdown = Shutdown::register()?;
+    let registry = issue_keys(&layout).await?;
+    let bus = bind_bus(&layout, &startup_config, registry).await?;
+
+    // Registered before the first READY=1: systemd checks for a SIGHUP
+    // handler then under Type=notify-reload.
+    let sighup = sandbox::register_sighup().context("failed to register SIGHUP handler")?;
+
+    // Alive before waiting on installation.toml, which may not exist yet on
+    // fresh multi-user VMs.
+    #[cfg(target_os = "linux")]
+    platform_linux::systemd::notify_ready();
+
+    let Some(installation) = await_installation(
+        &layout,
+        &bus,
+        &mut shutdown,
+        &startup_config.global.default_profile,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let install_ns = installation.namespace;
+
+    // The startup load may predate config.toml: `sesame init` writes it
+    // alongside installation.toml.
+    let config = core_config::load_config(&layout).context("failed to reload config after init")?;
+    tracing::info!(default_profile = %config.global.default_profile, "config loaded");
+
+    let uid = rustix::process::getuid().as_raw();
+    let agent = core_types::AgentId::from_uuid(uuid::Uuid::new_v5(
+        &install_ns,
+        format!("agent:human:uid{uid}").as_bytes(),
+    ));
+    let audit = open_audit(&layout, &config, agent)?;
+
+    // daemon-profile is an in-process bus subscriber: it receives the
+    // messages clients send to the bus host (StatusRequest, ProfileActivate,
+    // ProfileList, ...). Internal: the host handles no secrets.
+    let ctx = core_ipc::MessageContext {
+        sender: DaemonId::new(),
+        installation: Some(installation.identity()?),
+        agent_id: Some(agent),
+        trust_snapshot: None,
+    };
+    let (host_tx, host_rx) = mpsc::channel::<Vec<u8>>(256);
+    bus.register(ctx.sender, SecurityLevel::Internal, host_tx)
+        .await;
+
+    let (ctx_tx, ctx_rx) = mpsc::channel::<ContextSignal>(64);
+    spawn_context_monitors(&layout, ctx_tx);
+
+    let (confirm_tx, confirm_rx) = mpsc::channel::<Vec<u8>>(16);
+    // Rotation phase 2 runs on the event loop, signalled after the grace period.
+    let (rotation_done_tx, rotation_done_rx) = mpsc::channel::<()>(1);
+    let context_engine = context::context_engine(&config, &install_ns);
+    tracing::info!(profile = %context_engine.default_profile(), "context engine initialized with default profile");
+    let mut hub = Hub {
+        layout: layout.clone(),
+        bus,
+        ctx,
+        audit,
+        active_profiles: HashSet::new(),
+        locked: true,
+        default_profile_name: config.global.default_profile.clone(),
+        config_profile_names: context::profile_names(&config),
+        install_ns,
+        context_engine,
+        daemon_tracker: DaemonTracker::new(),
+        confirm_tx,
+        confirm_rx,
+        rotation_done_tx,
+        pending_rotation: None,
+    };
+    let config_watch = core_daemon::watch_config(&layout, config)?;
+
+    // The second READY=1 ends the pre-install -> full mode reload cycle
+    // (Type=notify-reload), making SubState observable by post-install.sh.
+    #[cfg(target_os = "linux")]
+    platform_linux::systemd::notify_ready();
+    tracing::info!("daemon-profile ready");
+
+    hub.serve(Sources {
+        shutdown,
+        sighup,
+        config_watch,
+        host_rx,
+        context_rx: ctx_rx,
+        rotation_done_rx,
+    })
+    .await?;
+
     tracing::info!(
-        active_profiles = active_profiles.len(),
-        audit_sequence = audit.sequence(),
-        "daemon-profile shutting down"
+        active_profiles = hub.active_profiles.len(),
+        audit_sequence = hub.audit.sequence(),
+        "daemon-profile shut down"
     );
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracker_reports_a_restart_with_the_previous_id() {
+        let mut tracker = DaemonTracker::new();
+        let first = DaemonId::new();
+        let second = DaemonId::new();
+        assert_eq!(tracker.track("daemon-wm", first), None);
+        assert_eq!(
+            tracker.track("daemon-wm", first),
+            None,
+            "same id is not a restart"
+        );
+        assert_eq!(tracker.track("daemon-wm", second), Some(first));
+        assert_eq!(
+            tracker.track("daemon-input", first),
+            None,
+            "names are tracked apart"
+        );
+    }
+
+    #[test]
+    fn every_client_daemon_has_a_clearance() {
+        let mut known: Vec<Daemon> = KNOWN_DAEMONS.iter().map(|(d, _)| *d).collect();
+        known.sort();
+        let clients: Vec<Daemon> = Daemon::ALL
+            .into_iter()
+            .filter(|d| *d != Daemon::Profile)
+            .collect();
+        assert_eq!(known, clients);
+    }
 }

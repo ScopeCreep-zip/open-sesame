@@ -1,60 +1,27 @@
 {
   lib,
   stdenv,
-  makeRustPlatform,
-  rust-bin,
+  callPackage,
   pkg-config,
   installShellFiles,
   makeWrapper,
   perl,
   openssl,
+  libgit2,
   fontconfig,
   wayland,
   wayland-protocols,
   libxkbcommon,
   xkeyboard-config,
   libseccomp,
+  sqlcipher,
+  makeFontsConf,
+  dejavu_fonts,
   open-sesame,
 }:
 
 let
-  rustToolchain = rust-bin.stable."1.97.0".minimal.override {
-    extensions = [ "rust-src" ];
-  };
-  rustPlatform = makeRustPlatform {
-    cargo = rustToolchain;
-    rustc = rustToolchain;
-  };
-
-  workspaceToml = builtins.fromTOML (builtins.readFile ../Cargo.toml);
-
-  rootDir = ./..;
-  rootEntries = builtins.attrNames (builtins.readDir rootDir);
-  isCrateDir =
-    name:
-    lib.hasPrefix "core-" name
-    || lib.hasPrefix "daemon-" name
-    || lib.hasPrefix "platform-" name
-    || lib.hasPrefix "extension-" name
-    || lib.hasPrefix "sesame-" name
-    || name == "open-sesame"
-    || name == "xtask";
-  crateDirs = lib.filter isCrateDir rootEntries;
-
-  filteredSrc = lib.fileset.toSource {
-    root = rootDir;
-    fileset = lib.fileset.unions (
-      [
-        ../Cargo.toml
-        ../Cargo.lock
-        ../rust-toolchain.toml
-        ../config.example.toml
-        ../.cargo
-        ../contrib
-      ]
-      ++ map (name: rootDir + "/${name}") crateDirs
-    );
-  };
+  common = callPackage ./common.nix { };
 
   # Desktop-only binary crates + CLI (rebuilt with desktop features).
   binaryCrates = [
@@ -71,24 +38,9 @@ let
     "daemon-input"
   ];
 in
-rustPlatform.buildRustPackage {
+common.rustPlatform.buildRustPackage {
   pname = "open-sesame-desktop";
-  version = workspaceToml.workspace.package.version;
-
-  src = filteredSrc;
-
-  cargoLock = {
-    lockFile = ../Cargo.lock;
-    outputHashes = {
-      "cosmic-client-toolkit-0.2.0" = "sha256-FL2YkCVrJ6JWUGMDg+jJJa51oar/PWDfgPgCyjcv6gk=";
-      "cosmic-protocols-0.2.0" = "sha256-FL2YkCVrJ6JWUGMDg+jJJa51oar/PWDfgPgCyjcv6gk=";
-      "atomicwrites-0.4.2" = "sha256-QZSuGPrJXh+svMeFWqAXoqZQxLq/WfIiamqvjJNVhxA=";
-      "cosmic-theme-1.0.0" = "sha256-xO92nOzovgOnzvPshIDImlzpCB6W7pLGVzhxN4D9O/k=";
-      "smithay-clipboard-0.8.0" = "sha256-GojAFRbhJcP0Rpr+v9WOivgW9x38PZdeBWTbMhkDB3A=";
-      "window_clipboard-0.4.1" = "sha256-WO3JFbE+6ESRAfkxrnEFeZyGuhUHLOKOVHcGQyHwoK0=";
-      "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
-    };
-  };
+  inherit (common) version src cargoLock;
 
   nativeBuildInputs = [
     pkg-config
@@ -97,25 +49,31 @@ rustPlatform.buildRustPackage {
     perl
   ];
 
+  # cargoUseSystemLibs sets OPENSSL_NO_VENDOR, LIBGIT2_NO_VENDOR, and
+  # LIBSQLITE3_SYS_USE_PKG_CONFIG: git2's vendored-openssl and
+  # vendored-libgit2 and rusqlite's bundled-sqlcipher yield to these.
   buildInputs = [
     openssl
+    libgit2
     fontconfig
     wayland
     wayland-protocols
     libxkbcommon
     libseccomp
+    sqlcipher
   ];
 
   # Build desktop crates with default features (desktop enabled).
-  cargoBuildFlags = lib.concatMap (c: [
-    "--package"
-    c
-  ]) binaryCrates;
+  cargoBuildFlags = common.packageFlags binaryCrates;
 
   cargoTestFlags = [ "--workspace" ];
 
+  # daemon-wm's text tests shape with real fonts; daemon-input's XKB tests
+  # compile the default keymap.
   preCheck = ''
     export HOME=$(mktemp -d)
+    export XKB_CONFIG_ROOT=${xkeyboard-config}/etc/X11/xkb
+    export FONTCONFIG_FILE=${makeFontsConf { fontDirectories = [ dejavu_fonts ]; }}
   '';
 
   # The headless package provides the base binaries on PATH.
@@ -132,8 +90,9 @@ rustPlatform.buildRustPackage {
       install -Dm755 "$releaseDir/$bin" "$out/bin/$bin"
     done
 
-    # daemon-wm uses libxkbcommon which needs evdev rules at runtime.
-    wrapProgram $out/bin/daemon-wm \
+    # daemon-input compiles the system keymap from XKB data
+    # (xkb_keymap_new_from_names); daemon-wm takes the compositor's keymap.
+    wrapProgram $out/bin/daemon-input \
       --set XKB_CONFIG_ROOT "${xkeyboard-config}/etc/X11/xkb"
 
     # Desktop systemd units
@@ -153,12 +112,7 @@ rustPlatform.buildRustPackage {
     runHook postInstall
   '';
 
-  meta = with lib; {
+  meta = lib.recursiveUpdate common.meta {
     description = "Open Sesame desktop — window switcher, clipboard, input for COSMIC/Wayland (requires open-sesame)";
-    homepage = "https://github.com/ScopeCreep-zip/open-sesame";
-    license = licenses.mit;
-    maintainers = [ ];
-    platforms = platforms.linux;
-    mainProgram = "sesame";
   };
 }

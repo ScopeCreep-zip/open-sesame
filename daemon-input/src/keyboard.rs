@@ -1,41 +1,44 @@
 //! Keyboard event capture via evdev and XKB keysym translation.
 //!
 //! Provides:
-//! - `XkbContext`: maintains xkbcommon state for keycode-to-keysym translation.
-//! - `KeyboardEvent`: a processed keyboard event with keysym, unicode, and modifiers.
-//! - `spawn_keyboard_readers()`: starts async tasks that read from all keyboard
-//!   devices and funnel events through a single channel.
+//! - [`XkbContext`]: xkbcommon state for keycode-to-keysym translation,
+//!   producing the bus `InputKeyEvent`.
+//! - [`spawn_keyboard_readers`]: async tasks that read every keyboard
+//!   device and funnel its events through one channel.
 
+use core_types::EventKind;
 use evdev::EventSummary;
 use tokio::sync::mpsc;
-
-/// A processed keyboard event ready for IPC forwarding.
-#[derive(Debug, Clone)]
-pub struct KeyboardEvent {
-    /// XKB keysym value (e.g., 0xFF1B for Escape).
-    pub keyval: u32,
-    /// Evdev keycode (hardware scan code).
-    pub keycode: u32,
-    /// true = key press, false = key release.
-    pub pressed: bool,
-    /// Active modifier bitmask (GDK-compatible bit positions).
-    pub modifiers: u32,
-    /// Unicode character, if applicable (only on key press).
-    pub unicode: Option<char>,
-}
 
 /// XKB context for translating evdev keycodes to keysyms and unicode.
 ///
 /// Maintains xkbcommon keymap and state. Must be called from a single thread
-/// (xkb::State is not Send/Sync). Process events sequentially.
+/// (`xkb::State` is not `Send`/`Sync`). Process events sequentially.
 pub struct XkbContext {
     state: xkbcommon::xkb::State,
+}
+
+/// The `InputKeyEvent` of `raw` translated by `xkb`; without an XKB
+/// context, the raw keycode stands in for the keysym and no modifiers or
+/// character are known.
+pub fn translate(xkb: Option<&mut XkbContext>, raw: RawKeyEvent) -> EventKind {
+    match xkb {
+        Some(xkb) => xkb.process_key(raw.keycode, raw.pressed),
+        None => EventKind::InputKeyEvent {
+            keyval: raw.keycode,
+            keycode: raw.keycode,
+            pressed: raw.pressed,
+            modifiers: 0,
+            unicode: None,
+        },
+    }
 }
 
 impl XkbContext {
     /// Create a new XKB context with the system's default keymap.
     ///
     /// Returns `None` if xkbcommon fails to initialize (missing XKB data files).
+    #[must_use]
     pub fn new() -> Option<Self> {
         let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
         let keymap = xkbcommon::xkb::Keymap::new_from_names(
@@ -51,12 +54,13 @@ impl XkbContext {
         Some(Self { state })
     }
 
-    /// Process an evdev key event and return the translated keysym, unicode, and modifiers.
+    /// Process an evdev key event: the `InputKeyEvent` with its keysym,
+    /// character (presses only), and GDK-compatible modifier mask.
     ///
     /// IMPORTANT: reads keysym and modifiers BEFORE updating state. This ensures
     /// that when the Alt key itself is pressed, the modifier mask does NOT yet
     /// include Alt — critical for correct Alt-release detection on the receiving end.
-    pub fn process_key(&mut self, evdev_keycode: u32, pressed: bool) -> KeyboardEvent {
+    pub fn process_key(&mut self, evdev_keycode: u32, pressed: bool) -> EventKind {
         // Evdev keycodes are offset by 8 from XKB keycodes.
         let xkb_keycode = evdev_keycode + 8;
 
@@ -79,7 +83,7 @@ impl XkbContext {
         // Update state AFTER reading.
         self.state.update_key(xkb_keycode.into(), direction);
 
-        KeyboardEvent {
+        EventKind::InputKeyEvent {
             keyval,
             keycode: evdev_keycode,
             pressed,
@@ -136,19 +140,15 @@ impl XkbContext {
 ///
 /// If no keyboard devices are found (user not in `input` group, or no
 /// keyboards attached), logs a warning and returns an empty receiver.
-/// This is not fatal — daemon-wm falls back to GTK4-only keyboard input.
+/// This is not fatal: daemon-wm's overlay surface still receives keyboard
+/// input from the compositor.
 pub fn spawn_keyboard_readers() -> mpsc::Receiver<RawKeyEvent> {
     let (tx, rx) = mpsc::channel::<RawKeyEvent>(256);
 
-    let devices = match platform_linux::input::enumerate_devices() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to enumerate input devices — keyboard forwarding disabled");
-            return rx;
-        }
-    };
-
-    let keyboards: Vec<_> = devices.into_iter().filter(|d| d.is_keyboard).collect();
+    let keyboards: Vec<_> = platform_linux::input::enumerate_devices()
+        .into_iter()
+        .filter(|d| d.is_keyboard)
+        .collect();
 
     if keyboards.is_empty() {
         tracing::warn!(
@@ -188,7 +188,7 @@ pub fn spawn_keyboard_readers() -> mpsc::Receiver<RawKeyEvent> {
                             // We forward press (1) and release (0), skip repeat (2).
                             if value == 0 || value == 1 {
                                 let raw = RawKeyEvent {
-                                    keycode: keycode.0 as u32,
+                                    keycode: u32::from(keycode.0),
                                     pressed: value == 1,
                                 };
                                 if tx.send(raw).await.is_err() {
@@ -226,55 +226,60 @@ pub struct RawKeyEvent {
 mod tests {
     use super::*;
 
-    #[test]
-    fn xkb_context_creation() {
-        // This test may fail in environments without XKB data files installed.
-        // That's acceptable — it exercises the creation path.
-        let ctx = XkbContext::new();
-        // Don't assert Some — CI may not have xkb data.
-        if let Some(mut ctx) = ctx {
-            // Process a key press for 'a' (evdev keycode 30).
-            let event = ctx.process_key(30, true);
-            assert!(event.pressed);
-            assert_eq!(event.keycode, 30);
-            // Keysym for 'a' is 0x0061.
-            assert_eq!(event.keyval, 0x0061);
-            assert_eq!(event.unicode, Some('a'));
+    /// The system keymap; the tests need the XKB data files.
+    fn context() -> XkbContext {
+        XkbContext::new().expect("no XKB keymap: install xkeyboard-config to run the xkb tests")
+    }
+
+    /// The fields of an `InputKeyEvent`.
+    fn fields(event: &EventKind) -> (u32, u32, bool, u32, Option<char>) {
+        match *event {
+            EventKind::InputKeyEvent {
+                keyval,
+                keycode,
+                pressed,
+                modifiers,
+                unicode,
+            } => (keyval, keycode, pressed, modifiers, unicode),
+            ref other => panic!("not an InputKeyEvent: {other:?}"),
         }
+    }
+
+    #[test]
+    fn xkb_translates_keycodes_to_keysyms_and_characters() {
+        let mut ctx = context();
+        // 'a' is evdev keycode 30, keysym 0x0061.
+        assert_eq!(
+            fields(&ctx.process_key(30, true)),
+            (0x0061, 30, true, 0, Some('a'))
+        );
     }
 
     #[test]
     fn xkb_modifier_tracking() {
-        let ctx = XkbContext::new();
-        if let Some(mut ctx) = ctx {
-            // Press left Alt (evdev keycode 56).
-            let event = ctx.process_key(56, true);
-            // Before the key is processed, Alt should NOT be in modifiers.
-            assert_eq!(
-                event.modifiers & (1 << 3),
-                0,
-                "Alt should not be in pre-press modifiers"
-            );
-            // After processing, Alt should be active.
-            assert!(ctx.is_alt_active(), "Alt should be active after press");
-
-            // Release Alt.
-            let _event = ctx.process_key(56, false);
-            assert!(
-                !ctx.is_alt_active(),
-                "Alt should not be active after release"
-            );
-        }
+        let mut ctx = context();
+        // Press left Alt (evdev keycode 56): the mask predates the press.
+        let (keyval, _, _, modifiers, _) = fields(&ctx.process_key(56, true));
+        assert_eq!(keyval, core_types::keysym::ALT_L);
+        assert_eq!(
+            modifiers & (1 << 3),
+            0,
+            "Alt should not be in pre-press modifiers"
+        );
+        assert!(ctx.is_alt_active(), "Alt should be active after press");
+        ctx.process_key(56, false);
+        assert!(
+            !ctx.is_alt_active(),
+            "Alt should not be active after release"
+        );
     }
 
     #[test]
-    fn raw_key_event_copy() {
-        let ev = RawKeyEvent {
+    fn without_xkb_the_keycode_stands_in() {
+        let raw = RawKeyEvent {
             keycode: 30,
-            pressed: true,
+            pressed: false,
         };
-        let ev2 = ev;
-        assert_eq!(ev2.keycode, 30);
-        assert!(ev2.pressed);
+        assert_eq!(fields(&translate(None, raw)), (30, 30, false, 0, None));
     }
 }

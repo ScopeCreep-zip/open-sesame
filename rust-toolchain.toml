@@ -1,4 +1,7 @@
+# The one toolchain pin: rustup, the nix packages, and the nix devshell all
+# read this file (rust-overlay fromRustupToolchainFile).
 [toolchain]
 channel = "1.97"
-components = [ "rustfmt", "clippy" ]
-targets = [ "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu" ]
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]

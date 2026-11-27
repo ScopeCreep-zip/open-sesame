@@ -9,11 +9,17 @@ exclude = [
   ".git/**/*.toml",
   ".cache/**/*.toml",
   "tmp/**/*.toml",
+  # direnv flake-input copies (read-only /nix/store paths)
+  ".direnv/**/*.toml",
 ]
 
 [formatting]
 # Don't align entries - keeps diffs cleaner
 align_entries = false
+
+# Don't align trailing comments - one comment's length must not reflow
+# its neighbours (taplo default: true)
+align_comments = false
 
 # Keep trailing commas in arrays for cleaner diffs
 array_trailing_comma = true
@@ -24,8 +30,9 @@ array_auto_expand = false
 # Don't auto-collapse arrays
 array_auto_collapse = false
 
-# Keep arrays compact
-compact_arrays = false
+# No padding inside single-line arrays (taplo default). taplo 0.10 pads
+# both brackets when false, which renders an empty array as `[  ]`.
+compact_arrays = true
 
 # Keep inline tables readable
 compact_inline_tables = false
@@ -57,10 +64,10 @@ enabled = true
 
 # Cargo.toml schema
 [[rule]]
-include = [ "Cargo.toml", "**/Cargo.toml" ]
-keys = [ "package", "dependencies", "dev-dependencies", "build-dependencies", "features", "workspace" ]
+include = ["Cargo.toml", "**/Cargo.toml"]
+keys = ["package", "dependencies", "dev-dependencies", "build-dependencies", "features", "workspace"]
 
 # mise.toml schema
 [[rule]]
-include = [ ".mise.toml", "mise.toml" ]
-keys = [ "tools", "tasks", "env", "vars", "settings" ]
+include = [".mise.toml", "mise.toml"]
+keys = ["tools", "tasks", "env", "vars", "settings"]

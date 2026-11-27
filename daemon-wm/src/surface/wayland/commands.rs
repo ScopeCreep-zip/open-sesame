@@ -1,118 +1,88 @@
-//! OverlayCmd processing — maps commands to state mutations.
+//! `OverlayCmd` processing: each command's view and activation change.
 
 use smithay_client_toolkit::shell::wlr_layer::KeyboardInteractivity;
-use wayland_client::QueueHandle;
 
-use super::app::OverlayApp;
-use super::{OverlayCmd, OverlayEvent, OverlayPhase};
+use super::app::{OverlayApp, View};
+use super::poll::Activation;
+use super::{OverlayCmd, OverlayEvent};
 
 impl OverlayApp {
-    pub fn process_command(&mut self, cmd: OverlayCmd, qh: &QueueHandle<Self>) {
+    pub fn process_command(&mut self, cmd: OverlayCmd) {
         match cmd {
             OverlayCmd::ShowBorder => {
-                self.phase = OverlayPhase::BorderOnly;
-                self.input_buffer.clear();
-                self.selection = 0;
-                self.activated_at = Some(std::time::Instant::now());
-                self.received_key_event = false;
-                self.ipc_keyboard_active = false;
-                self.last_real_input_at = None;
-                self.staged_launch = None;
-                self.modifier_released_sent = false;
+                self.activation = Activation::now();
+                self.view = View::Border;
                 self.needs_redraw = true;
                 self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
             }
             OverlayCmd::ShowFull { windows, hints } => {
-                self.phase = OverlayPhase::Full;
-                self.windows = windows;
-                self.hints = hints;
-                if self.activated_at.is_none() {
-                    self.activated_at = Some(std::time::Instant::now());
-                    self.received_key_event = false;
-                    self.ipc_keyboard_active = false;
-                    self.last_real_input_at = None;
+                // Shown straight from Hidden (launcher mode), the picker
+                // starts its own activation.
+                if !self.activation.started() {
+                    self.activation = Activation::now();
                 }
-                self.modifier_released_sent = false;
-                self.needs_redraw = true;
-                self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+                self.activation.rearm();
+                self.show(View::Picker {
+                    windows,
+                    hints,
+                    input: String::new(),
+                    selection: 0,
+                    staged_launch: None,
+                });
             }
             OverlayCmd::UpdateInput { input, selection } => {
-                self.input_buffer = input;
-                self.staged_launch = None;
-                self.selection = selection;
-                self.last_real_input_at = Some(std::time::Instant::now());
-                self.needs_redraw = true;
-            }
-            OverlayCmd::Hide => {
-                self.hide_common();
-                self.render_frame(qh);
-            }
-            OverlayCmd::HideAndSync => {
-                self.hide_common();
-                self.render_frame(qh);
-                self.pending_sync = true;
-                self.send_event(OverlayEvent::SurfaceUnmapped);
-                self.pending_sync = false;
+                self.activation.input();
+                if let View::Picker {
+                    input: shown,
+                    selection: selected,
+                    staged_launch,
+                    ..
+                } = &mut self.view
+                {
+                    *shown = input;
+                    *selected = selection;
+                    *staged_launch = None;
+                    self.needs_redraw = true;
+                }
             }
             OverlayCmd::ShowLaunchStaged { command } => {
-                self.staged_launch = Some(command);
-                self.last_real_input_at = Some(std::time::Instant::now());
-                self.needs_redraw = true;
+                self.activation.input();
+                if let View::Picker { staged_launch, .. } = &mut self.view {
+                    *staged_launch = Some(command);
+                    self.needs_redraw = true;
+                }
+            }
+            OverlayCmd::Hide => {
+                self.hide();
+                self.render_frame();
+            }
+            OverlayCmd::HideAndSync => {
+                self.hide();
+                self.render_frame();
+                self.send_event(OverlayEvent::SurfaceUnmapped);
             }
             OverlayCmd::ShowLaunching => {
-                self.phase = OverlayPhase::Launching;
-                self.error_message.clear();
-                self.last_real_input_at = Some(std::time::Instant::now());
-                self.needs_redraw = true;
-                self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+                self.activation.input();
+                self.show(View::Launching);
             }
-            OverlayCmd::ShowLaunchError { message } => {
-                self.phase = OverlayPhase::LaunchError;
-                self.error_message = message;
-                self.needs_redraw = true;
-                self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-            }
+            OverlayCmd::ShowLaunchError { message } => self.show(View::LaunchError(message)),
             OverlayCmd::ShowUnlockPrompt {
                 profile,
                 password_len,
                 error,
-            } => {
-                self.phase = OverlayPhase::UnlockPrompt;
-                self.unlock_profile = profile;
-                self.unlock_password_len = password_len;
-                if let Some(err) = error {
-                    self.error_message = err;
-                } else {
-                    self.error_message.clear();
-                }
-                self.needs_redraw = true;
-                self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-            }
-            OverlayCmd::ShowUnlockProgress { profile, message } => {
-                self.phase = OverlayPhase::UnlockProgress;
-                self.unlock_profile = profile;
-                self.unlock_message = message;
-                self.needs_redraw = true;
-                self.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-            }
-            OverlayCmd::ResetGrace => {
-                self.activated_at = Some(std::time::Instant::now());
-                self.received_key_event = false;
-                self.ipc_keyboard_active = false;
-                self.last_real_input_at = None;
-                self.modifier_released_sent = false;
-            }
-            OverlayCmd::ConfirmKeyboardInput => {
-                self.received_key_event = true;
-                self.ipc_keyboard_active = true;
-            }
+            } => self.show(View::UnlockPrompt {
+                profile,
+                password_len,
+                error,
+            }),
+            OverlayCmd::ShowUnlockProgress { message } => self.show(View::UnlockProgress(message)),
+            OverlayCmd::ResetGrace => self.activation = Activation::now(),
+            OverlayCmd::ConfirmKeyboardInput => self.activation.confirm_ipc(),
             OverlayCmd::UpdateTheme(theme) => {
                 self.theme = *theme;
                 self.needs_redraw = true;
             }
-            OverlayCmd::Quit => {
-                self.running = false;
-            }
+            OverlayCmd::Quit => self.running = false,
         }
     }
 }

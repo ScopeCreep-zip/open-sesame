@@ -51,7 +51,7 @@ fi
 # Build with Ubuntu's makepkg — override CARCH, PKGEXT, PACKAGER, PKGDEST
 export CARCH="${ARCH}"
 export PKGEXT='.pkg.tar.zst'
-export PACKAGER="Kat Morgan <usrbinkat@braincraft.io>"
+export PACKAGER="user <user@example.invalid>"
 export PKGDEST="${OUTPUT_DIR}"
 makepkg --nodeps --force
 

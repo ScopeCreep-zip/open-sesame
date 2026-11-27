@@ -1,329 +1,495 @@
 #!/usr/bin/env bash
-# tests/protocol_validation.sh — End-to-end protocol validation (V-001 through V-011)
+# tests/protocol_validation.sh — lifecycle validation of an Open Sesame build.
 #
-# Prerequisites:
-#   - sesame binary in PATH
-#   - Open Sesame systemd user services running (open-sesame-headless.target)
-#   - No existing sesame state (or willingness to wipe it)
+# Runs this tree's daemons and CLI through their whole lifecycle under an
+# isolated root: first-run `sesame init`, every daemon's request, the lock
+# and activation protocol (V-001 through V-011), sandbox containment, and
+# shutdown. The installation of the user running it is not touched: no
+# config, vault, unit, running daemon, or keyring item of theirs is read or
+# changed.
 #
 # Usage:
-#   bash tests/protocol_validation.sh
+#   cargo build --workspace --bins
+#   bash tests/protocol_validation.sh [--bin DIR] [--keep] [--clipboard]
 #
-# Exit code 0 = all tests pass, non-zero = at least one failure.
+#   --bin DIR    the binaries to validate (default: target/debug of this tree)
+#   --keep       keep the isolated root (logs, config, vault) for inspection
+#   --clipboard  also check clipboard capture: copies a token with wl-copy,
+#                replacing the session clipboard, and restores the text
+#                selection it replaced afterwards (a non-text selection is
+#                not restored)
 #
-# Note on password prompts:
-#   sesame init / sesame unlock use dialoguer::Password which reads from /dev/tty.
-#   This script uses `expect` to automate interactive password entry. Install expect
-#   if not present: apt install expect / nix-shell -p expect
+# Requirements:
+#   - Linux 7.1 or later (Landlock ABI 9): the daemons refuse to run below.
+#   - A Wayland session of the same user (`$WAYLAND_DISPLAY`, or a
+#     `wayland-*` socket in `/run/user/$UID`): daemon-wm and daemon-clipboard
+#     connect to the compositor.
+#   - `journalctl -k` readable by the user (the `systemd-journal` or `adm`
+#     group): a seccomp kill is read from the kernel's audit record.
+#   - `jq`: the doctor's report is JSON.
+#   - `socat`: each daemon's notify socket (sd_notify(3)) is received with it.
 #
-# Test password: "testpassword123" (used for all init/unlock operations)
+# How it isolates:
+#   - Every location the layout derives (`core_layout::Environment`) is set
+#     beneath a temporary root; the runtime directory is
+#     `/run/user/$UID/pds-lifecycle-<pid>`, short enough for a socket path
+#     (108 bytes) and apart from the user's `pds/`.
+#   - `sesame init` starts the daemons with `systemctl --user`: a stand-in
+#     `systemctl` first on `PATH` answers exactly those calls by starting
+#     the binaries under the root, and fails on any other call. As with
+#     systemd, starting a target whose daemons run is a no-op, and a start
+#     returns once every started daemon has sent `READY=1` to its
+#     `NOTIFY_SOCKET` (the units are `Type=notify`); a daemon that exits
+#     first, or is not ready within 30 s, fails the start.
+#   - Passwords are piped: every `sesame` prompt reads piped stdin.
+#   - daemon-clipboard connects to the session's compositor and records
+#     the selection current at its start into the isolated history, which
+#     is removed with the root.
+#
+# Exit status: 0 when every check passes, 1 when one fails, 2 when a
+# requirement is missing.
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+BIN="$SCRIPT_DIR/../target/debug"
+KEEP=0
+CLIPBOARD=0
+while (($#)); do
+    case "$1" in
+    --bin)
+        BIN=$2
+        shift 2
+        ;;
+    --keep)
+        KEEP=1
+        shift
+        ;;
+    --clipboard)
+        CLIPBOARD=1
+        shift
+        ;;
+    -h | --help)
+        sed -n '2,/^[^#]/{/^#/p;}' "${BASH_SOURCE[0]}"
+        exit 0
+        ;;
+    *)
+        echo "unknown argument: $1 (see --help)" >&2
+        exit 2
+        ;;
+    esac
+done
+BIN=$(cd -- "$BIN" && pwd)
+
+DAEMONS_HEADLESS=(daemon-profile daemon-secrets daemon-launcher daemon-snippets)
+DAEMONS_DESKTOP=(daemon-wm daemon-clipboard daemon-input)
+SANDBOXED=(daemon-profile daemon-secrets daemon-snippets daemon-wm daemon-clipboard daemon-input)
+PASSWORD="lifecycle-$RANDOM-$RANDOM"
+PROFILE=default
+
 PASS=0
 FAIL=0
-TEST_PASSWORD="testpassword123"
-PROFILE="default"
 
-# --------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------
+# -- Requirements -------------------------------------------------------------
 
-test_result() {
-    local name="$1" expected="$2" actual="$3"
-    if [[ "$actual" == *"$expected"* ]]; then
-        echo "PASS: $name"
-        ((PASS++))
+require() {
+    echo "requirement: $*" >&2
+    exit 2
+}
+
+for binary in sesame "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
+    [[ -x "$BIN/$binary" ]] || require "$BIN/$binary is missing (cargo build --workspace --bins)"
+done
+command -v jq >/dev/null || require "jq is not on PATH"
+command -v socat >/dev/null || require "socat is not on PATH"
+
+HOST_RUNTIME=/run/user/$(id -u)
+[[ -d "$HOST_RUNTIME" ]] || require "no session runtime directory $HOST_RUNTIME"
+case "${WAYLAND_DISPLAY:-}" in
+/*) WAYLAND_SOCKET=$WAYLAND_DISPLAY ;;
+"") WAYLAND_SOCKET=$(find "$HOST_RUNTIME" -maxdepth 1 -type s -name 'wayland-*' -print -quit) ;;
+*) WAYLAND_SOCKET=$HOST_RUNTIME/$WAYLAND_DISPLAY ;;
+esac
+[[ -S "${WAYLAND_SOCKET:-}" ]] || require "no Wayland compositor socket in $HOST_RUNTIME"
+
+# Host tools run without a development shell's library path.
+host() { env -u LD_LIBRARY_PATH "$@"; }
+host journalctl -k -n 1 --no-pager >/dev/null 2>&1 || require "journalctl -k is not readable"
+if ((CLIPBOARD)); then
+    for tool in wl-copy wl-paste; do
+        host sh -c "command -v $tool" >/dev/null || require "--clipboard needs $tool (wl-clipboard)"
+    done
+fi
+
+# -- Isolated root ------------------------------------------------------------
+
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sesame-lifecycle.XXXXXX")
+RUNTIME=$HOST_RUNTIME/pds-lifecycle-$$
+mkdir -p "$ROOT"/{home,config,cache,data,log,pids,notify,bin} "$RUNTIME"
+chmod 700 "$RUNTIME"
+STARTED=$(date '+%Y-%m-%d %H:%M:%S')
+
+# Stop the daemons in systemd's order: the bus clients (After=
+# open-sesame-profile.service) first, then daemon-profile once they have
+# exited, so no client loses the bus while stopping.
+stop_daemons() {
+    local pidfile pid clients=()
+    for pidfile in "$ROOT"/pids/*; do
+        [[ -e "$pidfile" && "$(basename "$pidfile")" != daemon-profile ]] || continue
+        pid=$(<"$pidfile")
+        kill -TERM "$pid" 2>/dev/null && clients+=("$pid")
+    done
+    local alive
+    for _ in $(seq 20); do
+        alive=0
+        for pid in "${clients[@]}"; do
+            kill -0 "$pid" 2>/dev/null && alive=1
+        done
+        ((alive)) || break
+        sleep 0.5
+    done
+    [[ -e "$ROOT/pids/daemon-profile" ]] && kill -TERM "$(<"$ROOT/pids/daemon-profile")" 2>/dev/null || true
+}
+
+cleanup() {
+    stop_daemons
+    # The notify listeners outlive their daemons, which notify until they exit.
+    local listener
+    for listener in "$ROOT"/notify/*.pid; do
+        [[ -e "$listener" ]] && kill -TERM "$(<"$listener")" 2>/dev/null || true
+    done
+    rm -rf "$RUNTIME"
+    if ((KEEP)); then
+        echo "kept: $ROOT"
     else
-        echo "FAIL: $name"
-        echo "  expected substring: $expected"
-        echo "  actual output: $actual"
-        ((FAIL++))
+        rm -rf "$ROOT"
     fi
 }
+trap cleanup EXIT
 
-test_result_not_contains() {
-    local name="$1" unexpected="$2" actual="$3"
-    if [[ "$actual" != *"$unexpected"* ]]; then
-        echo "PASS: $name"
-        ((PASS++))
+export HOME=$ROOT/home
+export XDG_CONFIG_HOME=$ROOT/config
+export XDG_CACHE_HOME=$ROOT/cache
+export XDG_DATA_HOME=$ROOT/data
+export XDG_RUNTIME_DIR=$RUNTIME
+export WAYLAND_DISPLAY=$WAYLAND_SOCKET
+export XDG_SESSION_TYPE=wayland
+export PDS_LOG_FORMAT=pretty
+unset NOTIFY_SOCKET DBUS_SYSTEM_BUS_ADDRESS
+export LIFECYCLE_ROOT=$ROOT LIFECYCLE_BIN=$BIN
+export PATH="$ROOT/bin:$BIN:$PATH"
+
+# The systemctl stand-in: the calls `sesame init` makes, answered by
+# starting this tree's daemons under the root. A target is active while
+# every one of its daemons runs; starting an active target is a no-op.
+cat >"$ROOT/bin/systemctl" <<'STANDIN'
+#!/usr/bin/env bash
+set -euo pipefail
+HEADLESS=(daemon-profile daemon-secrets daemon-launcher daemon-snippets)
+DESKTOP=(daemon-wm daemon-clipboard daemon-input)
+running() {
+  local pidfile=$LIFECYCLE_ROOT/pids/$1
+  [[ -e "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+active() {
+  local daemon
+  for daemon in "$@"; do running "$daemon" || return 1; done
+}
+NOTIFY_DIR=$XDG_RUNTIME_DIR/systemd
+# Start daemon $1 with a notify socket whose datagrams are appended to
+# notify/$1: the listener runs for the daemon's lifetime, as systemd's does.
+spawn() {
+  local daemon=$1 socket=$NOTIFY_DIR/$1.notify received=$LIFECYCLE_ROOT/notify/$1
+  if [[ -e "$received.pid" ]]; then
+    kill -TERM "$(<"$received.pid")" 2>/dev/null || true
+  fi
+  : >"$received"
+  setsid socat -u "UNIX-RECV:$socket,unlink-early" "OPEN:$received,append" </dev/null >/dev/null 2>&1 &
+  echo "$!" >"$received.pid"
+  for _ in $(seq 100); do
+    [[ -S "$socket" ]] && break
+    sleep 0.05
+  done
+  [[ -S "$socket" ]] || { echo "systemctl stand-in: no notify socket for $daemon" >&2; exit 1; }
+  NOTIFY_SOCKET=$socket setsid "$LIFECYCLE_BIN/$daemon" >>"$LIFECYCLE_ROOT/log/$daemon.log" 2>&1 </dev/null &
+  echo "$!" >"$LIFECYCLE_ROOT/pids/$daemon"
+}
+# Wait until daemon $1 has sent READY=1, as `systemctl start` of a
+# Type=notify unit does.
+await_ready() {
+  for _ in $(seq 300); do
+    grep -qF 'READY=1' "$LIFECYCLE_ROOT/notify/$1" && return 0
+    running "$1" || { echo "systemctl stand-in: $1 exited before READY=1" >&2; exit 1; }
+    sleep 0.1
+  done
+  echo "systemctl stand-in: $1 sent no READY=1 within 30 s" >&2
+  exit 1
+}
+start() {
+  local daemon started=()
+  mkdir -p "$NOTIFY_DIR"
+  for daemon in "$@"; do
+    running "$daemon" && continue
+    spawn "$daemon"
+    started+=("$daemon")
+  done
+  for daemon in "${started[@]}"; do await_ready "$daemon"; done
+}
+case "$*" in
+  "--user is-active --quiet open-sesame-headless.target") active "${HEADLESS[@]}" ;;
+  "--user daemon-reload") exit 0 ;;
+  "--user list-unit-files open-sesame-desktop.target --no-pager --no-legend")
+    echo "open-sesame-desktop.target static" ;;
+  "--user reset-failed "*) exit 0 ;;
+  "--user start open-sesame-headless.target")
+    # The other daemons are After=open-sesame-profile.service: they start
+    # once daemon-profile, which issues their keys, is ready.
+    start daemon-profile
+    start "${HEADLESS[@]:1}" ;;
+  "--user start open-sesame-desktop.target") start "${DESKTOP[@]}" ;;
+  *) echo "systemctl stand-in: unexpected call: $*" >&2; exit 1 ;;
+esac
+STANDIN
+chmod 755 "$ROOT/bin/systemctl"
+
+# -- Checks -------------------------------------------------------------------
+
+pass() {
+    echo "PASS: $1"
+    PASS=$((PASS + 1))
+}
+
+fail() {
+    echo "FAIL: $1"
+    shift
+    local line
+    for line in "$@"; do echo "  $line"; done
+    FAIL=$((FAIL + 1))
+}
+
+# Standard input with terminal color codes removed. A stream filter: bash
+# pattern substitution over a whole daemon log takes minutes.
+uncolor() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+# A daemon's log, colors removed. Callers search it as a here-string:
+# under pipefail a `grep -q` that stops at its first match fails the
+# pipeline it reads (SIGPIPE).
+log_of() { uncolor <"$ROOT/log/$1.log"; }
+
+# The last 20 lines of a daemon's log, colors removed.
+log_tail() { log_of "$1" | tail -n 20; }
+
+# Run `sesame "$@"`, with `$INPUT` (when set) as one piped line: its output,
+# colors removed, in $OUT and its exit status in $STATUS. Called directly,
+# not in a command substitution, so both reach the caller.
+OUT=""
+STATUS=0
+INPUT=""
+sesame_run() {
+    local raw
+    STATUS=0
+    if [[ -n "$INPUT" ]]; then
+        raw=$(printf '%s\n' "$INPUT" | sesame "$@" 2>&1) || STATUS=$?
     else
-        echo "FAIL: $name"
-        echo "  unexpected substring found: $unexpected"
-        echo "  actual output: $actual"
-        ((FAIL++))
+        raw=$(sesame "$@" 2>&1 </dev/null) || STATUS=$?
     fi
+    INPUT=""
+    OUT=$(uncolor <<<"$raw")
 }
 
-check_prerequisites() {
-    if ! command -v sesame &>/dev/null; then
-        echo "ERROR: sesame binary not found in PATH"
-        echo "Build with: cargo build -p open-sesame"
-        echo "Then add to PATH or run from target/debug/"
-        exit 2
-    fi
-
-    if ! command -v expect &>/dev/null; then
-        echo "ERROR: expect not found in PATH"
-        echo "Install with: apt install expect / nix-shell -p expect"
-        exit 2
-    fi
+# The same with `$1` piped.
+sesame_with() {
+    INPUT=$1
+    shift
+    sesame_run "$@"
 }
 
-# Use expect to drive interactive password prompts.
-sesame_init() {
-    expect -c "
-        set timeout 30
-        spawn sesame init
-        expect {
-            \"*assword*\" { send \"${TEST_PASSWORD}\r\" }
-            \"*already*\" { }
-            timeout { exit 1 }
-        }
-        expect {
-            \"*onfirm*\" { send \"${TEST_PASSWORD}\r\" }
-            eof { }
-            timeout { }
-        }
-        expect eof
-    " 2>&1
-}
-
-sesame_unlock() {
-    expect -c "
-        set timeout 30
-        spawn sesame unlock
-        expect {
-            \"*assword*\" { send \"${TEST_PASSWORD}\r\" }
-            \"*already*\" { }
-            timeout { exit 1 }
-        }
-        expect eof
-    " 2>&1
-}
-
-sesame_wipe() {
-    expect -c "
-        set timeout 30
-        spawn sesame init --wipe-reset-destroy-all-data
-        expect \"*destroy*\"
-        send \"destroy all data\r\"
-        expect {
-            \"*assword*\" { send \"${TEST_PASSWORD}\r\" }
-            eof { }
-            timeout { }
-        }
-        expect {
-            \"*onfirm*\" { send \"${TEST_PASSWORD}\r\" }
-            eof { }
-            timeout { }
-        }
-        expect eof
-    " 2>&1
-}
-
-sesame_set_secret() {
-    local profile="$1" key="$2" value="$3"
-    echo "$value" | sesame secret set -p "$profile" "$key" 2>&1 || true
-}
-
-sesame_get_secret() {
-    local profile="$1" key="$2"
-    sesame secret get -p "$profile" "$key" 2>&1 || true
-}
-
-# --------------------------------------------------------------------------
-# Full reset: wipe and re-init for a clean test environment
-# --------------------------------------------------------------------------
-
-full_reset() {
-    sesame_wipe || true
-    sleep 2
-    sesame_init
-    sleep 1
-    # Activate the default profile
-    sesame profile activate "$PROFILE" 2>&1 || true
-    sleep 1
-}
-
-# --------------------------------------------------------------------------
-# V-001: deactivate blocks secret access
-# --------------------------------------------------------------------------
-v001() {
-    full_reset
-    sesame_set_secret "$PROFILE" "v001-key" "v001-value"
-    sesame profile deactivate "$PROFILE" 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame_get_secret "$PROFILE" "v001-key")
-    test_result "V-001: deactivate blocks secret access" "not active" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-002: lock blocks secret access
-# --------------------------------------------------------------------------
-v002() {
-    full_reset
-    sesame_set_secret "$PROFILE" "v002-key" "v002-value"
-    sesame lock 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame_get_secret "$PROFILE" "v002-key")
-    test_result "V-002: lock blocks secret access" "locked" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-003: lock -> unlock -> get requires re-activation
-# --------------------------------------------------------------------------
-v003() {
-    full_reset
-    sesame_set_secret "$PROFILE" "v003-key" "v003-value"
-    sesame lock 2>&1 || true
-    sleep 1
-    sesame_unlock
-    sleep 1
-    local result
-    result=$(sesame_get_secret "$PROFILE" "v003-key")
-    test_result "V-003: unlock without activate denies access" "not active" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-004: lock -> unlock -> activate -> get succeeds
-# --------------------------------------------------------------------------
-v004() {
-    full_reset
-    sesame_set_secret "$PROFILE" "v004-key" "v004-value"
-    sesame lock 2>&1 || true
-    sleep 1
-    sesame_unlock
-    sleep 1
-    sesame profile activate "$PROFILE" 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame_get_secret "$PROFILE" "v004-key")
-    test_result "V-004: lock -> unlock -> activate -> get succeeds" "v004-value" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-005: deactivate -> activate -> get succeeds (vault re-opened)
-# --------------------------------------------------------------------------
-v005() {
-    full_reset
-    sesame_set_secret "$PROFILE" "v005-key" "v005-value"
-    sesame profile deactivate "$PROFILE" 2>&1 || true
-    sleep 1
-    sesame profile activate "$PROFILE" 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame_get_secret "$PROFILE" "v005-key")
-    test_result "V-005: deactivate -> activate -> get succeeds" "v005-value" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-006: status after lock reports locked
-# --------------------------------------------------------------------------
-v006() {
-    full_reset
-    sesame lock 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame status 2>&1 || true)
-    test_result "V-006: status after lock reports locked" "locked" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-007: status after deactivate shows profile not active
-# --------------------------------------------------------------------------
-v007() {
-    full_reset
-    sesame profile deactivate "$PROFILE" 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame status 2>&1 || true)
-    test_result_not_contains "V-007: status after deactivate shows profile not in active list" "$PROFILE" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-008: unlock when already unlocked is rejected
-# --------------------------------------------------------------------------
-v008() {
-    full_reset
-    local result
-    result=$(sesame_unlock)
-    test_result "V-008: unlock when already unlocked rejected" "already" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-009: kill daemon-secrets -> status reports locked
-# --------------------------------------------------------------------------
-v009() {
-    full_reset
-    # Kill daemon-secrets
-    pkill -f "daemon-secrets" 2>/dev/null || true
-    sleep 5  # Wait for watchdog/restart detection
-    local result
-    result=$(sesame status 2>&1 || true)
-    test_result "V-009: daemon-secrets kill -> status reports locked" "locked" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-010: full round-trip: set -> deactivate -> activate -> get
-# --------------------------------------------------------------------------
-v010() {
-    full_reset
-    sesame_set_secret "$PROFILE" "v010-key" "v010-value"
-    sesame profile deactivate "$PROFILE" 2>&1 || true
-    sleep 1
-    sesame profile activate "$PROFILE" 2>&1 || true
-    sleep 1
-    local result
-    result=$(sesame_get_secret "$PROFILE" "v010-key")
-    test_result "V-010: full round-trip succeeds" "v010-value" "$result"
-}
-
-# --------------------------------------------------------------------------
-# V-011: sesame init re-run when already unlocked completes without error
-# --------------------------------------------------------------------------
-v011() {
-    full_reset
-    local result exit_code=0
-    result=$(sesame_init) || exit_code=$?
-    if [[ $exit_code -eq 0 ]]; then
-        echo "PASS: V-011: sesame init re-run completes without error"
-        ((PASS++))
+# Pass when $OUT matches the extended regular expression `$2` and $STATUS
+# is `$3` (default 0).
+expect_match() {
+    local name=$1 pattern=$2 status=${3:-0}
+    if [[ "$STATUS" -eq "$status" ]] && grep -Eq -- "$pattern" <<<"$OUT"; then
+        pass "$name"
     else
-        echo "FAIL: V-011: sesame init re-run failed with exit code $exit_code"
-        echo "  output: $result"
-        ((FAIL++))
+        fail "$name" "expected exit $status and /$pattern/" "exit $STATUS: $OUT"
     fi
 }
 
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
+expect_no_match() {
+    local name=$1 pattern=$2
+    if ! grep -Eq -- "$pattern" <<<"$OUT"; then
+        pass "$name"
+    else
+        fail "$name" "unexpected /$pattern/" "$OUT"
+    fi
+}
 
-check_prerequisites
+alive() { kill -0 "$(cat "$ROOT/pids/$1")" 2>/dev/null; }
+
+# Run `sesame "${@:3}"` until $OUT matches `$1`, for up to `$2` seconds.
+wait_for() {
+    local pattern=$1 seconds=$2
+    shift 2
+    for _ in $(seq $((seconds * 2))); do
+        sesame_run "$@"
+        grep -Eq -- "$pattern" <<<"$OUT" && return 0
+        sleep 0.5
+    done
+}
+
+# -- Lifecycle ----------------------------------------------------------------
 
 echo "========================================"
-echo " Open Sesame Protocol Validation Suite"
+echo " Open Sesame lifecycle validation"
+echo " binaries: $BIN"
+echo " root:     $ROOT"
 echo "========================================"
-echo ""
 
-v001
-v002
-v003
-v004
-v005
-v006
-v007
-v008
-v009
-v010
-v011
+sesame_run status --doctor platform --output json
+kernel=$(jq -r '.checks[] | select(.id == "platform.kernel") | "\(.status) \(.value)"' <<<"$OUT" 2>&1 || true)
+OUT=$kernel
+expect_match "L-01: the kernel enforces the sandbox (doctor platform.kernel)" '^pass '
 
-echo ""
+sesame_with "$PASSWORD" init --no-keybinding
+expect_match "L-02: sesame init sets up config, daemons, and the vault" 'Setup complete'
+
+for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
+    if alive "$daemon"; then
+        pass "L-03: $daemon is running"
+    else
+        fail "L-03: $daemon is running" "$(log_tail "$daemon")"
+    fi
+done
+
+for daemon in "${SANDBOXED[@]}"; do
+    if grep -q 'sandbox applied status=FullyEnforced' <<<"$(log_of "$daemon")"; then
+        pass "L-04: $daemon runs fully sandboxed"
+    else
+        fail "L-04: $daemon runs fully sandboxed" "$(log_tail "$daemon")"
+    fi
+done
+
+sesame_run status
+expect_match "L-05: the vault is unlocked after init" "$PROFILE +unlocked"
+
+sesame_with "lifecycle-value" secret set -p "$PROFILE" lifecycle-key
+expect_match "L-06: daemon-secrets stores a secret" "stored"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "L-06: daemon-secrets returns it" "^lifecycle-value$"
+
+sesame_run wm list
+expect_match "L-07: daemon-wm lists the compositor's windows" "ID"
+sesame_run launch search a
+expect_match "L-07: daemon-launcher searches desktop entries" "Name|No "
+sesame_run clipboard history -p "$PROFILE"
+expect_match "L-07: daemon-clipboard answers history" "."
+sesame_run input status
+expect_match "L-07: daemon-input answers status" "Active layer"
+sesame_run snippet list -p "$PROFILE"
+expect_match "L-07: daemon-snippets answers list" "."
+
+if ((CLIPBOARD)); then
+    # The text selection replaced, restored below; empty when there is none.
+    saved=$(host wl-paste --no-newline --type text 2>/dev/null || true)
+    token="lifecycle-clipboard-$RANDOM$RANDOM"
+    host wl-copy -- "$token"
+    wait_for "$token" 10 clipboard history -p "$PROFILE"
+    expect_match "L-08: daemon-clipboard captures a copied selection" "$token"
+    entry=""
+    [[ $(grep -F -- "$token" <<<"$OUT" || true) =~ (clip-[0-9a-f-]{36}) ]] && entry=${BASH_REMATCH[1]}
+    if [[ -n "$entry" ]]; then
+        sesame_run clipboard get "$entry"
+        expect_match "L-08: the captured entry's content is served" "^$token$"
+    else
+        fail "L-08: the captured entry's content is served" "no entry ID listed for the token"
+    fi
+    if [[ -n "$saved" ]]; then
+        host wl-copy -- "$saved"
+    else
+        host wl-copy --clear
+    fi
+fi
+
+# -- Lock and activation protocol ---------------------------------------------
+
+sesame_run lock -p "$PROFILE"
+expect_match "V-002: lock zeroizes the vault key" "locked"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "V-002: a locked vault denies the secret" "vault locked" 1
+sesame_run status
+expect_match "V-006: status after lock reports locked" "$PROFILE +locked"
+
+sesame_with "$PASSWORD" unlock -p "$PROFILE"
+expect_match "V-003: unlock with the password" "unlocked via password"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "V-003: unlock without activate denies the secret" "is not active" 1
+
+sesame_with "$PASSWORD" unlock -p "$PROFILE"
+expect_match "V-008: unlock of an unlocked vault is reported, not repeated" "already unlocked"
+
+sesame_run profile activate "$PROFILE"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "V-004: lock, unlock, activate, then the secret is served" "^lifecycle-value$"
+
+sesame_run profile deactivate "$PROFILE"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "V-001: deactivate denies the secret" "is not active" 1
+sesame_run status
+expect_no_match "V-007: status after deactivate lists no active profile" "- $PROFILE"
+
+sesame_run profile activate "$PROFILE"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "V-005/V-010: deactivate, activate, then the secret is served" "^lifecycle-value$"
+
+sesame_with "$PASSWORD" init --no-keybinding
+expect_match "V-011: sesame init re-run completes" "Setup complete"
+
+kill -TERM "$(cat "$ROOT/pids/daemon-secrets")"
+wait_for "treated as locked" 40 status
+expect_match "V-009: with daemon-secrets gone, status reports every vault locked" "daemon-secrets is not answering; every vault is treated as locked"
+
+# -- Containment and shutdown -------------------------------------------------
+
+stop_daemons
+running=0
+for _ in $(seq 20); do
+    running=0
+    for pidfile in "$ROOT"/pids/*; do
+        kill -0 "$(cat "$pidfile")" 2>/dev/null && running=1
+    done
+    ((running)) || break
+    sleep 0.5
+done
+if ((running)); then
+    fail "S-01: every daemon stops on SIGTERM within 10 s" "$(for p in "$ROOT"/pids/*; do kill -0 "$(cat "$p")" 2>/dev/null && basename "$p"; done)"
+else
+    pass "S-01: every daemon stops on SIGTERM within 10 s"
+fi
+
+# The audit record names the executable the kernel ran: the binaries'
+# resolved directories (a --bin of symlinks into the Nix store, and a
+# wrapper's wrapped binary beside it).
+exe_dirs=()
+for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
+    exe_dirs+=(-e "exe=\"$(dirname -- "$(readlink -f -- "$BIN/$daemon")")/")
+done
+kills=$(host journalctl -k --no-pager --since "$STARTED" | grep 'type=1326' | grep -F "${exe_dirs[@]}" || true)
+if [[ -z "$kills" ]]; then
+    pass "S-02: no daemon was killed by its seccomp filter"
+else
+    fail "S-02: no daemon was killed by its seccomp filter" "$kills"
+fi
+
+for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
+    errors=$(grep -E ' ERROR |^Error:' <<<"$(log_of "$daemon")" || true)
+    if [[ -z "$errors" ]]; then
+        pass "S-03: $daemon logged no error"
+    else
+        fail "S-03: $daemon logged no error" "$errors"
+    fi
+done
+
 echo "========================================"
 echo " Results: PASS=$PASS  FAIL=$FAIL"
 echo "========================================"
-
-[[ $FAIL -eq 0 ]]
+((FAIL == 0)) || exit 1

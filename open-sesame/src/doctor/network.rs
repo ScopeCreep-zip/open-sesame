@@ -1,69 +1,70 @@
-//! Network checks: proxy configuration and git transport readiness.
+//! Network checks: the environment proxy policy every git and forge
+//! transport resolves through.
+
+use sesame_workspace::net::ProxyPolicy;
 
 use super::{Check, Status};
 
+const CATEGORY: &str = "network";
+
 pub fn checks() -> Vec<Check> {
-    let mut results = Vec::new();
-    let policy = sesame_workspace::net::ProxyPolicy::from_env();
+    match ProxyPolicy::from_env() {
+        Ok(policy) => policy_checks(&policy),
+        Err(e) => vec![Check::new(
+            "network.proxy",
+            CATEGORY,
+            Status::Fail,
+            e.to_string(),
+            "the proxy environment cannot be read",
+        )],
+    }
+}
 
-    // Active proxy endpoint.
-    results.push(if let Some(endpoint) = policy.active_proxy() {
-        Check {
-            id: "network.proxy".into(),
-            category: "network",
-            status: Status::Pass,
-            value: endpoint.to_string(),
-            description: "HTTP proxy detected from environment".into(),
-        }
-    } else {
-        Check {
-            id: "network.proxy".into(),
-            category: "network",
-            status: Status::Pass,
-            value: "direct (no environment proxy)".into(),
-            description: "Git config http.proxy may still supply a proxy".into(),
-        }
-    });
+fn policy_checks(policy: &ProxyPolicy) -> Vec<Check> {
+    let mut results = vec![match policy.active_proxy() {
+        Some(endpoint) => Check::new(
+            "network.proxy",
+            CATEGORY,
+            Status::Pass,
+            endpoint.to_string(),
+            "HTTP proxy from the environment",
+        ),
+        None => Check::new(
+            "network.proxy",
+            CATEGORY,
+            Status::Pass,
+            "direct (no environment proxy)",
+            "git configuration http.proxy may still supply a proxy",
+        ),
+    }];
 
-    // NO_PROXY check.
-    let np_count = policy.no_proxy_entry_count();
-    if policy.has_proxy() && np_count == 0 {
-        results.push(Check {
-            id: "network.no_proxy".into(),
-            category: "network",
-            status: Status::Warn,
-            value: "not set".into(),
-            description: "NO_PROXY not set while proxy is active".into(),
-        });
-    } else if np_count > 0 {
-        results.push(Check {
-            id: "network.no_proxy".into(),
-            category: "network",
-            status: Status::Pass,
-            value: format!("{np_count} entries"),
-            description: String::new(),
-        });
+    let no_proxy = policy.no_proxy_entry_count();
+    if policy.has_proxy() && no_proxy == 0 {
+        results.push(Check::new(
+            "network.no_proxy",
+            CATEGORY,
+            Status::Warn,
+            "not set",
+            "NO_PROXY is not set while a proxy is active; local hosts go through the proxy",
+        ));
+    } else if no_proxy > 0 {
+        results.push(Check::new(
+            "network.no_proxy",
+            CATEGORY,
+            Status::Pass,
+            format!("{no_proxy} entries"),
+            "",
+        ));
     }
 
-    // Conflicting proxy values across scheme-specific variables.
     if policy.has_conflicting_values() {
-        results.push(Check {
-            id: "network.proxy_conflict".into(),
-            category: "network",
-            status: Status::Pass,
-            value: "scheme-specific proxies configured".into(),
-            description: "HTTP and HTTPS use different proxy endpoints".into(),
-        });
+        results.push(Check::new(
+            "network.proxy_schemes",
+            CATEGORY,
+            Status::Pass,
+            "scheme-specific proxies configured",
+            "HTTP and HTTPS targets use different proxy endpoints",
+        ));
     }
-
-    // Transport summary.
-    results.push(Check {
-        id: "network.git_transport".into(),
-        category: "network",
-        status: Status::Pass,
-        value: "curl-sys (gix), libgit2 (git2), ureq/rustls (forge API)".into(),
-        description: "Proxy env vars resolved by shared policy".into(),
-    });
-
     results
 }

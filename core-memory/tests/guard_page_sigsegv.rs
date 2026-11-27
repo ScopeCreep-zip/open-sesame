@@ -10,6 +10,18 @@ mod guard_page_tests {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
 
+    /// The variable that selects which harness a child process runs.
+    const HARNESS: &str = "__GUARD_PAGE_HARNESS";
+
+    /// Whether this process is the child spawned to run harness `mode`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test harness selector is a test-process input, not a location"
+    )]
+    fn is_harness(mode: &str) -> bool {
+        std::env::var_os(HARNESS).is_some_and(|value| value == mode)
+    }
+
     fn spawn_harness(test_name: &str, env_val: &str) -> std::process::Output {
         let exe = std::env::current_exe().expect("cannot find test binary path");
         Command::new(&exe)
@@ -17,7 +29,7 @@ mod guard_page_tests {
             .arg(test_name)
             .arg("--test-threads=1")
             .arg("--nocapture")
-            .env("__GUARD_PAGE_HARNESS", env_val)
+            .env(HARNESS, env_val)
             .output()
             .expect("failed to spawn child process")
     }
@@ -64,7 +76,7 @@ mod guard_page_tests {
     /// Child harness: read one byte past the allocation end.
     #[test]
     fn overflow_harness() {
-        if std::env::var("__GUARD_PAGE_HARNESS").ok().as_deref() != Some("overflow") {
+        if !is_harness("overflow") {
             return; // Skip when not invoked as child.
         }
 
@@ -73,7 +85,10 @@ mod guard_page_tests {
         let len = alloc.len();
 
         // SAFETY: Deliberately out-of-bounds. Testing that SIGSEGV fires.
-        #[allow(unsafe_code)]
+        #[expect(
+            unsafe_code,
+            reason = "the out-of-bounds read is the fault this harness observes"
+        )]
         unsafe {
             let _byte = std::ptr::read_volatile(ptr.add(len));
         }
@@ -93,7 +108,7 @@ mod guard_page_tests {
     /// Child harness: read before the data region (into guard page 1).
     #[test]
     fn underflow_harness() {
-        if std::env::var("__GUARD_PAGE_HARNESS").ok().as_deref() != Some("underflow") {
+        if !is_harness("underflow") {
             return;
         }
 
@@ -102,12 +117,13 @@ mod guard_page_tests {
 
         // Go back one full page — past the canary, past any padding,
         // into the guard page between metadata and data region.
-        // SAFETY: sysconf is always safe.
-        #[allow(unsafe_code)]
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = rustix::param::page_size();
 
         // SAFETY: Deliberately out-of-bounds. Testing guard page.
-        #[allow(unsafe_code)]
+        #[expect(
+            unsafe_code,
+            reason = "the out-of-bounds read is the fault this harness observes"
+        )]
         unsafe {
             let _byte = std::ptr::read_volatile(ptr.sub(page_size));
         }

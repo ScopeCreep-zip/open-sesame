@@ -1,6 +1,6 @@
 [book]
 title = "Open Sesame"
-authors = [ "usrbinkat" ]
+authors = ["user"]
 description = "Trust-scoped secret and identity fabric for Linux"
 language = "en"
 src = "src"
@@ -11,7 +11,7 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/ScopeCreep-zip/open-sesame"
 edit-url-template = "https://github.com/ScopeCreep-zip/open-sesame/edit/main/docs/{path}"
 site-url = "/open-sesame/book/"
-additional-css = [ "theme/custom.css" ]
+additional-css = ["theme/custom.css"]
 
 [output.html.fold]
 enable = true

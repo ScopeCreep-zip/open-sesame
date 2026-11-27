@@ -123,7 +123,7 @@ The `AuthCombineMode` (`core-types/src/auth.rs`) supports three modes for headle
 environments:
 
 | Mode | Behavior |
-|------|----------|
+| --- | --- |
 | `Any` | Any single enrolled factor unlocks. SSH agent alone suffices. |
 | `All` | All enrolled factors required. Both password and SSH agent must be provided. |
 | `Policy` | Configurable: e.g., SSH agent always required, plus one additional factor. |
@@ -157,7 +157,7 @@ journald = true    # journald integration on systemd hosts
 ## File Locations
 
 | Path | Purpose |
-|------|---------|
+| --- | --- |
 | `~/.config/pds/config.toml` | User configuration |
 | `~/.config/pds/installation.toml` | Installation identity |
 | `~/.config/pds/vaults/{profile}.db` | Encrypted vaults |

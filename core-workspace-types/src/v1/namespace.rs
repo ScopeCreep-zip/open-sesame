@@ -1,27 +1,26 @@
-//! Namespace path: one or more validated segments representing the
-//! organizational hierarchy between server and repository.
+//! Namespace path as the forge spells it: one or more validated
+//! segments representing the organizational hierarchy between server
+//! and repository.
 //!
 //! Supports both flat namespaces (GitHub: one segment) and nested
-//! namespaces (GitLab: multiple segments). Each segment is validated
-//! as a filesystem-safe component on construction. Malformed input
-//! such as empty segments, leading/trailing slashes, and untrimmed
-//! whitespace is rejected, not silently repaired.
+//! namespaces (GitLab: multiple segments). `NamespacePath` is a remote
+//! identifier and preserves case; filesystem placement is derived
+//! through `NamespaceDir`, which is lowercase by construction.
+//! Malformed input such as empty segments, leading/trailing slashes,
+//! and untrimmed whitespace is rejected, not silently repaired.
 
 use std::fmt;
-use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::v1::error::{ValidationError, validate_component};
+use crate::v1::error::{LeadingDotPolicy, ValidationError, validate_component};
 
-/// A validated namespace path of one or more segments.
+/// A validated namespace path of one or more segments in remote spelling.
 ///
 /// Represents the organizational hierarchy between server and
 /// repository. GitHub uses a single segment (organization or user).
 /// GitLab uses one or more segments (group/subgroup/...).
-///
-/// Segments preserve original casing. Deserialization goes through the
-/// validating constructor.
+/// Deserialization goes through the validating constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(into = "String")]
 pub struct NamespacePath {
@@ -47,10 +46,9 @@ impl<'de> serde::Deserialize<'de> for NamespacePath {
 impl NamespacePath {
     /// Construct from a slash-separated path string.
     ///
-    /// Each segment is validated as a filesystem-safe component.
-    /// At least one segment is required. Empty segments, leading
-    /// slashes, trailing slashes, and whitespace-padded segments
-    /// are rejected.
+    /// Each segment is validated as an ASCII path component. At least
+    /// one segment is required. Empty segments, leading slashes,
+    /// trailing slashes, and whitespace-padded segments are rejected.
     ///
     /// # Errors
     ///
@@ -59,36 +57,13 @@ impl NamespacePath {
         if input.is_empty() {
             return Err(ValidationError::EmptyNamespace);
         }
-
-        let segments: Vec<&str> = input.split('/').collect();
-
-        // Reject empty segments from leading, trailing, or double slashes.
-        for seg in &segments {
-            if seg.is_empty() {
-                return Err(ValidationError::EmptyNamespace);
-            }
-            // Reject segments with leading/trailing whitespace.
-            if *seg != seg.trim() {
-                return Err(ValidationError::Whitespace {
-                    kind: "namespace segment",
-                    value: seg.to_string(),
-                });
-            }
-        }
-
-        let owned: Vec<String> = segments.iter().map(ToString::to_string).collect();
-
-        for seg in &owned {
-            validate_component("namespace segment", seg)?;
-        }
-
-        Ok(Self { segments: owned })
+        Self::from_segments(input.split('/').map(ToString::to_string).collect())
     }
 
-    /// Construct from pre-validated segments.
+    /// Construct from individual segments.
     ///
-    /// Each segment is still validated. Use this when segments come
-    /// from parsed URL components rather than a slash-separated string.
+    /// Use this when segments come from parsed URL components rather
+    /// than a slash-separated string. Each segment is validated.
     ///
     /// # Errors
     ///
@@ -101,7 +76,7 @@ impl NamespacePath {
             if seg.is_empty() {
                 return Err(ValidationError::EmptyNamespace);
             }
-            validate_component("namespace segment", seg)?;
+            validate_component("namespace segment", seg, LeadingDotPolicy::Reject)?;
         }
         Ok(Self { segments })
     }
@@ -123,14 +98,6 @@ impl NamespacePath {
     pub fn depth(&self) -> usize {
         self.segments.len()
     }
-
-    /// Convert to a relative filesystem path.
-    ///
-    /// Each segment becomes a directory component.
-    #[must_use]
-    pub fn as_path(&self) -> PathBuf {
-        self.segments.iter().collect()
-    }
 }
 
 impl fmt::Display for NamespacePath {
@@ -150,7 +117,6 @@ mod tests {
         assert_eq!(ns.depth(), 1);
         assert_eq!(ns.root_segment(), "braincraftio");
         assert_eq!(ns.to_string(), "braincraftio");
-        assert_eq!(ns.as_path(), PathBuf::from("braincraftio"));
     }
 
     #[test]
@@ -160,7 +126,6 @@ mod tests {
         assert_eq!(ns.depth(), 2);
         assert_eq!(ns.root_segment(), "group");
         assert_eq!(ns.to_string(), "group/subgroup");
-        assert_eq!(ns.as_path(), PathBuf::from("group/subgroup"));
     }
 
     #[test]
@@ -171,8 +136,18 @@ mod tests {
     }
 
     #[test]
+    fn preserves_remote_casing() {
+        let ns = NamespacePath::new("ScopeCreep-zip").unwrap();
+        assert_eq!(ns.root_segment(), "ScopeCreep-zip");
+        assert_ne!(ns, NamespacePath::new("scopecreep-zip").unwrap());
+    }
+
+    #[test]
     fn rejects_whitespace_padded_segments() {
-        assert!(NamespacePath::new(" org / sub ").is_err());
+        assert!(matches!(
+            NamespacePath::new(" org / sub "),
+            Err(ValidationError::Whitespace { .. })
+        ));
     }
 
     #[test]
@@ -228,6 +203,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_ascii_segment() {
+        assert!(matches!(
+            NamespacePath::new("örg"),
+            Err(ValidationError::NonAscii { .. })
+        ));
+    }
+
+    #[test]
     fn from_segments_valid() {
         let ns = NamespacePath::from_segments(vec!["a".into(), "b".into()]).unwrap();
         assert_eq!(ns.depth(), 2);
@@ -245,13 +228,7 @@ mod tests {
 
     #[test]
     fn from_segments_empty_segment_rejected() {
-        assert!(NamespacePath::from_segments(vec!["".into()]).is_err());
-    }
-
-    #[test]
-    fn preserves_casing() {
-        let ns = NamespacePath::new("ScopeCreep-zip").unwrap();
-        assert_eq!(ns.root_segment(), "ScopeCreep-zip");
+        assert!(NamespacePath::from_segments(vec![String::new()]).is_err());
     }
 
     #[test]
@@ -262,9 +239,9 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let original = NamespacePath::new("group/subgroup").unwrap();
+        let original = NamespacePath::new("Group/SubGroup").unwrap();
         let json = serde_json::to_string(&original).unwrap();
-        assert_eq!(json, "\"group/subgroup\"");
+        assert_eq!(json, "\"Group/SubGroup\"");
         let parsed: NamespacePath = serde_json::from_str(&json).unwrap();
         assert_eq!(original, parsed);
     }

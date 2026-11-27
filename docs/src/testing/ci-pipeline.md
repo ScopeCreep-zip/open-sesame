@@ -5,8 +5,8 @@ Open Sesame uses four GitHub Actions workflows for testing, documentation, relea
 ## Workflow Overview
 
 | Workflow | File | Triggers | Purpose |
-|----------|------|----------|---------|
-| Test | `test.yml` | Push to main/master, PRs | Run `cargo test` on dual architectures |
+| --- | --- | --- | --- |
+| Test | `test.yml` | Push to main/master, PRs | Format check, clippy, tests, and debug build on dual architectures; QA checks; PKGBUILD lint |
 | Docs | `docs.yml` | Push to main/master, PRs | Build rustdoc and mdBook |
 | Release | `release.yml` | Push to main, manual dispatch | Semantic-release, build, attest, publish |
 | Nix | `nix.yml` | Called by release.yml, PRs | Build Nix packages and push to Cachix |
@@ -37,10 +37,27 @@ emulation).
 3. Raises `RLIMIT_MEMLOCK` to 256 MiB with
    `sudo prlimit --pid $$ --memlock=268435456:268435456`. This is required because `ProtectedAlloc`
    uses `mlock` to pin secret-holding memory pages.
-4. Runs `mise run ci:test`.
+4. Runs `mise run ci:test`: `cargo:fmt:check`, `cargo:clippy`
+   (`--all-targets --all-features -D warnings`), `cargo:test`, and `cargo:build:debug`.
 
 The `MISE_AUTO_INSTALL` environment variable is set to `"false"` to prevent automatic tool
 installation outside the explicit `mise-action` step.
+
+### QA Job
+
+The `qa` job runs on `ubuntu-24.04`. It installs Nix via `cachix/install-nix-action@v31`, reads
+the `scopecreep-zip` Cachix cache, and runs `nix develop --accept-flake-config -c mise run ci:qa`.
+`ci:qa` depends on `qa:toml`, `qa:markdown`, `qa:links` (offline), `qa:shell`, and `qa:actions`.
+Their tools (taplo, markdownlint-cli2, lychee, shellcheck, shfmt, actionlint) and mise itself come
+from the flake devshell, so mise installs nothing.
+
+`MISE_TRUSTED_CONFIG_PATHS` is set to the checkout: mise refuses an untrusted `.mise.toml`, and a
+fresh runner has trusted nothing.
+
+### PKGBUILD Lint Job
+
+The `lint-pkgbuild` job runs `scripts/arch/lint-pkgbuild.sh` (namcap) in an
+`archlinux:base-devel` container.
 
 ## docs.yml
 
@@ -89,7 +106,7 @@ The build job uses the same dual-architecture matrix as the test workflow. It in
 `cargo:cargo-deb` via mise, raises the memlock limit, and runs architecture-specific mise tasks:
 
 | Architecture | Build Task | Rename Task |
-|-------------|-----------|-------------|
+| --- | --- | --- |
 | amd64 | `ci:build:deb` | `ci:release:rename-deb` |
 | arm64 | `ci:build:deb:arm64` | `ci:release:rename-deb:arm64` |
 
@@ -149,7 +166,8 @@ matrix:
 
 ## Mise Task Runner
 
-All workflows use `jdx/mise-action@v4` to install tools and run tasks. Mise manages:
+All workflows run tasks through mise. Except for the `qa` job, which takes every tool from the Nix
+devshell, they install tools with `jdx/mise-action@v4`. Mise manages:
 
 - Rust toolchain version (from `rust-toolchain.toml` or mise config)
 - Node.js (for semantic-release in the release workflow)
@@ -161,6 +179,7 @@ Task names follow the convention `ci:<category>:<action>` (e.g., `ci:test`, `ci:
 ## Environment Variables
 
 | Variable | Value | Purpose |
-|----------|-------|---------|
+| --- | --- | --- |
 | `CARGO_TERM_COLOR` | `always` | Colored cargo output in CI logs |
 | `MISE_AUTO_INSTALL` | `false` | Prevent implicit tool installation |
+| `MISE_TRUSTED_CONFIG_PATHS` | `${{ github.workspace }}` (`qa` job) | Trust the repository's `.mise.toml` |

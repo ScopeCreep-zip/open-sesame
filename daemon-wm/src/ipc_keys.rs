@@ -1,15 +1,25 @@
 //! IPC keyboard event deduplication and keysym mapping.
 
 use crate::controller::Event;
+use core_types::keysym;
+use std::time::{Duration, Instant};
+
+/// How recent an identical key event must be to count as the same
+/// keystroke.
+const DUPLICATE_WINDOW: Duration = Duration::from_millis(50);
+
+/// How many recent key events are remembered.
+const RECENT: usize = 8;
 
 /// Tracks recently processed key events to deduplicate overlay and IPC sources.
 ///
 /// When compositor keyboard focus is working, both the SCTK keyboard handler
 /// and the IPC `InputKeyEvent` will fire for the same physical keystroke. This
 /// ring buffer ensures only the first arrival is processed.
+#[derive(Debug)]
 pub struct KeyDeduplicator {
-    recent: [(u32, bool, std::time::Instant); 8],
-    idx: usize,
+    recent: [(u32, bool, Instant); RECENT],
+    next: usize,
 }
 
 impl Default for KeyDeduplicator {
@@ -19,61 +29,50 @@ impl Default for KeyDeduplicator {
 }
 
 impl KeyDeduplicator {
+    #[must_use]
     pub fn new() -> Self {
-        let epoch = std::time::Instant::now();
+        // Entries start one window in the past, so none matches yet.
+        let past = Instant::now()
+            .checked_sub(DUPLICATE_WINDOW)
+            .unwrap_or_else(Instant::now);
         Self {
-            recent: [(0, false, epoch); 8],
-            idx: 0,
+            recent: [(0, false, past); RECENT],
+            next: 0,
         }
     }
 
-    /// Returns true if this event should be processed (not a duplicate).
-    ///
-    /// An event is a duplicate if an event with the same keyval and pressed
-    /// state was processed within the last 50ms.
+    /// Whether this event should be processed: no event with the same
+    /// keysym and direction was processed within [`DUPLICATE_WINDOW`].
     pub fn accept(&mut self, keyval: u32, pressed: bool) -> bool {
-        let now = std::time::Instant::now();
-
-        for &(kv, pr, ts) in &self.recent {
-            if kv == keyval && pr == pressed && now.duration_since(ts).as_millis() < 50 {
-                return false;
-            }
+        let now = Instant::now();
+        if self.recent.iter().any(|&(kv, pr, at)| {
+            kv == keyval && pr == pressed && now.duration_since(at) < DUPLICATE_WINDOW
+        }) {
+            return false;
         }
-
-        self.recent[self.idx] = (keyval, pressed, now);
-        self.idx = (self.idx + 1) % self.recent.len();
+        self.recent[self.next] = (keyval, pressed, now);
+        self.next = (self.next + 1) % RECENT;
         true
     }
 }
 
-/// Map an IPC keyboard event (XKB keysym) to a controller Event.
-///
-/// Uses X11 keysym values which are identical to GDK key constants.
-/// Returns None for keys that the overlay does not handle (space, modifiers, etc.).
-pub fn map_ipc_key_to_event(keyval: u32, _modifiers: u32, unicode: Option<char>) -> Option<Event> {
-    const ESCAPE: u32 = 0xFF1B;
-    const RETURN: u32 = 0xFF0D;
-    const KP_ENTER: u32 = 0xFF8D;
-    const TAB: u32 = 0xFF09;
-    const DOWN: u32 = 0xFF54;
-    const UP: u32 = 0xFF52;
-    const BACKSPACE: u32 = 0xFF08;
-    const SPACE: u32 = 0x0020;
+/// The controller event of an IPC key press (X11 keysym, identical to GDK
+/// key constants), if the overlay handles it. Tab is not one: Tab cycling
+/// is driven by IPC re-activation (`WmActivateOverlay` /
+/// `WmActivateOverlayBackward`, sent when the compositor intercepts
+/// Alt+Tab), and handling it here would advance twice. Modifiers, function
+/// keys, and characters other than printable ASCII and space are not
+/// handled either.
+#[must_use]
+pub fn map_ipc_key_to_event(keyval: u32, unicode: Option<char>) -> Option<Event> {
     match keyval {
-        ESCAPE => Some(Event::Escape),
-        RETURN | KP_ENTER => Some(Event::Confirm),
-        TAB => {
-            // Tab-based cycling is handled entirely by IPC re-activation
-            // (WmActivateOverlay / WmActivateOverlayBackward). The compositor
-            // intercepts Alt+Tab and spawns a new sesame process. Suppress
-            // Tab here to prevent double-advancement. Arrow keys remain
-            // available for non-Alt navigation.
-            None
-        }
-        DOWN => Some(Event::SelectionDown),
-        UP => Some(Event::SelectionUp),
-        BACKSPACE => Some(Event::Backspace),
-        SPACE => Some(Event::Char(' ')),
+        keysym::ESCAPE => Some(Event::Escape),
+        keysym::RETURN | keysym::KP_ENTER => Some(Event::Confirm),
+        keysym::TAB => None,
+        keysym::DOWN => Some(Event::SelectionDown),
+        keysym::UP => Some(Event::SelectionUp),
+        keysym::BACKSPACE => Some(Event::Backspace),
+        keysym::SPACE => Some(Event::Char(' ')),
         _ => unicode
             .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
             .map(Event::Char),
@@ -84,104 +83,60 @@ pub fn map_ipc_key_to_event(keyval: u32, _modifiers: u32, unicode: Option<char>)
 mod tests {
     use super::*;
 
-    // ============================================================================
-    // map_ipc_key_to_event
-    // ============================================================================
-
     #[test]
-    fn map_escape() {
+    fn navigation_keys_map_to_their_events() {
         assert!(matches!(
-            map_ipc_key_to_event(0xFF1B, 0, None),
+            map_ipc_key_to_event(keysym::ESCAPE, None),
             Some(Event::Escape)
         ));
-    }
-
-    #[test]
-    fn map_return() {
         assert!(matches!(
-            map_ipc_key_to_event(0xFF0D, 0, None),
+            map_ipc_key_to_event(keysym::RETURN, None),
             Some(Event::Confirm)
         ));
-    }
-
-    #[test]
-    fn map_kp_enter() {
         assert!(matches!(
-            map_ipc_key_to_event(0xFF8D, 0, None),
+            map_ipc_key_to_event(keysym::KP_ENTER, None),
             Some(Event::Confirm)
         ));
-    }
-
-    #[test]
-    fn map_tab_suppressed() {
-        // Tab is suppressed — cycling is handled by IPC re-activation.
-        assert!(map_ipc_key_to_event(0xFF09, 0, None).is_none());
-    }
-
-    #[test]
-    fn map_tab_with_shift_suppressed() {
-        // Shift+Tab is also suppressed — backward cycling via IPC.
-        assert!(map_ipc_key_to_event(0xFF09, 1, None).is_none());
-    }
-
-    #[test]
-    fn map_down_arrow() {
         assert!(matches!(
-            map_ipc_key_to_event(0xFF54, 0, None),
+            map_ipc_key_to_event(keysym::DOWN, None),
             Some(Event::SelectionDown)
         ));
-    }
-
-    #[test]
-    fn map_up_arrow() {
         assert!(matches!(
-            map_ipc_key_to_event(0xFF52, 0, None),
+            map_ipc_key_to_event(keysym::UP, None),
             Some(Event::SelectionUp)
         ));
-    }
-
-    #[test]
-    fn map_backspace() {
         assert!(matches!(
-            map_ipc_key_to_event(0xFF08, 0, None),
+            map_ipc_key_to_event(keysym::BACKSPACE, None),
             Some(Event::Backspace)
         ));
     }
 
     #[test]
-    fn map_space_is_char() {
+    fn tab_is_suppressed() {
+        // Cycling is handled by IPC re-activation.
+        assert!(map_ipc_key_to_event(keysym::TAB, None).is_none());
+    }
+
+    #[test]
+    fn printable_characters_map_and_modifiers_do_not() {
         assert!(matches!(
-            map_ipc_key_to_event(0x0020, 0, Some(' ')),
+            map_ipc_key_to_event(keysym::SPACE, Some(' ')),
             Some(Event::Char(' '))
         ));
-    }
-
-    #[test]
-    fn map_alphanumeric_char() {
         assert!(matches!(
-            map_ipc_key_to_event(0x0067, 0, Some('g')),
+            map_ipc_key_to_event(0x0067, Some('g')),
             Some(Event::Char('g'))
         ));
-    }
-
-    #[test]
-    fn map_printable_non_alphanumeric_accepted() {
-        // Printable ASCII like '/' should now pass through to controller.
         assert!(matches!(
-            map_ipc_key_to_event(0x002F, 0, Some('/')),
+            map_ipc_key_to_event(0x002F, Some('/')),
             Some(Event::Char('/'))
         ));
+        assert!(map_ipc_key_to_event(keysym::ALT_L, None).is_none());
+        assert!(
+            map_ipc_key_to_event(0x00E9, Some('é')).is_none(),
+            "non-ASCII is not input"
+        );
     }
-
-    #[test]
-    fn map_modifier_key_ignored() {
-        // Alt_L keysym — no unicode, should be None.
-        assert!(map_ipc_key_to_event(0xFFE9, 0, None).is_none());
-    }
-
-    // ============================================================================
-    // KeyDeduplicator
-    // ============================================================================
 
     #[test]
     fn dedup_accepts_first() {
@@ -214,18 +169,25 @@ mod tests {
     fn dedup_accepts_after_window_expires() {
         let mut dedup = KeyDeduplicator::new();
         assert!(dedup.accept(0x67, true));
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        std::thread::sleep(DUPLICATE_WINDOW + Duration::from_millis(10));
         assert!(dedup.accept(0x67, true));
+    }
+
+    #[test]
+    fn a_fresh_deduplicator_accepts_keysym_zero() {
+        // The empty slots must not read as a recent keysym-0 release.
+        let mut dedup = KeyDeduplicator::new();
+        assert!(dedup.accept(0, false));
     }
 
     #[test]
     fn dedup_ring_buffer_wraps() {
         let mut dedup = KeyDeduplicator::new();
-        // Fill the ring buffer (8 entries).
-        for i in 0..8 {
-            assert!(dedup.accept(i, true));
+        for keyval in 0..u32::try_from(RECENT).unwrap() {
+            assert!(dedup.accept(keyval + 1, true));
         }
-        // 9th entry wraps — still accepted because it's a different key.
-        assert!(dedup.accept(8, true));
+        // The oldest entry is overwritten; the newest still deduplicates.
+        assert!(dedup.accept(100, true));
+        assert!(!dedup.accept(u32::try_from(RECENT).unwrap(), true));
     }
 }

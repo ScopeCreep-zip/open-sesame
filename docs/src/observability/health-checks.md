@@ -48,9 +48,12 @@ loaded, IPC connected, indexes built), each daemon calls
 `platform_linux::systemd::notify_ready()`, which sends `READY=1` to systemd. This tells systemd
 that the daemon is ready to accept requests.
 
-The `NOTIFY_SOCKET` path is included in daemon-profile's Landlock ruleset so that `sd_notify`
-calls succeed after the filesystem sandbox is applied. Abstract sockets (prefixed with `@`)
-bypass Landlock `AccessFs` rules and do not require explicit allowlisting.
+Every sandboxed daemon's Landlock ruleset grants the `NOTIFY_SOCKET` path
+(`core_daemon::sandbox::notify_rules`) so that `sd_notify` calls succeed after the sandbox is
+applied: from Landlock ABI 9 a pathname socket is reachable only under a rule. The user service
+manager's notification socket is a pathname socket (`$XDG_RUNTIME_DIR/systemd/notify`); an
+abstract one (`@`-prefixed) would be unreachable under the abstract-socket scope every daemon
+runs with ([Sandbox Model](../architecture/sandbox-model.md)).
 
 ### WatchdogSec=30
 

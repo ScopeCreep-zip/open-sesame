@@ -14,13 +14,13 @@ A launch profile is defined by the `LaunchProfile` struct in `core-config/src/sc
 env = { RUST_LOG = "debug", CARGO_HOME = "/workspace/.cargo" }
 secrets = ["github-token", "crates-io-token"]
 devshell = "/workspace/myproject#rust"
-cwd = "/workspace/usrbinkat/github.com/org/repo"
+cwd = "/workspace/alice/github.com/org/repo"
 ```
 
 Each field is optional and defaults to empty:
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `env` | `BTreeMap<String, String>` | Static environment variables injected into the child process. |
 | `secrets` | `Vec<String>` | Secret names fetched from the vault and converted to env vars. |
 | `devshell` | `Option<String>` | Nix flake devshell reference. Wraps the command in `nix develop`. |
@@ -50,7 +50,7 @@ tag resolves against the default (or explicitly specified) trust profile. A qual
 resolves against a different trust profile.
 
 | Tag | Resolution |
-|---|---|
+| --- | --- |
 | `dev-rust` | Resolves `dev-rust` in the current trust profile. |
 | `work:corp` | Resolves `corp` in the `work` trust profile. |
 
@@ -91,7 +91,7 @@ Launch profiles live under each trust profile's configuration section:
 env = { RUST_LOG = "debug" }
 secrets = ["github-token"]
 devshell = "/workspace/project#rust"
-cwd = "/workspace/usrbinkat/github.com/org/repo"
+cwd = "/workspace/alice/github.com/org/repo"
 
 [profiles.personal.launch_profiles.ai-tools]
 env = { ANTHROPIC_MODEL = "claude-sonnet-4-20250514" }

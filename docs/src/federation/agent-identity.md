@@ -23,7 +23,7 @@ pub enum AgentType {
 ```
 
 | Variant | Description | Example |
-|---------|-------------|---------|
+| --- | --- | --- |
 | `Human` | Interactive operator with keyboard/mouse | Desktop user |
 | `AI { model_family }` | LLM-based agent, API-driven | `model_family: "claude-4"` |
 | `Service { unit }` | systemd service or daemon process | `unit: "daemon-launcher.service"` |
@@ -47,7 +47,7 @@ pub enum LocalAgentId {
 ```
 
 | Variant | Verification | Use Case |
-|---------|-------------|----------|
+| --- | --- | --- |
 | `UnixUid` | UCred from Unix domain socket | Minimal identity, CLI tools |
 | `ProcessIdentity` | UCred + `/proc/{pid}/exe` inspection | Named processes |
 | `SystemdUnit` | systemd unit name lookup | Daemon services |
@@ -75,7 +75,7 @@ pub struct AgentIdentity {
 ```
 
 | Field | Purpose |
-|-------|---------|
+| --- | --- |
 | `id` | Globally unique agent identifier (UUID v7) |
 | `agent_type` | Classification: Human, AI, Service, Extension |
 | `local_id` | Process-level binding on this machine |
@@ -99,7 +99,7 @@ pub struct AgentMetadata {
 Available attestation methods vary by agent type:
 
 | Agent Type | Typical Attestation Methods |
-|------------|---------------------------|
+| --- | --- |
 | `Human` | `MasterPassword`, `SecurityKey`, `DeviceAttestation` |
 | `AI` | `Delegation`, `ProcessAttestation` |
 | `Service` | `ProcessAttestation`, `DeviceAttestation` |
@@ -120,7 +120,7 @@ an agent's identity claim. Each variant records the specific data for one verifi
 method:
 
 | Variant | Evidence |
-|---------|----------|
+| --- | --- |
 | `UCred` | pid, uid, gid from Unix domain socket |
 | `NoiseIK` | X25519 public key, registry generation counter |
 | `MasterPassword` | Timestamp of successful verification |

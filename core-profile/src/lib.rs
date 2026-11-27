@@ -1,17 +1,19 @@
-//! Profile schema, context-driven activation, isolation contracts, and atomic switching.
+//! Profile state, context-driven activation, and the audit log.
 //!
-//! Phase 1: schema types (`ProfileState`, `ContextSignal`, `AuditEntry`).
-//! Phase 2: runtime logic (`ContextEngine`, `AuditLogger` with BLAKE3 hash chain).
+//! Types: `ProfileState`, `ContextSignal`, `IsolatedResource`, `AuditEntry`.
+//! Runtime: `ContextEngine` (activation rules evaluated against context
+//! signals) and `AuditLogger` (an append-only log, each entry chained to the
+//! previous one under the configured audit hash).
 #![forbid(unsafe_code)]
 
 pub mod audit;
 pub mod context;
 
-use core_types::{AgentId, AgentType, AppId, InstallationId, ProfileId, TrustProfileName};
+use core_types::{AgentId, AgentType, AppId, InstallationId, ProfileId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use audit::{AuditLogger, verify_chain};
+pub use audit::{AuditLogger, open_audit_log, read_audit_log, verify_audit_log, verify_chain};
 pub use context::ContextEngine;
 
 // ============================================================================
@@ -76,7 +78,8 @@ pub struct AuditEntry {
     pub timestamp_ms: u64,
     /// The profile operation that occurred.
     pub action: AuditAction,
-    /// BLAKE3 hash of the previous entry (hex string). Empty for first entry.
+    /// Hash of the previous entry's serialized line under the configured
+    /// audit hash (hex string). Empty for the first entry.
     pub prev_hash: String,
     /// Optional agent identity that triggered this action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +99,10 @@ pub enum AuditAction {
         duration_ms: u32,
     },
     ProfileActivationFailed {
+        target: ProfileId,
+        reason: String,
+    },
+    ProfileDeactivationFailed {
         target: ProfileId,
         reason: String,
     },
@@ -145,11 +152,6 @@ pub enum AuditAction {
         id: InstallationId,
         org: Option<String>,
         machine_binding_present: bool,
-    },
-    ProfileIdMigrated {
-        name: TrustProfileName,
-        old_id: ProfileId,
-        new_id: ProfileId,
     },
     AuthorizationRequired {
         request_id: Uuid,

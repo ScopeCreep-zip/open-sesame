@@ -1,31 +1,21 @@
 //! Core trait and types for pluggable authentication backends.
 
 use crate::AuthError;
-use core_crypto::SecureBytes;
-use core_types::{AuthFactorId, TrustProfileName};
+use crate::vault_meta::VaultKeying;
+use core_crypto::{KeyContext, SecureBytes};
+use core_layout::Layout;
+use core_types::{AuthFactorId, HkdfAlgorithm, TrustProfileName};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 /// What kind of user interaction a backend requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthInteraction {
-    /// No interaction -- backend can unlock silently (SSH software key, TPM, keyring).
+    /// No interaction -- backend can unlock silently (an SSH agent holding a software key).
     None,
     /// Password/PIN entry required (keyboard input).
     PasswordEntry,
     /// Physical touch on hardware token required (FIDO2, PIV with touch policy).
     HardwareTouch,
-}
-
-/// How the master key should be sent to daemon-secrets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpcUnlockStrategy {
-    /// Use existing `UnlockRequest` with password field.
-    /// daemon-secrets performs the KDF.
-    PasswordUnlock,
-    /// Use `SshUnlockRequest` with pre-derived master key.
-    /// Used by SSH-agent and future backends that derive/unwrap the key client-side.
-    DirectMasterKey,
 }
 
 /// Which piece of the unlock this backend is providing.
@@ -39,16 +29,51 @@ pub enum FactorContribution {
     FactorPiece,
 }
 
-/// Result of a successful backend unlock.
+/// The master key of an `All`-policy vault: the vault's `hkdf` derivation
+/// (`KeyContext::CombinedMasterKey`) over every factor's piece,
+/// concatenated in `AuthFactorId` order. Vault creation and unlock both
+/// derive it here, so they cannot disagree.
+#[must_use]
+pub fn combine_factor_pieces(
+    profile: &TrustProfileName,
+    hkdf: HkdfAlgorithm,
+    pieces: &[(AuthFactorId, &[u8])],
+) -> SecureBytes {
+    let mut ordered = pieces.to_vec();
+    ordered.sort_by_key(|(id, _)| *id);
+    let mut combined = zeroize::Zeroizing::new(Vec::new());
+    for (_, piece) in &ordered {
+        combined.extend_from_slice(piece);
+    }
+    core_crypto::derive_key(hkdf, &KeyContext::CombinedMasterKey(profile), &combined)
+}
+
+/// Result of a successful backend unlock: the master key the backend
+/// unwrapped, which daemon-secrets receives as one factor of the vault's
+/// auth policy.
 pub struct UnlockOutcome {
-    /// The 32-byte master key (for `DirectMasterKey`) or password bytes (for `PasswordUnlock`).
+    /// The unwrapped 32-byte master key.
     pub master_key: SecureBytes,
     /// Backend-specific metadata for audit logging.
     pub audit_metadata: BTreeMap<String, String>,
-    /// Which IPC message type to use.
-    pub ipc_strategy: IpcUnlockStrategy,
     /// Which factor this outcome represents.
     pub factor_id: AuthFactorId,
+}
+
+impl UnlockOutcome {
+    /// The `FactorSubmit` request carrying this outcome to daemon-secrets
+    /// for `profile`. The master key moves into the request's protected
+    /// allocation without a heap copy.
+    #[must_use]
+    pub fn into_factor_submit(self, profile: &TrustProfileName) -> core_types::EventKind {
+        let (alloc, len) = self.master_key.into_protected_alloc();
+        core_types::EventKind::FactorSubmit {
+            factor_id: self.factor_id,
+            key_material: core_types::SensitiveBytes::from_protected(alloc, len),
+            profile: profile.clone(),
+            audit_metadata: self.audit_metadata,
+        }
+    }
 }
 
 /// A pluggable authentication backend for vault unlock.
@@ -58,42 +83,148 @@ pub trait VaultAuthBackend: Send + Sync {
     fn factor_id(&self) -> AuthFactorId;
 
     /// Human-readable name for audit logs and overlay display.
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Short identifier for IPC messages and config.
-    fn backend_id(&self) -> &str;
+    fn backend_id(&self) -> &'static str;
 
-    /// Check whether this backend has a valid enrollment for the profile.
-    fn is_enrolled(&self, profile: &TrustProfileName, config_dir: &Path) -> bool;
+    /// Whether this backend has an enrollment for the profile.
+    ///
+    /// # Errors
+    ///
+    /// When the enrollment's presence cannot be determined.
+    fn is_enrolled(&self, profile: &TrustProfileName, layout: &Layout) -> Result<bool, AuthError>;
 
-    /// Check whether this backend can currently perform an unlock.
-    /// Must be fast (< 100ms).
-    async fn can_unlock(&self, profile: &TrustProfileName, config_dir: &Path) -> bool;
+    /// Whether this backend can currently perform an unlock: enrolled, and
+    /// its external dependency (agent, entered password) is present. Must
+    /// be fast (< 100ms).
+    ///
+    /// # Errors
+    ///
+    /// When the enrollment exists but cannot be read or parsed.
+    async fn can_unlock(
+        &self,
+        profile: &TrustProfileName,
+        layout: &Layout,
+    ) -> Result<bool, AuthError>;
 
     /// What kind of user interaction this backend requires.
     fn requires_interaction(&self) -> AuthInteraction;
 
-    /// Attempt to derive/unwrap the master key for a profile.
+    /// Unwrap the master key of `profile`'s vault, deriving the KEK under
+    /// the vault's `keying`.
+    ///
+    /// # Errors
+    ///
+    /// The backend's enrollment, derivation, and unwrap errors.
     async fn unlock(
         &self,
         profile: &TrustProfileName,
-        config_dir: &Path,
-        salt: &[u8],
+        layout: &Layout,
+        keying: &VaultKeying,
     ) -> Result<UnlockOutcome, AuthError>;
 
-    /// Enroll this backend for a profile. Requires the master key.
+    /// Enroll this backend for a profile: wrap `master_key` under a KEK
+    /// derived with the vault's `keying`.
     ///
-    /// `selected_key_index` is an optional index into the list of eligible keys
-    /// returned by the backend. If `None`, the backend picks the first eligible key.
+    /// `credential` names which of the backend's credentials to enroll
+    /// (SSH agent: the key fingerprint, with or without `SHA256:`); a
+    /// backend with one credential ignores it.
+    ///
+    /// # Errors
+    ///
+    /// The backend's credential, derivation, wrap, and write errors.
     async fn enroll(
         &self,
         profile: &TrustProfileName,
         master_key: &SecureBytes,
-        config_dir: &Path,
-        salt: &[u8],
-        selected_key_index: Option<usize>,
+        layout: &Layout,
+        keying: &VaultKeying,
+        credential: Option<&str>,
     ) -> Result<(), AuthError>;
 
-    /// Remove enrollment for this backend.
-    async fn revoke(&self, profile: &TrustProfileName, config_dir: &Path) -> Result<(), AuthError>;
+    /// Remove enrollment for this backend: the enrollment file is
+    /// zero-filled and removed. Absent enrollment is not an error.
+    async fn revoke(&self, profile: &TrustProfileName, layout: &Layout) -> Result<(), AuthError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::profile;
+
+    #[test]
+    fn outcome_becomes_the_factor_submission() {
+        let outcome = UnlockOutcome {
+            master_key: SecureBytes::new(vec![5; 32]),
+            audit_metadata: BTreeMap::from([("backend".into(), "ssh-agent".into())]),
+            factor_id: AuthFactorId::SshAgent,
+        };
+        match outcome.into_factor_submit(&profile("work")) {
+            core_types::EventKind::FactorSubmit {
+                factor_id,
+                key_material,
+                profile: submitted,
+                audit_metadata,
+            } => {
+                assert_eq!(factor_id, AuthFactorId::SshAgent);
+                assert_eq!(key_material.as_bytes(), &[5; 32]);
+                assert_eq!(submitted.as_ref(), "work");
+                assert_eq!(audit_metadata["backend"], "ssh-agent");
+            }
+            other => panic!("expected FactorSubmit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn combined_key_derives_the_pieces_in_factor_order() {
+        let work = profile("work");
+        let (password, ssh) = ([1u8; 32], [2u8; 32]);
+        let mut ordered = password.to_vec();
+        ordered.extend_from_slice(&ssh);
+        for hkdf in [HkdfAlgorithm::Blake3, HkdfAlgorithm::HkdfSha256] {
+            let combined = combine_factor_pieces(
+                &work,
+                hkdf,
+                &[
+                    (AuthFactorId::SshAgent, &ssh),
+                    (AuthFactorId::Password, &password),
+                ],
+            );
+            let expected =
+                core_crypto::derive_key(hkdf, &KeyContext::CombinedMasterKey(&work), &ordered);
+            assert_eq!(combined.as_bytes(), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn combined_key_ignores_submission_order_and_is_profile_and_algorithm_scoped() {
+        let (a, b) = ([7u8; 32], [9u8; 32]);
+        let combine = |name: &str, hkdf, pieces: &[(AuthFactorId, &[u8])]| {
+            combine_factor_pieces(&profile(name), hkdf, pieces)
+        };
+        let forward = combine(
+            "work",
+            HkdfAlgorithm::Blake3,
+            &[(AuthFactorId::Password, &a), (AuthFactorId::SshAgent, &b)],
+        );
+        let reverse = combine(
+            "work",
+            HkdfAlgorithm::Blake3,
+            &[(AuthFactorId::SshAgent, &b), (AuthFactorId::Password, &a)],
+        );
+        assert_eq!(forward.as_bytes(), reverse.as_bytes());
+        let other_profile = combine(
+            "home",
+            HkdfAlgorithm::Blake3,
+            &[(AuthFactorId::Password, &a), (AuthFactorId::SshAgent, &b)],
+        );
+        assert_ne!(forward.as_bytes(), other_profile.as_bytes());
+        let other_algorithm = combine(
+            "work",
+            HkdfAlgorithm::HkdfSha256,
+            &[(AuthFactorId::Password, &a), (AuthFactorId::SshAgent, &b)],
+        );
+        assert_ne!(forward.as_bytes(), other_algorithm.as_bytes());
+    }
 }
