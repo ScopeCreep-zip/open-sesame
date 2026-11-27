@@ -202,10 +202,14 @@ user namespaces. daemon-secrets also sets `PrivateNetwork=yes`.
 
 daemon-launcher sets no mount namespace options: they would apply to every application it
 launches (`systemd-run --user --scope` children share its namespace). It sets
-`ProtectClock`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
-`ProtectControlGroups`, `LockPersonality`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`,
-an empty `CapabilityBoundingSet`, and `KillMode=process` so launched applications survive a
-launcher restart.
+`ProtectKernelTunables`, `ProtectControlGroups`, `LockPersonality`, `RestrictSUIDSGID`,
+`SystemCallArchitectures=native`, and `KillMode=process` so launched applications survive a
+launcher restart. It sets nothing that drops the capability bounding set
+(`CapabilityBoundingSet`, `ProtectClock`, `ProtectKernelModules`, `ProtectKernelLogs`): a user
+manager drops it only with `CAP_SETPCAP` in the service's user namespace, which
+`kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's default) denies, failing the start
+with `218/CAPABILITIES`; every launched application would inherit it; and an unprivileged user
+holds none of those capabilities in the initial user namespace.
 
 ## Daemon Matrix
 

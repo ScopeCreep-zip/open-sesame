@@ -187,7 +187,7 @@ Users who pass `--accept-flake-config` (or have the substituter trusted) automat
 pre-built binaries for both `x86_64-linux` and `aarch64-linux`.
 
 CI pushes to the Cachix cache on every release via the `nix.yml` workflow using
-`cachix/cachix-action@v15` with the `SCOPE_CREEP_CACHIX_PRIVATE_KEY` secret. The same workflow
+`cachix/cachix-action@v17` with the `SCOPE_CREEP_CACHIX_PRIVATE_KEY` secret. The same workflow
 runs on pull requests for cache warming (build only, no push without the secret).
 
 ## preCheck

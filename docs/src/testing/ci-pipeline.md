@@ -190,7 +190,7 @@ matrix:
 
 1. Checks out at the specified tag (or current ref for PRs).
 2. Installs Nix via `cachix/install-nix-action@v31`.
-3. Configures Cachix via `cachix/cachix-action@v15` with the `scopecreep-zip` cache name.
+3. Configures Cachix via `cachix/cachix-action@v17` with the `scopecreep-zip` cache name.
 4. Raises the memlock limit.
 5. Builds both `open-sesame` and `open-sesame-desktop` for the matrix system with
    `--accept-flake-config -L`.

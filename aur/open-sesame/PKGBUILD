@@ -20,6 +20,7 @@ makedepends=(
     'gcc-libs'
     'pkgconf'
     'libseccomp'
+    'openssl'
     'wayland'
     'libxkbcommon'
     'fontconfig'
@@ -63,7 +64,8 @@ check() {
 package_open-sesame() {
     install=open-sesame.install
     pkgdesc="Encrypted secret vaults, trust profiles, application launching, and snippet expansion"
-    depends=('glibc' 'gcc-libs' 'libseccomp')
+    # openssl: libcrypto.so.3, which daemon-secrets' SQLCipher store links.
+    depends=('glibc' 'gcc-libs' 'libseccomp' 'openssl')
     optdepends=(
         'openssh: SSH agent authentication'
         'open-sesame-desktop: window switcher, clipboard, input capture'
