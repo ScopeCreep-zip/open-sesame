@@ -49,7 +49,7 @@ impl WrappedKey {
     ///
     /// # Errors
     ///
-    /// Returns `AuthError::InvalidBlob` if the data is not [`BLOB_LEN`]
+    /// Returns `AuthError::InvalidBlob` if the data is not `BLOB_LEN`
     /// bytes or has an unsupported version.
     pub fn deserialize(data: &[u8]) -> Result<Self, AuthError> {
         let Some((&version, rest)) = data.split_first() else {

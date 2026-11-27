@@ -115,6 +115,20 @@ pre-push:
         Cargo check failed.
         Run: cargo check --all-targets --all-features
 
+    rustdoc:
+      run: mise run cargo:doc
+      tags: [rust, docs]
+      fail_text: |
+        rustdoc failed (warnings are denied, as in CI).
+        Run: mise run cargo:doc
+
+    dependencies:
+      run: mise run qa:deps
+      tags: [deps]
+      fail_text: |
+        cargo deny failed (advisories, licenses, sources, bans).
+        Run: mise run qa:deps
+
     link-check:
       run: mise exec -- lychee --offline '**/*.md'
       tags: [docs, links]

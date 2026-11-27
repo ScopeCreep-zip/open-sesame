@@ -97,7 +97,7 @@ impl MruStore {
     ///
     /// `target` moves to position 0. If it was already in the stack, it is
     /// removed from its old position first. Stack is capped at
-    /// [`MAX_ENTRIES`]. No-op if target is already at position 0.
+    /// `MAX_ENTRIES`. No-op if target is already at position 0.
     pub fn save(&self, target: &str) {
         if let Err(e) = save_to(&self.path, target) {
             tracing::warn!(target, path = %self.path.display(), error = %e, "mru: save failed");

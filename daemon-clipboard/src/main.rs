@@ -497,7 +497,7 @@ fn main() -> anyhow::Result<()> {
     // The sandbox is applied on the only thread; the configuration
     // watcher and the capture thread start inside it.
     #[cfg(target_os = "linux")]
-    apply_sandbox(&layout)?;
+    apply_sandbox(&layout, &config)?;
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -727,16 +727,16 @@ async fn reported_default(client: &BusClient) -> Option<TrustProfileName> {
     }
 }
 
-/// Apply Landlock + seccomp: bus client, configuration (read), the systemd
-/// notification socket, the Wayland socket, and the cache directory
-/// holding the history database.
+/// Apply Landlock + seccomp under `config`'s sandbox floor: bus client,
+/// configuration (read), the systemd notification socket, the Wayland
+/// socket, and the cache directory holding the history database.
 ///
 /// # Errors
 ///
-/// When a granted location cannot be placed or the sandbox cannot be
-/// applied: the daemon does not run unsandboxed.
+/// When a granted location cannot be placed, the kernel is below the
+/// floor, or the sandbox cannot be applied: the daemon does not run.
 #[cfg(target_os = "linux")]
-fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> {
+fn apply_sandbox(layout: &core_layout::Layout, config: &Config) -> anyhow::Result<()> {
     use core_daemon::sandbox::{
         config_rules, ipc_client_rules, notify_rules, seccomp_profile, wayland_rules,
     };
@@ -754,7 +754,7 @@ fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> {
     // SQLite: file locks and durable writes.
     let seccomp = seccomp_profile(IDENTITY.daemon, &["flock", "fsync", "fdatasync"]);
 
-    core_daemon::sandbox::apply(layout, &rules, &seccomp)
+    core_daemon::sandbox::apply(layout, config, &rules, &seccomp)
 }
 
 #[cfg(test)]

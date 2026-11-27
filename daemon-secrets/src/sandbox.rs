@@ -1,15 +1,18 @@
 //! Landlock + seccomp sandbox application (Linux only).
 
-/// Apply Landlock + seccomp: bus client, configuration (read-write: vault
-/// databases, salts, and metadata live under it), and the systemd
-/// notification socket.
+/// Apply Landlock + seccomp under `config`'s sandbox floor: bus client,
+/// configuration (read-write: vault databases, salts, and metadata live
+/// under it), and the systemd notification socket.
 ///
 /// # Errors
 ///
-/// When a granted location cannot be placed or the sandbox cannot be
-/// applied: the daemon does not run unsandboxed.
+/// When a granted location cannot be placed, the kernel is below the
+/// floor, or the sandbox cannot be applied: the daemon does not run.
 #[cfg(target_os = "linux")]
-pub(crate) fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> {
+pub(crate) fn apply_sandbox(
+    layout: &core_layout::Layout,
+    config: &core_config::Config,
+) -> anyhow::Result<()> {
     use core_daemon::sandbox::{config_rules, ipc_client_rules, notify_rules, seccomp_profile};
     use platform_linux::sandbox::FsAccess;
 
@@ -38,5 +41,5 @@ pub(crate) fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> 
             "clock_nanosleep",
         ],
     );
-    core_daemon::sandbox::apply(layout, &rules, &seccomp)
+    core_daemon::sandbox::apply(layout, config, &rules, &seccomp)
 }

@@ -262,8 +262,10 @@ systemd every notification is a no-op.
 `security::apply_resource_limits` sets `RLIMIT_NOFILE` and `RLIMIT_MEMLOCK`. Both log a failure
 and continue.
 
-`sandbox` holds the one Landlock ruleset definition (ABI 9, every access right and scope a hard
-requirement; `landlock_support()` asks the kernel whether it enforces them) and the seccomp filter
+`sandbox` holds the one Landlock ruleset definition (every access right and scope of ABI 10,
+best-effort, so the kernel enforces the part it supports; `landlock_gaps()` names each
+`core_types::SandboxProtection` it does not, and the configured floor, `[global.sandbox]
+require`, is a hard requirement) and the seccomp filter
 (default action kill-process, other architectures killed, `socket`/`socketpair` only for `AF_UNIX`,
 synchronized onto every thread). `apply_sandbox(rules, seccomp)` applies both. The grants and
 allowlists each daemon passes are described in [Sandbox Model](../architecture/sandbox-model.md).

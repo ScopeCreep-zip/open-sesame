@@ -4,8 +4,8 @@
 //! traffic using the Noise Protocol Framework (IK pattern) via `snow`.
 //!
 //! Protocol: `Noise_IK_25519_<cipher>_<hash>` ([`NoiseSuite`]), from
-//! `[crypto] noise_cipher` (ChaChaPoly or AESGCM) and `noise_hash`
-//! (BLAKE2s or SHA256)
+//! `[crypto] noise_cipher` (`ChaChaPoly` or `AESGCM`) and `noise_hash`
+//! (`BLAKE2s` or `SHA256`)
 //! - IK: initiator's static key transmitted, responder's static key pre-known
 //! - X25519 DH
 //! - 2-message handshake (1 round-trip), then forward-secret transport

@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     // The sandbox is applied on the only thread; the configuration
     // watcher and the keyboard readers start inside it.
     #[cfg(target_os = "linux")]
-    apply_sandbox(&layout)?;
+    apply_sandbox(&layout, &config)?;
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -197,16 +197,16 @@ fn status_response() -> EventKind {
     }
 }
 
-/// Apply Landlock + seccomp: bus client, configuration (read), the systemd
-/// notification socket, and the evdev device nodes with their sysfs
-/// metadata.
+/// Apply Landlock + seccomp under `config`'s sandbox floor: bus client,
+/// configuration (read), the systemd notification socket, and the evdev
+/// device nodes with their sysfs metadata.
 ///
 /// # Errors
 ///
-/// When a granted location cannot be placed or the sandbox cannot be
-/// applied: the daemon does not run unsandboxed.
+/// When a granted location cannot be placed, the kernel is below the
+/// floor, or the sandbox cannot be applied: the daemon does not run.
 #[cfg(target_os = "linux")]
-fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> {
+fn apply_sandbox(layout: &core_layout::Layout, config: &core_config::Config) -> anyhow::Result<()> {
     use core_daemon::sandbox::{config_rules, ipc_client_rules, notify_rules, seccomp_profile};
     use platform_linux::sandbox::{FsAccess, LandlockRule};
 
@@ -229,7 +229,7 @@ fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> {
     );
 
     let seccomp = seccomp_profile(IDENTITY.daemon, &[]);
-    core_daemon::sandbox::apply(layout, &rules, &seccomp)
+    core_daemon::sandbox::apply(layout, config, &rules, &seccomp)
 }
 
 #[cfg(test)]

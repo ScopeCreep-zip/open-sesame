@@ -2,8 +2,12 @@
 
 Every daemon but daemon-launcher runs inside three layers of containment on Linux: Landlock
 (filesystem, sockets, scopes), seccomp-bpf (system calls and socket families), and systemd unit
-hardening. Each daemon is granted what its work needs and nothing else, and a sandbox that cannot
-be applied in full is fatal: no daemon runs unsandboxed or partially sandboxed.
+hardening. Each daemon is granted what its work needs and nothing else. Every daemon runs under the
+strongest sandbox the running kernel enforces: Landlock's rights and scopes are requested
+best-effort, so a newer kernel tightens the sandbox and an older one runs with its own subset,
+reported at startup and by `sesame status --doctor`. seccomp and the unit hardening apply on every
+kernel, and a sandbox that cannot be built or applied (a rule that cannot be opened, a failed
+system call) is fatal.
 
 ## Process Hardening
 
@@ -28,31 +32,72 @@ only its rules, derived from `core_layout::Layout` by the rule functions of
 `core-daemon/src/sandbox.rs`, so the granted paths and the paths the daemon opens are one
 derivation.
 
-### Required ABI: Landlock 9 (Linux 7.1)
+### Coverage: Every Right the Kernel Enforces
 
-The ruleset handles every access right and scope of Landlock ABI 9, each as a
-`CompatLevel::HardRequirement`: filesystem access (`AccessFs`), TCP (`AccessNet`), `IoctlDev`,
-the abstract-socket and signal scopes (ABI 6), and `ResolveUnix` (ABI 9). A kernel that lacks any
-of them is refused before anything is restricted, with an error naming the missing right.
+The ruleset requests every access right and scope of Landlock ABI 10 (Linux 7.2) under
+`CompatLevel::BestEffort`, the compatibility model of the kernel's Landlock documentation
+("Backward and forward compatibility") and of the landlock crate: the kernel enforces the rights
+of its own ABI and the rest are dropped. The daemons therefore run on every kernel, and inherit
+each protection a newer kernel adds without a change to the code. `restrict_self` reports the
+result: fully enforced, partially enforced, or not enforced (no Landlock).
 
-ABI 9 is the first that restricts `connect(2)` and addressed `sendmsg(2)` to pathname Unix sockets
-(`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Below it, Landlock does not mediate a pathname socket
-connection at all, and every sandboxed process reaches every socket of the session: the session
-D-Bus bus among them, where `org.freedesktop.systemd1` (`StartTransientUnit`) runs any command
-outside the sandbox. With `ResolveUnix` handled, a socket is reachable only under a rule granting
-it (`FsAccess::ReadWriteFile` on the socket, `FsAccess::ReadWrite` on its directory).
+What a kernel does not enforce is a `core_types::SandboxProtection`, found by building a
+`HardRequirement` ruleset of that protection's rights alone (nothing is created in the kernel and
+nothing is restricted):
 
-`sesame status --doctor platform` reports whether the running kernel enforces the set
-(`platform.kernel`), asked of the kernel with the same ruleset definition rather than inferred
-from the release.
+| Protection | Rights | Linux |
+| --- | --- | --- |
+| `Filesystem` | `AccessFs` of ABI 1 | 5.13 |
+| `Reparenting` | `Refer` | 5.19 |
+| `Truncation` | `Truncate` | 6.2 |
+| `Tcp` | `BindTcp`, `ConnectTcp` | 6.7 |
+| `DeviceIoctl` | `IoctlDev` | 6.10 |
+| `Scopes` | abstract Unix sockets, signals | 6.12 |
+| `PathnameSockets` | `ResolveUnix` | 7.1 |
+| `Udp` | `BindUdp`, `ConnectSendUdp` | 7.2 |
+
+A daemon on a kernel that lacks some logs `landlock: partially enforced` at warning level with
+each missing protection and its consequence, and continues; without Landlock it logs
+`landlock: not enforced` and continues under seccomp and its unit. `sesame status --doctor
+platform` reports the same: `platform.kernel` carries the release and the enforcement
+(`7.2.15, Landlock fully enforced`), and passes with no protection missing or warns naming each
+missing one with the Linux release that enforces it.
+
+### Floor: `[global.sandbox] require`
+
+A protection named in `require` (the table's names in kebab case: `filesystem`, `reparenting`,
+`truncation`, `tcp`, `device-ioctl`, `scopes`, `pathname-sockets`, `udp`) is a floor:
+
+```toml
+[global.sandbox]
+require = ["filesystem", "scopes", "pathname-sockets"]
+```
+
+On a kernel that does not enforce one, every sandboxed daemon refuses to start with an error
+naming each unmet protection, before anything is restricted, and `platform.kernel` fails, naming
+the floor and what the kernel lacks of it. On a kernel that meets it, the floor's rights are
+requested as `CompatLevel::HardRequirement` and every other right best-effort (the landlock
+crate's pattern for a minimum with opportunistic additions). An unknown name fails the
+configuration load, listing the accepted ones. The floor is read when a daemon starts; a reload
+does not re-sandbox a running daemon.
+
+`PathnameSockets` is the one whose absence opens a path out of the sandbox. Below ABI 9, Landlock
+does not mediate `connect(2)` or addressed `sendmsg(2)` to a pathname Unix socket, so a sandboxed
+process reaches every socket it can name: the session D-Bus bus among them, where
+`org.freedesktop.systemd1` (`StartTransientUnit`) runs any command outside the sandbox. Under
+systemd, `InaccessiblePaths=-%t/bus` removes the session bus socket from each sandboxed unit's
+mount namespace on every kernel (see [systemd Unit Hardening](#systemd-unit-hardening)); a daemon
+started outside its unit has only Landlock. With `ResolveUnix` handled, a socket is reachable only
+under a rule granting it (`FsAccess::ReadWriteFile` on the socket, `FsAccess::ReadWrite` on its
+directory).
 
 ### Scopes
 
-Every daemon runs with both scopes: it cannot connect to an abstract-namespace Unix socket created
-outside its domain (Xwayland and some session buses listen on abstract addresses), and it cannot
-signal a process outside it. Abstract sockets cannot be granted by a rule; every socket a daemon
-uses is a pathname socket (the user service manager's `NOTIFY_SOCKET` is
-`$XDG_RUNTIME_DIR/systemd/notify`).
+On a kernel that enforces them (Linux 6.12), every daemon runs with both scopes: it cannot connect
+to an abstract-namespace Unix socket created outside its domain (Xwayland and some session buses
+listen on abstract addresses), and it cannot signal a process outside it. Abstract sockets cannot
+be granted by a rule; every socket a daemon uses is a pathname socket (the user service manager's
+`NOTIFY_SOCKET` is `$XDG_RUNTIME_DIR/systemd/notify`).
 
 ### Rules
 
@@ -124,10 +169,14 @@ real-versus-effective ID check (`getgid`, `getegid`) is granted afterwards.
 | daemon-snippets | none |
 
 `platform-linux/src/sandbox.rs` tests each property in a child process, since both layers last for
-the process's life: an ungranted pathname socket is refused, a granted one is reachable, an
-abstract socket outside the domain is refused, and `socket(AF_INET)` kills the process while
-`AF_UNIX` is admitted. `tests/protocol_validation.sh` runs every daemon of a build through its
-lifecycle under an isolated root and fails on any seccomp kill the kernel records for them.
+the process's life, and expects of each kernel what it enforces: an ungranted pathname socket is
+refused where `PathnameSockets` is enforced and reachable where it is not, a granted one is
+reachable, an abstract socket outside the domain is refused where `Scopes` is enforced, the status
+`apply_landlock` returns is the one the kernel's gaps predict, and `socket(AF_INET)` kills the
+process while `AF_UNIX` is admitted. A table test checks that the protections name every requested
+right exactly once. `tests/protocol_validation.sh` runs every daemon of a build through its
+lifecycle under an isolated root, checks that each reports the enforcement the doctor predicts,
+and fails on any seccomp kill the kernel records for them.
 
 ## systemd Unit Hardening
 
@@ -156,7 +205,7 @@ launcher restart.
 
 ## Daemon Matrix
 
-| Daemon | Landlock (ABI 9) | seccomp | Session D-Bus | Network sockets | Unit mount namespace |
+| Daemon | Landlock | seccomp | Session D-Bus | Network sockets | Unit mount namespace |
 | --- | :---: | :---: | :---: | :---: | :---: |
 | daemon-profile | Y | Y | - | - | Y |
 | daemon-secrets | Y | Y | - | - (and `PrivateNetwork`) | Y |

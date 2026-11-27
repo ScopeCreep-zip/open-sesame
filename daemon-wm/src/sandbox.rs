@@ -7,7 +7,8 @@ use core_daemon::sandbox::{
 use core_layout::Layout;
 use platform_linux::sandbox::{FsAccess, LandlockRule};
 
-/// Apply Landlock + seccomp: bus client, Wayland compositor socket,
+/// Apply Landlock + seccomp under `config`'s sandbox floor: bus client,
+/// Wayland compositor socket,
 /// configuration (read: hot-reload, vault salts and enrollments for inline
 /// unlock), SSH agent sockets, the systemd notification socket, the cache
 /// directory (MRU stack), COSMIC theme configuration, user data, and the
@@ -19,9 +20,9 @@ use platform_linux::sandbox::{FsAccess, LandlockRule};
 ///
 /// # Errors
 ///
-/// When a granted location cannot be placed or the sandbox cannot be
-/// applied: the daemon does not run unsandboxed.
-pub fn apply_sandbox(layout: &Layout) -> anyhow::Result<()> {
+/// When a granted location cannot be placed, the kernel is below the
+/// floor, or the sandbox cannot be applied: the daemon does not run.
+pub fn apply_sandbox(layout: &Layout, config: &core_config::Config) -> anyhow::Result<()> {
     let mut rules = ipc_client_rules(layout)?;
     rules.extend(wayland_rules(layout)?);
     rules.extend(config_rules(layout, FsAccess::ReadOnly)?);
@@ -130,5 +131,5 @@ pub fn apply_sandbox(layout: &Layout) -> anyhow::Result<()> {
         ],
     );
 
-    core_daemon::sandbox::apply(layout, &rules, &seccomp)
+    core_daemon::sandbox::apply(layout, config, &rules, &seccomp)
 }

@@ -41,7 +41,7 @@ fn failed(operation: &str, e: impl std::fmt::Display) -> core_types::Error {
 
 impl FrecencyDb {
     /// Open or create the frecency database at `path` (WAL mode), creating
-    /// the schema and deleting launches older than [`RETENTION`].
+    /// the schema and deleting launches older than `RETENTION`.
     ///
     /// # Errors
     ///

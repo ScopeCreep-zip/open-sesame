@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     // The sandbox is applied on the only thread; the configuration
     // watcher, Wayland, and overlay threads start inside it.
     #[cfg(target_os = "linux")]
-    daemon_wm::sandbox::apply_sandbox(&layout)?;
+    daemon_wm::sandbox::apply_sandbox(&layout, &config)?;
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

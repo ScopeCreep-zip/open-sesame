@@ -9,8 +9,6 @@
 mod client;
 mod framing;
 mod message;
-/// The Noise protocol suite, the bus endpoint, and keypair issuance and
-/// persistence.
 pub mod noise;
 mod noise_keys;
 mod registry;

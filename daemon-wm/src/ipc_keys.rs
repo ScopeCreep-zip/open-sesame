@@ -42,7 +42,7 @@ impl KeyDeduplicator {
     }
 
     /// Whether this event should be processed: no event with the same
-    /// keysym and direction was processed within [`DUPLICATE_WINDOW`].
+    /// keysym and direction was processed within `DUPLICATE_WINDOW`.
     pub fn accept(&mut self, keyval: u32, pressed: bool) -> bool {
         let now = Instant::now();
         if self.recent.iter().any(|&(kv, pr, at)| {

@@ -95,7 +95,7 @@ fn main() -> anyhow::Result<()> {
     // The sandbox is applied on the only thread; the runtime's threads
     // and the configuration watcher start inside it.
     #[cfg(target_os = "linux")]
-    sandbox::apply_sandbox(&layout)?;
+    sandbox::apply_sandbox(&layout, &config)?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

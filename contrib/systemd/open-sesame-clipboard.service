@@ -21,7 +21,8 @@ ProtectHome=read-only
 ProtectSystem=strict
 # Unix-domain sockets of the native ABI only, and no session D-Bus bus (it
 # reaches the user's service manager); the in-process seccomp filter and
-# Landlock (ABI 9) enforce the same.
+# Landlock enforce the same, Landlock from Linux 7.1 (ResolveUnix); below it,
+# InaccessiblePaths is the one layer that hides the bus.
 RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native
 InaccessiblePaths=-%t/bus

@@ -60,8 +60,8 @@ impl Respawns {
     ///
     /// # Errors
     ///
-    /// When [`MAX_RESPAWNS`] respawns already happened within
-    /// [`RESPAWN_WINDOW`]: the overlay keeps dying, and the daemon stops
+    /// When `MAX_RESPAWNS` respawns already happened within
+    /// `RESPAWN_WINDOW`: the overlay keeps dying, and the daemon stops
     /// for a systemd restart.
     pub fn schedule(&mut self) -> anyhow::Result<()> {
         let now = Instant::now();

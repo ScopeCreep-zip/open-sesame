@@ -300,19 +300,34 @@ operations at first; later ABIs extend it to sockets and other processes:
 Declare the ABI your ruleset is written against as a constant and handle
 `from_all(ABI)` of it; never construct an ABI from the running kernel (the
 landlock crate keeps that private by design, because a ruleset would then
-differ between machines). The crate's default `CompatLevel::BestEffort`
-silently drops rights the kernel lacks. A security boundary that depends on a
-right sets `CompatLevel::HardRequirement`, so a kernel without it is an error
-naming the right, before anything is restricted:
+differ between machines). Under the crate's default `CompatLevel::BestEffort`
+the kernel enforces the rights of its own ABI and drops the rest, which is
+the compatibility model the kernel's Landlock documentation prescribes: the
+program runs on every kernel, under the strongest sandbox each one enforces,
+and inherits what a newer kernel adds:
 
 ```rust
-let ruleset = Ruleset::default()
-    .set_compatibility(CompatLevel::HardRequirement)
-    .handle_access(AccessFs::from_all(ABI::V9))?
-    .handle_access(AccessNet::from_all(ABI::V9))?
-    .scope(Scope::from_all(ABI::V9))?
-    .create()?;
+let status = Ruleset::default()
+    .set_compatibility(CompatLevel::BestEffort)
+    .handle_access(AccessFs::from_all(ABI::V10))?
+    .handle_access(AccessNet::from_all(ABI::V10))?
+    .scope(Scope::from_all(ABI::V10))?
+    .create()?
+    // rules...
+    .restrict_self()?;
+// status.ruleset: FullyEnforced, PartiallyEnforced, or NotEnforced.
 ```
+
+Best effort must not be silent. Report what the kernel does not enforce, at
+startup and in diagnostics: a `CompatLevel::HardRequirement` ruleset of one
+protection's rights alone fails exactly when the kernel lacks it, and builds
+nothing in the kernel. `CompatLevel::HardRequirement` on the whole ruleset is
+for a program that must not run at all below a level (the crate's "rare
+circumstances"); it also keeps the program from running in CI on an older
+kernel. Test each restriction on a kernel that enforces it and on one that
+does not: expect a refusal where the kernel's ABI includes the right and
+access where it does not (rust-landlock runs its tests on a matrix of UML
+kernels, one per ABI, with `landlock-test-tools`).
 
 ### 3.2 Symlink resolution
 
@@ -381,15 +396,19 @@ to a pathname Unix socket: a sandboxed process reaches every socket it can
 name, whatever its rules. On a desktop that includes the session D-Bus bus
 (`$XDG_RUNTIME_DIR/bus`), where the user's service manager
 (`org.freedesktop.systemd1`) starts transient units running any command, an
-escape from any sandbox. Handle ABI 9 (as a hard requirement), and grant each
-socket a process connects to: `ResolveUnix` (part of `AccessFs::from_file`) on
-the socket, or on its directory. seccomp cannot close this gap: it cannot read
-the address `connect` points to.
+escape from any sandbox. Request ABI 9's `ResolveUnix` (it is part of
+`AccessFs::from_all` from `ABI::V9`), grant each socket a process connects to
+(`ResolveUnix`, part of `AccessFs::from_file`, on the socket or on its
+directory), and report a kernel below ABI 9 as one where this gap is open.
+seccomp cannot close it: it cannot read the address `connect` points to. On
+such a kernel, systemd's `InaccessiblePaths=-%t/bus` removes the session bus
+socket from the unit's mount namespace.
 
 **`NOTIFY_SOCKET` path:**
 `sd_notify()` sends to the socket in `$NOTIFY_SOCKET`. A user service
-manager's is a pathname socket (`$XDG_RUNTIME_DIR/systemd/notify`); with ABI 9
-handled, grant it like any socket, or notifications fail. An abstract address
+manager's is a pathname socket (`$XDG_RUNTIME_DIR/systemd/notify`); with
+`ResolveUnix` handled (ABI 9), grant it like any socket, or notifications fail
+on every kernel that enforces it. An abstract address
 (`@`-prefixed) cannot be granted by a rule: under the abstract-socket scope
 (below) it is unreachable.
 
@@ -789,11 +808,14 @@ addresses a specific failure mode described in this guide.
 - [ ] Grant `ReadWrite` to data directory (`$XDG_DATA_HOME/myapp`)
 - [ ] Canonicalize all paths to resolve symlinks (NixOS/Guix)
 - [ ] Grant `ReadOnly` to `/dev/urandom` if using crypto
-- [ ] Handle ABI 9 or later as `CompatLevel::HardRequirement` (pathname
-      socket `connect` is unmediated below it)
+- [ ] Request every right and scope of the newest ABI the crate knows,
+      best-effort, so each kernel enforces all it supports
+- [ ] Report the protections the kernel does not enforce, at startup and in
+      diagnostics (below ABI 9 pathname socket `connect` is unmediated)
 - [ ] Grant each socket the process connects to, `$NOTIFY_SOCKET` among them,
       and nothing else: never the session D-Bus bus
-- [ ] Enable every scope (abstract sockets, signals)
+- [ ] Request every scope (abstract sockets, signals)
+- [ ] Test each restriction where the kernel enforces it and where it does not
 - [ ] Test on NixOS or with symlinked configs
 
 ### seccomp allowlist

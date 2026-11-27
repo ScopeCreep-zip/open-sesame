@@ -58,6 +58,12 @@ run = "cargo clippy --all-targets --all-features -- -D warnings"
 hide = true
 run = "cargo test"
 
+[tasks."cargo:doc"]
+hide = true
+description = "rustdoc for every crate, warnings denied (broken and private intra-doc links)"
+env.RUSTDOCFLAGS = "-D warnings"
+run = "cargo doc --no-deps --all-features"
+
 [tasks."cargo:build"]
 hide = true
 run = "cargo build --release"
@@ -210,13 +216,13 @@ depends = ["cargo:fmt"]
 
 [tasks.lint]
 alias = ["l"]
-description = "Lint code (rustfmt check, clippy)"
-depends = ["cargo:fmt:check", "cargo:clippy"]
+description = "Lint code (rustfmt check, clippy, rustdoc)"
+depends = ["cargo:fmt:check", "cargo:clippy", "cargo:doc"]
 
 [tasks.test]
 alias = ["t"]
 description = "Run all quality gates + tests"
-depends = ["cargo:fmt:check", "cargo:clippy", "cargo:test"]
+depends = ["cargo:fmt:check", "cargo:clippy", "cargo:doc", "cargo:test"]
 
 # =============================================================================
 # BUILD (all gated by quality checks)
@@ -729,7 +735,7 @@ cd docs && mdbook serve --port 3000
 [tasks."qa:all"]
 alias = ["qa"]
 description = "Run all QA checks"
-depends = ["lint", "qa:toml", "qa:markdown", "qa:links", "qa:shell", "qa:actions"]
+depends = ["lint", "qa:toml", "qa:markdown", "qa:links", "qa:shell", "qa:actions", "qa:deps"]
 
 [tasks."qa:toml"]
 description = "Lint and format TOML files"
@@ -815,7 +821,7 @@ run = """
 #!/usr/bin/env bash
 set -euxo pipefail
 mise run ci:setup
-cargo doc --no-deps --all-features
+mise run cargo:doc
 mise run docs:man
 mise run docs:completions
 mise run docs:book
@@ -826,7 +832,6 @@ test -f target/completions/sesame.fish
 test -d docs/book/
 echo "✓ All documentation artifacts generated successfully"
 """
-env.RUSTDOCFLAGS = "-D warnings"
 
 [tasks."ci:build:deb"]
 description = "CI build both .deb packages (amd64)"
@@ -1210,8 +1215,8 @@ Open Sesame
 
 QUALITY GATES:
   fmt              (f)    Format code
-  lint             (l)    Format check + clippy
-  test             (t)    Format check + clippy + test
+  lint             (l)    Format check + clippy + rustdoc
+  test             (t)    Format check + clippy + rustdoc + test
 
 BUILD (all run quality gates first):
   build            (b)    Release binary

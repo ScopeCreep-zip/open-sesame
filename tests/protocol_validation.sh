@@ -20,7 +20,10 @@
 #                not restored)
 #
 # Requirements:
-#   - Linux 7.1 or later (Landlock ABI 9): the daemons refuse to run below.
+#   - Any Linux kernel: the daemons run under what its Landlock enforces
+#     (no `[global.sandbox] require` floor is configured). L-01 records it
+#     (doctor `platform.kernel`, whose value names the enforcement), and
+#     L-04 expects every daemon to report that enforcement.
 #   - A Wayland session of the same user (`$WAYLAND_DISPLAY`, or a
 #     `wayland-*` socket in `/run/user/$UID`): daemon-wm and daemon-clipboard
 #     connect to the compositor.
@@ -348,7 +351,12 @@ echo "========================================"
 sesame_run status --doctor platform --output json
 kernel=$(jq -r '.checks[] | select(.id == "platform.kernel") | "\(.status) \(.value)"' <<<"$OUT" 2>&1 || true)
 OUT=$kernel
-expect_match "L-01: the kernel enforces the sandbox (doctor platform.kernel)" '^pass '
+expect_match "L-01: the doctor reports the kernel's Landlock coverage (platform.kernel)" '^(pass|warn) .*, Landlock (fully|partially|not) enforced$'
+case "$kernel" in
+*", Landlock fully enforced") ENFORCEMENT=FullyEnforced ;;
+*", Landlock partially enforced") ENFORCEMENT=PartiallyEnforced ;;
+*) ENFORCEMENT=NotEnforced ;;
+esac
 
 sesame_with "$PASSWORD" init --no-keybinding
 expect_match "L-02: sesame init sets up config, daemons, and the vault" 'Setup complete'
@@ -362,10 +370,10 @@ for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
 done
 
 for daemon in "${SANDBOXED[@]}"; do
-    if grep -q 'sandbox applied status=FullyEnforced' <<<"$(log_of "$daemon")"; then
-        pass "L-04: $daemon runs fully sandboxed"
+    if grep -q "sandbox applied status=$ENFORCEMENT" <<<"$(log_of "$daemon")"; then
+        pass "L-04: $daemon is sandboxed as the kernel enforces ($ENFORCEMENT)"
     else
-        fail "L-04: $daemon runs fully sandboxed" "$(log_tail "$daemon")"
+        fail "L-04: $daemon is sandboxed as the kernel enforces ($ENFORCEMENT)" "$(log_tail "$daemon")"
     fi
 done
 

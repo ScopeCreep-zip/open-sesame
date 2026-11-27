@@ -105,6 +105,9 @@ pub struct GlobalConfig {
     /// Alt+Tab. Bound through COSMIC's shortcut config or the
     /// `GlobalShortcuts` portal (`sesame setup-keybinding`, daemon-launcher).
     pub launcher_key: core_types::KeyCombo,
+
+    /// The daemons' kernel sandbox.
+    pub sandbox: SandboxConfig,
 }
 
 impl Default for GlobalConfig {
@@ -117,8 +120,24 @@ impl Default for GlobalConfig {
             ipc: IpcConfig::default(),
             logging: LogConfig::default(),
             launcher_key: "alt+space".parse().expect("hardcoded valid key combo"),
+            sandbox: SandboxConfig::default(),
         }
     }
+}
+
+/// The daemons' kernel sandbox (`[global.sandbox]`).
+///
+/// Every daemon runs under every protection the kernel enforces; one it
+/// does not is a warning (`sesame status --doctor`). The protections of
+/// `require` are a floor: on a kernel that does not enforce one, every
+/// sandboxed daemon refuses to start and the doctor fails, naming it. The
+/// floor applies when a daemon starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// The protections the kernel must enforce (`pathname-sockets`,
+    /// `scopes`, ...).
+    pub require: Vec<core_types::SandboxProtection>,
 }
 
 /// IPC bus configuration.
@@ -277,6 +296,25 @@ mod tests {
         );
         let bad: Config = toml::from_str("[crypto]\naudit_hash = \"md5\"\n").unwrap();
         assert!(bad.crypto().is_err());
+    }
+
+    #[test]
+    fn the_sandbox_floor_is_read_and_defaults_to_none() {
+        assert!(Config::default().global.sandbox.require.is_empty());
+        let config: Config =
+            toml::from_str("[global.sandbox]\nrequire = [\"pathname-sockets\", \"scopes\"]\n")
+                .unwrap();
+        assert_eq!(
+            config.global.sandbox.require,
+            [
+                core_types::SandboxProtection::PathnameSockets,
+                core_types::SandboxProtection::Scopes
+            ]
+        );
+        let unknown = toml::from_str::<Config>("[global.sandbox]\nrequire = [\"sockets\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("pathname-sockets"), "{unknown}");
     }
 
     #[test]

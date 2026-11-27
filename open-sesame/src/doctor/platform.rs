@@ -18,31 +18,88 @@ pub(super) fn kernel_release() -> anyhow::Result<String> {
         .context("kernel release is not UTF-8")
 }
 
-/// The kernel release, passing when the kernel enforces the whole Landlock
-/// access set the daemon sandboxes require
-/// (`platform_linux::sandbox::landlock_support`, asked of the kernel, not
-/// inferred from the release): on a kernel that does not, every sandboxed
-/// daemon refuses to start. `memfd_secret` is the memory category's check.
-fn kernel_check() -> anyhow::Result<Check> {
+/// The verdict on a kernel that does not enforce `gaps`, under the floor
+/// `require` (`[global.sandbox] require`): failing below the floor (the
+/// daemons refuse to start), a warning naming each protection the kernel
+/// lacks (the daemons run without them), passing when it lacks none.
+#[cfg(target_os = "linux")]
+fn landlock_verdict(
+    gaps: &[core_types::SandboxProtection],
+    require: &[core_types::SandboxProtection],
+) -> (Status, String) {
+    use core_types::SandboxProtection;
+    let below = platform_linux::sandbox::unmet(require, gaps);
+    if !below.is_empty() {
+        let floor = require
+            .iter()
+            .map(|p| p.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return (
+            Status::Fail,
+            format!(
+                "below the configured sandbox floor ([global.sandbox] require = {floor}); \
+                 the daemons refuse to start: {}",
+                SandboxProtection::describe(&below)
+            ),
+        );
+    }
+    match gaps.first() {
+        None => (
+            Status::Pass,
+            "Landlock enforces every sandbox protection".to_owned(),
+        ),
+        Some(SandboxProtection::Filesystem) => (
+            Status::Warn,
+            "the kernel has no Landlock: the daemons run confined by seccomp and their units \
+             only; [global.sandbox] require makes a protection a floor"
+                .to_owned(),
+        ),
+        Some(_) => (
+            Status::Warn,
+            format!(
+                "the daemons run without what this kernel's Landlock lacks: {}; \
+                 [global.sandbox] require makes a protection a floor",
+                SandboxProtection::describe(gaps)
+            ),
+        ),
+    }
+}
+
+/// The kernel release and the daemons' Landlock sandbox on it
+/// (`platform_linux::sandbox::landlock_gaps`, asked of the kernel, not
+/// inferred from the release) under the configured floor: the value is the
+/// release and the enforcement every sandboxed daemon reports
+/// (`landlock_verdict` judges it). `memfd_secret` is the memory category's
+/// check.
+fn kernel_check(layout: &Layout) -> anyhow::Result<Check> {
     let release = kernel_release()?;
     #[cfg(target_os = "linux")]
-    let (status, description) = match platform_linux::sandbox::landlock_support() {
-        Ok(()) => (
-            Status::Pass,
-            "Landlock enforces every sandbox restriction (ABI 9, Linux 7.1 or later)".to_owned(),
-        ),
-        Err(e) => (Status::Fail, format!("{e}; the daemons refuse to start")),
+    let (status, value, description) = {
+        let config = core_config::load_config(layout).context("cannot read the sandbox floor")?;
+        let gaps = platform_linux::sandbox::landlock_gaps();
+        let (status, description) = landlock_verdict(&gaps, &config.global.sandbox.require);
+        let enforcement = platform_linux::sandbox::landlock_enforcement(&gaps);
+        (
+            status,
+            format!("{release}, Landlock {enforcement}"),
+            description,
+        )
     };
     #[cfg(not(target_os = "linux"))]
-    let (status, description) = (
-        Status::Warn,
-        "this platform has no Landlock; the daemons run without it".to_owned(),
-    );
+    let (status, value, description) = {
+        let _ = layout;
+        (
+            Status::Warn,
+            release,
+            "this platform has no Landlock; the daemons run without it".to_owned(),
+        )
+    };
     Ok(Check::new(
         "platform.kernel",
         CATEGORY,
         status,
-        release,
+        value,
         description,
     ))
 }
@@ -151,7 +208,8 @@ fn input_group_check(layout: &Layout) -> anyhow::Result<Check> {
 
 pub fn checks(layout: &Layout) -> Vec<Check> {
     vec![
-        kernel_check().unwrap_or_else(|e| Check::probe_failed("platform.kernel", CATEGORY, &e)),
+        kernel_check(layout)
+            .unwrap_or_else(|e| Check::probe_failed("platform.kernel", CATEGORY, &e)),
         ptrace_check(layout)
             .unwrap_or_else(|e| Check::probe_failed("platform.ptrace_scope", CATEGORY, &e)),
         session_check(layout),
@@ -166,14 +224,53 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_kernel_check_asks_the_kernel_for_the_sandbox_access_set() {
-        let check = kernel_check().unwrap();
-        assert_eq!(check.value, kernel_release().unwrap());
+    fn the_kernel_check_reports_this_kernels_coverage_and_enforcement() {
+        use platform_linux::sandbox::{landlock_enforcement, landlock_gaps};
+        let root = tempfile::tempdir().unwrap();
+        let check = kernel_check(&Layout::under(root.path())).unwrap();
+        let gaps = landlock_gaps();
         assert_eq!(
-            check.status == Status::Pass,
-            platform_linux::sandbox::landlock_support().is_ok(),
-            "{check:?}"
+            check.value,
+            format!(
+                "{}, Landlock {}",
+                kernel_release().unwrap(),
+                landlock_enforcement(&gaps)
+            )
         );
+        assert_eq!(
+            (check.status, check.description),
+            landlock_verdict(&gaps, &[])
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_below_the_floor_fails_and_one_without_a_floor_warns() {
+        use core_types::SandboxProtection::{Filesystem, PathnameSockets, Scopes, Udp};
+        let (status, description) = landlock_verdict(&[PathnameSockets, Udp], &[PathnameSockets]);
+        assert_eq!(status, Status::Fail);
+        assert!(description.contains("pathname-sockets"), "{description}");
+        assert!(description.contains("refuse to start"), "{description}");
+        assert!(
+            !description.contains("udp ("),
+            "only the unmet floor: {description}"
+        );
+
+        let (status, description) = landlock_verdict(&[PathnameSockets, Udp], &[Scopes]);
+        assert_eq!(status, Status::Warn);
+        assert!(description.contains("pathname-sockets"), "{description}");
+        assert!(description.contains("udp"), "{description}");
+
+        assert_eq!(
+            landlock_verdict(&core_types::SandboxProtection::ALL, &[]).0,
+            Status::Warn,
+            "no Landlock and no floor: the daemons run, and it is reported"
+        );
+        assert_eq!(
+            landlock_verdict(&core_types::SandboxProtection::ALL, &[Filesystem]).0,
+            Status::Fail
+        );
+        assert_eq!(landlock_verdict(&[], &[Filesystem, Udp]).0, Status::Pass);
     }
 
     #[test]

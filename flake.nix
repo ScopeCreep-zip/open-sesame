@@ -547,8 +547,12 @@
               markdownlint-cli2
               lefthook
 
-              # Supply chain: advisories, licenses, sources, bans (deny.toml)
+              # Supply chain: advisories, licenses, sources, bans (deny.toml).
+              # cargo-deny fetches the advisory database with git; a host git
+              # run under this shell's LD_LIBRARY_PATH loads the shell's glibc
+              # and aborts.
               cargo-deny
+              git
 
               # Task runner (.mise.toml: qa:*, ci:*, cargo:*)
               mise

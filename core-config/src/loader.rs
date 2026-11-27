@@ -81,7 +81,7 @@ pub fn resolve_config_paths(layout: &Layout) -> core_types::Result<Vec<PathBuf>>
 /// Load configuration by merging all layers.
 ///
 /// Each file from `resolve_config_paths` (lowest to highest priority) is
-/// merged into the layers below it with [`merge_layer`]; the merged
+/// merged into the layers below it with `merge_layer`; the merged
 /// document is then read as a [`Config`], so every key a file leaves unset
 /// takes its compiled default.
 ///

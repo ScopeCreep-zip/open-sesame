@@ -1,5 +1,5 @@
 //! The SCTK overlay thread's loop: Wayland dispatch, daemon commands,
-//! modifier polling, and rendering, every [`POLL_TIMEOUT`] at most.
+//! modifier polling, and rendering, every `POLL_TIMEOUT` at most.
 
 use anyhow::Context;
 use cosmic_text::{FontSystem, SwashCache};

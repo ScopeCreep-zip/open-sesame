@@ -58,8 +58,8 @@ impl Refresh {
 }
 
 /// Track the compositor's windows in `windows` with `list`: a poll thread
-/// enumerates every [`POLL_INTERVAL`] and on request, and a task publishes
-/// each list. After [`MAX_FAILURES`] consecutive failures the compositor
+/// enumerates every `POLL_INTERVAL` and on request, and a task publishes
+/// each list. After `MAX_FAILURES` consecutive failures the compositor
 /// connection is dead: the thread reports it through
 /// [`Refresh::lost`], and the event loop stops the daemon.
 ///

@@ -26,6 +26,16 @@ default_profile = "default"
 # shift; the key is an XKB keysym name.
 launcher_key = "alt+space"
 
+[global.sandbox]
+# The daemons run under every Landlock protection the kernel enforces; one it
+# does not is a warning (`sesame status --doctor platform`). Each protection
+# listed here is a floor: on a kernel that does not enforce it, every
+# sandboxed daemon refuses to start and the doctor fails. Protections, with
+# the first Linux release that enforces each: filesystem (5.13),
+# reparenting (5.19), truncation (6.2), tcp (6.7), device-ioctl (6.10),
+# scopes (6.12), pathname-sockets (7.1), udp (7.2).
+# require = ["filesystem", "scopes", "pathname-sockets"]
+
 [global.ipc]
 # channel_capacity = 1024
 # slow_subscriber_timeout_ms = 5000

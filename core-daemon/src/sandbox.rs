@@ -137,8 +137,8 @@ fn thread_count(layout: &Layout) -> anyhow::Result<usize> {
         .count())
 }
 
-/// Apply the daemon's sandbox: Landlock with `rules`, then the `seccomp`
-/// filter.
+/// Apply the daemon's sandbox: Landlock with `rules` and the floor of
+/// `config` (`[global.sandbox] require`), then the `seccomp` filter.
 ///
 /// Landlock restricts the calling thread and the threads it starts
 /// afterwards, never a thread that already exists. This is called while
@@ -149,10 +149,12 @@ fn thread_count(layout: &Layout) -> anyhow::Result<usize> {
 ///
 /// # Errors
 ///
-/// When the threads cannot be counted, there is more than one, or either
-/// layer cannot be applied: the daemon does not run unsandboxed.
+/// When the threads cannot be counted, there is more than one, the kernel
+/// does not enforce a protection of the floor, or either layer cannot be
+/// applied: the daemon does not run below its floor or unsandboxed.
 pub fn apply(
     layout: &Layout,
+    config: &core_config::Config,
     rules: &[LandlockRule],
     seccomp: &SeccompProfile,
 ) -> anyhow::Result<()> {
@@ -163,8 +165,9 @@ pub fn apply(
          so that no thread runs outside it",
         seccomp.daemon_name
     );
-    let status = platform_linux::sandbox::apply_sandbox(rules, seccomp)
-        .context("refusing to run unsandboxed")?;
+    let status =
+        platform_linux::sandbox::apply_sandbox(rules, &config.global.sandbox.require, seccomp)
+            .with_context(|| format!("{} refuses to start", seccomp.daemon_name))?;
     tracing::info!(?status, daemon = %seccomp.daemon_name, "sandbox applied");
     Ok(())
 }
@@ -340,7 +343,9 @@ mod tests {
             daemon_name: "test-daemon".into(),
             allowed_syscalls: Vec::new(),
         };
-        let err = apply(&layout, &[], &seccomp).unwrap_err().to_string();
+        let err = apply(&layout, &core_config::Config::default(), &[], &seccomp)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("test-daemon has 2 threads"), "{err}");
     }
 

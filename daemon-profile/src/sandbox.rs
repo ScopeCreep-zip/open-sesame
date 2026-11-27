@@ -18,8 +18,9 @@ pub(crate) fn register_sighup() -> std::io::Result<tokio::signal::unix::Signal> 
     signal(SignalKind::hangup())
 }
 
-/// Apply Landlock + seccomp: configuration (read-write: the audit log and
-/// installation identity live there), the PDS runtime directory
+/// Apply Landlock + seccomp under `config`'s sandbox floor: configuration
+/// (read-write: the audit log and installation identity live there), the
+/// PDS runtime directory
 /// (read-write: bus socket, endpoint, and keys), the systemd notification
 /// socket, and with the `desktop` feature the system D-Bus socket (the
 /// Wi-Fi monitor) and, in a Wayland session, the compositor socket (the
@@ -32,10 +33,13 @@ pub(crate) fn register_sighup() -> std::io::Result<tokio::signal::unix::Signal> 
 ///
 /// # Errors
 ///
-/// When a granted location cannot be placed, or the sandbox cannot be
-/// applied: the daemon does not run unsandboxed.
+/// When a granted location cannot be placed, the kernel is below the
+/// floor, or the sandbox cannot be applied: the daemon does not run.
 #[cfg(target_os = "linux")]
-pub(crate) fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> {
+pub(crate) fn apply_sandbox(
+    layout: &core_layout::Layout,
+    config: &core_config::Config,
+) -> anyhow::Result<()> {
     use core_daemon::sandbox::{config_rules, notify_rules, seccomp_profile};
     use platform_linux::sandbox::{FsAccess, LandlockRule};
 
@@ -89,5 +93,5 @@ pub(crate) fn apply_sandbox(layout: &core_layout::Layout) -> anyhow::Result<()> 
             "timerfd_gettime",
         ],
     );
-    core_daemon::sandbox::apply(layout, &rules, &seccomp)
+    core_daemon::sandbox::apply(layout, config, &rules, &seccomp)
 }
