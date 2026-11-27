@@ -367,91 +367,54 @@ docker compose down -v 2>/dev/null || true
 echo "Containers and volumes removed"
 """
 
+# The container install tests: scripts/docker/verify-install.sh boots the
+# distribution's systemd container, installs the package, and fails unless
+# every headless daemon runs under its installed unit, the vault is
+# unlocked, and no doctor check fails. CI's `install` job and the release's
+# `verify-packages` job run the same script.
 [tasks."test:docker:arch:repo"]
 description = "Arch: install from GitHub Pages pacman repo"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-docker compose down -v arch-repo 2>/dev/null || true
-docker compose up --build -d arch-repo
-sleep 12
-docker exec open-sesame-arch-repo install-repo.sh
-docker exec --user arch open-sesame-arch-repo post-install.sh
-"""
+run = "./scripts/docker/verify-install.sh arch repo"
 
 [tasks."test:docker:ubuntu:repo"]
 description = "Ubuntu: install from GitHub Pages APT repo"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-docker compose down -v ubuntu-repo 2>/dev/null || true
-docker compose up --build -d ubuntu-repo
-sleep 12
-docker exec open-sesame-ubuntu-repo install-repo.sh
-docker exec --user ubuntu open-sesame-ubuntu-repo post-install.sh
-"""
+run = "./scripts/docker/verify-install.sh ubuntu repo"
 
 [tasks."test:docker:fedora:repo"]
 description = "Fedora: install from GitHub Pages DNF repo"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-docker compose down -v fedora-repo 2>/dev/null || true
-docker compose up --build -d fedora-repo
-sleep 12
-docker exec open-sesame-fedora-repo install-repo.sh
-docker exec --user fedora open-sesame-fedora-repo post-install.sh
-"""
+run = "./scripts/docker/verify-install.sh fedora repo"
 
 [tasks."test:docker:arch:local"]
-description = "Arch: install from locally built .pkg.tar.zst"
+description = "Arch: install from locally built .pkg.tar.zst (target/arch)"
 depends = ["test:arch:pkg"]
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-docker compose down -v arch-local 2>/dev/null || true
-docker compose up --build -d arch-local
-sleep 12
-docker exec open-sesame-arch-local install-local.sh
-docker exec --user arch open-sesame-arch-local post-install.sh
-"""
+run = "./scripts/docker/verify-install.sh arch local target/arch"
 
 [tasks."test:docker:ubuntu:local"]
-description = "Ubuntu: install from locally built .deb"
+description = "Ubuntu: install from locally built .deb (target/debian)"
 depends = ["build:deb"]
+run = "./scripts/docker/verify-install.sh ubuntu local target/debian"
+
+[tasks."test:nix"]
+description = "Nix: evaluate the flake, build both packages, run its checks (the Home Manager module against the packages' units)"
+run = "nix flake check --accept-flake-config -L"
+
+[tasks."test:lifecycle"]
+description = "Lifecycle validation: this tree's daemons under their shipped units (needs a Wayland session and the user service manager)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-docker compose down -v ubuntu-local 2>/dev/null || true
-docker compose up --build -d ubuntu-local
-sleep 12
-docker exec open-sesame-ubuntu-local install-local.sh
-docker exec --user ubuntu open-sesame-ubuntu-local post-install.sh
+cargo build --workspace --bins
+bash tests/protocol_validation.sh
 """
 
 [tasks."test:docker:fedora:local"]
-description = "Fedora: install from locally built .rpm"
+description = "Fedora: install from locally built .rpm (target/generate-rpm)"
 depends = ["build:rpm"]
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-docker compose down -v fedora-local 2>/dev/null || true
-docker compose up --build -d fedora-local
-sleep 12
-docker exec open-sesame-fedora-local install-local.sh
-docker exec --user fedora open-sesame-fedora-local post-install.sh
-"""
+run = "./scripts/docker/verify-install.sh fedora local target/generate-rpm"
 
 [tasks."test:docker:ubuntu:source"]
 description = "Ubuntu: build from source (Dockerfile builder stage)"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-docker compose down -v ubuntu-source 2>/dev/null || true
-docker compose up --build -d ubuntu-source
-sleep 12
-docker exec --user ubuntu open-sesame-ubuntu-source post-install.sh
-"""
+run = "./scripts/docker/verify-install.sh ubuntu source"
 
 # =============================================================================
 # INSTALL (composed from build + install steps)
@@ -1236,7 +1199,11 @@ TEST (Arch packaging):
   test:arch:pkg           Build + install + verify from local tarballs (Arch container)
   test:arch:ci            Reproduce CI arch build on ubuntu:24.04 container
 
-TEST (Docker containers):
+TEST (lifecycle, Nix):
+  test:lifecycle             This tree's daemons under their shipped units (Wayland session)
+  test:nix                   nix flake check: packages + Home Manager module against their units
+
+TEST (Docker containers, scripts/docker/verify-install.sh):
   test:docker:ubuntu:repo    Ubuntu: install from GitHub Pages APT repo
   test:docker:ubuntu:local   Ubuntu: install from locally built .deb
   test:docker:ubuntu:source  Ubuntu: build from source and install

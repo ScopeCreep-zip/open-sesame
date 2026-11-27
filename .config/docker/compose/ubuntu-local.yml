@@ -1,15 +1,18 @@
 # Ubuntu -- install from locally prebuilt .deb packages
 #
-# Requires: mise run build:deb (produces target/debian/*.deb)
+# Packages: $SESAME_PACKAGES, default target/debian (mise run build:deb)
 #
-# docker compose up -d ubuntu-local
-# docker exec --user ubuntu open-sesame-ubuntu-local sesame status --doctor --exit-code
+# mise run test:docker:ubuntu:local
+# scripts/docker/verify-install.sh ubuntu local <DIR>
 
 services:
   ubuntu-local:
     build:
       context: ../../..
       dockerfile: .config/docker/Dockerfile.ubuntu
+      # systemd and the user only: the packages under test install over
+      # nothing of open-sesame.
+      target: base
     container_name: open-sesame-ubuntu-local
     hostname: ubuntu-local
     init: false
@@ -20,7 +23,7 @@ services:
     environment:
       container: docker
     volumes:
-      - ../../../target/debian:/packages:ro
+      - ${SESAME_PACKAGES:-../../../target/debian}:/packages:ro
       - ubuntu-local-config:/home/ubuntu/.config/pds
       - ubuntu-local-cache:/home/ubuntu/.cache/open-sesame
     tmpfs:

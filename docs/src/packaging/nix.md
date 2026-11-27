@@ -108,65 +108,67 @@ When `settings` or `profiles` are non-empty, the module generates
 The `settings` option populates `profiles.default.wm`, while `profiles` allows defining additional
 trust profiles with launch profiles and vault configuration.
 
-### Systemd Service Generation
+### Systemd Units
 
-The module generates two systemd user targets and up to seven services:
+The module installs the packages' own units: the files under `$out/lib/systemd/user` of
+`open-sesame` (the headless target and the profile, secrets, launcher, and snippets services) and,
+unless `headless` is set, of `open-sesame-desktop` (the desktop target and the wm, clipboard, and
+input services). These are `contrib/systemd`, with `ExecStart` patched to the store path: the same
+units the `.deb`, `.rpm`, and Arch packages ship, that `tests/protocol_validation.sh` runs every
+daemon under, and that CI installs in its systemd containers. Every sandboxing directive
+(`ProtectSystem`, `ProtectHome`, `ReadWritePaths`, `RestrictAddressFamilies`,
+`InaccessiblePaths`, the `*Directory=` settings, limits, `Type`) is the unit's own; the module
+writes none.
 
-**Headless target** (`open-sesame-headless`):
+The unit files are linked into `~/.config/systemd/user`, where Home Manager links the units it
+generates, together with the links `systemctl enable` creates from their `[Install]` sections:
 
-- `WantedBy = [ "default.target" ]` -- starts on login regardless of graphical session
-- Four services: `open-sesame-profile`, `open-sesame-secrets`, `open-sesame-launcher`,
-  `open-sesame-snippets`
-- All services declare `PartOf = [ "open-sesame-headless.target" ]`
+| Link | Unit |
+| --- | --- |
+| `default.target.wants/` | `open-sesame-headless.target` |
+| `open-sesame-headless.target.wants/` | the four headless services |
+| `graphical-session.target.wants/` | `open-sesame-desktop.target` (desktop mode) |
+| `open-sesame-desktop.target.wants/` | the three desktop services (desktop mode) |
 
-**Desktop target** (`open-sesame-desktop`, omitted in headless mode):
+sd-switch starts and restarts them on activation as it does Home Manager's own units.
 
-- `Requires = [ "open-sesame-headless.target" ]`
-- `BindsTo = [ "graphical-session.target" ]`
-- `WantedBy = [ "graphical-session.target" ]`
-- Three services: `open-sesame-wm`, `open-sesame-clipboard`, `open-sesame-input`
+`logLevel` is a drop-in, `<unit>.d/50-log-level.conf`, setting `Environment=RUST_LOG=<level>` over
+the unit's `RUST_LOG=info`.
 
-All services share common hardening directives:
-
-- `Type = "notify"` with `WatchdogSec = 30`
-- `Restart = "on-failure"` with `RestartSec = 5`
-- `NoNewPrivileges = true`
-- `LimitMEMLOCK = "64M"` (required for `mlock`-backed `ProtectedAlloc`)
-- `LimitCORE = 0` (disables core dumps to prevent secret leakage)
-- `Environment = [ "RUST_LOG=${cfg.logLevel}" ]`
-
-Per-service hardening varies. For example, `daemon-secrets` sets `PrivateNetwork = true` and
-`MemoryMax = "256M"`, while `daemon-launcher` sets `CapabilityBoundingSet = ""` and
-`SystemCallArchitectures = "native"`.
-
-The `daemon-profile` service uses `ProtectHome = "read-only"`, `ProtectSystem = "strict"`, and
-`ReadWritePaths = [ "%t/pds" "%h/.config/pds" ]` to restrict filesystem access.
+The flake's `checks.<system>.home-manager-module` (`nix/home-manager-check.nix`, run by
+`nix flake check`, `mise run test:nix`, and the Test workflow's `nix` job) evaluates the module
+through `homeManagerConfiguration` in desktop and headless mode. It fails if the module generates
+an `open-sesame` unit of its own, links anything that is not a unit file of the mode's packages,
+leaves a shipped unit unlinked, enables a unit for a target other than its `[Install] WantedBy=`, or
+omits a service's `logLevel` drop-in.
 
 ### tmpfiles.d Rules
 
-The module creates tmpfiles.d rules to ensure runtime directories exist before services start:
+The units' `ReadWritePaths` are bind-mounted into each service's mount namespace, so each source
+directory must exist on the real filesystem. daemon-profile's unit declares
+`ConfigurationDirectory=pds`, `CacheDirectory=open-sesame`, and `RuntimeDirectory=pds`; the other
+daemons' units do not, and fail with `226/NAMESPACE` until those directories exist. The module
+creates them owner-only, as the daemons keep them:
 
 ```text
 d %t/pds 0700 - - -
-d %h/.config/pds 0700 - - -
-d %h/.cache/open-sesame 0700 - - -
+d ${config.xdg.configHome}/pds 0700 - - -
+d ${config.xdg.cacheHome}/open-sesame 0700 - - -
 ```
 
-In desktop mode, an additional rule is added:
+In desktop mode, an additional rule creates fontconfig's cache, which `open-sesame-wm.service`
+grants optionally (`ReadWritePaths=-%C/fontconfig`):
 
 ```text
-d %h/.cache/fontconfig 0755 - - -
+d ${config.xdg.cacheHome}/fontconfig 0755 - - -
 ```
-
-These directories must exist on the real filesystem because `ProtectSystem=strict` bind-mounts
-`ReadWritePaths` into each service's mount namespace, and the source directory must already exist.
 
 ### SSH Agent Integration
 
 The module sets `systemd.user.sessionVariables.SSH_AUTH_SOCK = "${HOME}/.ssh/agent.sock"` to provide
-a stable socket path for systemd user services. The `daemon-profile` and `daemon-wm` services
-additionally load `EnvironmentFile = [ "-%h/.config/pds/ssh-agent.env" ]` (the leading `-` makes
-the file optional).
+a stable socket path for systemd user services. The `daemon-profile` and `daemon-wm` units
+additionally load `EnvironmentFile=-%E/pds/ssh-agent.env` (the leading `-` makes the file
+optional).
 
 ## Cachix Binary Cache
 

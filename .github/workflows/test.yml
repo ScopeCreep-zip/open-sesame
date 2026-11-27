@@ -57,6 +57,131 @@ jobs:
       - name: Run QA tasks in the devshell
         run: nix develop --accept-flake-config -c mise run ci:qa
 
+  # Each package built as the release builds it, installed in its
+  # distribution's systemd container, and its units run. Release runs only
+  # when this workflow succeeds, so no version is tagged whose packages do
+  # not start.
+  install:
+    name: Install ${{ matrix.format }} (${{ matrix.distro }} systemd container)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            distro: ubuntu
+            tools: "rust cargo:cargo-deb"
+            setup_task: ""
+            build_task: ci:build:deb
+            packages: target/x86_64-unknown-linux-gnu/debian
+          - format: rpm
+            distro: fedora
+            tools: "rust cargo:cargo-generate-rpm"
+            setup_task: ""
+            build_task: ci:build:rpm
+            packages: target/x86_64-unknown-linux-gnu/generate-rpm
+          - format: pkg.tar.zst
+            distro: arch
+            tools: "rust"
+            setup_task: ci:setup:arch-repo
+            build_task: ci:build:arch
+            packages: .
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          minimum_release_age: 7d
+          install_args: ${{ matrix.tools }}
+          cache: true
+
+      - name: Install packaging tools
+        if: matrix.setup_task != ''
+        run: mise run ${{ matrix.setup_task }}
+
+      - name: Build packages (with raised mlock limit for ProtectedAlloc)
+        run: |
+          sudo prlimit --pid $$ --memlock=268435456:268435456
+          mise run ${{ matrix.build_task }}
+
+      - name: Install the package and run its units
+        run: ./scripts/docker/verify-install.sh ${{ matrix.distro }} local ${{ matrix.packages }}
+
+  # The flake evaluated and checked: both packages built, and the Home
+  # Manager module checked against the units they ship.
+  nix:
+    name: Nix flake check
+    runs-on: ubuntu-24.04
+    env:
+      # The repository's .mise.toml is trusted in its own checkout.
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scopecreep-zip
+
+      - name: Run the flake's checks (with raised mlock limit for ProtectedAlloc)
+        run: |
+          sudo prlimit --pid $$ --memlock=268435456:268435456
+          nix develop --accept-flake-config -c mise run test:nix
+
+  lifecycle:
+    name: Lifecycle (shipped units under systemd)
+    runs-on: ubuntu-24.04
+    env:
+      # The repository's .mise.toml is trusted in its own checkout.
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scopecreep-zip
+
+      # The daemons run as transient services of the runner user's service
+      # manager, which lingering starts.
+      - name: Start the user service manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 100); do
+            [ -S "/run/user/$uid/bus" ] && break
+            sleep 0.1
+          done
+          [ -S "/run/user/$uid/bus" ]
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$uid"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+          } >> "$GITHUB_ENV"
+
+      # daemon-wm and daemon-clipboard need a compositor: sway's headless
+      # backend offers the wlr toplevel and data-control protocols.
+      - name: Start a headless Wayland compositor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sway
+          WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+            nohup sway --config /dev/null > "$RUNNER_TEMP/sway.log" 2>&1 &
+          for _ in $(seq 100); do
+            compgen -G "$XDG_RUNTIME_DIR/wayland-*" > /dev/null && break
+            sleep 0.1
+          done
+          compgen -G "$XDG_RUNTIME_DIR/wayland-*" || { cat "$RUNNER_TEMP/sway.log"; exit 1; }
+
+      - name: Run the lifecycle validation in the devshell
+        run: nix develop --accept-flake-config -c mise run test:lifecycle
+
   lint-pkgbuild:
     name: Lint PKGBUILDs (namcap)
     runs-on: ubuntu-24.04

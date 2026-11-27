@@ -29,8 +29,8 @@ InaccessiblePaths=-%t/bus
 ConfigurationDirectory=pds
 CacheDirectory=open-sesame
 RuntimeDirectory=pds
-ReadWritePaths=%h/.config/pds
-ReadWritePaths=%h/.cache/open-sesame
+ReadWritePaths=%E/pds
+ReadWritePaths=%C/open-sesame
 
 # Resource limits
 LimitNOFILE=4096
@@ -40,7 +40,7 @@ MemoryMax=128M
 
 # Environment
 Environment=RUST_LOG=info
-EnvironmentFile=-%h/.config/pds/ssh-agent.env
+EnvironmentFile=-%E/pds/ssh-agent.env
 
 [Install]
 WantedBy=open-sesame-headless.target

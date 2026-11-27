@@ -122,6 +122,14 @@ pre-push:
         rustdoc failed (warnings are denied, as in CI).
         Run: mise run cargo:doc
 
+    lifecycle:
+      run: mise run test:lifecycle
+      tags: [test, lifecycle]
+      fail_text: |
+        Lifecycle validation failed: the daemons under their shipped units
+        (needs a Wayland session and the user service manager).
+        Run: mise run test:lifecycle
+
     dependencies:
       run: mise run qa:deps
       tags: [deps]

@@ -460,9 +460,10 @@ Enable the home-manager module:
 }
 ```
 
-The module generates `~/.config/pds/config.toml`, creates systemd user services with dual targets
-(`open-sesame-headless.target` always, `open-sesame-desktop.target` when `headless = false`), configures
-`SSH_AUTH_SOCK` for SSH agent forwarding, and sets up tmpfiles.d rules for runtime directories.
+The module generates `~/.config/pds/config.toml`, installs and enables the packages' own systemd user
+units (`open-sesame-headless.target` always, `open-sesame-desktop.target` when `headless = false`), the
+same units the distribution packages ship, configures `SSH_AUTH_SOCK` for SSH agent forwarding, and
+sets up tmpfiles.d rules for the directories the units grant.
 
 Available Nix packages:
 

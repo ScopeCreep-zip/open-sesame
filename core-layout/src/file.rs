@@ -43,11 +43,18 @@ fn with_path(path: &Path, what: &str, e: &std::io::Error) -> std::io::Error {
 }
 
 /// Create `dir` and its missing parents owner-only (0700 on Unix), and
-/// restrict `dir` itself to its owner when it already exists.
+/// restrict `dir` itself to its owner when it already exists with another
+/// mode.
+///
+/// A directory already owner-only is not written to: a daemon's unit
+/// mounts the directories it does not write read-only
+/// (`ProtectHome=read-only`), where a mode change fails with `EROFS` even
+/// when it would change nothing.
 ///
 /// # Errors
 ///
-/// The I/O error of the failing step, naming the directory.
+/// The I/O error of the failing step, naming the directory: an existing
+/// directory with another mode that cannot be restricted among them.
 pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -57,6 +64,14 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
             .mode(0o700)
             .create(dir)
             .map_err(|e| with_path(dir, "create", &e))?;
+        let mode = std::fs::metadata(dir)
+            .map_err(|e| with_path(dir, "inspect", &e))?
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode == 0o700 {
+            return Ok(());
+        }
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| with_path(dir, "restrict", &e))
     }
@@ -303,6 +318,35 @@ mod tests {
         std::fs::create_dir(&existing).unwrap();
         std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
         create_private_dir(&existing).unwrap();
+        assert_eq!(mode_of(&existing), 0o700);
+    }
+
+    /// A directory already owner-only is not written to: under a unit's
+    /// `ProtectHome=read-only` a mode change fails with `EROFS` even when
+    /// it would change nothing. Every `chmod` updates the inode's change
+    /// time, so an unchanged ctime shows that none was made.
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_only_directory_is_left_untouched() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("config");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ctime = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.ctime(), meta.ctime_nsec())
+        };
+        let before = ctime(&existing);
+        // Coarse timestamp clocks tick every few milliseconds; a write after
+        // the wait would show as a later ctime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        create_private_dir(&existing).unwrap();
+        assert_eq!(
+            ctime(&existing),
+            before,
+            "the directory's inode was written"
+        );
         assert_eq!(mode_of(&existing), 0o700);
     }
 }

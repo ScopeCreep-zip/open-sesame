@@ -12,7 +12,9 @@
 # Package installation happens via docker exec after container start.
 # Repo profiles install open-sesame (headless). Desktop requires a Wayland
 # compositor and /dev/input; add open-sesame-desktop via docker exec when needed.
-# See mise tasks: test:docker:{ubuntu,fedora,arch}:{repo,local} and test:docker:ubuntu:source
+# See mise tasks: test:docker:{ubuntu,fedora,arch}:{repo,local} and test:docker:ubuntu:source,
+# all run through scripts/docker/verify-install.sh (also CI's install gate). Local
+# profiles mount $SESAME_PACKAGES (default: the local build's output) at /packages.
 
 include:
   - path: .config/docker/compose/ubuntu-repo.yml

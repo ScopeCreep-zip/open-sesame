@@ -253,6 +253,44 @@ jobs:
           retention-days: 1
 
   # ==========================================================================
+  # Install the release's own amd64 artifacts in their distributions'
+  # systemd containers and run their units: assets and repositories are
+  # published only for packages that start (the Test workflow's `install`
+  # job gates the release itself on the same check)
+  # ==========================================================================
+  verify-packages:
+    name: Verify ${{ matrix.format }} install
+    needs: [semantic-release, build, build-rpm, build-arch]
+    if: needs.semantic-release.outputs.new_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            distro: ubuntu
+            artifact: deb-amd64
+          - format: rpm
+            distro: fedora
+            artifact: rpm-amd64
+          - format: pkg.tar.zst
+            distro: arch
+            artifact: arch-amd64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.semantic-release.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: packages
+
+      - name: Install the package and run its units
+        run: ./scripts/docker/verify-install.sh ${{ matrix.distro }} local packages
+
+  # ==========================================================================
   # Generate build attestations for supply chain security
   # ==========================================================================
   attest:
@@ -290,7 +328,7 @@ jobs:
   # ==========================================================================
   upload-assets:
     name: Upload Release Assets
-    needs: [semantic-release, build, build-rpm, build-arch]
+    needs: [semantic-release, build, build-rpm, build-arch, verify-packages]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
     env:
@@ -379,7 +417,7 @@ jobs:
   # ==========================================================================
   publish:
     name: Publish Repositories & Docs
-    needs: [semantic-release, build, build-rpm, build-arch, upload-assets, build-docs]
+    needs: [semantic-release, build, build-rpm, build-arch, verify-packages, upload-assets, build-docs]
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
