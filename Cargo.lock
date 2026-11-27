@@ -100,9 +100,9 @@ dependencies = [
 
 [[package]]
 name = "allocator-api2"
-version = "0.2.21"
+version = "0.2.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+checksum = "57b212daf2e827b1ccdd778b7eb48ba433e58cb0e4f27b43cd6b7a608425a014"
 
 [[package]]
 name = "almost"
@@ -357,9 +357,9 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.7"
+version = "1.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+checksum = "64c0e36294adc8db531500e3f2b8ec75c4af9177271e9c6d33f93609d56e57cd"
 dependencies = [
  "arrayvec",
  "cc",
@@ -547,9 +547,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.3"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f0e023adb368345ce0ca6cdfc0f24a06554468d0e8503e14a0841de79bfa69"
+checksum = "95e45cf2980b2d467be49a9ed942c9179b701063a7ca3d037de7ee9bd67f8d66"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -839,9 +839,12 @@ checksum = "be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.2"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "144e7f1de087984240b7816d47f698b414979faa6f40839c5b86d6bd47db57b7"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "cookie"
@@ -874,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "core-auth"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "async-trait",
  "core-crypto",
@@ -893,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "blake3",
  "core-layout",
@@ -910,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2",
@@ -926,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "core-daemon"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -943,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "core-fuzzy"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "core-types",
  "criterion",
@@ -954,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "blake3",
  "core-layout",
@@ -973,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "core-layout"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "core-types",
  "dirs",
@@ -983,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -994,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -1010,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "core-crypto",
  "core-types",
@@ -1024,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1039,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "core-workspace-types"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1448,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1469,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1487,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1510,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1531,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1554,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1570,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1943,11 +1946,11 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.18.0"
+version = "1.19.0"
 
 [[package]]
 name = "extension-sdk"
-version = "1.18.0"
+version = "1.19.0"
 
 [[package]]
 name = "fallible-iterator"
@@ -1963,9 +1966,9 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "faster-hex"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4ede54fe330383a5de28c0a1f06668ff9dbf06c8094e1c5150c39488a5e911d"
+checksum = "52094542d09210d54b87d1a7a13996182c8170cd84e7baa56b332b7ca0d7a7de"
 dependencies = [
  "defmt 0.3.101",
  "serde",
@@ -2021,9 +2024,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+checksum = "3e44f110d1777dc6559a51e7d45083945ded4f1bf3305494350f693b6d20b9c8"
 
 [[package]]
 name = "fixedbitset"
@@ -4630,7 +4633,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4962,7 +4965,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-linux"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "ashpd",
  "core-layout",
@@ -4992,11 +4995,11 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.18.0"
+version = "1.19.0"
 
 [[package]]
 name = "platform-windows"
-version = "1.18.0"
+version = "1.19.0"
 
 [[package]]
 name = "plotters"
@@ -5602,7 +5605,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5821,7 +5824,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "core-config",
  "core-layout",
@@ -7162,6 +7165,15 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -7422,7 +7434,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "clap",
