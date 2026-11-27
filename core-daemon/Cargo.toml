@@ -1,0 +1,28 @@
+[package]
+name = "core-daemon"
+description = "Daemon lifecycle shared by every PDS daemon: startup, logging, signals, config watch, bus connection, sandbox grants"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+core-types = { workspace = true }
+core-layout = { workspace = true }
+core-config = { workspace = true }
+core-ipc = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -16,7 +16,7 @@ selections are defined. No functional code exists.
 The `Cargo.toml` declares Windows-specific dependencies:
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `core-types` | Shared types (`Window`, `WindowId`, `Error`, etc.) |
 | `windows` | Official Microsoft Windows API bindings (Win32, COM, WinRT) |
 | `serde` | Serialization for configuration types |

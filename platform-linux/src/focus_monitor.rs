@@ -6,12 +6,10 @@
 //! Compatible with: sway, Hyprland, niri, Wayfire, COSMIC (which also
 //! advertises the wlr protocol for backwards compatibility).
 //!
-//! Runs as a long-lived task — spawn with `tokio::spawn`.
+//! [`spawn`] connects and binds on the calling thread, then dispatches on a
+//! dedicated `focus-monitor` thread through `wayland::dispatch_forever`.
 
 use std::collections::HashMap;
-use std::os::unix::io::AsFd;
-use tokio::io::Interest;
-use tokio::io::unix::AsyncFd;
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     globals::{GlobalList, GlobalListContents, registry_queue_init},
@@ -25,26 +23,12 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 /// Event from the focus monitor: either a focus change or a window close.
 #[derive(Debug, Clone)]
 pub enum FocusEvent {
-    /// An app gained focus. Payload is the app_id.
+    /// An app gained focus. Payload is the `app_id`.
     Focus(String),
-    /// A window closed. Payload is the app_id (empty if unknown).
+    /// A window closed. Payload is the `app_id`; a toplevel that never
+    /// reported one emits no close event.
     Closed(String),
 }
-
-/// Monitors the focused (activated) toplevel via wlr-foreign-toplevel-management-v1.
-///
-/// Connects to the Wayland display, binds the wlr foreign toplevel manager,
-/// tracks toplevel state events, and sends `FocusEvent`s through the channel
-/// whenever focus changes or a window closes.
-///
-/// Runs as a long-lived task — spawn with `tokio::spawn`.
-pub async fn focus_monitor(tx: tokio::sync::mpsc::Sender<FocusEvent>) {
-    if let Err(e) = focus_monitor_inner(&tx).await {
-        tracing::warn!(error = %e, "focus monitor exiting");
-    }
-}
-
-// -- Hoisted types (were function-local in focus_monitor_inner) --
 
 /// Per-toplevel tracking state.
 #[derive(Debug, Default, Clone)]
@@ -60,7 +44,25 @@ struct FocusState {
     tx: tokio::sync::mpsc::Sender<FocusEvent>,
 }
 
-/// UserData attached to each toplevel handle proxy (unit — state tracked in FocusState).
+impl FocusState {
+    /// Send `event` without blocking the Wayland dispatch. A full channel
+    /// drops the event and is logged; a closed one means the consumer is
+    /// gone.
+    fn emit(&self, event: FocusEvent) {
+        use tokio::sync::mpsc::error::TrySendError;
+        match self.tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(event)) => {
+                tracing::warn!(?event, "focus event dropped: consumer channel full");
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::debug!("focus event consumer gone");
+            }
+        }
+    }
+}
+
+/// User data attached to each toplevel handle proxy (unit — state tracked in `FocusState`).
 #[derive(Debug, Default, Clone)]
 struct HandleData;
 
@@ -83,18 +85,13 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for FocusState {
         _state: &mut Self,
         _proxy: &ZwlrForeignToplevelManagerV1,
         event: zwlr_foreign_toplevel_manager_v1::Event,
-        _: &(),
+        (): &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        match event {
-            zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel: _ } => {
-                // New toplevel created — handle events arrive on the handle dispatch.
-            }
-            zwlr_foreign_toplevel_manager_v1::Event::Finished => {
-                tracing::info!("wlr foreign toplevel manager finished");
-            }
-            _ => {}
+        // A new toplevel's events arrive on the handle dispatch.
+        if let zwlr_foreign_toplevel_manager_v1::Event::Finished = event {
+            tracing::info!("wlr foreign toplevel manager finished");
         }
     }
 
@@ -121,16 +118,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, HandleData> for FocusState {
                 let entry = state.toplevels.entry(id).or_default();
                 entry.app_id = app_id;
             }
-            zwlr_foreign_toplevel_handle_v1::Event::State { state: state_bytes } => {
-                // State is a packed array of u32 in native endian.
-                let activated = state_bytes
-                    .chunks_exact(4)
-                    .flat_map(TryInto::<[u8; 4]>::try_into)
-                    .map(u32::from_ne_bytes)
-                    .any(|v| v == zwlr_foreign_toplevel_handle_v1::State::Activated as u32);
-
-                let entry = state.toplevels.entry(id).or_default();
-                entry.activated = activated;
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: packed } => {
+                state.toplevels.entry(id).or_default().activated =
+                    crate::wayland::ToplevelState::decode(&packed, crate::wayland::WLR_STATE)
+                        .activated;
             }
             zwlr_foreign_toplevel_handle_v1::Event::Done => {
                 // Atomic commit point — check if the activated app changed.
@@ -140,22 +131,25 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, HandleData> for FocusState {
                     && entry.app_id != state.focused_app_id
                 {
                     state.focused_app_id.clone_from(&entry.app_id);
-                    let _ = state.tx.try_send(FocusEvent::Focus(entry.app_id.clone()));
+                    let event = FocusEvent::Focus(entry.app_id.clone());
+                    state.emit(event);
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
-                let closed_app_id = state
-                    .toplevels
-                    .get(&id)
-                    .map(|t| t.app_id.clone())
-                    .unwrap_or_default();
-                let was_focused = state.toplevels.get(&id).is_some_and(|t| t.activated);
-                state.toplevels.remove(&id);
+                let closed = state.toplevels.remove(&id);
                 handle.destroy();
-                if was_focused {
-                    state.focused_app_id.clear();
+                if let Some(toplevel) = closed {
+                    if toplevel.activated {
+                        state.focused_app_id.clear();
+                    }
+                    if toplevel.app_id.is_empty() {
+                        tracing::debug!("toplevel without app_id closed");
+                    } else {
+                        state.emit(FocusEvent::Closed(toplevel.app_id));
+                    }
+                } else {
+                    tracing::debug!("untracked toplevel closed");
                 }
-                let _ = state.tx.try_send(FocusEvent::Closed(closed_app_id));
             }
             // title, output_enter, output_leave, parent — not relevant for focus tracking.
             _ => {}
@@ -163,8 +157,21 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, HandleData> for FocusState {
     }
 }
 
-async fn focus_monitor_inner(tx: &tokio::sync::mpsc::Sender<FocusEvent>) -> core_types::Result<()> {
-    // -- Connect and bind --
+/// Monitor the focused (activated) toplevel via
+/// wlr-foreign-toplevel-management-v1, sending a [`FocusEvent`] through
+/// `tx` whenever focus changes or a window closes.
+///
+/// Connects to the Wayland display, binds the manager and receives the
+/// existing toplevels on the calling thread; event dispatch then runs on a
+/// dedicated `focus-monitor` thread for the life of the process, backing
+/// off on failed dispatch steps.
+///
+/// # Errors
+///
+/// `core_types::Error::Platform` when the display is unreachable, the
+/// compositor lacks the protocol, the initial roundtrip fails, or the
+/// thread cannot be spawned.
+pub fn spawn(tx: tokio::sync::mpsc::Sender<FocusEvent>) -> core_types::Result<()> {
     let conn = Connection::connect_to_env()
         .map_err(|e| core_types::Error::Platform(format!("Wayland connection failed: {e}")))?;
 
@@ -185,7 +192,7 @@ async fn focus_monitor_inner(tx: &tokio::sync::mpsc::Sender<FocusEvent>) -> core
     let mut state = FocusState {
         toplevels: HashMap::new(),
         focused_app_id: String::new(),
-        tx: tx.clone(),
+        tx,
     };
 
     // Initial roundtrip to receive existing toplevels.
@@ -193,54 +200,11 @@ async fn focus_monitor_inner(tx: &tokio::sync::mpsc::Sender<FocusEvent>) -> core
         .roundtrip(&mut state)
         .map_err(|e| core_types::Error::Platform(format!("Wayland roundtrip failed: {e}")))?;
 
-    // -- Async event loop via tokio AsyncFd --
-    let async_fd = AsyncFd::with_interest(
-        conn.as_fd()
-            .try_clone_to_owned()
-            .map_err(|e| core_types::Error::Platform(format!("failed to clone Wayland fd: {e}")))?,
-        Interest::READABLE,
-    )
-    .map_err(|e| core_types::Error::Platform(format!("AsyncFd creation failed: {e}")))?;
-
-    loop {
-        // Wait for the Wayland socket to become readable.
-        let mut ready = async_fd
-            .readable()
-            .await
-            .map_err(|e| core_types::Error::Platform(format!("AsyncFd readable failed: {e}")))?;
-
-        // Read events from the socket into the internal buffer.
-        if let Some(guard) = conn.prepare_read() {
-            match guard.read() {
-                Ok(_) => {}
-                Err(wayland_client::backend::WaylandError::Io(ref e))
-                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => {
-                    let proto_err = conn.protocol_error();
-                    return Err(core_types::Error::Platform(format!(
-                        "Wayland read failed: {e} (protocol_error: {proto_err:?})"
-                    )));
-                }
-            }
-        }
-
-        // Dispatch all pending events to our handlers.
-        event_queue.dispatch_pending(&mut state).map_err(|e| {
-            let proto_err = conn.protocol_error();
-            core_types::Error::Platform(format!(
-                "Wayland dispatch failed: {e} (protocol_error: {proto_err:?})"
-            ))
+    std::thread::Builder::new()
+        .name("focus-monitor".into())
+        .spawn(move || crate::wayland::dispatch_forever(&conn, event_queue, state, "focus"))
+        .map_err(|e| {
+            core_types::Error::Platform(format!("failed to spawn focus monitor thread: {e}"))
         })?;
-
-        // Flush any outgoing requests (e.g. destroy).
-        conn.flush().map_err(|e| {
-            let proto_err = conn.protocol_error();
-            core_types::Error::Platform(format!(
-                "Wayland flush failed: {e} (protocol_error: {proto_err:?})"
-            ))
-        })?;
-
-        // Clear readiness so we wait again.
-        ready.clear_ready();
-    }
+    Ok(())
 }

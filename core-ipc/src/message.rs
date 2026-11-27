@@ -10,13 +10,14 @@ use uuid::Uuid;
 ///
 /// WIRE FORMAT CONTRACT:
 ///
-/// v2 fields: `wire_version`, `msg_id`, `correlation_id`, `sender`,
-/// `timestamp`, `payload`, `security_level`, `verified_sender_name`
+/// Fields in positional order: `wire_version`, `msg_id`, `correlation_id`,
+/// `sender`, `timestamp`, `payload`, `security_level`,
+/// `verified_sender_name`, `origin_installation`, `agent_id`,
+/// `trust_snapshot` (v3), `expects_response` (v4).
 ///
-/// All v2 binaries must be deployed atomically (single compilation unit).
-/// Adding fields requires incrementing this constant and updating the decode
-/// path to handle both old and new versions during rolling upgrades.
-pub const WIRE_VERSION: u8 = 3;
+/// Every binary on a bus is built from one compilation unit and deployed
+/// together; there is no decode path for other versions.
+pub const WIRE_VERSION: u8 = 4;
 
 /// The IPC bus message envelope wrapping any payload type.
 ///
@@ -55,6 +56,12 @@ pub struct Message<T> {
     pub agent_id: Option<AgentId>,
     /// Trust snapshot at time of message creation.
     pub trust_snapshot: Option<TrustVector>,
+
+    // -- v4 --
+    /// Whether the sender waits for a correlated response
+    /// (`BusClient::request`). The bus routes a response only to a sender
+    /// that waits for one; broadcasts are never tracked.
+    pub expects_response: bool,
 }
 
 /// Context for constructing outbound messages.
@@ -120,6 +127,7 @@ impl<T: Serialize> Message<T> {
             origin_installation: ctx.installation.clone(),
             agent_id: ctx.agent_id,
             trust_snapshot: ctx.trust_snapshot.clone(),
+            expects_response: false,
         }
     }
 
@@ -127,6 +135,14 @@ impl<T: Serialize> Message<T> {
     #[must_use]
     pub fn with_correlation(mut self, id: Uuid) -> Self {
         self.correlation_id = Some(id);
+        self
+    }
+
+    /// Mark the message a request whose sender waits for a correlated
+    /// response.
+    #[must_use]
+    pub fn expecting_response(mut self) -> Self {
+        self.expects_response = true;
         self
     }
 }
@@ -153,7 +169,16 @@ mod tests {
     fn message_new_sets_wire_version() {
         let msg = make_test_message();
         assert_eq!(msg.wire_version, WIRE_VERSION);
-        assert_eq!(msg.wire_version, 3);
+        assert_eq!(msg.wire_version, 4);
+    }
+
+    #[test]
+    fn only_requests_expect_a_response_and_the_flag_survives_the_wire() {
+        assert!(!make_test_message().expects_response);
+        let request = make_test_message().expecting_response();
+        let decoded: Message<EventKind> =
+            crate::framing::decode_frame(&crate::framing::encode_frame(&request).unwrap()).unwrap();
+        assert!(decoded.expects_response);
     }
 
     // SECURITY INVARIANT: New messages must have no verified_sender_name (server
@@ -284,11 +309,6 @@ mod tests {
                 id: installation.clone(),
                 org: None,
                 machine_binding_present: false,
-            },
-            EventKind::ProfileIdMigrated {
-                name: TrustProfileName::try_from("work").unwrap(),
-                old_id: ProfileId::from_uuid(Uuid::from_u128(1)),
-                new_id: ProfileId::from_uuid(Uuid::from_u128(2)),
             },
             EventKind::AuthorizationRequired {
                 request_id: req_id,

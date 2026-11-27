@@ -1,9 +1,13 @@
-//! Semantic remote identity.
+//! Semantic remote identity in remote spelling.
 //!
-//! Two remotes identify the same repository when they share the same
-//! host, namespace, and repository name. Transport, port, username,
-//! and URL rendering do not affect identity. Port is an endpoint
-//! concern, not a provenance concern.
+//! A `RemoteIdentity` is host + namespace + repository as the forge
+//! spells them. Transport, port, username, and URL rendering do not
+//! affect identity; port is an endpoint concern, not a provenance
+//! concern. Namespace and repository compare exactly, because
+//! case-sensitive servers treat `Repo` and `repo` as different
+//! repositories. Whether two remotes occupy the same workspace
+//! directory is a placement question: compare
+//! `WorkspaceCoordinate::from_remote_repository` of each.
 
 use std::fmt;
 
@@ -14,8 +18,9 @@ use crate::v1::{GitHost, NamespacePath, RepositoryName};
 /// The identity of a git remote repository.
 ///
 /// Equality compares host (case-insensitive for FQDNs, canonical for
-/// IPs), namespace, and repository name. Two `RemoteIdentity` values
-/// representing the same repository via HTTPS and SSH are equal.
+/// IPs), namespace, and repository name (exact spelling). Two
+/// `RemoteIdentity` values for the same spelling via HTTPS and SSH are
+/// equal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RemoteIdentity {
     host: GitHost,

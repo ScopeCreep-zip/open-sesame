@@ -1,157 +1,114 @@
 # Password Backend
 
-This page describes the password authentication backend implemented in
-`core-auth/src/password.rs` and `core-auth/src/password_wrap.rs`. The backend uses Argon2id to
-derive a key-encrypting key (KEK) from user-provided password bytes, then wraps or unwraps a
-32-byte master key using AES-256-GCM.
+This page describes the password authentication backend, `PasswordBackend` in
+`core-auth/src/password.rs`. It derives a key-encrypting key (KEK) from the vault password
+under the vault's password KDF, and wraps or unwraps the vault's 32-byte master key with
+AES-256-GCM in the vault's `.password-wrap` file.
 
 ## PasswordBackend
 
-The `PasswordBackend` struct holds an optional `SecureVec` containing password bytes. Password
-bytes must be injected via `with_password()` (builder pattern) or `set_password()` (mutation)
-before calling `unlock()` or `enroll()`. The `SecureVec` type provides mlock'd memory and
-zeroize-on-drop semantics.
+`PasswordBackend` holds an optional `SecureVec` with the password bytes (mlock'd,
+zeroize-on-drop). The bytes are injected with `with_password()` before `unlock()` or
+`enroll()`; without them both fail with `AuthError::BackendNotApplicable`.
 
 ### Trait Implementation
 
 | Method | Behavior |
-|--------|----------|
-| `factor_id()` | Returns `AuthFactorId::Password` |
-| `name()` | Returns `"Password"` |
-| `backend_id()` | Returns `"password"` |
-| `is_enrolled(profile, config_dir)` | Checks whether `{config_dir}/vaults/{profile}.password-wrap` exists |
-| `can_unlock(profile, config_dir)` | Returns `true` only if enrolled AND password bytes have been set |
-| `requires_interaction()` | Returns `AuthInteraction::PasswordEntry` |
+| --- | --- |
+| `factor_id()` | `AuthFactorId::Password` |
+| `name()` | `"Password"` |
+| `backend_id()` | `"password"` |
+| `is_enrolled(profile, layout)` | Whether `Layout::vault_file(profile, VaultFile::PasswordWrap)` exists |
+| `can_unlock(profile, layout)` | Enrolled, and password bytes are set |
+| `requires_interaction()` | `AuthInteraction::PasswordEntry` |
 
 ### KEK Derivation
 
-The `derive_kek()` method performs:
+The KEK is `core_crypto::derive_password_key(kdf, password, salt)`: the vault's password KDF
+(`VaultKeying::algorithms.kdf`, fixed at vault creation by `[crypto] kdf`) over the password
+and the vault's 16-byte salt, returned as an AES-256-GCM `EncryptionKey`.
 
-1. Validate salt is exactly 16 bytes.
-2. Call `core_crypto::derive_key_argon2(password, salt)` -- Argon2id with project-wide
-   parameters.
-3. Copy the first 32 bytes of the Argon2id output into a `[u8; 32]` KEK array.
+- `KdfAlgorithm::Argon2id` (default): Argon2id with the parameters defined in `core-crypto`.
+- `KdfAlgorithm::Pbkdf2Sha256`: PBKDF2-HMAC-SHA256, for deployments that require a
+  NIST-approved KDF.
 
-The Argon2id parameters are defined in `core-crypto` (not in `core-auth`).
+A vault's KDF cannot change after creation: an unlock under the other KDF derives a different
+KEK and fails with `AuthError::UnwrapFailed`.
 
-### Unlock Flow
+### Unlock
 
-1. Read password bytes from the stored `SecureVec`. Fail with `BackendNotApplicable` if no
-   password was set.
-2. Load the `PasswordWrapBlob` from `{config_dir}/vaults/{profile}.password-wrap`.
-3. Derive the KEK via `derive_kek(password, salt)`.
-4. Call `blob.unwrap(&mut kek)` to decrypt the master key via AES-256-GCM. The KEK is
-   zeroized after use.
-5. Return an `UnlockOutcome` with `ipc_strategy: DirectMasterKey` and
-   `factor_id: Password`.
+1. Derive the KEK from the injected password under the vault's keying
+   (`VaultMetadata::load_keying`).
+2. Load the wrapped master key from `.password-wrap` (`WrappedKey::load`); an absent file is
+   `AuthError::NotEnrolled`.
+3. Unwrap it; a wrong password fails GCM authentication and is `AuthError::UnwrapFailed`.
+4. Return an `UnlockOutcome` with the master key, `factor_id: Password`, and audit metadata
+   `{"backend": "password"}`. The caller submits it to daemon-secrets as one factor
+   (`FactorSubmit`).
 
-### Enrollment Flow
+### Enrollment
 
-1. Read password bytes from the stored `SecureVec`.
-2. Derive the KEK via `derive_kek(password, salt)`.
-3. Call `PasswordWrapBlob::wrap(master_key, &mut kek)` to encrypt the master key. The KEK is
-   zeroized after use.
-4. Write the blob to disk via `blob.save(config_dir, profile)`.
+1. Derive the KEK as above.
+2. Wrap the master key under it with a fresh random nonce (`WrappedKey::wrap`).
+3. Write the `.password-wrap` file (`WrappedKey::save`).
+
+`sesame init` enrolls the password when it creates the vault. Other factors are enrolled from
+the password: [Factor Architecture](./factor-architecture.md#enrollment-and-revocation)
+describes the transaction.
 
 ### Revocation
 
-Revocation overwrites the wrap file with zeros before deletion to prevent casual recovery
-from disk:
+`revoke()` destroys the `.password-wrap` file with `core_layout::file::destroy`: the file is
+zero-filled in place, then removed. An absent file is not an error. A vault's last factor is
+never revoked: the enrollment transaction refuses it.
 
-1. Read the file length.
-2. Write a zero-filled buffer of the same length.
-3. Delete the file via `std::fs::remove_file`.
+## The Wrapped Master Key
 
-## PasswordWrapBlob
-
-Defined in `core-auth/src/password_wrap.rs`, the `PasswordWrapBlob` struct represents the
-on-disk binary format for the AES-256-GCM wrapped master key.
+`WrappedKey` (`core-auth/src/wrapped_key.rs`) is the on-disk format of a master key wrapped
+under a factor's KEK. The password factor stores it in `.password-wrap`; the platform keyring
+factor stores the same format in `.keyring-enrollment`.
 
 ### Binary Format
 
 ```text
 Offset  Length  Field
-0       1       Version byte (0x01)
-1       12      Nonce (random, generated via getrandom)
+0       1       Version byte (WRAPPED_KEY_VERSION = 0x01)
+1       12      Nonce (random, from the OS random source)
 13      48      Ciphertext (32-byte master key + 16-byte GCM tag)
 ```
 
 Total size: 61 bytes.
 
-The version constant `PASSWORD_WRAP_VERSION` is `0x01`.
+### Errors
 
-### Wrapping (Encryption)
-
-`PasswordWrapBlob::wrap(master_key, kek_bytes)`:
-
-1. Construct an `EncryptionKey` from the 32-byte KEK.
-2. Generate a 12-byte random nonce via `getrandom`.
-3. Encrypt the master key with AES-256-GCM using the KEK and nonce.
-4. Zeroize the KEK bytes.
-5. Return the blob containing version, nonce, and ciphertext.
-
-### Unwrapping (Decryption)
-
-`PasswordWrapBlob::unwrap(kek_bytes)`:
-
-1. Construct an `EncryptionKey` from the 32-byte KEK.
-2. Zeroize the KEK bytes immediately after key construction.
-3. Decrypt using AES-256-GCM with the stored nonce and ciphertext.
-4. Return the plaintext as `SecureBytes` (mlock'd, zeroize-on-drop).
-5. If GCM authentication fails (wrong password), return `AuthError::UnwrapFailed`.
-
-### Deserialization
-
-`PasswordWrapBlob::deserialize(data)` rejects:
-
-- Data shorter than 61 bytes (`AuthError::InvalidBlob`).
-- Version bytes other than `0x01` (`AuthError::InvalidBlob`).
+`WrappedKey::deserialize` rejects any length other than 61 bytes and any version other than
+`0x01` with `AuthError::InvalidBlob`. `WrappedKey::load` names the file in the error, so a
+damaged enrollment is reported by its path.
 
 ### Persistence
 
-**Path**: `{config_dir}/vaults/{profile}.password-wrap`
-
-**Write**: `save()` uses atomic rename via a `.password-wrap.tmp` intermediate file. On Unix,
-file permissions are set to `0o600` (owner read/write only) before the rename. The parent
-`vaults/` directory is created if it does not exist.
-
-**Read**: `load()` reads the file and calls `deserialize()`.
-
-### Zeroization
-
-The `PasswordWrapBlob` struct implements `Drop` to zeroize its `nonce` and `ciphertext`
-fields. All KEK arrays are zeroized immediately after use in both `wrap()` and `unwrap()`.
+`WrappedKey::save` writes through `core_layout::file::write` with `Mode::OwnerOnly`: a
+missing `vaults/` directory is created `0700`, and the file is written `0600` to
+`<path>.tmp`, synced, and renamed into place, so a reader never sees a partial file.
 
 ## Salt
 
-Each profile has an independent 16-byte salt stored at `{config_dir}/vaults/{profile}.salt`.
-The salt is generated via `getrandom` during vault initialization
-(`daemon-secrets/src/unlock.rs::generate_profile_salt`).
+Each profile has an independent 16-byte salt at `<config dir>/vaults/<profile>.salt`
+(`Layout::vault_file(profile, VaultFile::Salt)`). `core_auth::salt::create` draws it from the
+OS random source when `sesame init` creates the vault and writes it owner-only like the
+wrapped key. `salt::require` reads it; an absent salt is `AuthError::NotInitialized`, and a
+salt of any other length is `AuthError::InvalidVaultFile` naming the file.
 
-During `sesame init`, the salt file is written with:
-
-- The `vaults/` directory created with permissions `0o700`.
-- The salt file itself written via `core_config::atomic_write` and then set to
-  permissions `0o600`.
-
-The salt is used as input to both the Argon2id KDF (password backend) and the BLAKE3
-challenge derivation (SSH agent backend). Using a per-profile salt ensures that the same
-password produces different KEKs for different profiles.
+The salt is the KDF salt of the password factor and the input of the SSH agent factor's
+challenge derivation (under the vault's `hkdf`). A per-profile salt makes the same password
+derive different KEKs for different vaults.
 
 ## Key Material Handling
 
-The password backend's key material lifecycle:
-
-1. **Password bytes**: Stored in `SecureVec` (mlock'd, zeroize-on-drop). Acquired from the
-   user via `dialoguer::Password` (terminal) or stdin (pipe). The `String` holding the raw
-   password is zeroized immediately after copying into the `SecureVec`.
-
-2. **KEK (Argon2id output)**: A `[u8; 32]` stack array. Zeroized by
-   `PasswordWrapBlob::wrap()` and `PasswordWrapBlob::unwrap()` after use.
-
-3. **Master key**: Returned as `SecureBytes` (backed by `ProtectedAlloc` -- mlock'd,
-   mprotect'd, zeroize-on-drop). Transferred to daemon-secrets via `SensitiveBytes` IPC
-   wrapper which also uses `ProtectedAlloc`.
-
-At no point does the master key exist in an unprotected heap allocation. The KEK exists
-briefly on the stack and is zeroized before the function returns.
+1. **Password bytes**: a `SecureVec` (mlock'd, zeroize-on-drop), filled by the CLI prompt or
+   the overlay's password field, and moved into the backend.
+2. **KEK**: an `EncryptionKey`; its AES key schedule is wiped on drop (`aes-gcm` with the
+   `zeroize` feature).
+3. **Master key**: `SecureBytes` backed by `ProtectedAlloc` (guard pages, mlock,
+   zeroize-on-drop), moved into the `FactorSubmit` message's `SensitiveBytes` without a heap
+   copy (`UnlockOutcome::into_factor_submit`).

@@ -55,7 +55,7 @@ organizational namespace, then distributed to devices before `sesame init` runs.
 `InstallationConfig` (`core-config/src/schema_installation.rs`) fields are:
 
 | Field | Purpose | Fleet Use |
-|-------|---------|-----------|
+| --- | --- | --- |
 | `id` | UUID v4, unique per device | Asset tracking, audit correlation |
 | `namespace` | Derived UUID for deterministic profile IDs | Cross-device profile identity |
 | `org.domain` | Organization domain | Fleet grouping |
@@ -154,7 +154,7 @@ automatically. Fleet monitoring collects systemd service states via standard nod
 Key posture signals per device:
 
 | Signal | Source | Meaning |
-|--------|--------|---------|
+| --- | --- | --- |
 | `memfd_secret` availability | Daemon startup log | Whether secrets are removed from kernel direct map |
 | Landlock enforcement | Daemon startup log | Whether filesystem sandboxing is active |
 | seccomp-bpf active | Daemon startup log | Whether syscall filtering is active |

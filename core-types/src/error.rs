@@ -5,6 +5,13 @@ pub enum Error {
     #[error("IPC error: {0}")]
     Ipc(String),
 
+    /// An operation received no answer within its deadline.
+    #[error("{operation} timed out after {}ms", after.as_millis())]
+    Timeout {
+        operation: String,
+        after: std::time::Duration,
+    },
+
     #[error("configuration error: {0}")]
     Config(String),
 

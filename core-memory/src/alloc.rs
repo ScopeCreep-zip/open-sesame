@@ -12,6 +12,7 @@
 //! See crate-level documentation for the full memory layout specification.
 
 use std::fmt;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -44,51 +45,23 @@ static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
 /// Whether `memfd_secret` is available. Probed once, cached for process lifetime.
 static MEMFD_SECRET_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
-/// Initialize or retrieve the process-wide canary.
+/// Initialize or retrieve the process-wide canary, from the operating
+/// system's entropy source (`getrandom(2)` on Linux, blocking until the
+/// pool is initialized). Without entropy no canary can be trusted, so the
+/// process cannot continue.
 fn global_canary() -> &'static [u8; CANARY_SIZE] {
     CANARY.get_or_init(|| {
         let mut buf = [0u8; CANARY_SIZE];
-
-        #[cfg(target_os = "linux")]
-        {
-            // SAFETY: buf is a valid mutable buffer of CANARY_SIZE bytes.
-            // flags=0 means block until entropy pool is initialized.
-            let ret = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), CANARY_SIZE, 0) };
-            assert!(
-                ret == CANARY_SIZE as isize,
-                "getrandom failed for canary: returned {ret}, errno {}",
-                errno()
-            );
+        if let Err(e) = getrandom::fill(&mut buf) {
+            panic!("no OS entropy for the secure-memory canary: {e}");
         }
-
-        #[cfg(target_os = "macos")]
-        {
-            // SAFETY: buf is a valid mutable buffer, CANARY_SIZE <= 256.
-            let ret = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), CANARY_SIZE) };
-            assert!(ret == 0, "getentropy failed for canary: errno {}", errno());
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            use std::io::Read;
-            let mut f = std::fs::File::open("/dev/urandom")
-                .expect("failed to open /dev/urandom for canary initialization");
-            f.read_exact(&mut buf)
-                .expect("failed to read /dev/urandom for canary initialization");
-        }
-
         buf
     })
 }
 
 /// Return the system page size.
 fn page_size() -> usize {
-    *PAGE_SIZE.get_or_init(|| {
-        // SAFETY: sysconf(_SC_PAGESIZE) is always safe.
-        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        assert!(ps > 0, "sysconf(_SC_PAGESIZE) returned {ps}");
-        ps as usize
-    })
+    *PAGE_SIZE.get_or_init(rustix::param::page_size)
 }
 
 /// Round `n` up to the next multiple of `align`. `align` must be a power of 2.
@@ -97,72 +70,92 @@ const fn round_up(n: usize, align: usize) -> usize {
     (n + align - 1) & !(align - 1)
 }
 
-/// Read the current thread-local errno.
+/// The calling thread's `errno`, read immediately after the failing call.
 #[inline]
 fn errno() -> i32 {
-    #[cfg(target_os = "linux")]
-    // SAFETY: __errno_location returns a valid pointer to thread-local errno.
-    unsafe {
-        *libc::__errno_location()
-    }
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .expect("last_os_error is built from errno")
+}
 
-    #[cfg(target_os = "macos")]
-    // SAFETY: __error returns a valid pointer to thread-local errno.
-    unsafe {
-        *libc::__error()
+/// A new `memfd_secret(2)` file descriptor (flags 0), owned and closed on
+/// drop.
+///
+/// `libc::SYS_memfd_secret` is the per-ABI syscall number (447 on most
+/// ABIs, `4000 + 447` on mips o32, `5000 + 447` on mips64,
+/// `__X32_SYSCALL_BIT + 447` on the `x86_64` x32 ABI). The architectures
+/// listed are those for which libc defines it under both glibc and musl.
+///
+/// # Errors
+///
+/// The syscall's error (`ENOSYS` without `CONFIG_SECRETMEM`).
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "s390x",
+        target_arch = "mips",
+        target_arch = "mips64",
+    )
+))]
+fn memfd_secret() -> std::io::Result<OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: memfd_secret(2) takes one flags argument; 0 requests none.
+    // It returns a new file descriptor, or -1 with errno set.
+    let ret = unsafe { libc::syscall(libc::SYS_memfd_secret, 0) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    let raw = libc::c_int::try_from(ret).expect("a file descriptor fits in c_int");
+    // SAFETY: `raw` is the descriptor memfd_secret just created; nothing
+    // else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
-    }
+/// `memfd_secret(2)` does not exist on this platform or architecture.
+///
+/// # Errors
+///
+/// Always `ErrorKind::Unsupported`.
+#[cfg(not(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "s390x",
+        target_arch = "mips",
+        target_arch = "mips64",
+    )
+)))]
+fn memfd_secret() -> std::io::Result<OwnedFd> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+/// The allocation error for a failed system call: its errno, or
+/// `Unsupported` when the platform lacks the call.
+fn os_failure(e: &std::io::Error) -> ProtectedAllocError {
+    e.raw_os_error().map_or(
+        ProtectedAllocError::Unsupported,
+        ProtectedAllocError::MmapFailed,
+    )
 }
 
 /// Probe whether `memfd_secret` is available and cache the result.
 ///
-/// Must be called before seccomp sandbox is applied (syscall 447 would be
-/// blocked post-sandbox). Returns true if memfd_secret is usable.
+/// Must be called before the seccomp sandbox is applied (the syscall is
+/// blocked post-sandbox). Returns true if `memfd_secret` is usable.
 fn probe_memfd_secret() -> bool {
-    *MEMFD_SECRET_AVAILABLE.get_or_init(|| {
-        #[cfg(target_os = "linux")]
-        {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            const SYS_MEMFD_SECRET: libc::c_long = 447;
-
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            {
-                tracing::error!(
-                    audit = "memory-protection",
-                    event_type = "memfd-secret-probe",
-                    available = false,
-                    "memfd_secret not supported on this CPU architecture"
-                );
-                return false;
-            }
-
-            // SAFETY: syscall(SYS_MEMFD_SECRET, 0) either returns an fd or -1.
-            let fd = unsafe { libc::syscall(SYS_MEMFD_SECRET, 0) } as libc::c_int;
-            if fd < 0 {
-                let e = errno();
-                tracing::error!(
-                    audit = "memory-protection",
-                    event_type = "memfd-secret-probe",
-                    available = false,
-                    errno = e,
-                    "SECURITY DEGRADED: memfd_secret unavailable (errno {e}). \
-                     Secret memory pages are NOT removed from the kernel direct map. \
-                     This means secret material is readable via /proc/pid/mem by any \
-                     same-UID process, and may be visible to kernel modules and DMA. \
-                     Required: Linux kernel >= 5.14 with CONFIG_SECRETMEM=y. \
-                     Check: zgrep CONFIG_SECRETMEM /proc/config.gz || \
-                     grep CONFIG_SECRETMEM /boot/config-$(uname -r). \
-                     This is a security bypass — all secret-carrying types operate \
-                     with reduced protection until this is resolved."
-                );
-                return false;
-            }
-            // SAFETY: fd is a valid open file descriptor.
-            unsafe { libc::close(fd) };
+    *MEMFD_SECRET_AVAILABLE.get_or_init(|| match memfd_secret() {
+        Ok(_probe) => {
             tracing::info!(
                 audit = "memory-protection",
                 event_type = "memfd-secret-probe",
@@ -171,16 +164,21 @@ fn probe_memfd_secret() -> bool {
             );
             true
         }
-
-        #[cfg(not(target_os = "linux"))]
-        {
+        Err(e) => {
             tracing::error!(
                 audit = "memory-protection",
                 event_type = "memfd-secret-probe",
                 available = false,
-                "SECURITY DEGRADED: memfd_secret is Linux-only. \
-                 Secret memory on this platform uses mmap(MAP_ANONYMOUS) with \
-                 mlock — pages are NOT removed from the kernel direct map."
+                error = %e,
+                "SECURITY DEGRADED: memfd_secret unavailable ({e}). \
+                 Secret memory pages are NOT removed from the kernel direct map. \
+                 This means secret material is readable via /proc/pid/mem by any \
+                 same-UID process, and may be visible to kernel modules and DMA. \
+                 Required: Linux kernel >= 5.14 with CONFIG_SECRETMEM=y. \
+                 Check: zgrep CONFIG_SECRETMEM /proc/config.gz || \
+                 grep CONFIG_SECRETMEM /boot/config-$(uname -r). \
+                 This is a security bypass — all secret-carrying types operate \
+                 with reduced protection until this is resolved."
             );
             false
         }
@@ -245,13 +243,56 @@ pub struct ProtectedAlloc {
     user_data_len: usize,
     /// Start of the data region (page-aligned, after guard page 1).
     data_region: NonNull<u8>,
-    /// Size of the data region in bytes (data_pages * page_size).
+    /// Size of the data region in bytes (`data_pages * page_size`).
     data_region_len: usize,
-    /// Pointer to the canary (immediately before user_data).
+    /// Pointer to the canary (immediately before `user_data`).
     canary_ptr: NonNull<u8>,
-    /// Whether this allocation is backed by memfd_secret (true) or
-    /// mmap(MAP_ANONYMOUS) fallback (false). Affects Drop behavior.
+    /// Whether this allocation is backed by `memfd_secret` (true) or the
+    /// `mmap(MAP_ANONYMOUS)` fallback (false). Affects Drop behavior.
     is_secret_mem: bool,
+}
+
+/// The sizes of one allocation, derived from the page size and the
+/// requested length.
+struct RegionLayout {
+    /// System page size.
+    page: usize,
+    /// Requested user data length.
+    user_len: usize,
+    /// Pages in the data region.
+    data_pages: usize,
+    /// `data_pages * page`.
+    data_region_len: usize,
+    /// The whole mapping: the data region plus `OVERHEAD_PAGES`.
+    mmap_total: usize,
+}
+
+impl RegionLayout {
+    /// The layout for `user_len` bytes on pages of `page` bytes.
+    ///
+    /// # Panics
+    ///
+    /// When a size overflows `usize`.
+    fn new(user_len: usize, page: usize) -> Self {
+        let data_bytes_needed = CANARY_SIZE
+            .checked_add(user_len)
+            .expect("allocation size overflow");
+        let data_pages = round_up(data_bytes_needed, page) / page;
+        let data_region_len = data_pages
+            .checked_mul(page)
+            .expect("data region size overflow");
+        let mmap_total = OVERHEAD_PAGES
+            .checked_add(data_pages)
+            .and_then(|pages| pages.checked_mul(page))
+            .expect("mmap size overflow");
+        Self {
+            page,
+            user_len,
+            data_pages,
+            data_region_len,
+            mmap_total,
+        }
+    }
 }
 
 // SAFETY: The mmap'd region is process-local. MAP_SHARED for memfd_secret
@@ -276,104 +317,67 @@ impl ProtectedAlloc {
     /// - `len` is 0
     /// - Both `memfd_secret` and `mmap` fail
     /// - `mprotect` fails on guard or metadata pages
+    ///
+    /// # Panics
+    ///
+    /// When the allocation size overflows `usize`.
     pub fn new(len: usize) -> Result<Self, ProtectedAllocError> {
         if len == 0 {
             return Err(ProtectedAllocError::ZeroSize);
         }
 
-        let page = page_size();
-        let canary = global_canary();
-
-        let data_bytes_needed = CANARY_SIZE
-            .checked_add(len)
-            .expect("allocation size overflow");
-        let data_pages = round_up(data_bytes_needed, page) / page;
-        let data_region_len = data_pages
-            .checked_mul(page)
-            .expect("data region size overflow");
-
-        let total_pages = OVERHEAD_PAGES
-            .checked_add(data_pages)
-            .expect("page count overflow");
-        let mmap_total = total_pages.checked_mul(page).expect("mmap size overflow");
+        let layout = RegionLayout::new(len, page_size());
 
         // Allocate: memfd_secret preferred, mmap(MAP_ANONYMOUS) fallback.
         let is_secret_mem = probe_memfd_secret();
         let mmap_base = if is_secret_mem {
-            Self::memfd_secret_mmap(mmap_total)?
+            Self::memfd_secret_mmap(layout.mmap_total)?
         } else {
-            Self::anonymous_mmap(mmap_total)?
+            Self::anonymous_mmap(layout.mmap_total)?
         };
 
-        let base = mmap_base.cast::<u8>();
-
         let result = Self::init_region(
-            base,
-            mmap_total,
-            page,
-            len,
-            data_pages,
-            data_region_len,
-            canary,
+            mmap_base.cast::<u8>(),
+            &layout,
+            global_canary(),
             is_secret_mem,
         );
 
         if result.is_err() {
             // SAFETY: mmap_base/mmap_total are from a successful mmap.
             unsafe {
-                libc::munmap(mmap_base, mmap_total);
+                libc::munmap(mmap_base, layout.mmap_total);
             }
         }
 
         result
     }
 
-    /// Allocate via `memfd_secret(2)`.
-    #[cfg(target_os = "linux")]
+    /// Map `size` bytes of a new `memfd_secret(2)` file. The descriptor is
+    /// closed on return; the mapping keeps the pages alive.
     fn memfd_secret_mmap(size: usize) -> Result<*mut libc::c_void, ProtectedAllocError> {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        const SYS_MEMFD_SECRET: libc::c_long = 447;
+        let fd = memfd_secret().map_err(|e| os_failure(&e))?;
+        let length = u64::try_from(size).expect("a mapping size fits in u64");
+        rustix::fs::ftruncate(&fd, length)
+            .map_err(|e| ProtectedAllocError::MmapFailed(e.raw_os_error()))?;
 
-        // SAFETY: SYS_MEMFD_SECRET with flags=0 is safe.
-        let fd = unsafe { libc::syscall(SYS_MEMFD_SECRET, 0) } as libc::c_int;
-        if fd < 0 {
-            return Err(ProtectedAllocError::MmapFailed(errno()));
-        }
-
-        // SAFETY: fd is a valid memfd_secret file descriptor.
-        let ret = unsafe { libc::ftruncate(fd, size as libc::off_t) };
-        if ret != 0 {
-            let e = errno();
-            // SAFETY: fd is a valid open file descriptor.
-            unsafe { libc::close(fd) };
-            return Err(ProtectedAllocError::MmapFailed(e));
-        }
-
-        // SAFETY: fd is valid, size > 0, MAP_SHARED required for memfd_secret.
+        // SAFETY: `fd` is an open memfd_secret file of `size` bytes, size > 0;
+        // memfd_secret requires MAP_SHARED.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
-                fd,
+                fd.as_raw_fd(),
                 0,
             )
         };
-
-        // SAFETY: fd is a valid open file descriptor.
-        unsafe { libc::close(fd) };
-
         if ptr == libc::MAP_FAILED {
+            // errno is read before `fd` is dropped (closed).
             return Err(ProtectedAllocError::MmapFailed(errno()));
         }
-
         Ok(ptr)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn memfd_secret_mmap(_size: usize) -> Result<*mut libc::c_void, ProtectedAllocError> {
-        Err(ProtectedAllocError::Unsupported)
     }
 
     /// Fallback: allocate via `mmap(MAP_ANONYMOUS|MAP_PRIVATE)` with mlock.
@@ -397,18 +401,48 @@ impl ProtectedAlloc {
         Ok(ptr)
     }
 
+    /// Write the metadata record at the start of the metadata page: the
+    /// mapping size, data region offset, user data offset, user data
+    /// length, and data page count (native-endian `u64` each), then the
+    /// canary.
+    fn write_metadata(metadata: *mut u8, layout: &RegionLayout, canary: &[u8; CANARY_SIZE]) {
+        const FIELDS: usize = 5;
+        let data_offset = 3 * layout.page;
+        let fields: [usize; FIELDS] = [
+            layout.mmap_total,
+            data_offset,
+            data_offset + layout.data_region_len - layout.user_len,
+            layout.user_len,
+            layout.data_pages,
+        ];
+        let mut record = [0u8; FIELDS * 8 + CANARY_SIZE];
+        let (values, canary_slot) = record.split_at_mut(FIELDS * 8);
+        for (slot, field) in values.chunks_exact_mut(8).zip(fields) {
+            let value = u64::try_from(field).expect("a mapping offset fits in u64");
+            slot.copy_from_slice(&value.to_ne_bytes());
+        }
+        canary_slot.copy_from_slice(canary);
+        // SAFETY: `metadata` is the writable metadata page, at least one
+        // page (> record.len()) long; the record is a separate stack buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(record.as_ptr(), metadata, record.len());
+        }
+    }
+
     /// Initialize the mmap'd region.
-    #[allow(clippy::too_many_arguments)]
     fn init_region(
         base: *mut u8,
-        mmap_total: usize,
-        page: usize,
-        user_len: usize,
-        data_pages: usize,
-        data_region_len: usize,
+        layout: &RegionLayout,
         canary: &[u8; CANARY_SIZE],
         is_secret_mem: bool,
     ) -> Result<Self, ProtectedAllocError> {
+        let &RegionLayout {
+            page,
+            user_len,
+            data_region_len,
+            mmap_total,
+            ..
+        } = layout;
         let guard0 = base;
         // SAFETY: All pointer arithmetic within the mmap'd region.
         let metadata = unsafe { base.add(page) };
@@ -434,17 +468,7 @@ impl ProtectedAlloc {
         }
 
         // --- Metadata page ---
-        // SAFETY: metadata is within the region, currently writable.
-        unsafe {
-            let mp = metadata;
-            (mp as *mut u64).write(mmap_total as u64);
-            (mp.add(8) as *mut u64).write((3 * page) as u64);
-            let user_data_offset = 3 * page + data_region_len - user_len;
-            (mp.add(16) as *mut u64).write(user_data_offset as u64);
-            (mp.add(24) as *mut u64).write(user_len as u64);
-            (mp.add(32) as *mut u64).write(data_pages as u64);
-            std::ptr::copy_nonoverlapping(canary.as_ptr(), mp.add(40), CANARY_SIZE);
-        }
+        Self::write_metadata(metadata, layout, canary);
         // SAFETY: metadata is page-aligned.
         if unsafe { libc::mprotect(metadata.cast(), page, libc::PROT_READ) } != 0 {
             return Err(ProtectedAllocError::MprotectFailed(errno(), "metadata_ro"));
@@ -463,7 +487,8 @@ impl ProtectedAlloc {
             std::ptr::copy_nonoverlapping(canary.as_ptr(), canary_ptr, CANARY_SIZE);
         }
 
-        let padding_len = canary_ptr as usize - data_start as usize;
+        // canary_ptr = data_start + data_region_len - user_len - CANARY_SIZE.
+        let padding_len = data_region_len - user_len - CANARY_SIZE;
         if padding_len > 0 {
             // SAFETY: data_start..canary_ptr within writable data region.
             unsafe {
@@ -544,6 +569,11 @@ impl ProtectedAlloc {
     }
 
     /// Create a `ProtectedAlloc` and copy `data` into it.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtectedAllocError::ZeroSize`] for empty `data`, and the
+    /// [`new`](Self::new) errors.
     pub fn from_slice(data: &[u8]) -> Result<Self, ProtectedAllocError> {
         if data.is_empty() {
             return Err(ProtectedAllocError::ZeroSize);
@@ -561,6 +591,10 @@ impl ProtectedAlloc {
     }
 
     /// Create from a byte slice that may be empty (1-byte sentinel for empty).
+    ///
+    /// # Errors
+    ///
+    /// The [`new`](Self::new) errors.
     pub fn from_slice_or_sentinel(data: &[u8]) -> Result<Self, ProtectedAllocError> {
         if data.is_empty() {
             tracing::trace!(
@@ -576,6 +610,7 @@ impl ProtectedAlloc {
 
     /// Returns a shared reference to the user data.
     #[inline]
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: user_data points to user_data_len bytes within the mmap'd region.
         unsafe { std::slice::from_raw_parts(self.user_data.as_ptr(), self.user_data_len) }
@@ -588,12 +623,16 @@ impl ProtectedAlloc {
         unsafe { std::slice::from_raw_parts_mut(self.user_data.as_ptr(), self.user_data_len) }
     }
 
+    /// Length of the user data in bytes.
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.user_data_len
     }
 
+    /// Whether the user data is empty (never: `new` rejects zero sizes).
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.user_data_len == 0
     }
@@ -602,6 +641,7 @@ impl ProtectedAlloc {
     /// `mmap` fallback (false). Used by `sesame status --doctor` to
     /// report the memory protection backend.
     #[inline]
+    #[must_use]
     pub fn is_secret_mem(&self) -> bool {
         self.is_secret_mem
     }
@@ -621,8 +661,9 @@ impl ProtectedAlloc {
         for (x, y) in a.iter().zip(b.iter()) {
             acc |= x ^ y;
         }
-        // SAFETY: acc is a stack variable.
-        let result = unsafe { std::ptr::read_volatile(&acc) };
+        // SAFETY: `acc` is an initialized stack variable; the volatile read
+        // keeps the comparison from being short-circuited.
+        let result = unsafe { std::ptr::read_volatile(&raw const acc) };
         result == 0
     }
 
@@ -672,15 +713,13 @@ impl Drop for ProtectedAlloc {
             // memfd_secret pages were never marked DONTDUMP and are not in
             // the direct map — DODUMP is meaningless for them.
             #[cfg(target_os = "linux")]
-            if !self.is_secret_mem {
-                // SAFETY: data_region pointer/size are valid.
-                unsafe {
-                    libc::madvise(
-                        self.data_region.as_ptr().cast(),
-                        self.data_region_len,
-                        libc::MADV_DODUMP,
-                    );
-                }
+            // SAFETY: data_region pointer/size are valid.
+            unsafe {
+                libc::madvise(
+                    self.data_region.as_ptr().cast(),
+                    self.data_region_len,
+                    libc::MADV_DODUMP,
+                );
             }
         }
 

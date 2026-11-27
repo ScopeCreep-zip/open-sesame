@@ -15,7 +15,7 @@ selections are defined. No functional code exists.
 The `Cargo.toml` declares macOS-specific dependencies:
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `core-types` | Shared types (`Window`, `WindowId`, `Error`, etc.) |
 | `security-framework` | Keychain Services API (create/read/delete keychain items) |
 | `objc2` | Objective-C runtime bindings for Accessibility and AppKit APIs |

@@ -83,12 +83,12 @@ su builder -c "CARCH=x86_64 PKGEXT='.pkg.tar.zst' makepkg --nodeps --force" 2>&1
 
 echo ""
 echo "=== Built packages ==="
-ls -la *.pkg.tar.zst
+ls -la ./*.pkg.tar.zst
 
 # ── Install packages ─────────────────────────────────────────────────────────
 echo ""
 echo "=== Installing with pacman -U ==="
-pacman -U --noconfirm *.pkg.tar.zst 2>&1
+pacman -U --noconfirm ./*.pkg.tar.zst 2>&1
 
 # ── Verify installation ─────────────────────────────────────────────────────
 echo ""

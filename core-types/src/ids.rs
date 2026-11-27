@@ -46,6 +46,21 @@ macro_rules! define_id {
 }
 
 define_id!(ProfileId, "prof");
+
+impl ProfileId {
+    /// The installation-scoped identity of profile `name`: UUID v5 of
+    /// `profile:<name>` in `installation_namespace`
+    /// (`InstallationConfig::namespace`), stable across restarts and
+    /// distinct between installations.
+    #[must_use]
+    pub fn of_profile(installation_namespace: &Uuid, name: &str) -> Self {
+        Self(Uuid::new_v5(
+            installation_namespace,
+            format!("profile:{name}").as_bytes(),
+        ))
+    }
+}
+
 define_id!(WindowId, "win");
 define_id!(CompositorWorkspaceId, "ws");
 define_id!(MonitorId, "mon");
@@ -95,5 +110,36 @@ impl AppId {
 impl fmt::Display for AppId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ns() -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, b"installation")
+    }
+
+    #[test]
+    fn profile_ids_are_installation_scoped_and_stable() {
+        assert_eq!(
+            ProfileId::of_profile(&ns(), "work"),
+            ProfileId::of_profile(&ns(), "work")
+        );
+        assert_ne!(
+            ProfileId::of_profile(&ns(), "work"),
+            ProfileId::of_profile(&ns(), "home")
+        );
+        let other = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"other");
+        assert_ne!(
+            ProfileId::of_profile(&ns(), "work"),
+            ProfileId::of_profile(&other, "work")
+        );
+        // The persisted derivation: audit entries and clipboard rows carry it.
+        assert_eq!(
+            *ProfileId::of_profile(&ns(), "work").as_uuid(),
+            Uuid::new_v5(&ns(), b"profile:work")
+        );
     }
 }

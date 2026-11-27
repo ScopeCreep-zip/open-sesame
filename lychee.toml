@@ -2,7 +2,7 @@
 # https://github.com/lycheeverse/lychee
 
 # Display settings
-no_progress = true  # Don't show progress bar (better for CI/CD)
+no_progress = true # Don't show progress bar (better for CI/CD)
 format = "detailed" # Output format: compact, detailed, json, markdown, raw
 
 # Maximum number of concurrent requests
@@ -18,7 +18,7 @@ timeout = 20
 max_retries = 2
 
 # Accept these status codes
-accept = [ 200, 201, 202, 203, 204, 206, 301, 302, 304, 401, 403 ]
+accept = [200, 201, 202, 203, 204, 206, 301, 302, 304, 401, 403]
 
 # Exclude patterns
 exclude = [
@@ -36,23 +36,22 @@ exclude = [
   "^https://github\\.com/.*/edit/",
   "^https://github\\.com/.*/new/",
 
-  # Anchors in markdown (handled separately)
-  "^#",
+  # Host paths inside example config files in code blocks (`gpgkey=` in
+  # yum .repo files); they name the reader's filesystem, not this repository
+  "^file:///etc/pki/rpm-gpg/",
 
   # crates.io API endpoints (rate limited)
   "^https://crates\\.io/api/",
 ]
 
 # Link checking behavior
-include_verbatim = true  # Check links in code blocks
-include_anchor = true    # Check anchors
-include_fragments = true # Check fragments
+include_verbatim = true # Check links in code blocks
+include_fragments = "anchor-only" # Check `#section` fragments against target headings
 
-# Network exclusions
+# Network exclusions (mail addresses are excluded unless `include_mail = true`)
 exclude_link_local = true # Skip link-local addresses (169.254.x.x)
-exclude_loopback = true   # Skip localhost and 127.0.0.1
-exclude_private = true    # Exclude private IPs
-exclude_mail = true       # Exclude mail addresses
+exclude_loopback = true # Skip localhost and 127.0.0.1
+exclude_private = true # Exclude private IPs
 
 # Offline behavior
 skip_missing = true # Skip missing files when offline

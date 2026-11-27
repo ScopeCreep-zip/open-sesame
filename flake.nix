@@ -13,6 +13,10 @@
     konductor = {
       url = "github:braincraftio/konductor";
       inputs.nixpkgs.follows = "nixpkgs";
+      # konductor takes open-sesame as an input; this flake is that input,
+      # so the lock does not nest another open-sesame and konductor pair on
+      # every update.
+      inputs.open-sesame.follows = "";
     };
   };
 
@@ -507,26 +511,25 @@
         system:
         let
           pkgs = pkgsFor system;
+          common = pkgs.callPackage ./nix/common.nix { };
         in
         {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
-              # Rust toolchain (from konductor's rust-overlay, version-locked)
-              (rust-bin.stable."1.97.0".minimal.override {
-                extensions = [
-                  "rust-src"
-                  "rust-analyzer"
-                  "clippy"
-                  "rustfmt"
-                ];
-              })
+              # Rust toolchain: rust-toolchain.toml (nix/common.nix) plus
+              # rust-src and rust-analyzer
+              common.devToolchain
 
               # Build tools
               pkg-config
               patchelf
               cargo-deb
               (pkgs.callPackage ./nix/cargo-generate-rpm.nix { })
+
+              # tests/protocol_validation.sh: the doctor's JSON report and
+              # the daemons' sd_notify(3) sockets
               jq
+              socat
 
               # Documentation
               mdbook
@@ -543,6 +546,16 @@
               actionlint
               markdownlint-cli2
               lefthook
+
+              # Supply chain: advisories, licenses, sources, bans (deny.toml).
+              # cargo-deny fetches the advisory database with git; a host git
+              # run under this shell's LD_LIBRARY_PATH loads the shell's glibc
+              # and aborts.
+              cargo-deny
+              git
+
+              # Task runner (.mise.toml: qa:*, ci:*, cargo:*)
+              mise
             ];
 
             buildInputs = with pkgs; [
@@ -558,6 +571,11 @@
               fontconfig
               pcsclite
               libseccomp
+
+              # GTK4 (daemon-launcher `gtk` feature; built by the lefthook
+              # pre-commit `cargo clippy --all-targets --all-features` gate)
+              glib
+              gtk4
             ];
 
             # pkg-config needs to find .pc files from buildInputs
@@ -571,6 +589,8 @@
                 fontconfig.dev
                 pcsclite.dev
                 libseccomp.dev
+                glib.dev
+                gtk4.dev
               ]
             );
 
@@ -585,6 +605,8 @@
                 fontconfig
                 wayland
                 libxkbcommon
+                glib
+                gtk4
               ]
             );
 
@@ -600,6 +622,8 @@
                 fontconfig
                 wayland
                 libxkbcommon
+                glib
+                gtk4
               ]
             );
 

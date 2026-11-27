@@ -32,7 +32,7 @@ configured in `~/.config/pds/observability.toml`.
 ### Daemon Health
 
 | Metric | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `pds_daemon_uptime_seconds` | Gauge | Seconds since daemon start |
 | `pds_daemon_restart_count` | Counter | systemd restart count (from watchdog) |
 | `pds_daemon_memory_rss_bytes` | Gauge | Resident set size |
@@ -41,7 +41,7 @@ configured in `~/.config/pds/observability.toml`.
 ### Vault Operations
 
 | Metric | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `pds_vault_unlock_total` | Counter | Unlock attempts (labeled by factor, result) |
 | `pds_vault_unlock_duration_seconds` | Histogram | Time to complete unlock |
 | `pds_vault_secret_read_total` | Counter | Secret read operations |
@@ -51,7 +51,7 @@ configured in `~/.config/pds/observability.toml`.
 ### IPC Throughput
 
 | Metric | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `pds_ipc_messages_sent_total` | Counter | Messages sent (labeled by event kind) |
 | `pds_ipc_messages_received_total` | Counter | Messages received |
 | `pds_ipc_message_bytes_total` | Counter | Total bytes over the bus |
@@ -62,7 +62,7 @@ configured in `~/.config/pds/observability.toml`.
 ### Memory Protection Posture
 
 | Metric | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `pds_mlock_limit_bytes` | Gauge | Configured `LimitMEMLOCK` |
 | `pds_mlock_used_bytes` | Gauge | Currently locked memory |
 | `pds_seccomp_active` | Gauge | 1 if seccomp filter is loaded, 0 otherwise |

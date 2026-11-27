@@ -11,7 +11,7 @@ package that adds GUI daemons for COSMIC/Wayland.
 Defined in `open-sesame/Cargo.toml` under `[package.metadata.generate-rpm]`.
 
 | Field | Value |
-|-------|-------|
+| --- | --- |
 | Package name | `open-sesame` |
 | Vendor | `scopecreep.zip` |
 | Requires | `glibc`, `libgcc`, `libseccomp` |
@@ -49,7 +49,7 @@ Defined in `open-sesame/Cargo.toml` under `[package.metadata.generate-rpm]`.
 Defined in `daemon-wm/Cargo.toml` under `[package.metadata.generate-rpm]`.
 
 | Field | Value |
-|-------|-------|
+| --- | --- |
 | Package name | `open-sesame-desktop` |
 | Vendor | `scopecreep.zip` |
 | Requires | `glibc`, `libgcc`, `libseccomp`, `libxkbcommon`, `libwayland-client`, `fontconfig`, `freetype` |
@@ -102,7 +102,7 @@ completes. This differs from Debian maintainer scripts which receive string argu
 ### $1 Values
 
 | Scriptlet | Install | Upgrade | Remove |
-|-----------|---------|---------|--------|
+| --- | --- | --- | --- |
 | `%pre` | 1 | 2 | (N/A) |
 | `%post` | 1 | 2 | (N/A) |
 | `%preun` | (N/A) | 1 | 0 |
@@ -154,7 +154,7 @@ stop processing of that package in the transaction with no rollback capability.
 Each package ships its own preset file to avoid RPM file conflicts:
 
 | Preset | Package | Units |
-|--------|---------|-------|
+| --- | --- | --- |
 | `90-open-sesame.preset` | `open-sesame` | profile, secrets, launcher, snippets, headless target |
 | `90-open-sesame-desktop.preset` | `open-sesame-desktop` | wm, clipboard, input, desktop target |
 
@@ -250,7 +250,7 @@ sha256sum -c SHA256SUMS.txt
 ## Comparison with Debian Scriptlets
 
 | Concern | Debian (dpkg) | RPM |
-|---------|---------------|-----|
+| --- | --- | --- |
 | Argument type | String (`configure`, `remove`, `upgrade`) | Numeric (`$1`: package count) |
 | Install detection | `case "$1" in configure)` | `if [ "$1" -eq 1 ]` |
 | Remove detection | `case "$1" in remove)` | `if [ "$1" -eq 0 ]` |

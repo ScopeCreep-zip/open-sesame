@@ -20,14 +20,16 @@ pub(crate) struct SecretRateLimiter {
     quota: governor::Quota,
 }
 
+/// Sustained requests per second per requester.
+const PER_SECOND: NonZeroU32 = NonZeroU32::new(10).unwrap();
+/// Requests a requester may burst above the sustained rate.
+const BURST: NonZeroU32 = NonZeroU32::new(20).unwrap();
+
 impl SecretRateLimiter {
     pub(crate) fn new() -> Self {
-        // 10 requests/sec with burst of 20.
-        let quota = governor::Quota::per_second(NonZeroU32::new(10).expect("nonzero"))
-            .allow_burst(NonZeroU32::new(20).expect("nonzero"));
         Self {
             limiters: HashMap::new(),
-            quota,
+            quota: governor::Quota::per_second(PER_SECOND).allow_burst(BURST),
         }
     }
 

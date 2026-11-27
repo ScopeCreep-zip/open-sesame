@@ -21,7 +21,7 @@ human has authorized them, either directly (via `DelegationGrant`) or via policy
 The `AgentType` enum (`core-types/src/security.rs`) defines the entity classification:
 
 | Type | Role in Orchestration |
-|------|----------------------|
+| --- | --- |
 | `Human` | Approver, delegator, root of trust for capability chains |
 | `AI { model_family }` | Automated operations, LLM-driven workflows, copilot actions |
 | `Service { unit }` | Background processes, CI/CD pipelines, cron jobs |
@@ -120,7 +120,7 @@ All agent actions are attributed in the audit log. The audit entry for any opera
 includes:
 
 | Field | Source |
-|-------|--------|
+| --- | --- |
 | Agent ID | `AgentIdentity.id` |
 | Agent type | `AgentIdentity.agent_type` |
 | Delegation chain | `AgentIdentity.delegation_chain` -- full chain from root delegator |
@@ -189,7 +189,7 @@ The `TrustVector` (`core-types/src/security.rs`) provides the quantitative basis
 authorization decisions in mixed human-agent workflows:
 
 | Dimension | Effect on Orchestration |
-|-----------|------------------------|
+| --- | --- |
 | `authn_strength` | Higher strength reduces approval gate friction |
 | `authz_freshness` | Stale authorization triggers re-approval |
 | `delegation_depth` | Deeper chains require stronger attestations at each link |

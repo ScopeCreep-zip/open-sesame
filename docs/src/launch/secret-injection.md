@@ -134,7 +134,7 @@ Bash function export injection.
 Every launched process receives these environment variables regardless of tag configuration:
 
 | Variable | Value |
-|---|---|
+| --- | --- |
 | `SESAME_PROFILE` | The trust profile name used for the launch. |
 | `SESAME_APP_ID` | The desktop entry ID of the launched application. |
 | `SESAME_SOCKET` | Path to the IPC bus Unix socket. |

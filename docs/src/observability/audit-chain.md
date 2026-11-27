@@ -1,33 +1,34 @@
 # Audit Chain
 
-Open Sesame maintains a tamper-evident audit log using a BLAKE3 hash chain. Every auditable
-operation appends a JSONL entry whose `prev_hash` field contains the hash of the previous
-entry's serialized JSON. Tampering with any entry invalidates all subsequent hashes.
+Open Sesame keeps a tamper-evident audit log: every auditable operation appends a JSONL entry
+whose `prev_hash` is the hash of the previous entry's serialized line. Changing, deleting,
+reordering, or injecting an entry breaks every later link.
 
-## Hash Chain Mechanics
+`core-profile/src/audit.rs` is the only reader and writer of the log: `open_audit_log`
+resumes the chain for appending, `read_audit_log` reads it, and `verify_audit_log` replays
+it.
 
-The `AuditLogger` in `core-profile/src/audit.rs` maintains three pieces of mutable state:
+## Hash Algorithm
 
-- `last_hash`: the hex-encoded hash of the most recently written entry.
-- `sequence`: a monotonically increasing counter (starts at 1).
-- `hash_algorithm`: either `Blake3` or `Sha256` (configurable at construction, default is
-  BLAKE3).
+The chain hash is the configured `[crypto] audit_hash`: BLAKE3 (default) or SHA-256 for
+governance-compatible deployments. A chain is verifiable only under the algorithm it was
+written with: verifying a SHA-256 chain as BLAKE3 fails at the second entry.
 
-When `append(action)` is called:
+## Appending
 
-1. The sequence is incremented.
-2. A wall-clock timestamp (milliseconds since Unix epoch) is captured.
-3. An `AuditEntry` is constructed with the current `last_hash` as its `prev_hash`.
-4. The entry is serialized to a single-line JSON string.
-5. The JSON bytes are hashed with the configured algorithm (BLAKE3 or SHA-256).
-6. The resulting hex digest becomes the new `last_hash`.
-7. The JSON line is written to the underlying `Write` sink and flushed.
+`AuditLogger` holds the chain head (`last_hash`, the hex hash of the last written line, and
+`sequence`), the hash algorithm, and the default agent identity. `append(action)`:
 
-The first entry in a fresh log has an empty string as its `prev_hash`.
+1. Reads the wall clock (milliseconds since the Unix epoch); a clock before the epoch is an
+   error.
+2. Builds an `AuditEntry` with sequence `sequence + 1` and `prev_hash` the current head.
+3. Serializes it to one JSON line, writes it, and flushes.
+4. Only after the write succeeds, advances the head to the new line's hash and sequence: a
+   failed write leaves the logger consistent with the log.
+
+The first entry of a fresh log has an empty `prev_hash`.
 
 ## Entry Structure
-
-Each JSONL line contains:
 
 ```json
 {
@@ -40,124 +41,97 @@ Each JSONL line contains:
 ```
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `sequence` | `u64` | Monotonically increasing, starting at 1. |
-| `timestamp_ms` | `u64` | Wall clock time in milliseconds since Unix epoch. |
-| `action` | `AuditAction` | The auditable operation (see variants below). |
-| `prev_hash` | `String` | Hex-encoded hash of the previous entry's JSON. Empty for the first entry. |
-| `agent_id` | `Option<AgentId>` | The agent identity that triggered the action, if known. |
+| `timestamp_ms` | `u64` | Wall clock time in milliseconds since the Unix epoch. |
+| `action` | `AuditAction` | The auditable operation (below). |
+| `prev_hash` | `String` | Hex hash of the previous entry's line. Empty for the first entry. |
+| `agent_id` | `Option<AgentId>` | The agent that triggered the action; omitted when unknown. |
 
 ## AuditAction Variants
 
-The `AuditAction` enum in `core-profile/src/lib.rs` is `#[non_exhaustive]` and currently
-defines:
+`AuditAction` (`core-profile/src/lib.rs`, `#[non_exhaustive]`):
 
 | Variant | Fields | Description |
-|---|---|---|
-| `ProfileActivated` | `target: ProfileId`, `duration_ms: u32` | A trust profile was activated. |
-| `ProfileDeactivated` | `target: ProfileId`, `duration_ms: u32` | A trust profile was deactivated. |
-| `ProfileActivationFailed` | `target: ProfileId`, `reason: String` | Activation failed. |
-| `DefaultProfileChanged` | `previous: ProfileId`, `current: ProfileId` | The default profile for new launches changed. |
+| --- | --- | --- |
+| `ProfileActivated` | `target`, `duration_ms` | A trust profile was activated. |
+| `ProfileDeactivated` | `target`, `duration_ms` | A trust profile was deactivated. |
+| `ProfileActivationFailed` | `target`, `reason` | An activation failed. |
+| `ProfileDeactivationFailed` | `target`, `reason` | A deactivation failed or was not confirmed. |
+| `DefaultProfileChanged` | `previous`, `current` | The default profile for new launches changed. |
 | `IsolationViolationAttempt` | `from_profile`, `resource` | A cross-profile resource access was blocked. |
-| `SecretAccessed` | `profile_id: ProfileId`, `secret_ref: String` | A secret was read from a vault. |
-| `KeyRotationStarted` | `daemon_name: String`, `generation: u64` | IPC bus key rotation began. |
-| `KeyRotationCompleted` | `daemon_name: String`, `generation: u64` | Key rotation completed. |
-| `KeyRevoked` | `daemon_name: String`, `reason: String`, `generation: u64` | A daemon's key was revoked. |
-| `SecretOperationAudited` | `action`, `profile`, `key`, `requester`, `outcome` | A secret operation was logged. |
-| `AgentConnected` | `agent_id: AgentId`, `agent_type: AgentType` | An agent connected. |
-| `AgentDisconnected` | `agent_id: AgentId`, `reason: String` | An agent disconnected. |
-| `InstallationCreated` | `id`, `org`, `machine_binding_present` | A new installation was registered. |
-| `ProfileIdMigrated` | `name`, `old_id`, `new_id` | A profile's internal ID was migrated. |
-| `AuthorizationRequired` | `request_id: Uuid`, `operation: String` | An operation requires authorization. |
+| `SecretAccessed` | `profile_id`, `secret_ref` | A secret was read from a vault. |
+| `KeyRotationStarted` | `daemon_name`, `generation` | IPC key rotation began. |
+| `KeyRotationCompleted` | `daemon_name`, `generation` | Key rotation completed. |
+| `KeyRevoked` | `daemon_name`, `reason`, `generation` | A daemon's key was revoked. |
+| `SecretOperationAudited` | `action`, `profile`, `key`, `requester`, `requester_name`, `outcome` | A secret operation was performed or denied. |
+| `AgentConnected` | `agent_id`, `agent_type` | An agent connected. |
+| `AgentDisconnected` | `agent_id`, `reason` | An agent disconnected. |
+| `InstallationCreated` | `id`, `org`, `machine_binding_present` | An installation was created. |
+| `AuthorizationRequired` | `request_id`, `operation` | An operation requires authorization. |
 | `AuthorizationGranted` | `request_id`, `delegator`, `scope` | Authorization was granted. |
-| `AuthorizationDenied` | `request_id: Uuid`, `reason: String` | Authorization was denied. |
-| `AuthorizationTimeout` | `request_id: Uuid` | An authorization request timed out. |
+| `AuthorizationDenied` | `request_id`, `reason` | Authorization was denied. |
+| `AuthorizationTimeout` | `request_id` | An authorization request timed out. |
 | `DelegationRevoked` | `delegation_id`, `revoker`, `reason` | A delegation was revoked. |
 | `HeartbeatRenewed` | `delegation_id`, `renewal_source` | A delegation heartbeat was renewed. |
 | `FederationSessionEstablished` | `session_id`, `remote_installation` | A federation session was established. |
-| `FederationSessionTerminated` | `session_id: Uuid`, `reason: String` | A federation session ended. |
-| `PostureEvaluated` | `composite_score: f64` | A security posture evaluation produced a score. |
+| `FederationSessionTerminated` | `session_id`, `reason` | A federation session ended. |
+| `PostureEvaluated` | `composite_score` | A device posture evaluation produced a score. |
 
-## Tamper Detection: sesame audit verify
+## Verification: sesame audit verify
 
-The `sesame audit verify` command in `open-sesame/src/audit.rs` reads the audit log at
-`~/.config/pds/audit.jsonl` and replays the hash chain:
+`sesame audit verify` replays the chain of the log under the configured algorithm:
 
 ```text
 $ sesame audit verify
 OK: 1247 entries verified.
 ```
 
-The verification algorithm in `core_profile::verify_chain`:
-
-1. Iterates each non-empty JSONL line in order.
-2. Parses each line as an `AuditEntry`.
-3. Checks that `entry.prev_hash` matches the hash computed from the previous line's raw JSON
-   bytes.
-4. If any mismatch is found, returns an error identifying the broken sequence number and the
-   expected vs. actual `prev_hash`.
-
-Verification detects: modified entries, deleted entries, reordered entries, and injected entries.
-The test suite in `core-profile/src/audit.rs` explicitly validates detection of all four
-tampering modes.
+`verify_chain` iterates the non-empty lines in order, parses each as an `AuditEntry`, and
+checks that its `prev_hash` is the hash of the previous line. The first mismatch is an error
+naming the sequence number and the expected and actual `prev_hash`; an unparseable line is
+an error naming its line number. The `core-profile` tests cover modified, deleted, and
+reordered entries, and a chain resumed across a restart.
 
 ## sesame audit tail
 
-The `sesame audit tail` command displays recent audit entries:
-
 ```bash
-sesame audit tail 10
+sesame audit tail -n 10
 sesame audit tail --follow
 ```
 
-Without `--follow`, the command reads the last N entries from the log file and pretty-prints
-each as indented JSON separated by `---` dividers.
+Without `--follow`, the last N entries are pretty-printed. With `--follow`, new appends are
+printed as the file grows, until `Ctrl-C`.
 
-With `--follow`, it watches the audit log file for new appends using
-`notify::RecommendedWatcher` (inotify on Linux). When the file grows, only the new bytes are
-read (via `Seek::SeekFrom::Start(last_len)`), parsed line by line, and printed. The follow loop
-exits on `Ctrl-C` (SIGINT).
+## Startup and Recovery
 
-## Chain Recovery After Corruption
+daemon-profile opens the log once `installation.toml` exists (`open_audit`):
 
-On daemon-profile startup, the audit logger loads its state from the last line of the existing
-log file. The `load_audit_state` function in `daemon-profile/src/context.rs`:
+1. `open_audit_log` reads the chain head from the log's last non-empty line: its hash under
+   the configured algorithm and its sequence. A missing or empty log starts a fresh chain.
+2. A last line that does not parse is an error naming the file and `sesame audit verify`:
+   starting a fresh chain after it would fork the log, so daemon-profile does not start until
+   the log is inspected.
+3. `verify_audit_log` then replays the whole chain. A broken chain is logged at `error` and
+   the daemon keeps running: the log stays tamper-evident (`sesame audit verify` reports the
+   break), and refusing to start would also stop recording new events.
 
-1. Reads the file contents (returns `(empty, 0)` if the file does not exist).
-2. Finds the last non-empty line by iterating in reverse.
-3. Attempts to parse it as an `AuditEntry`.
-4. If successful, computes its BLAKE3 hash and extracts its sequence number.
-5. If parsing fails (corrupt last entry), falls back to `(empty_hash, 0)`, starting a fresh
-   chain segment.
-
-After loading, the startup code runs `verify_chain` on the existing log if the sequence is
-greater than 0. A verification failure is logged at `error` level but does not prevent the
-daemon from starting -- the daemon continues appending to the potentially-broken chain.
-
-## Chain Continuity Across Restarts
-
-The audit chain survives daemon restarts. On restart, daemon-profile loads the last hash and
-sequence from disk and continues appending. The hash of the last pre-restart entry becomes the
-`prev_hash` of the first post-restart entry, maintaining an unbroken chain. The test
-`chain_resumes_after_restart` in `core-profile/src/audit.rs` validates this property across two
-simulated sessions with five total entries.
+The chain survives restarts: the first entry after a restart links to the last entry before
+it.
 
 ## File Format and Location
 
-- **Path**: `~/.config/pds/audit.jsonl` (resolved via `core_config::config_dir()`).
-- **Format**: JSON Lines -- one JSON object per line, newline-delimited.
-- **Hash algorithm**: BLAKE3 by default. SHA-256 is supported as an alternative. The algorithm
-  must be consistent within a single log file for verification to succeed.
-- **Write mode**: append-only (`OpenOptions::new().create(true).append(true)`). Each write is
-  followed by an explicit `flush()` via `BufWriter`.
-- **Agent identity**: the `default_agent_id` is derived from the installation namespace and the
-  Unix UID of the running process:
-  `uuid::Uuid::new_v5(&install_ns, "agent:human:uid{uid}")`.
+- **Path**: `Layout::audit_log`, `<config dir>/audit.jsonl` (`~/.config/pds/audit.jsonl`).
+- **Format**: JSON Lines, one entry per line.
+- **Mode**: opened for appending and restricted to its owner (`0600`), including a log that
+  already existed with wider permissions.
+- **Agent identity**: daemon-profile's default agent is
+  `uuid::Uuid::new_v5(&install_ns, "agent:human:uid{uid}")`, from the installation namespace
+  and the process's Unix UID.
 
 ## Retention and Rotation
 
-The current implementation does not perform automatic log rotation or retention. The audit log
-grows unboundedly. External log rotation (e.g., `logrotate`) can be applied, but rotating the
-file severs the hash chain -- `sesame audit verify` can only validate entries present in a
-single contiguous file. Operators who require forensic auditability across rotation boundaries
-should archive rotated segments and verify them independently.
+The log is not rotated or pruned by Open Sesame and grows without bound. External rotation
+(for example `logrotate`) severs the chain at the rotation point: `sesame audit verify`
+validates one contiguous file, so rotated segments must be archived and verified on their
+own.

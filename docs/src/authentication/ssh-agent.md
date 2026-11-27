@@ -13,7 +13,7 @@ and on-disk enrollment blobs.
 ### Trait Implementation
 
 | Method | Behavior |
-|--------|----------|
+| --- | --- |
 | `factor_id()` | Returns `AuthFactorId::SshAgent` |
 | `name()` | Returns `"SSH Agent"` |
 | `backend_id()` | Returns `"ssh-agent"` |
@@ -21,9 +21,9 @@ and on-disk enrollment blobs.
 | `can_unlock(profile, config_dir)` | Enrolled, blob is parseable, and the enrolled key's fingerprint is present in the running agent |
 | `requires_interaction()` | Returns `AuthInteraction::None` |
 
-The `can_unlock()` check connects to the SSH agent via `spawn_blocking` (the
-`ssh-agent-client-rs` crate uses synchronous Unix socket I/O) and searches the agent's
-identity list for a key matching the fingerprint stored in the enrollment blob.
+The `can_unlock()` check connects to the SSH agent via `spawn_blocking` (the agent client,
+`core-auth/src/agent.rs`, uses synchronous Unix socket I/O) and searches the agent's identity
+list for a key matching the fingerprint stored in the enrollment blob.
 
 ## Challenge Construction
 
@@ -40,8 +40,11 @@ the same challenge at both enrollment and unlock time.
 
 ## Signature to KEK Derivation
 
-After the SSH agent signs the challenge, the raw signature bytes are fed into a second BLAKE3
-`derive_key` call:
+The agent's signature is accepted only when it carries the identity's signature algorithm
+(`rsa-sha2-512` for RSA keys, the key's own algorithm otherwise) and verifies against the
+identity's public key (ssh-key's `crypto` features: Ed25519, RSA PKCS#1 v1.5); any other answer
+is `AuthError::AgentProtocolError`, so an agent cannot substitute bytes of its choosing. The raw
+signature bytes are then fed into a second BLAKE3 `derive_key` call:
 
 ```text
 context = "pds v2 ssh-vault-kek {profile_name}"
@@ -63,9 +66,9 @@ Defined in `core-auth/src/ssh_types.rs`, the `SshKeyType` enum restricts which S
 can be used:
 
 | Type | Wire name | Determinism |
-|------|-----------|-------------|
+| --- | --- | --- |
 | `Ed25519` | `ssh-ed25519` | Deterministic by specification (RFC 8032) |
-| `Rsa` | `ssh-rsa` | PKCS#1 v1.5 padding uses no randomness; `ssh-agent-client-rs` hard-codes SHA-512 |
+| `Rsa` | `ssh-rsa` | PKCS#1 v1.5 padding uses no randomness; sign requests carry `SSH_AGENT_RSA_SHA2_512` |
 
 **Excluded key types:**
 

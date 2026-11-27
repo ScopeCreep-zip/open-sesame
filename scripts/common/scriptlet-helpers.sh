@@ -1,6 +1,8 @@
+# shellcheck shell=bash
 # scriptlet-helpers.sh -- shared helpers for open-sesame deb and RPM scriptlets.
 # Concatenated into each scriptlet at build time by mise tasks.
-# Do not add a shebang -- this file is sourced, not executed directly.
+# Do not add a shebang -- this file is sourced, not executed directly; the
+# assembled scriptlets start with #!/bin/bash (cargo:assemble-scriptlets).
 
 # Upstream systemd-update-helper default (UPDATE_HELPER_USER_TIMEOUT_SEC=15).
 SESAME_BUS_TIMEOUT=15s
@@ -22,7 +24,8 @@ sesame_active_user_uids() {
 # Uses -M "$uid@" which forces a PAM-authenticated stdio-bridge connection,
 # avoiding "Transport endpoint is not connected" when running as root.
 sesame_user_systemctl() {
-    local uid="$1"; shift
+    local uid="$1"
+    shift
     SYSTEMD_BUS_TIMEOUT="${SESAME_BUS_TIMEOUT}" \
         systemctl --user -M "$uid@" "$@" 2>/dev/null || :
 }

@@ -1,6 +1,6 @@
 //! Workspace directory management configuration types.
 //!
-//! `WorkspaceConfig` is stored in `~/.config/pds/workspaces.toml`.
+//! `WorkspaceConfig` is stored at `Layout::workspaces_file`.
 //! `LocalSesameConfig` is found at `.sesame.toml` in workspace or repo roots.
 
 use serde::{Deserialize, Serialize};
@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use core_workspace_types::{GitHost, GitTransport, RepositoryName, WorkspaceUser};
 
-/// Workspace directory management configuration.
-/// Stored in `~/.config/pds/workspaces.toml`.
+/// Workspace directory management configuration, stored at
+/// `Layout::workspaces_file`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceConfig {
@@ -37,14 +37,10 @@ pub enum WorkspaceAutoMode {
 
 /// Workspace directory settings.
 ///
-/// All fields use typed values validated at deserialization time.
-/// Environment variables are read only in `Default` to establish
-/// initial values when no configuration file exists.
-/// Workspace directory settings.
-///
 /// Fields that accept user input are validated types. Deserialization
-/// rejects invalid values with actionable error messages. Environment
-/// variable precedence is applied by the loader, not by Default.
+/// rejects invalid values with actionable error messages. The
+/// `$SESAME_WORKSPACE_ROOT` override is applied by
+/// `sesame_workspace::WorkspaceLayout::from_config`, not here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceSettings {
@@ -203,22 +199,22 @@ mod tests {
 
     #[test]
     fn workspace_auto_mode_serde() {
-        let toml_str = "workspace_auto = \"never\"\n";
         #[derive(Deserialize)]
         struct T {
             workspace_auto: WorkspaceAutoMode,
         }
+        let toml_str = "workspace_auto = \"never\"\n";
         let parsed: T = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.workspace_auto, WorkspaceAutoMode::Never);
     }
 
     #[test]
     fn transport_serde() {
-        let toml_str = "transport = \"https\"\n";
         #[derive(Deserialize)]
         struct T {
             transport: GitTransport,
         }
+        let toml_str = "transport = \"https\"\n";
         let parsed: T = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.transport, GitTransport::Https);
     }
@@ -255,15 +251,18 @@ mod tests {
     fn fragment_deserializes_partial() {
         let toml_str = r#"
             [settings]
-            default_server = "git.braincraft.io"
+            default_server = "git.example.invalid"
 
             [links]
-            "/workspace/user/git.braincraft.io/org" = "work"
+            "/workspace/user/git.example.invalid/org" = "work"
         "#;
         let frag: WorkspaceConfigFragment = toml::from_str(toml_str).unwrap();
         assert_eq!(
-            frag.settings.default_server.as_ref().map(|s| s.to_string()),
-            Some("git.braincraft.io".to_string())
+            frag.settings
+                .default_server
+                .as_ref()
+                .map(ToString::to_string),
+            Some("git.example.invalid".to_string())
         );
         assert!(frag.settings.root.is_none());
         assert!(frag.settings.transport.is_none());
@@ -290,7 +289,7 @@ mod tests {
         let toml_str = r#"
             [settings]
             root = "/workspace"
-            user = "usrbinkat"
+            user = "alice"
             default_ssh = true
             workspace_repo = "workspace"
             workspace_auto = "auto"

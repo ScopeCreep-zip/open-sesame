@@ -1,26 +1,24 @@
-//! Encrypted secret storage with platform keyring KEK management.
+//! Encrypted secret storage.
 //!
-//! Architecture (ADR-SEC-001, ADR-SEC-002):
-//! - Individual secrets stored in an encrypted local store (SQLCipher via rusqlite)
-//! - Platform keyrings (Secret Service, Keychain, Credential Manager) store ONLY
-//!   a key-encrypting-key (KEK) that protects the master key at rest
-//! - Cross-profile isolation is cryptographic: different BLAKE3-derived vault keys
-//!   per profile, not namespace-based
+//! Architecture (ADR-SEC-002):
+//! - Individual secrets stored in an encrypted local store (`SQLCipher` via rusqlite)
+//! - Cross-profile isolation is cryptographic: a different vault key per
+//!   profile, not namespace-based
 //!
-//! Key hierarchy:
-//!   User password → Argon2id → Master Key → BLAKE3 → per-profile vault key → SQLCipher
+//! Key hierarchy, every derivation under the vault's `hkdf`
+//! (`core_crypto::derive_key`):
+//!   master key (unwrapped by an enrolled factor) → per-profile vault key
+//!   (`SQLCipher` page key) → per-entry AES-256-GCM key
 //!
-//! This crate contains NO platform-specific code. Platform keyring integration
-//! is behind the `KeyLocker` trait, implemented in platform-* crates.
+//! This crate contains NO platform-specific code.
 #![forbid(unsafe_code)]
 
-pub mod compliance;
+#[cfg(test)]
+mod compliance;
 mod jit;
-mod key_locker;
-pub mod sqlcipher;
-pub mod store;
+mod sqlcipher;
+mod store;
 
 pub use jit::JitDelivery;
-pub use key_locker::KeyLocker;
 pub use sqlcipher::SqlCipherStore;
-pub use store::{InMemoryStore, SecretsStore};
+pub use store::SecretsStore;

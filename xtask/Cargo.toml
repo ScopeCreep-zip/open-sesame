@@ -1,24 +1,20 @@
 [package]
 name = "xtask"
-version = "1.0.0"
-edition = "2024"
-publish = false
+description = "Build automation: man page, shell completions, rustdoc, mdBook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-# CLI framework
-clap = { version = "4", features = [ "derive" ] }
-
-# Man page generation
-clap_mangen = "0.2"
-
-# Shell completion generation
-clap_complete = "4"
-
-# Error handling
-anyhow = "1"
-
-# TOML parsing (for reading parent Cargo.toml version)
-toml = "0.9"
-
-# Filesystem operations
-flate2 = "1.0"
+# The `sesame` CLI definition the man page and completions are rendered from.
+open-sesame = { workspace = true }
+clap = { workspace = true }
+clap_mangen = { workspace = true }
+clap_complete = { workspace = true }
+anyhow = { workspace = true }
+flate2 = { workspace = true }

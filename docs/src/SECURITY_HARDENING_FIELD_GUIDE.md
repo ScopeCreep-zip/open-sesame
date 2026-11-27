@@ -13,7 +13,7 @@ independent security layers that each reduce the blast radius of a compromise.
 No single layer is sufficient. The three primary layers are:
 
 | Layer | Scope | Enforced By |
-|---|---|---|
+| --- | --- | --- |
 | **systemd sandboxing** | Mount namespaces, resource limits, lifecycle | systemd (PID 1 / user manager) |
 | **Landlock** | Filesystem access control | Kernel LSM, applied per-process |
 | **seccomp-bpf** | Syscall filtering | Kernel, applied per-thread/process |
@@ -58,7 +58,7 @@ it, each thread must install the filter individually, creating a race window.
 **Action modes:**
 
 | Action | Behavior | Use Case |
-|---|---|---|
+| --- | --- | --- |
 | `SECCOMP_RET_KILL_PROCESS` | Kills the entire process with SIGSYS | Production: fail-closed, no zombie threads |
 | `SECCOMP_RET_KILL_THREAD` | Kills only the offending thread | Dangerous with async runtimes (see 2.2) |
 | `SECCOMP_RET_ERRNO` | Returns an errno to the caller | Graceful degradation, testable |
@@ -130,83 +130,32 @@ match result {
 This does not prevent the thread death, but it prevents the entire event loop
 from freezing and gives you a log line to debug.
 
-### 2.3 SIGSYS signal handler
+### 2.3 Observing a seccomp kill
 
-When seccomp blocks a syscall, the kernel delivers SIGSYS to the thread before
-killing it (for `KILL_THREAD`) or to the process (for `KILL_PROCESS`). You can
-install a handler to log which syscall was blocked.
+A `SIGSYS` handler cannot observe a `KILL_THREAD` or `KILL_PROCESS` verdict.
+For both, the kernel forces the signal (`force_sig_seccomp(nr, data, true)`,
+which also requests a core dump) or exits the thread (`do_exit(SIGSYS)`); no
+user handler runs (`kernel/seccomp.c`, `__seccomp_filter`). Only
+`SECCOMP_RET_TRAP` delivers a catchable `SIGSYS`, and it lets the process
+continue, so it is not a production verdict.
 
-**Constraints:** The signal handler runs in signal context. You must not
-allocate, lock mutexes, or call most libc functions. Use only async-signal-safe
-functions.
+Observe kills from outside the process instead:
 
-```rust
-use libc::{
-    c_int, c_void, sigaction, siginfo_t, SA_RESETHAND, SA_SIGINFO, SIGSYS,
-};
-
-unsafe extern "C" fn sigsys_handler(
-    _sig: c_int,
-    info: *mut siginfo_t,
-    _ctx: *mut c_void,
-) {
-    // si_syscall contains the blocked syscall number
-    let syscall = (*info).si_syscall;
-
-    // Write directly to stderr (fd 2) -- no allocator, no buffering
-    // Manual integer formatting in a stack buffer
-    let mut buf = [0u8; 64];
-    let prefix = b"seccomp: blocked syscall ";
-    buf[..prefix.len()].copy_from_slice(prefix);
-    let mut pos = prefix.len();
-
-    // Convert syscall number to decimal digits
-    if syscall == 0 {
-        buf[pos] = b'0';
-        pos += 1;
-    } else {
-        let mut n = syscall;
-        let start = pos;
-        while n > 0 {
-            buf[pos] = b'0' + (n % 10) as u8;
-            pos += 1;
-            n /= 10;
-        }
-        buf[start..pos].reverse();
-    }
-    buf[pos] = b'\n';
-    pos += 1;
-
-    let _ = libc::write(2, buf.as_ptr() as *const c_void, pos);
-}
-
-pub fn install_sigsys_handler() {
-    unsafe {
-        let mut sa: sigaction = std::mem::zeroed();
-        sa.sa_sigaction = sigsys_handler as usize;
-        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
-        sigaction(SIGSYS, &sa, std::ptr::null_mut());
-    }
-}
-```
-
-**Important:** Install the handler *before* applying the seccomp filter.
-
-**Why output may not appear in journalctl:**
-
-- With `KILL_THREAD`, the thread dies but the process lives. The write to
-  stderr may succeed, but if the process later freezes (see 2.2), journald
-  may not flush the pipe buffer before systemd kills it.
-- With `KILL_PROCESS`, the write races against process teardown.
-- Use `SA_RESETHAND` so the handler fires once, then the default (kill) takes
-  effect on the next violation.
+- **Audit log.** The kernel emits an audit record (`type=SECCOMP`, with
+  `syscall=` and `sig=31`) for every kill action listed in
+  `/proc/sys/kernel/seccomp/actions_logged`, which lists `kill_process` and
+  `kill_thread` by default. `journalctl -k`, `ausearch -m SECCOMP`, and
+  `dmesg` show it.
+- **systemd.** The unit fails with `status=31/SYS`.
+- **strace.** `strace -f` shows the call immediately before
+  `+++ killed by SIGSYS +++` (5.1).
 
 ### 2.4 Building seccomp allowlists with strace
 
 The only reliable way to build a seccomp allowlist is to trace your application
 under real workloads.
 
-**Step 1: Trace all threads**
+#### Step 1: Trace all threads
 
 ```bash
 # Attach to a running process
@@ -218,7 +167,7 @@ strace -f -o /tmp/trace.log -- ./my-daemon
 
 The `-f` flag follows child threads and processes.
 
-**Step 2: Exercise ALL code paths**
+#### Step 2: Exercise ALL code paths
 
 This is where most allowlists fail. You must exercise:
 
@@ -230,7 +179,7 @@ This is where most allowlists fail. You must exercise:
 - Config reload (inotify, file re-read)
 - IPC (socket creation, connection, message exchange)
 
-**Step 3: Extract unique syscalls**
+#### Step 3: Extract unique syscalls
 
 ```bash
 awk -F'(' '{print $1}' /tmp/trace.log \
@@ -239,7 +188,7 @@ awk -F'(' '{print $1}' /tmp/trace.log \
   > /tmp/syscalls.txt
 ```
 
-**Step 4: Diff against your allowlist**
+#### Step 4: Diff against your allowlist
 
 Compare the trace output against your current allowlist. Add any missing
 syscalls.
@@ -247,7 +196,7 @@ syscalls.
 **Commonly missed syscalls:**
 
 | Syscall | Triggered By |
-|---|---|
+| --- | --- |
 | `ftruncate` | SQLite WAL rollback/checkpoint |
 | `fsync` | SQLite PRAGMA, checkpoint, journal |
 | `fdatasync` | SQLite WAL writes |
@@ -332,13 +281,53 @@ ruleset.restrict_self()?;
 - Rules are **stackable**: multiple Landlock rulesets compose (intersection).
 - Landlock requires **no privileges** -- any process can restrict itself.
 
-**ABI versions** (V1 through V6) add support for new access rights. Always
-query the running kernel's supported version and degrade gracefully:
+**ABI versions** add access rights. Landlock covered only file system
+operations at first; later ABIs extend it to sockets and other processes:
+
+| ABI | Linux | Adds |
+| --- | --- | --- |
+| 1 | 5.13 | File system access rights |
+| 2 | 5.19 | `Refer` (rename and link across directories) |
+| 3 | 6.2 | `Truncate` |
+| 4 | 6.7 | TCP bind and connect (`AccessNet`) |
+| 5 | 6.10 | `IoctlDev` |
+| 6 | 6.12 | Scopes: abstract Unix sockets, signals |
+| 7 | 6.15 | Audit log control |
+| 8 | 7.0 | Restricting every thread at once (`TSYNC`) |
+| 9 | 7.1 | Pathname Unix socket `connect` (`ResolveUnix`) |
+| 10 | 7.2 | UDP bind, connect, send |
+
+Declare the ABI your ruleset is written against as a constant and handle
+`from_all(ABI)` of it; never construct an ABI from the running kernel (the
+landlock crate keeps that private by design, because a ruleset would then
+differ between machines). Under the crate's default `CompatLevel::BestEffort`
+the kernel enforces the rights of its own ABI and drops the rest, which is
+the compatibility model the kernel's Landlock documentation prescribes: the
+program runs on every kernel, under the strongest sandbox each one enforces,
+and inherits what a newer kernel adds:
 
 ```rust
-let abi = landlock::ABI::V3; // minimum supported
-let actual = landlock::ABI::new_current().unwrap_or(abi);
+let status = Ruleset::default()
+    .set_compatibility(CompatLevel::BestEffort)
+    .handle_access(AccessFs::from_all(ABI::V10))?
+    .handle_access(AccessNet::from_all(ABI::V10))?
+    .scope(Scope::from_all(ABI::V10))?
+    .create()?
+    // rules...
+    .restrict_self()?;
+// status.ruleset: FullyEnforced, PartiallyEnforced, or NotEnforced.
 ```
+
+Best effort must not be silent. Report what the kernel does not enforce, at
+startup and in diagnostics: a `CompatLevel::HardRequirement` ruleset of one
+protection's rights alone fails exactly when the kernel lacks it, and builds
+nothing in the kernel. `CompatLevel::HardRequirement` on the whole ruleset is
+for a program that must not run at all below a level (the crate's "rare
+circumstances"); it also keeps the program from running in CI on an older
+kernel. Test each restriction on a kernel that enforces it and on one that
+does not: expect a refusal where the kernel's ABI includes the right and
+access where it does not (rust-landlock runs its tests on a matrix of UML
+kernels, one per ABI, with `landlock-test-tools`).
 
 ### 3.2 Symlink resolution
 
@@ -348,7 +337,7 @@ This is a critical distinction on distributions that use symlink farms.
 **NixOS and Guix** store all packages in `/nix/store/` (or `/gnu/store/`)
 and symlink configuration files into place:
 
-```
+```text
 /etc/myapp/config.toml -> /nix/store/abc123-myapp-config/config.toml
 ```
 
@@ -401,38 +390,35 @@ ruleset.add_rule(PathBeneath::new(
 ))?;
 ```
 
+**Pathname Unix sockets below ABI 9 are not mediated at all:**
+Before `ResolveUnix` (ABI 9, Linux 7.1), Landlock does not check `connect(2)`
+to a pathname Unix socket: a sandboxed process reaches every socket it can
+name, whatever its rules. On a desktop that includes the session D-Bus bus
+(`$XDG_RUNTIME_DIR/bus`), where the user's service manager
+(`org.freedesktop.systemd1`) starts transient units running any command, an
+escape from any sandbox. Request ABI 9's `ResolveUnix` (it is part of
+`AccessFs::from_all` from `ABI::V9`), grant each socket a process connects to
+(`ResolveUnix`, part of `AccessFs::from_file`, on the socket or on its
+directory), and report a kernel below ABI 9 as one where this gap is open.
+seccomp cannot close it: it cannot read the address `connect` points to. On
+such a kernel, systemd's `InaccessiblePaths=-%t/bus` removes the session bus
+socket from the unit's mount namespace.
+
 **`NOTIFY_SOCKET` path:**
-`sd_notify()` communicates with systemd via a Unix socket whose path is in
-`$NOTIFY_SOCKET`. This can be either:
+`sd_notify()` sends to the socket in `$NOTIFY_SOCKET`. A user service
+manager's is a pathname socket (`$XDG_RUNTIME_DIR/systemd/notify`); with
+`ResolveUnix` handled (ABI 9), grant it like any socket, or notifications fail
+on every kernel that enforces it. An abstract address
+(`@`-prefixed) cannot be granted by a rule: under the abstract-socket scope
+(below) it is unreachable.
 
-- **Abstract socket** (prefixed with `@`): Bypasses the filesystem entirely.
-  Landlock does not apply. No rule needed.
-- **Filesystem socket** (e.g., `/run/user/1000/systemd/notify`): Landlock
-  must allow write access to this path, or `sd_notify()` silently fails.
-
-Check before adding rules:
-
-```rust
-if let Ok(sock) = std::env::var("NOTIFY_SOCKET") {
-    if !sock.starts_with('@') {
-        // Filesystem socket -- add to Landlock rules
-        let sock_path = Path::new(&sock);
-        if let Some(parent) = sock_path.parent() {
-            ruleset.add_rule(PathBeneath::new(
-                File::open(parent)?,
-                AccessFs::WriteFile,
-            ))?;
-        }
-    }
-}
-```
-
-**Abstract sockets bypass Landlock entirely:**
-Any Unix domain socket with an abstract address (beginning with a null byte,
-shown as `@` in `ss` output) is not subject to Landlock filesystem rules.
-This is by design -- abstract sockets live in the network namespace, not the
-filesystem. If you need to restrict abstract socket access, use seccomp to
-filter `connect`/`bind` with argument inspection, or use network namespaces.
+**Abstract sockets and the scope (ABI 6):**
+An abstract address (a leading null byte, `@` in `ss` output) has no
+file-system path, so no rule applies to it. Since ABI 6,
+`Scope::AbstractUnixSocket` refuses `connect` to an abstract socket created
+outside the process's Landlock domain (Xwayland and some session buses listen
+on abstract addresses). Without the scope, every abstract socket of the
+network namespace is reachable.
 
 ---
 
@@ -501,7 +487,7 @@ systemd.user.tmpfiles.rules = [
 
 For other distributions, create `~/.config/systemd/user/tmpfiles.d/myapp.conf`:
 
-```
+```text
 # Type  Path                      Mode  User  Group  Age
 d       %t/myapp                  0700  -     -      -
 d       %h/.config/myapp          0700  -     -      -
@@ -633,7 +619,7 @@ grep "killed by SIGSYS" /tmp/trace.log
 The last syscall logged for that thread (immediately before the
 `+++ killed by SIGSYS +++` line) is the blocked syscall. Example:
 
-```
+```text
 [pid 12345] ftruncate(7, 0)     = ?
 [pid 12345] +++ killed by SIGSYS (core dumped) +++
 ```
@@ -660,7 +646,7 @@ journalctl --user -u my-daemon.service --no-pager -o short-precise
 **Key exit status codes:**
 
 | Status | Meaning | Likely Cause |
-|---|---|---|
+| --- | --- | --- |
 | **226/NAMESPACE** | Mount namespace setup failed | `ReadWritePaths` directory does not exist |
 | **31/SYS** | Killed by signal 31 (SIGSYS) | seccomp blocked a syscall |
 | **6/ABRT** | Aborted | Watchdog timeout, assertion failure, or panic |
@@ -742,26 +728,26 @@ If it is running but not responding, it is frozen. Attach strace.
 
 The two-tier model:
 
-```
-                    +--------------------------+
-                    |     systemd (outer)      |
-                    |  Mount namespaces         |
-                    |  Resource limits          |
-                    |  (LimitNOFILE, MemoryMax) |
-                    |  Watchdog lifecycle       |
-                    |  ProtectSystem,           |
-                    |  ProtectHome              |
-                    +-----------+--------------+
-                                |
-                    +-----------v--------------+
-                    |   Application (inner)    |
-                    |  Landlock filesystem ACL  |
-                    |  seccomp-bpf syscall      |
-                    |  filter                   |
-                    |  setrlimit               |
-                    |  (NOFILE, MEMLOCK)        |
-                    |  Directory bootstrap      |
-                    +--------------------------+
+```text
+                    +----------------------------+
+                    |      systemd (outer)       |
+                    |  Mount namespaces          |
+                    |  Resource limits           |
+                    |  (LimitNOFILE, MemoryMax)  |
+                    |  Watchdog lifecycle        |
+                    |  ProtectSystem,            |
+                    |  ProtectHome               |
+                    +-------------+--------------+
+                                  |
+                    +-------------v--------------+
+                    |    Application (inner)     |
+                    |  Landlock filesystem ACL   |
+                    |  seccomp-bpf syscall       |
+                    |  filter                    |
+                    |  setrlimit                 |
+                    |  (NOFILE, MEMLOCK)         |
+                    |  Directory bootstrap       |
+                    +----------------------------+
 ```
 
 **systemd owns:**
@@ -822,7 +808,14 @@ addresses a specific failure mode described in this guide.
 - [ ] Grant `ReadWrite` to data directory (`$XDG_DATA_HOME/myapp`)
 - [ ] Canonicalize all paths to resolve symlinks (NixOS/Guix)
 - [ ] Grant `ReadOnly` to `/dev/urandom` if using crypto
-- [ ] Check `$NOTIFY_SOCKET` -- if filesystem path, grant write access
+- [ ] Request every right and scope of the newest ABI the crate knows,
+      best-effort, so each kernel enforces all it supports
+- [ ] Report the protections the kernel does not enforce, at startup and in
+      diagnostics (below ABI 9 pathname socket `connect` is unmediated)
+- [ ] Grant each socket the process connects to, `$NOTIFY_SOCKET` among them,
+      and nothing else: never the session D-Bus bus
+- [ ] Request every scope (abstract sockets, signals)
+- [ ] Test each restriction where the kernel enforces it and where it does not
 - [ ] Test on NixOS or with symlinked configs
 
 ### seccomp allowlist
@@ -836,6 +829,10 @@ addresses a specific failure mode described in this guide.
 - [ ] Include `clone3` if targeting glibc >= 2.34
 - [ ] Use `SECCOMP_RET_KILL_PROCESS` (not `KILL_THREAD`) in production
 - [ ] Use `SECCOMP_FILTER_FLAG_TSYNC` for multi-threaded programs
+- [ ] Kill on a foreign architecture (`set_act_badarch`): `socketcall` and
+      32-bit entry points bypass per-call rules
+- [ ] Admit `socket`/`socketpair` only for the families the program uses
+      (argument 0), and leave `io_uring` out
 
 ### Defensive timeouts
 
@@ -843,12 +840,11 @@ addresses a specific failure mode described in this guide.
 - [ ] Timeout duration is shorter than `WatchdogSec / 2`
 - [ ] Timeout fires a log message identifying the blocked operation
 
-### SIGSYS handler
+### Observing kills
 
-- [ ] Installed *before* seccomp filter is applied
-- [ ] Uses only async-signal-safe functions (raw `write` to fd 2)
-- [ ] Logs the blocked syscall number
-- [ ] Uses `SA_RESETHAND` to avoid infinite handler loops
+- [ ] `kill_process` listed in `/proc/sys/kernel/seccomp/actions_logged`
+      (the default), so each kill is an audit record naming the call
+- [ ] No `SIGSYS` handler relied on: kill verdicts never run it (2.3)
 
 ### Watchdog
 

@@ -1,20 +1,35 @@
-//! Validated repository name.
+//! Validated repository name as the forge spells it.
 //!
-//! Strips `.git` suffix on construction. Validated as a filesystem-safe
-//! component. Repository identity is separate from workspace repository
-//! detection, which is a command/config concern.
+//! `RepositoryName` is a remote identifier. It preserves case exactly as
+//! the user or forge supplied it, because URL rendering must reproduce
+//! the remote's spelling: case-sensitive git servers (`git daemon`,
+//! `git-http-backend`, bare repositories over SSH) resolve `Repo` and
+//! `repo` to different repositories. Filesystem placement is derived
+//! from it through `RepoDir`, which is lowercase by construction.
+//!
+//! Leading dots are permitted: forges host repositories such as
+//! `.github` and `.dotfiles`. A name whose placement would be `.git`
+//! is rejected, because a repository directory sits inside an org
+//! directory whose own `.git` is the workspace.git repository.
 
 use std::fmt;
 
 use serde::Serialize;
 
-use crate::v1::error::{ValidationError, validate_component};
+use crate::v1::error::{LeadingDotPolicy, ValidationError, validate_component};
 
-/// A validated repository name.
+/// Directory name git uses for repository metadata.
+pub(crate) const GIT_DIR_NAME: &str = ".git";
+
+/// Suffix git URLs conventionally append to repository paths.
+const GIT_URL_SUFFIX: &str = ".git";
+
+/// A validated repository name in its remote spelling.
 ///
-/// Construction strips a trailing `.git` suffix and validates the
-/// result as filesystem-safe. The original suffix state is not
-/// preserved because repository identity does not depend on it.
+/// Construction strips one trailing `.git` URL suffix and validates the
+/// result as a single ASCII path component. Equality is exact: two names
+/// that differ only in case are different remote spellings. Use
+/// `RepoDir::from_remote` to compare placements.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(into = "String")]
 pub struct RepositoryName {
@@ -40,23 +55,50 @@ impl<'de> serde::Deserialize<'de> for RepositoryName {
 impl RepositoryName {
     /// Construct from a repository name string.
     ///
-    /// Strips a trailing `.git` suffix before validation.
+    /// Strips one trailing `.git` URL suffix in any ASCII case, then
+    /// validates. Leading dots are accepted. A name equal to `.git` in
+    /// any ASCII case, before or after suffix stripping, is reserved.
     ///
     /// # Errors
     ///
-    /// Returns `ValidationError` for empty, malformed, or unsafe input.
+    /// Returns `ValidationError` for empty, malformed, non-ASCII,
+    /// unsafe, or reserved input.
     pub fn new(input: &str) -> Result<Self, ValidationError> {
-        let name = input.strip_suffix(".git").unwrap_or(input).to_string();
+        const KIND: &str = "repository name";
 
-        validate_component("repository name", &name)?;
+        let name = if input.eq_ignore_ascii_case(GIT_DIR_NAME) {
+            input
+        } else {
+            strip_git_suffix(input)
+        };
 
-        Ok(Self { name })
+        validate_component(KIND, name, LeadingDotPolicy::Allow)?;
+
+        if name.eq_ignore_ascii_case(GIT_DIR_NAME) {
+            return Err(ValidationError::ReservedName {
+                kind: KIND,
+                value: name.to_string(),
+            });
+        }
+
+        Ok(Self {
+            name: name.to_string(),
+        })
     }
 
-    /// The validated repository name without `.git` suffix.
+    /// The repository name in its remote spelling, without `.git` suffix.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.name
+    }
+}
+
+/// Strip one trailing `.git` URL suffix, matched in any ASCII case.
+fn strip_git_suffix(input: &str) -> &str {
+    let split = input.len().saturating_sub(GIT_URL_SUFFIX.len());
+    match input.get(split..) {
+        Some(tail) if split > 0 && tail.eq_ignore_ascii_case(GIT_URL_SUFFIX) => &input[..split],
+        _ => input,
     }
 }
 
@@ -90,6 +132,17 @@ mod tests {
     }
 
     #[test]
+    fn strips_git_suffix_in_any_case() {
+        for input in ["Repo.git", "Repo.GIT", "Repo.Git"] {
+            assert_eq!(
+                RepositoryName::new(input).unwrap().as_str(),
+                "Repo",
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn preserves_non_git_dots() {
         let r = RepositoryName::new("my.project").unwrap();
         assert_eq!(r.as_str(), "my.project");
@@ -102,20 +155,64 @@ mod tests {
     }
 
     #[test]
-    fn preserves_casing() {
-        let r = RepositoryName::new("OpenSesame").unwrap();
-        assert_eq!(r.as_str(), "OpenSesame");
+    fn preserves_remote_casing() {
+        let r = RepositoryName::new("NixPkgs").unwrap();
+        assert_eq!(r.as_str(), "NixPkgs");
+        assert_ne!(r, RepositoryName::new("nixpkgs").unwrap());
+    }
+
+    #[test]
+    fn accepts_leading_dot() {
+        let r = RepositoryName::new(".github").unwrap();
+        assert_eq!(r.as_str(), ".github");
+    }
+
+    #[test]
+    fn strips_git_suffix_from_leading_dot_name() {
+        let r = RepositoryName::new(".github.git").unwrap();
+        assert_eq!(r.as_str(), ".github");
     }
 
     #[test]
     fn rejects_empty() {
-        assert!(RepositoryName::new("").is_err());
+        assert!(matches!(
+            RepositoryName::new(""),
+            Err(ValidationError::Empty { .. })
+        ));
     }
 
     #[test]
-    fn rejects_only_git_suffix() {
-        // ".git" after stripping leaves empty string
-        assert!(RepositoryName::new(".git").is_err());
+    fn rejects_git_dir_name() {
+        for input in [".git", ".GIT", ".Git", ".git.git", ".GIT.git"] {
+            assert!(
+                matches!(
+                    RepositoryName::new(input),
+                    Err(ValidationError::ReservedName { .. })
+                ),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_bare_dot_and_dotdot() {
+        for input in [".", "..", "...git"] {
+            assert!(
+                matches!(
+                    RepositoryName::new(input),
+                    Err(ValidationError::PathTraversal { .. })
+                ),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_ascii() {
+        assert!(matches!(
+            RepositoryName::new("Ärger"),
+            Err(ValidationError::NonAscii { .. })
+        ));
     }
 
     #[test]
@@ -135,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn equality_by_normalized_name() {
+    fn equality_by_suffix_normalized_name() {
         let a = RepositoryName::new("repo").unwrap();
         let b = RepositoryName::new("repo.git").unwrap();
         assert_eq!(a, b);
@@ -148,10 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn serde_roundtrip() {
-        let original = RepositoryName::new("konductor").unwrap();
+    fn serde_roundtrip_preserves_case() {
+        let original = RepositoryName::new("NixPkgs").unwrap();
         let json = serde_json::to_string(&original).unwrap();
-        assert_eq!(json, "\"konductor\"");
+        assert_eq!(json, "\"NixPkgs\"");
         let parsed: RepositoryName = serde_json::from_str(&json).unwrap();
         assert_eq!(original, parsed);
     }
@@ -160,6 +257,12 @@ mod tests {
     fn serde_strips_git_suffix() {
         let parsed: RepositoryName = serde_json::from_str("\"repo.git\"").unwrap();
         assert_eq!(parsed.as_str(), "repo");
+    }
+
+    #[test]
+    fn serde_accepts_leading_dot() {
+        let parsed: RepositoryName = serde_json::from_str("\".github\"").unwrap();
+        assert_eq!(parsed.as_str(), ".github");
     }
 
     #[test]

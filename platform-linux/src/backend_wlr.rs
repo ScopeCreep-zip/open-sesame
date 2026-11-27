@@ -1,17 +1,19 @@
-//! CompositorBackend implementation using wlr-foreign-toplevel-management-v1.
+//! `CompositorBackend` implementation using wlr-foreign-toplevel-management-v1.
 //!
-//! Tracks all toplevels via the wlr protocol. Supports list, activate, focus,
-//! and close operations. Compatible with sway, Hyprland, niri, Wayfire, and
-//! COSMIC (backwards-compatible wlr advertisement).
+//! Tracks all toplevels via the wlr protocol: list, activate, and close.
+//! Compatible with sway, Hyprland, niri, Wayfire, and COSMIC
+//! (backwards-compatible wlr advertisement).
 //!
-//! Architecture: a dedicated dispatch thread continuously reads Wayland events
-//! and updates a shared state snapshot on each `Done` event (the protocol's
-//! atomic commit point). `list_windows()` reads the snapshot. `activate_window()`
-//! and `close_window()` call proxy methods directly (wayland-client 0.31 proxies
-//! are `Send + Sync`) and flush the shared connection.
+//! Architecture: a dedicated dispatch thread (`wayland::dispatch_forever`)
+//! continuously reads Wayland events and updates a shared state snapshot on
+//! each `Done` event (the protocol's atomic commit point). `list_windows()`
+//! reads the snapshot. `activate_window()` and `close_window()` call proxy
+//! methods directly (wayland-client 0.31 proxies are `Send + Sync`) and
+//! flush the shared connection.
 
-use crate::compositor::{BoxFuture, CompositorBackend, Workspace};
-use core_types::{CompositorWorkspaceId, Geometry, Window, WindowId};
+use crate::compositor::CompositorBackend;
+use crate::wayland::{ToplevelState, WLR_STATE};
+use core_types::{Window, WindowId};
 
 pub(crate) struct WlrBackend {
     state: std::sync::Arc<std::sync::Mutex<WlrState>>,
@@ -30,7 +32,7 @@ struct WlrState {
 struct WlrToplevelSnapshot {
     app_id: String,
     title: String,
-    activated: bool,
+    state: ToplevelState,
     /// Proxy handle for activate/close — Send+Sync in wayland-client 0.31.
     handle: wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
 }
@@ -40,7 +42,7 @@ struct WlrPendingToplevel {
     window_id: WindowId,
     app_id: String,
     title: String,
-    activated: bool,
+    state: ToplevelState,
     handle: wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
 }
 
@@ -50,7 +52,27 @@ struct WlrDispatchState {
     shared: std::sync::Arc<std::sync::Mutex<WlrState>>,
 }
 
-/// User-data attached to each toplevel handle proxy (unit — state tracked in WlrDispatchState).
+impl WlrDispatchState {
+    /// The pending state of the toplevel `handle`, created by its first
+    /// event.
+    fn pending_entry(
+        &mut self,
+        handle: &wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+    ) -> &mut WlrPendingToplevel {
+        use wayland_client::Proxy;
+        self.pending
+            .entry(handle.id())
+            .or_insert_with(|| WlrPendingToplevel {
+                window_id: WindowId::new(),
+                app_id: String::new(),
+                title: String::new(),
+                state: ToplevelState::default(),
+                handle: handle.clone(),
+            })
+    }
+}
+
+/// User-data attached to each toplevel handle proxy (unit — state tracked in `WlrDispatchState`).
 #[derive(Debug, Default, Clone)]
 struct WlrHandleData;
 
@@ -78,7 +100,7 @@ impl wayland_client::Dispatch<wayland_client::protocol::wl_seat::WlSeat, ()> for
         _: &mut Self,
         _: &wayland_client::protocol::wl_seat::WlSeat,
         _: wayland_client::protocol::wl_seat::Event,
-        _: &(),
+        (): &(),
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
     ) {
@@ -90,7 +112,7 @@ impl wayland_client::Dispatch<wayland_protocols_wlr::foreign_toplevel::v1::clien
         _state: &mut Self,
         _proxy: &wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
         event: wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::Event,
-        _: &(),
+        (): &(),
         _conn: &wayland_client::Connection,
         _qh: &wayland_client::QueueHandle<Self>,
     ) {
@@ -119,29 +141,13 @@ impl wayland_client::Dispatch<wayland_protocols_wlr::foreign_toplevel::v1::clien
         let id = handle.id();
         match event {
             zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
-                state.pending.entry(id).or_insert_with(|| WlrPendingToplevel {
-                    window_id: WindowId::new(), app_id: String::new(),
-                    title: String::new(), activated: false,
-                    handle: handle.clone(),
-                }).app_id = app_id;
+                state.pending_entry(handle).app_id = app_id;
             }
             zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
-                state.pending.entry(id).or_insert_with(|| WlrPendingToplevel {
-                    window_id: WindowId::new(), app_id: String::new(),
-                    title: String::new(), activated: false,
-                    handle: handle.clone(),
-                }).title = title;
+                state.pending_entry(handle).title = title;
             }
-            zwlr_foreign_toplevel_handle_v1::Event::State { state: state_bytes } => {
-                let activated = state_bytes.chunks_exact(4)
-                    .flat_map(TryInto::<[u8; 4]>::try_into)
-                    .map(u32::from_ne_bytes)
-                    .any(|v| v == zwlr_foreign_toplevel_handle_v1::State::Activated as u32);
-                state.pending.entry(id).or_insert_with(|| WlrPendingToplevel {
-                    window_id: WindowId::new(), app_id: String::new(),
-                    title: String::new(), activated: false,
-                    handle: handle.clone(),
-                }).activated = activated;
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: packed } => {
+                state.pending_entry(handle).state = ToplevelState::decode(&packed, WLR_STATE);
             }
             zwlr_foreign_toplevel_handle_v1::Event::Done => {
                 // Atomic commit point — publish to shared state.
@@ -151,7 +157,7 @@ impl wayland_client::Dispatch<wayland_protocols_wlr::foreign_toplevel::v1::clien
                             shared.toplevels.insert(tl.window_id, WlrToplevelSnapshot {
                                 app_id: tl.app_id.clone(),
                                 title: tl.title.clone(),
-                                activated: tl.activated,
+                                state: tl.state,
                                 handle: tl.handle.clone(),
                             });
                         }
@@ -218,7 +224,7 @@ impl WlrBackend {
         std::thread::Builder::new()
             .name("wlr-dispatch".into())
             .spawn(move || {
-                wlr_dispatch_loop(dispatch_conn, event_queue, dispatch_state);
+                crate::wayland::dispatch_forever(&dispatch_conn, event_queue, dispatch_state, "wlr")
             })
             .map_err(|e| {
                 core_types::Error::Platform(format!("failed to spawn wlr dispatch thread: {e}"))
@@ -233,180 +239,53 @@ impl WlrBackend {
     }
 }
 
-/// Continuous Wayland event dispatch loop running on a dedicated thread.
-///
-/// Uses `prepare_read()` + `libc::poll()` to efficiently wait for Wayland events
-/// without busy-spinning. Dispatches events to the `WlrDispatchState` which
-/// publishes committed state to the shared `WlrState` on `Done` events.
-fn wlr_dispatch_loop(
-    conn: wayland_client::Connection,
-    mut event_queue: wayland_client::EventQueue<WlrDispatchState>,
-    mut state: WlrDispatchState,
-) {
-    use std::os::fd::AsFd;
-    use std::os::unix::io::AsRawFd;
-
-    let mut backoff = std::time::Duration::from_millis(100);
-    let max_backoff = std::time::Duration::from_secs(30);
-
-    loop {
-        // Prepare to read — if events are already buffered, this returns None
-        // and we should dispatch immediately.
-        if let Some(guard) = conn.prepare_read() {
-            // Wait for Wayland fd to be readable (50ms periodic wake-up).
-            let mut pollfd = libc::pollfd {
-                fd: conn.as_fd().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ret = unsafe { libc::poll(&mut pollfd, 1, 50) };
-
-            if ret > 0 && (pollfd.revents & libc::POLLIN) != 0 {
-                match guard.read() {
-                    Ok(_) => {
-                        backoff = std::time::Duration::from_millis(100);
-                    }
-                    Err(wayland_client::backend::WaylandError::Io(ref e))
-                        if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(e) => {
-                        let proto_err = conn.protocol_error();
-                        tracing::error!(error = %e, ?proto_err, backoff_ms = backoff.as_millis(), "wlr dispatch: Wayland read failed, backing off");
-                        std::thread::sleep(backoff);
-                        backoff = (backoff * 2).min(max_backoff);
-                        continue;
-                    }
-                }
-            } else {
-                // Timeout or error — drop the read guard to cancel.
-                drop(guard);
-            }
+impl WlrBackend {
+    /// Issue `request` on the handle of window `id`, then flush it to the
+    /// compositor.
+    fn on_toplevel(
+        &self,
+        id: &WindowId,
+        request: impl FnOnce(&WlrToplevelSnapshot),
+    ) -> core_types::Result<()> {
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| core_types::Error::Platform(format!("lock poisoned: {e}")))?;
+            let toplevel = state
+                .toplevels
+                .get(id)
+                .ok_or_else(|| core_types::Error::Platform(format!("window {id} not found")))?;
+            request(toplevel);
         }
-
-        // Dispatch all buffered events.
-        if let Err(e) = event_queue.dispatch_pending(&mut state) {
-            let proto_err = conn.protocol_error();
-            tracing::error!(error = %e, ?proto_err, backoff_ms = backoff.as_millis(), "wlr dispatch: dispatch_pending failed, backing off");
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(max_backoff);
-            continue;
-        }
-
-        // Flush outgoing requests (e.g. destroy from Closed handling).
-        if let Err(e) = conn.flush() {
-            let proto_err = conn.protocol_error();
-            tracing::error!(error = %e, ?proto_err, backoff_ms = backoff.as_millis(), "wlr dispatch: flush failed, backing off");
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(max_backoff);
-            continue;
-        }
+        self.conn
+            .flush()
+            .map_err(|e| core_types::Error::Platform(format!("flush failed: {e}")))
     }
 }
 
 impl CompositorBackend for WlrBackend {
-    fn list_windows(&self) -> BoxFuture<'_, core_types::Result<Vec<Window>>> {
-        Box::pin(async move {
-            let state = self
-                .state
-                .lock()
-                .map_err(|e| core_types::Error::Platform(format!("lock poisoned: {e}")))?;
-            let windows = state
-                .toplevels
-                .iter()
-                .map(|(wid, tl)| Window {
-                    id: *wid,
-                    app_id: core_types::AppId::new(&tl.app_id),
-                    title: tl.title.clone(),
-                    workspace_id: CompositorWorkspaceId::from_uuid(uuid::Uuid::nil()),
-                    monitor_id: core_types::MonitorId::from_uuid(uuid::Uuid::nil()),
-                    geometry: Geometry {
-                        x: 0,
-                        y: 0,
-                        width: 0,
-                        height: 0,
-                    },
-                    is_focused: tl.activated,
-                    is_minimized: false,
-                    is_fullscreen: false,
-                    profile_id: core_types::ProfileId::from_uuid(uuid::Uuid::nil()),
-                })
-                .collect();
-            Ok(windows)
-        })
+    fn list_windows(&self) -> core_types::Result<Vec<Window>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| core_types::Error::Platform(format!("lock poisoned: {e}")))?;
+        Ok(state
+            .toplevels
+            .iter()
+            .map(|(wid, tl)| tl.state.window(*wid, &tl.app_id, tl.title.clone()))
+            .collect())
     }
 
-    fn list_workspaces(&self) -> BoxFuture<'_, core_types::Result<Vec<Workspace>>> {
-        Box::pin(async { Ok(vec![]) })
+    fn activate_window(&self, id: &WindowId) -> core_types::Result<()> {
+        self.on_toplevel(id, |toplevel| toplevel.handle.activate(&self.seat))
     }
 
-    fn activate_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>> {
-        let id = *id;
-        Box::pin(async move {
-            let state = self
-                .state
-                .lock()
-                .map_err(|e| core_types::Error::Platform(format!("lock poisoned: {e}")))?;
-            let tl = state
-                .toplevels
-                .get(&id)
-                .ok_or_else(|| core_types::Error::Platform("window not found".into()))?;
-            tl.handle.activate(&self.seat);
-            drop(state);
-            self.conn
-                .flush()
-                .map_err(|e| core_types::Error::Platform(format!("flush failed: {e}")))?;
-            Ok(())
-        })
+    fn close_window(&self, id: &WindowId) -> core_types::Result<()> {
+        self.on_toplevel(id, |toplevel| toplevel.handle.close())
     }
 
-    fn set_window_geometry(
-        &self,
-        _id: &WindowId,
-        _geom: &Geometry,
-    ) -> BoxFuture<'_, core_types::Result<()>> {
-        Box::pin(async {
-            Err(core_types::Error::Platform(
-                "set_window_geometry not supported by wlr protocol".into(),
-            ))
-        })
-    }
-
-    fn move_to_workspace(
-        &self,
-        _id: &WindowId,
-        _ws: &CompositorWorkspaceId,
-    ) -> BoxFuture<'_, core_types::Result<()>> {
-        Box::pin(async {
-            Err(core_types::Error::Platform(
-                "move_to_workspace not supported by wlr protocol".into(),
-            ))
-        })
-    }
-
-    fn focus_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>> {
-        self.activate_window(id)
-    }
-
-    fn close_window(&self, id: &WindowId) -> BoxFuture<'_, core_types::Result<()>> {
-        let id = *id;
-        Box::pin(async move {
-            let state = self
-                .state
-                .lock()
-                .map_err(|e| core_types::Error::Platform(format!("lock poisoned: {e}")))?;
-            let tl = state
-                .toplevels
-                .get(&id)
-                .ok_or_else(|| core_types::Error::Platform("window not found".into()))?;
-            tl.handle.close();
-            drop(state);
-            self.conn
-                .flush()
-                .map_err(|e| core_types::Error::Platform(format!("flush failed: {e}")))?;
-            Ok(())
-        })
-    }
-
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "wlr"
     }
 }

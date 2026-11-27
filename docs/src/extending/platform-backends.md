@@ -8,7 +8,7 @@ existing platform crate.
 Open Sesame uses one platform crate per operating system:
 
 | Crate | Target | Status |
-|-------|--------|--------|
+| --- | --- | --- |
 | `platform-linux` | `target_os = "linux"` | Implemented: compositor backends, evdev input, D-Bus, systemd, Landlock/seccomp sandbox |
 | `platform-macos` | `target_os = "macos"` | Scaffolded: module declarations with no functional code |
 | `platform-windows` | `target_os = "windows"` | Scaffolded: module declarations with no functional code |
@@ -149,12 +149,13 @@ additional optional dependencies are needed.
 
 Platform crates use a layered feature flag model:
 
-- **No features:** Headless-safe modules only (sandbox, security, systemd, dbus, cosmic_keys,
-  cosmic_theme, clipboard trait). Suitable for server/container deployments.
-- **`desktop`:** Wayland compositor integration, evdev input, focus monitoring. Pulls in
-  `wayland-client`, `wayland-protocols`, `wayland-protocols-wlr`, `smithay-client-toolkit`, `evdev`.
-- **`cosmic`:** COSMIC-specific protocols. Implies `desktop`. Pulls in `cosmic-client-toolkit` and
-  `cosmic-protocols` (GPL-3.0).
+- **No features:** Headless-safe modules only (sandbox, security, systemd, dbus, keyring,
+  global_shortcuts, cosmic_keys). Suitable for server/container deployments.
+- **`desktop`:** Wayland compositor integration, clipboard capture, evdev input, focus monitoring.
+  Pulls in `wayland-client`, `wayland-protocols`, `wayland-protocols-wlr`, `wl-clipboard-rs`,
+  `evdev`.
+- **`cosmic`:** COSMIC-specific protocols and the COSMIC theme. Implies `desktop`. Pulls in
+  `cosmic-client-toolkit`, `cosmic-protocols` (GPL-3.0), `cosmic-theme`, and `cosmic-config`.
 
 This layering isolates build dependencies and license obligations. The `cosmic` feature flag
 specifically isolates GPL-3.0 dependencies so that builds without COSMIC support remain under the

@@ -7,18 +7,25 @@
 //!
 //! - `clone`: Repository cloning (gix) and workspace.git orchestration.
 //! - `inspect`: Local repository queries — branch, remote URL, clean status.
-//! - `remote`: Network operations — probe, behind-check.
+//! - `marker`: What a directory is by its `.git` entry; the only
+//!   repository detector.
+//! - `remote`: Remote probe and upstream drift; a local remote (`file://`
+//!   or a path) is read in-process, since gix's local transport runs
+//!   `git upload-pack`.
 //! - `workspace`: git2-based operations for init-around-existing and pull.
+//! - `worktree`: Linked-worktree link files and their rewrite on rename.
 
 mod clone;
 mod inspect;
+pub(crate) mod marker;
 mod remote;
 mod workspace;
+mod worktree;
 
-pub use clone::{clone_to, clone_workspace_git};
-pub use inspect::{
-    current_branch, head_commit_short, head_commit_summary, is_clean, is_git_repo,
-    remote_tracking_commit_short, remote_url,
-};
-pub use remote::{is_behind_remote, probe_remote};
+pub use clone::{CloneTarget, clone_to, clone_workspace_git, inspect_clone_target};
+pub use inspect::remote_url;
+pub use marker::{GitMarker, git_marker};
+pub use remote::{RemoteProbe, UpstreamDrift, probe_remote, upstream_drift};
 pub use workspace::pull_ff_only;
+pub use worktree::WorktreeLinkRewrite;
+pub(crate) use worktree::{WorktreeLink, rewrite_worktree_links};

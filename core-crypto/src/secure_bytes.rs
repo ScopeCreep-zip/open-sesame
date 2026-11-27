@@ -24,6 +24,11 @@ use zeroize::Zeroize;
 /// Empty `SecureBytes` is permitted (for denial/error paths where no key
 /// material exists). Internally, empty data is backed by a 1-byte sentinel
 /// allocation to satisfy `ProtectedAlloc` invariants.
+///
+/// Dropping it drops the `ProtectedAlloc`, whose `Drop` verifies the canary
+/// (aborting on corruption), zeroes the data region, and unlocks and unmaps
+/// it. `SecureBytes` has no `Drop` of its own, so ownership of the
+/// allocation can move out (`into_protected_alloc`) without `unsafe`.
 pub struct SecureBytes {
     inner: ProtectedAlloc,
     /// Actual user data length. May be 0 even though `inner` holds 1 byte
@@ -37,8 +42,8 @@ impl SecureBytes {
     ///
     /// **Prefer [`from_slice`](Self::from_slice) whenever possible.** This
     /// method exists only for callers that receive an owned `Vec<u8>` from
-    /// an external API (e.g., AES-GCM decrypt, platform keyring retrieve)
-    /// where a `&[u8]` is not available. The `Vec` is copied into protected
+    /// an external API (e.g., AES-GCM decrypt) where a `&[u8]` is not
+    /// available. The `Vec` is copied into protected
     /// memory and zeroized, but the secret briefly exists on the unprotected
     /// heap during the copy — `from_slice` avoids this by copying directly
     /// from a borrowed reference.
@@ -48,18 +53,12 @@ impl SecureBytes {
     /// # Panics
     ///
     /// Panics if mlock, mmap, or mprotect fails.
+    #[must_use]
     pub fn new(mut data: Vec<u8>) -> Self {
-        let actual_len = data.len();
-        // ProtectedAlloc requires non-zero size. For empty data, use a
-        // 1-byte sentinel that is never exposed through the public API.
-        let alloc = ProtectedAlloc::from_slice_or_sentinel(&data)
-            .unwrap_or_else(|e| panic!("SecureBytes allocation failed: {e}"));
+        let bytes = Self::from_slice(&data);
         // Zeroize the source Vec — it was on the unprotected heap.
         data.zeroize();
-        SecureBytes {
-            inner: alloc,
-            actual_len,
-        }
+        bytes
     }
 
     /// Create a `SecureBytes` directly from a byte slice.
@@ -69,9 +68,12 @@ impl SecureBytes {
     ///
     /// # Panics
     ///
-    /// Same as [`SecureBytes::new`].
+    /// Panics if mlock, mmap, or mprotect fails.
+    #[must_use]
     pub fn from_slice(data: &[u8]) -> Self {
         let actual_len = data.len();
+        // ProtectedAlloc requires non-zero size. For empty data, use a
+        // 1-byte sentinel that is never exposed through the public API.
         let alloc = ProtectedAlloc::from_slice_or_sentinel(data)
             .unwrap_or_else(|e| panic!("SecureBytes allocation failed: {e}"));
         SecureBytes {
@@ -105,18 +107,7 @@ impl SecureBytes {
     /// between type wrappers without leaving copies on the heap.
     #[must_use]
     pub fn into_protected_alloc(self) -> (ProtectedAlloc, usize) {
-        let actual_len = self.actual_len;
-        // Prevent Drop from running — we're transferring ownership.
-        let inner = {
-            let me = std::mem::ManuallyDrop::new(self);
-            // SAFETY: We're moving the ProtectedAlloc out of the ManuallyDrop.
-            // The ManuallyDrop ensures SecureBytes::drop doesn't run (which
-            // would be a no-op anyway since ProtectedAlloc::drop does the work).
-            // We must ensure the ProtectedAlloc is either dropped by the new
-            // owner or consumed — it is, because we return it.
-            unsafe { std::ptr::read(&me.inner) }
-        };
-        (inner, actual_len)
+        (self.inner, self.actual_len)
     }
 }
 
@@ -126,19 +117,6 @@ impl Clone for SecureBytes {
     /// zeroize on drop.
     fn clone(&self) -> Self {
         Self::from_slice(self.as_bytes())
-    }
-}
-
-impl Drop for SecureBytes {
-    fn drop(&mut self) {
-        // ProtectedAlloc::drop handles:
-        // 1. Canary verification (abort on corruption)
-        // 2. Volatile zero of entire data region
-        // 3. munlock
-        // 4. munmap
-        //
-        // Nothing additional needed here — the ProtectedAlloc field is
-        // dropped automatically and performs all cleanup.
     }
 }
 
@@ -235,7 +213,7 @@ mod tests {
         let (alloc, len) = sb.into_protected_alloc();
         assert_eq!(len, 0);
         // The alloc holds a 1-byte sentinel but len=0 means no user data.
-        assert!(alloc.len() >= 1); // sentinel
+        assert!(!alloc.is_empty()); // sentinel
     }
 
     #[test]

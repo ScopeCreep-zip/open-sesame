@@ -9,7 +9,7 @@ Each vault database is a SQLCipher-encrypted SQLite file. The following PRAGMA d
 in `SqlCipherStore::open()` (`core-secrets/src/sqlcipher.rs`) before any table access:
 
 | Parameter | Value | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `cipher_page_size` | 4096 | Page-level encryption granularity |
 | `cipher_hmac_algorithm` | HMAC_SHA256 | Per-page authentication |
 | `cipher_kdf_algorithm` | PBKDF2_HMAC_SHA256 | Internal SQLCipher KDF for page keys |
@@ -43,7 +43,7 @@ test in `core-secrets/src/sqlcipher.rs` verifies this property.
 The full set of derived keys sharing the same master key (defined in `core-crypto/src/hkdf.rs`):
 
 | Context | Purpose |
-|---|---|
+| --- | --- |
 | `pds v2 vault-key {profile_id}` | SQLCipher page encryption |
 | `pds v2 entry-encryption-key` | Per-entry AES-256-GCM (derived from vault key, not master key) |
 | `pds v2 clipboard-key {profile_id}` | Clipboard encryption |

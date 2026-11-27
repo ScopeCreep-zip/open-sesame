@@ -1,30 +1,43 @@
 //! Pluggable authentication backends for vault unlock.
 //!
-//! Provides a trait-based dispatch system for vault authentication methods.
-//! The `AuthDispatcher` tries non-interactive backends (SSH-agent, future TPM)
-//! first, falling back to password entry when no automatic method is available.
+//! One `VaultAuthBackend` per factor, registered in `AuthDispatcher`. A
+//! client unlocks a vault by walking the factors daemon-secrets reports it
+//! still requires (`remaining_factors`), providing each through its
+//! backend, and reading daemon-secrets' answer to each submission
+//! (`FactorProgress`).
 //!
-//! The SSH-agent backend is currently a stub — actual agent communication is
-//! future work. The trait and types are defined to establish the contract.
+//! Vault file locations come from `core_layout::Layout::vault_file`; files
+//! holding key material are written and destroyed through
+//! `core_layout::file` (owner-only).
 #![forbid(unsafe_code)]
 
+mod agent;
 mod backend;
 mod dispatcher;
+mod keyring;
 mod password;
-pub mod password_wrap;
+mod progress;
+pub mod salt;
 mod ssh;
 mod ssh_types;
-pub mod vault_meta;
+#[cfg(test)]
+mod test_support;
+mod vault_meta;
+mod wrapped_key;
 
 pub use backend::{
-    AuthInteraction, FactorContribution, IpcUnlockStrategy, UnlockOutcome, VaultAuthBackend,
+    AuthInteraction, FactorContribution, UnlockOutcome, VaultAuthBackend, combine_factor_pieces,
 };
 pub use dispatcher::AuthDispatcher;
+pub use keyring::{KEYRING_SERVICE, PlatformKeyringBackend, keyring_credential};
 pub use password::PasswordBackend;
-pub use password_wrap::{PASSWORD_WRAP_VERSION, PasswordWrapBlob};
-pub use ssh::SshAgentBackend;
+pub use progress::{FactorProgress, ResponseError, remaining_factors};
+pub use ssh::{AgentKey, SshAgentBackend, eligible_agent_keys, same_fingerprint};
 pub use ssh_types::{ENROLLMENT_VERSION, EnrollmentBlob, SshKeyType};
-pub use vault_meta::{EnrolledFactor, VAULT_META_VERSION, VaultInitMode, VaultMetadata};
+pub use vault_meta::{
+    EnrolledFactor, VAULT_META_VERSION, VaultAlgorithms, VaultKeying, VaultMetadata,
+};
+pub use wrapped_key::{WRAPPED_KEY_VERSION, WrappedKey};
 
 /// Errors from authentication backends.
 ///
@@ -37,6 +50,8 @@ pub enum AuthError {
     BackendNotApplicable(String),
     #[error("enrollment not found for profile '{0}'")]
     NotEnrolled(String),
+    #[error("vault '{0}' is not initialized: it has no salt (run `sesame init`)")]
+    NotInitialized(String),
     #[error("SSH agent unavailable: {0}")]
     AgentUnavailable(String),
     #[error("unsupported key type: {0}")]
@@ -45,10 +60,53 @@ pub enum AuthError {
     UnwrapFailed,
     #[error("enrollment blob invalid: {0}")]
     InvalidBlob(String),
-    #[error("no eligible SSH key found in agent")]
-    NoEligibleKey,
+    /// A vault file that is not an enrollment (the metadata, the salt) is
+    /// corrupt, of another format version, or cannot be serialized; the
+    /// message names the file.
+    #[error("{0}")]
+    InvalidVaultFile(String),
+    /// The platform keyring holds something other than a 32-byte KEK under
+    /// a vault's credential; the message names the credential.
+    #[error("{0}")]
+    MalformedKek(String),
+    #[error("SSH key {0} is not loaded in the agent (list loaded keys with `ssh-add -l`)")]
+    KeyNotInAgent(String),
     #[error("SSH agent protocol error: {0}")]
     AgentProtocolError(String),
+    #[error("the platform keyring holds no {0} (re-enroll with `sesame keyring enroll`)")]
+    KeyringEntryMissing(String),
+    #[error("platform keyring: {0}")]
+    Keyring(#[from] core_types::CredentialError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Layout(#[from] core_layout::Error),
+    #[error("system clock is before the Unix epoch: {0}")]
+    Clock(std::time::SystemTimeError),
+    /// A primitive of `core_crypto` failed (the OS random source, or an
+    /// encryption that is not an unwrap).
+    #[error(transparent)]
+    Crypto(#[from] core_types::Error),
+}
+
+impl AuthError {
+    /// This error of reading the file at `path`: a blob that does not
+    /// parse is named by the file it was read from.
+    pub(crate) fn in_file(self, path: &std::path::Path) -> Self {
+        match self {
+            Self::InvalidBlob(reason) => Self::InvalidBlob(format!("{}: {reason}", path.display())),
+            other => other,
+        }
+    }
+}
+
+impl From<AuthError> for core_types::Error {
+    fn from(e: AuthError) -> Self {
+        match e {
+            AuthError::Io(io) => Self::Io(io),
+            AuthError::Layout(layout) => layout.into(),
+            AuthError::Crypto(crypto) => crypto,
+            other => Self::Secrets(other.to_string()),
+        }
+    }
 }

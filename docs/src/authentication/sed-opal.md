@@ -14,7 +14,7 @@ on software-layer full-disk encryption.
 ## Relevant Standards
 
 | Specification | Role |
-|--------------|------|
+| --- | --- |
 | **TCG Opal 2.0** (Trusted Computing Group) | Defines the SED management interface: locking ranges, authentication, band management, and the Security Protocol command set. |
 | **TCG Opal SSC** (Security Subsystem Class) | Profile of TCG Storage that Opal-compliant drives implement. |
 | **ATA Security Feature Set** | Legacy drive locking (ATA password). Opal supersedes this but some drives support both. |
@@ -161,7 +161,7 @@ facility (key storage with hardware-gated access), not for drive-level boot lock
 ## Integration Dependencies
 
 | Dependency | Type | Purpose |
-|-----------|------|---------|
+| --- | --- | --- |
 | `sedutil-cli` | System tool | Opal drive management (enrollment, locking range setup) |
 | `libata` / kernel NVMe driver | Kernel | ATA Security / NVMe Security Send/Receive commands |
 | Rust crate: `sedutil-rs` or direct ioctl | Cargo dependency | Programmatic Opal SP communication |

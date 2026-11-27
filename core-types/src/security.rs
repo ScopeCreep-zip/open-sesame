@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::constants::PROFILE_NAMESPACE;
 use crate::ids::AgentId;
 use crate::oci::OciReference;
 
@@ -416,20 +417,48 @@ pub struct InstallationId {
     pub id: Uuid,
     /// Optional organizational namespace for enterprise deployments.
     pub org_ns: Option<OrganizationNamespace>,
-    /// Derived namespace for deterministic ID generation (e.g., profile IDs).
-    /// Computed as `uuid5(org_ns.namespace || PROFILE_NS, "install:{id}")`.
+    /// Derived namespace for deterministic ID generation (e.g., profile IDs):
+    /// [`InstallationId::derive_namespace`].
     pub namespace: Uuid,
     /// Optional machine binding for hardware attestation.
     pub machine_binding: Option<MachineBinding>,
 }
 
+impl InstallationId {
+    /// The namespace of installation `id`: UUID v5 of `install:<id>` in the
+    /// organization's namespace, or in [`PROFILE_NAMESPACE`] without one.
+    ///
+    /// Persisted in the installation file at `sesame init`; every
+    /// `ProfileId` is derived from it, so a change re-keys every profile of
+    /// every existing installation.
+    #[must_use]
+    pub fn derive_namespace(id: &Uuid, org: Option<&OrganizationNamespace>) -> Uuid {
+        let parent = org.map_or(PROFILE_NAMESPACE, |org| org.namespace);
+        Uuid::new_v5(&parent, format!("install:{id}").as_bytes())
+    }
+}
+
 /// Organizational namespace for enterprise-managed installations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrganizationNamespace {
-    /// Organization domain (e.g., "braincraft.io").
+    /// Organization domain (e.g., "example.invalid").
     pub domain: String,
-    /// Deterministic namespace derived from domain: `uuid5(NAMESPACE_URL, domain)`.
+    /// Deterministic namespace derived from the domain:
+    /// [`OrganizationNamespace::for_domain`].
     pub namespace: Uuid,
+}
+
+impl OrganizationNamespace {
+    /// The namespace of organization `domain`: UUID v5 of `org:<domain>` in
+    /// [`PROFILE_NAMESPACE`]. Persisted with the installation identity, so
+    /// the derivation is fixed.
+    #[must_use]
+    pub fn for_domain(domain: &str) -> Self {
+        Self {
+            domain: domain.to_owned(),
+            namespace: Uuid::new_v5(&PROFILE_NAMESPACE, format!("org:{domain}").as_bytes()),
+        }
+    }
 }
 
 /// Cryptographic binding to a specific machine.

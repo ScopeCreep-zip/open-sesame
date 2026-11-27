@@ -1,176 +1,152 @@
-//! Key rotation: two-phase Noise IK keypair rotation with grace period,
-//! and shared keypair generation helper (DRY extraction).
+//! Two-phase Noise IK keypair rotation of every known daemon.
+//!
+//! Phase 1 issues each daemon a new keypair, registers its public key as
+//! pending beside the current one, and announces it: the daemon reads the
+//! keypair and reconnects with it, while either key authenticates it.
+//! Phase 2, after the grace period, promotes each pending key to current
+//! and retires the old one. A daemon re-registered under a new generation
+//! in between (a restart revocation) already holds a fresh key and is left
+//! as it is.
 
-use anyhow::Context;
-use core_ipc::{BusServer, Message};
-use core_profile::{AuditAction, AuditLogger};
-use core_types::{DaemonId, EventKind, SecurityLevel};
+use std::collections::BTreeMap;
 
+use core_profile::AuditAction;
+use core_types::{Daemon, EventKind};
+
+use crate::dispatch::Hub;
 use crate::{KEY_ROTATION_GRACE, KNOWN_DAEMONS};
 
-/// Per-daemon baseline: (generation, current_pubkey) captured before rotation.
-type RotationBaseline = std::collections::HashMap<String, (u64, [u8; 32])>;
-
-/// Snapshot of daemon generations and current pubkeys at phase 1 start.
-/// Used by phase 2 to skip daemons that were revoked during the grace period.
-static ROTATION_BASELINE: tokio::sync::Mutex<Option<RotationBaseline>> =
-    tokio::sync::Mutex::const_new(None);
-
-/// Key rotation phase 1: generate keypairs, write to disk, pre-register in
-/// registry, announce pending.
-///
-/// Returns immediately — does NOT sleep. The grace period is handled by a
-/// spawned background task that signals phase 2 via channel.
-pub(crate) async fn rotate_keys_phase1<W: std::io::Write>(
-    bus: &BusServer,
-    daemon_id: DaemonId,
-    audit: &mut AuditLogger<W>,
-) -> anyhow::Result<()> {
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    let noise_params: snow::params::NoiseParams = "Noise_IK_25519_ChaChaPoly_BLAKE2s"
-        .parse()
-        .expect("valid noise params");
-    let builder = snow::Builder::new(noise_params);
-
-    let mut baseline = std::collections::HashMap::new();
-
-    for &(daemon_name, _security_level) in KNOWN_DAEMONS {
-        // Snapshot current generation and pubkey before generating the new key.
-        let (current_generation, old_pubkey) = {
-            let reg = bus.registry_mut().await;
-            match reg.find_by_name(daemon_name) {
-                Some(id) => (id.generation, Some(id.current_pubkey)),
-                None => (0, None),
-            }
-        };
-
-        let new_keypair = core_ipc::ZeroizingKeypair::new(
-            builder
-                .generate_keypair()
-                .context(format!("failed to generate new keypair for {daemon_name}"))?,
-        );
-
-        let mut new_pubkey = [0u8; 32];
-        new_pubkey.copy_from_slice(new_keypair.public());
-
-        core_ipc::noise::write_daemon_keypair(daemon_name, new_keypair.as_inner())
-            .await
-            .context(format!("failed to write rotated keypair for {daemon_name}"))?;
-
-        // Pre-register the new pubkey so daemons reconnecting during the
-        // grace period are immediately recognized by the registry.
-        {
-            let mut reg = bus.registry_mut().await;
-            reg.register_pending(daemon_name, new_pubkey);
-        }
-
-        let event = EventKind::KeyRotationPending {
-            daemon_name: daemon_name.into(),
-            new_pubkey,
-            grace_period_s: KEY_ROTATION_GRACE,
-        };
-        let msg = Message::new(&msg_ctx, event, SecurityLevel::Internal, bus.epoch());
-        if let Ok(payload) = core_ipc::encode_frame(&msg) {
-            bus.publish(&payload, SecurityLevel::Internal).await;
-        }
-
-        tracing::info!(
-            audit = "key-management",
-            event_type = "key-rotation-pending",
-            daemon = daemon_name,
-            grace_period_s = KEY_ROTATION_GRACE,
-            "key rotation announced"
-        );
-
-        // Store baseline for phase 2 generation comparison.
-        if let Some(old_pk) = old_pubkey {
-            baseline.insert(daemon_name.to_owned(), (current_generation, old_pk));
-        }
-
-        let _ = audit.append(AuditAction::KeyRotationStarted {
-            daemon_name: daemon_name.into(),
-            generation: current_generation,
-        });
-    }
-
-    // Store baseline for phase 2.
-    *ROTATION_BASELINE.lock().await = Some(baseline);
-
-    Ok(())
+/// A rotation between its phases: each daemon phase 1 issued a pending key
+/// to, with its registry generation then.
+#[derive(Debug, Default)]
+pub(crate) struct PendingRotation {
+    generations: BTreeMap<Daemon, u64>,
 }
 
-/// Key rotation phase 2: finalize registry, announce completion.
-///
-/// Called after the grace period expires. Promotes pending pubkeys to current,
-/// removes old pubkeys from the registry, increments generation counters.
-pub(crate) async fn rotate_keys_phase2<W: std::io::Write>(
-    bus: &BusServer,
-    daemon_id: DaemonId,
-    audit: &mut AuditLogger<W>,
-) -> anyhow::Result<()> {
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-    let baseline = ROTATION_BASELINE
-        .lock()
-        .await
-        .take()
-        .context("phase 2 called without phase 1 baseline")?;
-
-    // Single lock acquisition for atomic finalization across all daemons.
-    {
-        let mut reg = bus.registry_mut().await;
-        for &(daemon_name, _security_level) in KNOWN_DAEMONS {
-            // Check if the daemon's generation advanced since phase 1
-            // (crash-restart revocation during grace period).
-            let current_gen = reg.find_by_name(daemon_name).map(|id| id.generation);
-            let baseline_gen = baseline.get(daemon_name).map(|(generation, _)| *generation);
-
-            if current_gen != baseline_gen {
-                tracing::info!(
-                    audit = "key-management",
-                    event_type = "rotation-skipped",
-                    daemon = daemon_name,
-                    baseline_gen = ?baseline_gen,
-                    current_gen = ?current_gen,
-                    "skipping rotation — daemon was revoked during grace period"
-                );
-                continue;
-            }
-
-            if !reg.finalize_rotation(daemon_name) {
-                tracing::warn!(
-                    daemon = daemon_name,
-                    "finalize_rotation returned false — no pending key found"
-                );
-            }
-        }
-    }
-
-    // Announce completion for each daemon.
-    for &(daemon_name, _security_level) in KNOWN_DAEMONS {
-        let event = EventKind::KeyRotationComplete {
-            daemon_name: daemon_name.into(),
-        };
-        let msg = Message::new(&msg_ctx, event, SecurityLevel::Internal, bus.epoch());
-        if let Ok(payload) = core_ipc::encode_frame(&msg) {
-            bus.publish(&payload, SecurityLevel::Internal).await;
-        }
-
-        tracing::info!(
-            audit = "key-management",
-            event_type = "key-rotation-complete",
-            daemon = daemon_name,
-            "key rotation finalized"
+impl Hub {
+    /// Rotation phase 1: issue, pre-register, and announce a new keypair
+    /// for every known daemon, then schedule phase 2 after the grace
+    /// period. Returns once the keys are announced; it does not wait.
+    ///
+    /// A daemon whose keypair cannot be issued keeps its current key and
+    /// is left out of the rotation; the others rotate.
+    ///
+    /// # Errors
+    ///
+    /// When a rotation is already pending (its daemons' grace period has
+    /// not ended), or naming every daemon whose keypair could not be
+    /// issued.
+    pub(crate) async fn begin_key_rotation(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.pending_rotation.is_none(),
+            "a key rotation is already pending"
         );
-        let current_generation = bus
-            .registry_mut()
-            .await
-            .find_by_name(daemon_name)
-            .map_or(0, |id| id.generation);
-        let _ = audit.append(AuditAction::KeyRotationCompleted {
-            daemon_name: daemon_name.to_string(),
-            generation: current_generation,
-        });
+        let generations = self.bus.registry_mut().await.snapshot_generations();
+        let mut pending = PendingRotation::default();
+        let mut failed = Vec::new();
+        for &(daemon, _) in KNOWN_DAEMONS {
+            let Some(&generation) = generations.get(daemon.name()) else {
+                tracing::error!(%daemon, "known daemon not registered, not rotated");
+                failed.push(daemon.name());
+                continue;
+            };
+            let new_pubkey =
+                match core_ipc::noise::issue_daemon_keypair(&self.layout, daemon.name()).await {
+                    Ok(public) => public,
+                    Err(e) => {
+                        tracing::error!(error = %e, %daemon, "failed to issue a rotated keypair");
+                        failed.push(daemon.name());
+                        continue;
+                    }
+                };
+            // Registered before the announcement, so the daemon's
+            // reconnection with the new key is recognized.
+            self.bus
+                .registry_mut()
+                .await
+                .register_pending(daemon.name(), new_pubkey);
+            pending.generations.insert(daemon, generation);
+            self.record(&AuditAction::KeyRotationStarted {
+                daemon_name: daemon.name().into(),
+                generation,
+            });
+            self.announce(EventKind::KeyRotationPending {
+                daemon_name: daemon.name().into(),
+                new_pubkey,
+                grace_period_s: KEY_ROTATION_GRACE,
+            })
+            .await;
+            tracing::info!(
+                audit = "key-management",
+                event_type = "key-rotation-pending",
+                %daemon,
+                generation,
+                grace_period_s = KEY_ROTATION_GRACE,
+                "key rotation announced"
+            );
+        }
+        if !pending.generations.is_empty() {
+            self.pending_rotation = Some(pending);
+            self.schedule_rotation_phase2();
+        }
+        anyhow::ensure!(
+            failed.is_empty(),
+            "failed to rotate the keys of {}",
+            failed.join(", ")
+        );
+        Ok(())
     }
 
-    Ok(())
+    /// Rotation phase 2: promote each pending key to current, retire the
+    /// old one, and announce and audit each promotion.
+    pub(crate) async fn finish_key_rotation(&mut self) {
+        let Some(pending) = self.pending_rotation.take() else {
+            tracing::warn!("rotation phase 2 signalled with no rotation pending");
+            return;
+        };
+        let promoted: Vec<(Daemon, u64)> = {
+            let mut registry = self.bus.registry_mut().await;
+            pending
+                .generations
+                .into_iter()
+                .filter_map(|(daemon, generation)| {
+                    let current = registry.find_by_name(daemon.name()).map(|r| r.generation);
+                    if current != Some(generation) {
+                        tracing::info!(
+                            audit = "key-management",
+                            event_type = "rotation-skipped",
+                            %daemon,
+                            rotated_generation = generation,
+                            current_generation = ?current,
+                            "re-registered during the grace period, rotation skipped"
+                        );
+                        return None;
+                    }
+                    if registry.finalize_rotation(daemon.name()) {
+                        Some((daemon, generation + 1))
+                    } else {
+                        tracing::warn!(%daemon, "no pending key to promote");
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (daemon, generation) in promoted {
+            self.record(&AuditAction::KeyRotationCompleted {
+                daemon_name: daemon.name().into(),
+                generation,
+            });
+            tracing::info!(
+                audit = "key-management",
+                event_type = "key-rotation-complete",
+                %daemon,
+                generation,
+                "key rotation finalized"
+            );
+            self.announce(EventKind::KeyRotationComplete {
+                daemon_name: daemon.name().into(),
+            })
+            .await;
+        }
+    }
 }

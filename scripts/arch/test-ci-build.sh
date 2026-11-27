@@ -84,7 +84,7 @@ su builder -c "CARCH=x86_64 PKGEXT='.pkg.tar.zst' makepkg --nodeps --force"
 
 echo ""
 echo "=== Built packages ==="
-ls -la *.pkg.tar.zst
+ls -la ./*.pkg.tar.zst
 
 echo ""
 echo "=== CI build parity test PASSED ==="

@@ -20,6 +20,9 @@ pub enum AuthFactorId {
     Password,
     /// SSH agent key-based authentication (deterministic signature → KEK).
     SshAgent,
+    /// The operating system's credential store holds a random KEK
+    /// (`CredentialStore`): the Secret Service on Linux.
+    PlatformKeyring,
     /// FIDO2/WebAuthn hardware token.
     Fido2,
     /// TPM 2.0 or vTPM sealed key.
@@ -40,6 +43,7 @@ impl AuthFactorId {
         match s {
             "password" => Ok(Self::Password),
             "ssh-agent" => Ok(Self::SshAgent),
+            "platform-keyring" => Ok(Self::PlatformKeyring),
             "fido2" => Ok(Self::Fido2),
             "tpm" => Ok(Self::Tpm),
             "fingerprint" => Ok(Self::Fingerprint),
@@ -54,6 +58,7 @@ impl AuthFactorId {
         match self {
             Self::Password => "password",
             Self::SshAgent => "ssh-agent",
+            Self::PlatformKeyring => "platform-keyring",
             Self::Fido2 => "fido2",
             Self::Tpm => "tpm",
             Self::Fingerprint => "fingerprint",

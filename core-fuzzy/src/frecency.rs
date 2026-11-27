@@ -1,216 +1,180 @@
-//! Frecency scoring with SQLite persistence.
+//! Frecency scoring with `SQLite` persistence.
 //!
-//! Mozilla-style double-exponential decay model:
-//! score = sum(frequency_i * 0.5^((now - timestamp_i) / half_life))
+//! Exponential decay: an entry's score is the sum, over its launches, of
+//! `0.5^(age / HALF_LIFE)`, so frequently and recently launched entries
+//! rank highest. A launch older than [`RETENTION`] contributes under 0.1%
+//! and is deleted when the database opens.
 //!
-//! Half-life: 30 days (configurable). Each launch records a timestamp.
-//! The score decays exponentially so frequently-used recent apps rank highest.
-//!
-//! Frecency data is plaintext SQLite (ADR-LNC-002: usage patterns are not
+//! Frecency data is plaintext `SQLite` (ADR-LNC-002: usage patterns are not
 //! secrets — which apps you launch frequently is not sensitive enough to
-//! warrant SQLCipher overhead). Per-profile isolation via separate DB files.
+//! warrant `SQLCipher` overhead). Each profile has its own database file
+//! (`core_layout::Layout::frecency_db`).
 
 use rusqlite::{Connection, params};
+use std::collections::HashMap;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Half-life for frecency decay in milliseconds (30 days).
-const HALF_LIFE_MS: f64 = 30.0 * 24.0 * 3600.0 * 1000.0;
+/// The age at which a launch counts half: 30 days.
+const HALF_LIFE: Duration = Duration::from_hours(30 * 24);
 
-/// SQLite-backed frecency index for a single profile.
+/// The age after which a launch is deleted: ten half-lives.
+const RETENTION: Duration = Duration::from_hours(10 * 30 * 24);
+
+/// The schema: one row per launch, timestamped in milliseconds since the
+/// Unix epoch (distinct launches within a second stay distinct rows).
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS launches (
+    entry_id  TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    PRIMARY KEY (entry_id, timestamp)
+);";
+
+/// `SQLite`-backed frecency index of one profile.
 pub struct FrecencyDb {
     conn: Connection,
 }
 
+/// A frecency failure: the operation and the `SQLite` error.
+fn failed(operation: &str, e: impl std::fmt::Display) -> core_types::Error {
+    core_types::Error::Platform(format!("frecency {operation} failed: {e}"))
+}
+
 impl FrecencyDb {
-    /// Open or create a frecency database at the given path.
-    ///
-    /// Creates the schema on first open. Uses WAL mode for concurrent reads.
+    /// Open or create the frecency database at `path` (WAL mode), creating
+    /// the schema and deleting launches older than `RETENTION`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be opened or migrated.
+    /// `core_types::Error::Platform` when the database cannot be opened,
+    /// migrated, or pruned, or the system clock is unreadable.
     pub fn open(path: &Path) -> core_types::Result<Self> {
-        let conn = Connection::open(path)
-            .map_err(|e| core_types::Error::Platform(format!("frecency DB open failed: {e}")))?;
-
+        let conn = Connection::open(path).map_err(|e| failed("open", e))?;
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| core_types::Error::Platform(format!("frecency WAL mode failed: {e}")))?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS frecency (
-                entry_id    TEXT NOT NULL,
-                profile_id  TEXT NOT NULL,
-                timestamp   INTEGER NOT NULL,
-                action      TEXT NOT NULL DEFAULT 'launch',
-                PRIMARY KEY (entry_id, profile_id, timestamp)
-            );
-            CREATE INDEX IF NOT EXISTS idx_frecency_profile
-                ON frecency (profile_id, entry_id);",
-        )
-        .map_err(|e| {
-            core_types::Error::Platform(format!("frecency schema migration failed: {e}"))
-        })?;
-
-        Ok(Self { conn })
+            .map_err(|e| failed("WAL mode", e))?;
+        Self::init(conn)
     }
 
-    /// Open an in-memory frecency database (for testing).
-    pub fn open_in_memory() -> core_types::Result<Self> {
-        let conn = Connection::open_in_memory().map_err(|e| {
-            core_types::Error::Platform(format!("frecency in-memory open failed: {e}"))
-        })?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS frecency (
-                entry_id    TEXT NOT NULL,
-                profile_id  TEXT NOT NULL,
-                timestamp   INTEGER NOT NULL,
-                action      TEXT NOT NULL DEFAULT 'launch',
-                PRIMARY KEY (entry_id, profile_id, timestamp)
-            );
-            CREATE INDEX IF NOT EXISTS idx_frecency_profile
-                ON frecency (profile_id, entry_id);",
-        )
-        .map_err(|e| core_types::Error::Platform(format!("frecency schema failed: {e}")))?;
-
-        Ok(Self { conn })
+    #[cfg(test)]
+    fn open_in_memory() -> core_types::Result<Self> {
+        Self::init(Connection::open_in_memory().map_err(|e| failed("open", e))?)
     }
 
-    /// Record a launch event for the given entry in the given profile.
-    pub fn record_launch(&self, entry_id: &str, profile_id: &str) -> core_types::Result<()> {
-        let now = now_unix();
+    fn init(conn: Connection) -> core_types::Result<Self> {
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| failed("schema migration", e))?;
+        let db = Self { conn };
+        let cutoff = millis(SystemTime::now() - RETENTION)?;
+        db.conn
+            .execute("DELETE FROM launches WHERE timestamp < ?1", params![cutoff])
+            .map_err(|e| failed("prune", e))?;
+        Ok(db)
+    }
+
+    /// Record a launch of `entry_id` now.
+    ///
+    /// # Errors
+    ///
+    /// `core_types::Error::Platform` when the insert fails or the system
+    /// clock is unreadable.
+    pub fn record_launch(&self, entry_id: &str) -> core_types::Result<()> {
         self.conn
             .execute(
-                "INSERT INTO frecency (entry_id, profile_id, timestamp, action) VALUES (?1, ?2, ?3, 'launch')",
-                params![entry_id, profile_id, now],
+                "INSERT INTO launches (entry_id, timestamp) VALUES (?1, ?2)",
+                params![entry_id, millis(SystemTime::now())?],
             )
-            .map_err(|e| {
-                core_types::Error::Platform(format!("frecency record failed: {e}"))
-            })?;
+            .map_err(|e| failed("record", e))?;
         Ok(())
     }
 
-    /// Compute frecency scores for all entries in the given profile.
+    /// The frecency score of every entry, highest first.
     ///
-    /// Returns `(entry_id, score)` pairs sorted by score descending.
-    pub fn scores(&self, profile_id: &str) -> core_types::Result<Vec<(String, f64)>> {
-        let now = now_unix();
+    /// # Errors
+    ///
+    /// `core_types::Error::Platform` when the query or a row read fails,
+    /// or the system clock is unreadable.
+    pub fn scores(&self) -> core_types::Result<Vec<(String, f64)>> {
+        let now = millis(SystemTime::now())?;
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT entry_id, timestamp FROM frecency WHERE profile_id = ?1 ORDER BY entry_id",
-            )
-            .map_err(|e| core_types::Error::Platform(format!("frecency query failed: {e}")))?;
-
+            .prepare("SELECT entry_id, timestamp FROM launches")
+            .map_err(|e| failed("query", e))?;
         let rows = stmt
-            .query_map(params![profile_id], |row| {
+            .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|e| core_types::Error::Platform(format!("frecency query_map failed: {e}")))?;
+            .map_err(|e| failed("query", e))?;
 
-        // Accumulate scores per entry.
-        let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-
+        let mut scores: HashMap<String, f64> = HashMap::new();
         for row in rows {
-            let (entry_id, timestamp) = row.map_err(|e| {
-                core_types::Error::Platform(format!("frecency row read failed: {e}"))
-            })?;
-
-            let age_secs = (now - timestamp) as f64;
-            let decay = 0.5_f64.powf(age_secs / HALF_LIFE_MS);
-            *scores.entry(entry_id).or_default() += decay;
+            let (entry_id, timestamp) = row.map_err(|e| failed("row read", e))?;
+            *scores.entry(entry_id).or_default() += decay(now, timestamp);
         }
-
-        let mut result: Vec<(String, f64)> = scores.into_iter().collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(result)
-    }
-
-    /// Get the frecency score for a single entry in a profile.
-    pub fn score_for(&self, entry_id: &str, profile_id: &str) -> core_types::Result<f64> {
-        let now = now_unix();
-        let mut stmt = self
-            .conn
-            .prepare("SELECT timestamp FROM frecency WHERE entry_id = ?1 AND profile_id = ?2")
-            .map_err(|e| core_types::Error::Platform(format!("frecency query failed: {e}")))?;
-
-        let timestamps: Vec<i64> = stmt
-            .query_map(params![entry_id, profile_id], |row| row.get(0))
-            .map_err(|e| core_types::Error::Platform(format!("frecency query_map failed: {e}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut score = 0.0;
-        for ts in timestamps {
-            let age_secs = (now - ts) as f64;
-            let decay = 0.5_f64.powf(age_secs / HALF_LIFE_MS);
-            score += decay;
-        }
-
-        Ok(score)
-    }
-
-    /// Prune entries older than the given number of days.
-    pub fn prune(&self, max_age_days: u32) -> core_types::Result<u64> {
-        let cutoff = now_unix() - i64::from(max_age_days) * 86_400_000;
-        let deleted = self
-            .conn
-            .execute("DELETE FROM frecency WHERE timestamp < ?1", params![cutoff])
-            .map_err(|e| core_types::Error::Platform(format!("frecency prune failed: {e}")))?;
-        Ok(deleted as u64)
+        let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(ranked)
     }
 }
 
-/// Returns current time as milliseconds since epoch (for sub-second uniqueness).
-fn now_unix() -> i64 {
-    SystemTime::now()
+/// The weight of a launch at `timestamp` seen at `now` (both milliseconds
+/// since the epoch). A launch timestamped after `now` (the clock stepped
+/// back) has age zero.
+fn decay(now: i64, timestamp: i64) -> f64 {
+    let age = Duration::from_millis(u64::try_from(now - timestamp).unwrap_or(0));
+    0.5_f64.powf(age.as_secs_f64() / HALF_LIFE.as_secs_f64())
+}
+
+/// `time` in milliseconds since the Unix epoch.
+fn millis(time: SystemTime) -> core_types::Result<i64> {
+    let since = time
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+        .map_err(|e| failed("clock read", e))?;
+    i64::try_from(since.as_millis()).map_err(|e| failed("clock read", e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn record_and_retrieve_score() {
-        let db = FrecencyDb::open_in_memory().unwrap();
-        db.record_launch("firefox.desktop", "work").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        db.record_launch("firefox.desktop", "work").unwrap();
-
-        let score = db.score_for("firefox.desktop", "work").unwrap();
-        // Two very recent launches: each ~1.0 decay, so score ~2.0
-        assert!(score > 1.9 && score < 2.1, "score was {score}");
+    fn insert(db: &FrecencyDb, entry_id: &str, timestamp: i64) {
+        db.conn
+            .execute(
+                "INSERT INTO launches (entry_id, timestamp) VALUES (?1, ?2)",
+                params![entry_id, timestamp],
+            )
+            .unwrap();
     }
 
     #[test]
-    fn profile_isolation() {
+    fn recent_launches_each_count_about_one() {
         let db = FrecencyDb::open_in_memory().unwrap();
-        db.record_launch("firefox.desktop", "work").unwrap();
+        db.record_launch("firefox.desktop").unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+        db.record_launch("firefox.desktop").unwrap();
 
-        let work_score = db.score_for("firefox.desktop", "work").unwrap();
-        let personal_score = db.score_for("firefox.desktop", "personal").unwrap();
+        let scores = db.scores().unwrap();
+        assert_eq!(scores.len(), 1);
+        assert!(scores[0].1 > 1.9 && scores[0].1 <= 2.0, "{scores:?}");
+    }
 
-        assert!(work_score > 0.0);
-        assert_eq!(personal_score, 0.0);
+    #[test]
+    fn a_launch_one_half_life_old_counts_half() {
+        let now = millis(SystemTime::now()).unwrap();
+        let half_life = i64::try_from(HALF_LIFE.as_millis()).unwrap();
+        assert!((decay(now, now - half_life) - 0.5).abs() < 1e-9);
+        assert!((decay(now, now) - 1.0).abs() < f64::EPSILON);
+        assert!((decay(now, now + 1_000) - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn scores_sorted_descending() {
         let db = FrecencyDb::open_in_memory().unwrap();
-        // Firefox launched 3 times, code launched 1 time
-        db.record_launch("firefox.desktop", "work").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        db.record_launch("firefox.desktop", "work").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        db.record_launch("firefox.desktop", "work").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        db.record_launch("code.desktop", "work").unwrap();
+        for _ in 0..3 {
+            db.record_launch("firefox.desktop").unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        db.record_launch("code.desktop").unwrap();
 
-        let scores = db.scores("work").unwrap();
+        let scores = db.scores().unwrap();
         assert_eq!(scores.len(), 2);
         assert_eq!(scores[0].0, "firefox.desktop");
         assert_eq!(scores[1].0, "code.desktop");
@@ -218,29 +182,29 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_old_entries() {
-        let db = FrecencyDb::open_in_memory().unwrap();
-        // Insert an entry with an old timestamp directly.
-        db.conn
-            .execute(
-                "INSERT INTO frecency (entry_id, profile_id, timestamp, action) VALUES ('old.desktop', 'work', 1000, 'launch')",
-                [],
-            )
-            .unwrap();
-        db.record_launch("new.desktop", "work").unwrap();
+    fn opening_deletes_launches_past_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.frecency.db");
+        let db = FrecencyDb::open(&path).unwrap();
+        let retention = i64::try_from(RETENTION.as_millis()).unwrap();
+        let now = millis(SystemTime::now()).unwrap();
+        insert(&db, "old.desktop", now - retention - 1_000);
+        insert(&db, "kept.desktop", now - retention + 60_000);
+        drop(db);
 
-        let deleted = db.prune(1).unwrap(); // prune entries older than 1 day
-        assert_eq!(deleted, 1);
-
-        let scores = db.scores("work").unwrap();
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0].0, "new.desktop");
+        let names: Vec<String> = FrecencyDb::open(&path)
+            .unwrap()
+            .scores()
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["kept.desktop"]);
     }
 
     #[test]
-    fn empty_profile_returns_empty() {
+    fn empty_database_has_no_scores() {
         let db = FrecencyDb::open_in_memory().unwrap();
-        let scores = db.scores("nonexistent").unwrap();
-        assert!(scores.is_empty());
+        assert!(db.scores().unwrap().is_empty());
     }
 }

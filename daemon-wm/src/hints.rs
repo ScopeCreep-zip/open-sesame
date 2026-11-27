@@ -1,361 +1,244 @@
-//! Letter-hint assignment and prefix matching.
+//! Mnemonic hint assignment and prefix matching.
 //!
-//! Assigns repeated-letter hints to windows based on a configurable key set.
-//! Supports numeric shorthand: "a2" matches "aa", "a3" matches "aaa".
+//! Each window's hint repeats its app's key: the key bound to the app in
+//! `key_bindings`, else the first letter of its name, else a key from the
+//! configured `hint_keys` pool. Windows of one app take consecutive
+//! repetitions (`f`, `ff`, `fff`), which numeric shorthand abbreviates
+//! (`f2`, `f3`). The same key launches the app when no window of it is
+//! open (launch-or-focus).
 
 use core_config::WmKeyBinding;
-use std::collections::{BTreeMap, HashMap};
-
-/// Assigns unique repeated-letter hints from a key set to N items.
-///
-/// For keys "asdf" and 6 items: a, s, d, f, aa, as.
-/// Each key is used once before any key repeats.
-#[must_use]
-pub fn assign_hints(count: usize, hint_keys: &str) -> Vec<String> {
-    if count == 0 || hint_keys.is_empty() {
-        return Vec::new();
-    }
-
-    let keys: Vec<char> = hint_keys.chars().collect();
-    let key_count = keys.len();
-    let mut hints = Vec::with_capacity(count);
-
-    for i in 0..count {
-        let base_idx = i % key_count;
-        let repeat = (i / key_count) + 1;
-        let hint: String = std::iter::repeat_n(keys[base_idx], repeat).collect();
-        hints.push(hint);
-    }
-
-    hints
-}
+use std::collections::BTreeMap;
 
 /// Result of matching user input against assigned hints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchResult {
     /// No hints match the input.
     NoMatch,
-    /// Multiple hints share this prefix; indices into the hint list.
+    /// Several hints start with the input (one may equal it); indices into
+    /// the hint list.
     Partial(Vec<usize>),
-    /// Exactly one hint matches; index into the hint list.
+    /// Exactly one hint starts with the input, and equals it.
     Exact(usize),
 }
 
-/// Match user input against a set of assigned hints.
+/// Match user input against a set of assigned hints, after normalizing it
+/// (lowercase, numeric shorthand expanded: `a2` → `aa`).
 ///
-/// Normalizes numeric shorthand before matching: "a2" -> "aa".
-/// Case-insensitive.
+/// An input equal to one hint but also a prefix of others (`a` among `a`,
+/// `aa`) is [`MatchResult::Partial`]: the display narrows, and the user
+/// commits with Enter or the modifier release.
 #[must_use]
 pub fn match_input(input: &str, hints: &[String]) -> MatchResult {
     let normalized = normalize_input(input);
     if normalized.is_empty() {
         return MatchResult::NoMatch;
     }
-
-    let mut exact: Option<usize> = None;
-    let mut partial: Vec<usize> = Vec::new();
-
-    for (i, hint) in hints.iter().enumerate() {
-        if hint == &normalized {
-            exact = Some(i);
-            partial.push(i);
-        } else if hint.starts_with(&normalized) {
-            partial.push(i);
-        }
-    }
-
-    if partial.is_empty() {
-        MatchResult::NoMatch
-    } else if let Some(idx) = exact
-        && partial.len() == 1
-    {
-        MatchResult::Exact(idx)
-    } else if let Some(idx) = exact
-        && partial.len() > 1
-    {
-        // Exact match exists but other hints share the prefix.
-        // Still report partial so the UI can narrow display.
-        // The caller can decide to activate on timeout or wait.
-        let _ = idx;
-        MatchResult::Partial(partial)
-    } else {
-        MatchResult::Partial(partial)
+    let matching: Vec<usize> = hints
+        .iter()
+        .enumerate()
+        .filter(|(_, hint)| hint.starts_with(&normalized))
+        .map(|(i, _)| i)
+        .collect();
+    match matching.as_slice() {
+        [] => MatchResult::NoMatch,
+        [only] if hints[*only] == normalized => MatchResult::Exact(*only),
+        _ => MatchResult::Partial(matching),
     }
 }
 
-/// Normalize input: lowercase, expand numeric shorthand (a2 -> aa).
+/// Largest repetition count numeric shorthand expands.
+const MAX_SHORTHAND: usize = 26;
+
+/// Normalize input: lowercase, and expand numeric shorthand — one repeated
+/// letter followed by a count from 1 to [`MAX_SHORTHAND`] (`a2`, `aa3`) —
+/// into that many repetitions.
 fn normalize_input(input: &str) -> String {
     let input = input.to_lowercase();
-
-    if input.len() >= 2 {
-        let chars: Vec<char> = input.chars().collect();
-
-        // Find where numeric suffix starts.
-        let mut letter_end = chars.len();
-        while letter_end > 0 && chars[letter_end - 1].is_ascii_digit() {
-            letter_end -= 1;
+    let letters = input.trim_end_matches(|c: char| c.is_ascii_digit());
+    let Some(base) = letters.chars().next() else {
+        return input;
+    };
+    let count = input[letters.len()..]
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=MAX_SHORTHAND).contains(n));
+    match count {
+        Some(count) if letters.chars().all(|c| c == base) => {
+            std::iter::repeat_n(base, count).collect()
         }
-
-        if letter_end > 0 && letter_end < chars.len() {
-            let letters: String = chars[..letter_end].iter().collect();
-            let num_str: String = chars[letter_end..].iter().collect();
-
-            if let Ok(num) = num_str.parse::<usize>()
-                && num > 0
-                && num <= 26
-                && letters
-                    .chars()
-                    .all(|c| c == letters.chars().next().unwrap_or(' '))
-            {
-                let base = letters.chars().next().unwrap();
-                return std::iter::repeat_n(base, num).collect();
-            }
-        }
+        _ => input,
     }
-
-    input
 }
 
-/// Auto-generate a hint key from an app ID by extracting its first alphabetic character.
+/// The last reverse-DNS segment of `app_id` (`com.mitchellh.ghostty` →
+/// `ghostty`).
+fn app_name(app_id: &str) -> &str {
+    app_id.rsplit('.').next().unwrap_or(app_id)
+}
+
+/// The mnemonic key of an app id: the first letter of its name, lowercased.
 #[must_use]
 pub fn auto_key_for_app(app_id: &str) -> Option<char> {
-    let segment = app_id.rsplit('.').next().unwrap_or(app_id);
-    segment
+    app_name(app_id)
         .chars()
-        .find(|c| c.is_ascii_alphabetic())
+        .find(char::is_ascii_alphabetic)
         .map(|c| c.to_ascii_lowercase())
 }
 
-/// Look up the configured hint key for an app_id, falling back to auto-detection.
+/// The key bound to `app_id` in `key_bindings` — a pattern equal to the app
+/// id or its name, ignoring case — else its mnemonic key.
 #[must_use]
 pub fn key_for_app(app_id: &str, key_bindings: &BTreeMap<String, WmKeyBinding>) -> Option<char> {
-    let app_lower = app_id.to_lowercase();
-    let last_segment = app_id.rsplit('.').next().map(|s| s.to_lowercase());
-
-    for (key, binding) in key_bindings {
-        for pattern in &binding.apps {
-            if pattern == app_id
-                || pattern.to_lowercase() == app_lower
-                || last_segment.as_deref() == Some(&pattern.to_lowercase())
-            {
-                return key.chars().next();
-            }
-        }
-    }
-    auto_key_for_app(app_id)
-}
-
-/// Look up the launch command for a key character.
-#[must_use]
-pub fn launch_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) -> Option<&str> {
-    let key_str = key.to_lowercase().to_string();
-    key_bindings.get(&key_str).and_then(|b| b.launch.as_deref())
-}
-
-/// Look up the launch profile tags for a key character.
-#[must_use]
-pub fn tags_for_key(key: char, key_bindings: &BTreeMap<String, WmKeyBinding>) -> Vec<String> {
-    let key_str = key.to_lowercase().to_string();
+    let name = app_name(app_id);
     key_bindings
-        .get(&key_str)
-        .map(|b| b.tags.clone())
-        .unwrap_or_default()
+        .iter()
+        .find(|(_, binding)| {
+            binding.apps.iter().any(|pattern| {
+                pattern.to_lowercase() == app_id.to_lowercase()
+                    || pattern.to_lowercase() == name.to_lowercase()
+            })
+        })
+        .and_then(|(key, _)| key.chars().next())
+        .or_else(|| auto_key_for_app(app_id))
 }
 
-/// Look up the launch args for a key character.
+/// The binding of hint key `key` (case-insensitive): what typing it
+/// launches when no window matches.
 #[must_use]
-pub fn launch_args_for_key(
+pub fn binding_for_key(
     key: char,
     key_bindings: &BTreeMap<String, WmKeyBinding>,
-) -> Vec<String> {
-    let key_str = key.to_lowercase().to_string();
-    key_bindings
-        .get(&key_str)
-        .map(|b| b.launch_args.clone())
-        .unwrap_or_default()
+) -> Option<&WmKeyBinding> {
+    key_bindings.get(&key.to_lowercase().to_string())
 }
 
-/// Assign hints to windows grouped by app, using configured key mappings.
-///
-/// Hint key priority:
-/// 1. Explicit config (`key_bindings` maps app to a specific key)
-/// 2. First letter of the app name (reverse-DNS last segment)
-///
-/// Windows sharing the same key get consecutive repetitions: v, vv, vvv
-/// (with numeric shorthand v1, v2, v3).
-/// Returns `(hint_string, original_index)` pairs in original window order.
+/// Hints for windows of `app_ids`, in window order: each app's key (see
+/// [`key_for_app`]), repeated once per earlier window of the same key.
+/// Apps without a key take the first `hint_keys` key no other app on
+/// screen uses (the first pool key when every one is taken).
 #[must_use]
 pub fn assign_app_hints(
     app_ids: &[&str],
     key_bindings: &BTreeMap<String, WmKeyBinding>,
-) -> Vec<(String, usize)> {
-    if app_ids.is_empty() {
-        return Vec::new();
-    }
-
-    // Group indices by app base key.
-    let mut by_key: HashMap<char, Vec<usize>> = HashMap::new();
-
-    for (i, app_id) in app_ids.iter().enumerate() {
-        let key = key_for_app(app_id, key_bindings).unwrap_or('a');
-        by_key.entry(key).or_default().push(i);
-    }
-
-    let mut result: Vec<(String, usize)> = Vec::with_capacity(app_ids.len());
-
-    for (base, indices) in &by_key {
-        for (count, &idx) in indices.iter().enumerate() {
-            let hint: String = std::iter::repeat_n(*base, count + 1).collect();
-            result.push((hint, idx));
-        }
-    }
-
-    // Sort by original index to maintain window order.
-    result.sort_by_key(|&(_, idx)| idx);
-    result
+    hint_keys: &str,
+) -> Vec<String> {
+    let keys: Vec<Option<char>> = app_ids
+        .iter()
+        .map(|app_id| key_for_app(app_id, key_bindings))
+        .collect();
+    let fallback = hint_keys
+        .chars()
+        .find(|c| !keys.contains(&Some(*c)))
+        .or_else(|| hint_keys.chars().next());
+    let mut repeats: BTreeMap<char, usize> = BTreeMap::new();
+    keys.into_iter()
+        .filter_map(|key| key.or(fallback))
+        .map(|key| {
+            let count = repeats.entry(key).or_default();
+            *count += 1;
+            std::iter::repeat_n(key, *count).collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn assign_hints_basic() {
-        let hints = assign_hints(5, "asd");
-        assert_eq!(hints, vec!["a", "s", "d", "aa", "ss"]);
+    fn hints(values: &[&str]) -> Vec<String> {
+        values.iter().map(|&v| v.to_owned()).collect()
     }
 
-    #[test]
-    fn assign_hints_empty() {
-        assert!(assign_hints(0, "abc").is_empty());
-        assert!(assign_hints(5, "").is_empty());
-    }
-
-    #[test]
-    fn match_exact() {
-        let hints = vec!["a".into(), "s".into(), "d".into(), "aa".into()];
-        assert_eq!(match_input("d", &hints), MatchResult::Exact(2));
-    }
-
-    #[test]
-    fn match_partial() {
-        let hints = vec!["a".into(), "aa".into(), "aaa".into()];
-        // "a" matches all three as prefix, exact on index 0 but partial because others share prefix.
-        if let MatchResult::Partial(indices) = match_input("a", &hints) {
-            assert_eq!(indices.len(), 3);
-        } else {
-            panic!("expected Partial");
+    fn binding(apps: &[&str], launch: Option<&str>) -> WmKeyBinding {
+        WmKeyBinding {
+            apps: apps.iter().map(|&a| a.to_owned()).collect(),
+            launch: launch.map(str::to_owned),
+            tags: vec!["dev".into()],
+            launch_args: Vec::new(),
         }
     }
 
     #[test]
-    fn match_no_match() {
-        let hints = vec!["a".into(), "s".into()];
-        assert_eq!(match_input("z", &hints), MatchResult::NoMatch);
+    fn a_unique_hint_matches_exactly() {
+        assert_eq!(
+            match_input("d", &hints(&["a", "s", "d", "aa"])),
+            MatchResult::Exact(2)
+        );
+        assert_eq!(match_input("S", &hints(&["a", "s"])), MatchResult::Exact(1));
     }
 
     #[test]
-    fn match_numeric_shorthand() {
-        let hints = vec!["a".into(), "aa".into(), "aaa".into()];
-        // "a3" normalizes to "aaa" -> exact match on index 2.
-        assert_eq!(match_input("a3", &hints), MatchResult::Exact(2));
+    fn a_shared_prefix_is_partial_even_with_an_equal_hint() {
+        assert_eq!(
+            match_input("a", &hints(&["a", "aa", "aaa"])),
+            MatchResult::Partial(vec![0, 1, 2])
+        );
     }
 
     #[test]
-    fn match_case_insensitive() {
-        let hints = vec!["a".into(), "s".into()];
-        assert_eq!(match_input("S", &hints), MatchResult::Exact(1));
+    fn unmatched_and_empty_input_match_nothing() {
+        assert_eq!(match_input("z", &hints(&["a", "s"])), MatchResult::NoMatch);
+        assert_eq!(match_input("", &hints(&["a"])), MatchResult::NoMatch);
     }
 
     #[test]
-    fn auto_key_reverse_dns() {
+    fn numeric_shorthand_expands_one_repeated_letter() {
+        assert_eq!(normalize_input("a3"), "aaa");
+        assert_eq!(normalize_input("AA2"), "aa");
+        assert_eq!(normalize_input("ab2"), "ab2", "mixed letters do not expand");
+        assert_eq!(normalize_input("a27"), "a27", "beyond the limit");
+        assert_eq!(normalize_input("a0"), "a0");
+        assert_eq!(normalize_input("42"), "42", "no letter");
+        assert_eq!(
+            match_input("a3", &hints(&["a", "aa", "aaa"])),
+            MatchResult::Exact(2)
+        );
+    }
+
+    #[test]
+    fn mnemonic_keys_are_the_first_letter_of_the_app_name() {
         assert_eq!(auto_key_for_app("com.mitchellh.ghostty"), Some('g'));
+        assert_eq!(auto_key_for_app("Firefox"), Some('f'));
+        assert_eq!(auto_key_for_app("org.x.123"), None);
     }
 
     #[test]
-    fn auto_key_simple() {
-        assert_eq!(auto_key_for_app("firefox"), Some('f'));
-    }
-
-    fn empty_bindings() -> BTreeMap<String, WmKeyBinding> {
-        BTreeMap::new()
-    }
-
-    #[test]
-    fn assign_app_hints_groups() {
-        let apps = vec!["firefox", "firefox", "ghostty"];
-        let result = assign_app_hints(&apps, &empty_bindings());
-        // Two firefox windows: "f", "ff"; one ghostty: "g"
-        let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
-        assert!(hint_strs.contains(&"f"));
-        assert!(hint_strs.contains(&"ff"));
-        assert!(hint_strs.contains(&"g"));
-        assert_eq!(result.len(), 3);
+    fn bindings_win_over_mnemonics_and_match_ids_or_names() {
+        let bindings = BTreeMap::from([("x".to_owned(), binding(&["Firefox"], None))]);
+        assert_eq!(key_for_app("org.mozilla.firefox", &bindings), Some('x'));
+        assert_eq!(key_for_app("firefox", &bindings), Some('x'));
+        assert_eq!(key_for_app("ghostty", &bindings), Some('g'));
     }
 
     #[test]
-    fn launch_for_key_case_insensitive() {
-        let mut bindings = BTreeMap::new();
-        bindings.insert(
-            "f".to_string(),
-            WmKeyBinding {
-                apps: vec!["app-f".into()],
-                launch: Some("app-f".into()),
-                tags: Vec::new(),
-                launch_args: Vec::new(),
-            },
+    fn windows_of_one_app_repeat_its_key_in_window_order() {
+        let assigned =
+            assign_app_hints(&["firefox", "ghostty", "firefox"], &BTreeMap::new(), "asd");
+        assert_eq!(assigned, ["f", "g", "ff"]);
+    }
+
+    #[test]
+    fn apps_without_a_letter_take_a_free_pool_key() {
+        // 'a' belongs to alacritty, so the letterless app takes 's'.
+        let assigned = assign_app_hints(
+            &["alacritty", "org.x.123", "org.y.456"],
+            &BTreeMap::new(),
+            "asd",
         );
-        assert_eq!(launch_for_key('f', &bindings), Some("app-f"));
-        assert_eq!(launch_for_key('F', &bindings), Some("app-f"));
-        assert_eq!(launch_for_key('z', &bindings), None);
+        assert_eq!(assigned, ["a", "s", "ss"]);
+        // With every pool key taken, the first is shared by repetition.
+        let assigned = assign_app_hints(&["alacritty", "org.x.123"], &BTreeMap::new(), "a");
+        assert_eq!(assigned, ["a", "aa"]);
     }
 
     #[test]
-    fn assign_app_hints_uses_first_letter() {
-        let apps = vec!["vivaldi", "com.mitchellh.ghostty", "microsoft-edge"];
-        let result = assign_app_hints(&apps, &empty_bindings());
-        let hint_strs: Vec<&str> = result.iter().map(|(h, _)| h.as_str()).collect();
-        assert!(hint_strs.contains(&"v"), "vivaldi should get 'v'");
-        assert!(hint_strs.contains(&"g"), "ghostty should get 'g'");
-        assert!(hint_strs.contains(&"m"), "microsoft-edge should get 'm'");
-    }
-
-    #[test]
-    fn tags_for_key_found() {
-        let mut bindings = BTreeMap::new();
-        bindings.insert(
-            "g".to_string(),
-            WmKeyBinding {
-                apps: vec!["ghostty".into()],
-                launch: Some("ghostty".into()),
-                tags: vec!["dev-rust".into(), "ai-tools".into()],
-                launch_args: Vec::new(),
-            },
+    fn bindings_are_found_by_key_ignoring_case() {
+        let bindings = BTreeMap::from([("g".to_owned(), binding(&["ghostty"], Some("ghostty")))]);
+        assert_eq!(
+            binding_for_key('G', &bindings).and_then(|b| b.launch.as_deref()),
+            Some("ghostty")
         );
-        let tags = tags_for_key('g', &bindings);
-        assert_eq!(tags, vec!["dev-rust", "ai-tools"]);
-    }
-
-    #[test]
-    fn tags_for_key_not_found() {
-        let bindings = BTreeMap::new();
-        let tags = tags_for_key('z', &bindings);
-        assert!(tags.is_empty());
-    }
-
-    #[test]
-    fn tags_for_key_no_tags_on_binding() {
-        let mut bindings = BTreeMap::new();
-        bindings.insert(
-            "f".to_string(),
-            WmKeyBinding {
-                apps: vec!["firefox".into()],
-                launch: Some("firefox".into()),
-                tags: Vec::new(),
-                launch_args: Vec::new(),
-            },
-        );
-        let tags = tags_for_key('f', &bindings);
-        assert!(tags.is_empty());
+        assert!(binding_for_key('z', &bindings).is_none());
     }
 }

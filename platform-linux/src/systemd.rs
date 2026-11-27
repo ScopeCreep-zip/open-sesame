@@ -1,17 +1,14 @@
 //! systemd integration helpers.
+//!
+//! `sd_notify::notify` leaves `NOTIFY_SOCKET` set, so watchdog keepalives
+//! and status updates keep working after `READY=1`. Outside systemd (no
+//! `NOTIFY_SOCKET`) every notification is a no-op.
+
+use sd_notify::NotifyState;
 
 /// Notify systemd that the daemon is ready (Type=notify).
-///
-/// `unset_environment` is false to preserve NOTIFY_SOCKET for
-/// subsequent watchdog keepalive pings.
 pub fn notify_ready() {
-    match std::env::var("NOTIFY_SOCKET") {
-        Ok(val) => {
-            tracing::info!(notify_socket = %val, "sd_notify: NOTIFY_SOCKET present, sending READY=1")
-        }
-        Err(_) => tracing::warn!("sd_notify: NOTIFY_SOCKET not set — notify will be a no-op"),
-    }
-    match sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+    match sd_notify::notify(&[NotifyState::Ready]) {
         Ok(()) => tracing::info!("sd_notify: READY=1 sent successfully"),
         Err(e) => tracing::error!(error = %e, "sd_notify: failed to send READY=1"),
     }
@@ -20,29 +17,19 @@ pub fn notify_ready() {
 /// Notify systemd that the daemon is entering a reload cycle (Type=notify-reload).
 ///
 /// Sends `RELOADING=1` + `MONOTONIC_USEC=<now>` in one datagram so systemd
-/// transitions the service to reload-notify state. Must be followed by
-/// `notify_ready()` after the reload/transition work completes.
+/// transitions the service to reload-notify state; systemd v253+ fails the
+/// reload without the timestamp. Must be followed by `notify_ready()` after
+/// the reload/transition work completes.
 pub fn notify_reloading() {
-    let mono_usec = {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: CLOCK_MONOTONIC is always valid, ts is stack-allocated and valid.
-        unsafe {
-            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    let now = match NotifyState::monotonic_usec_now() {
+        Ok(now) => now,
+        Err(e) => {
+            tracing::error!(error = %e, "sd_notify: CLOCK_MONOTONIC unreadable, RELOADING=1 not sent");
+            return;
         }
-        (ts.tv_sec as u64) * 1_000_000 + (ts.tv_nsec as u64) / 1_000
     };
-
-    tracing::info!(mono_usec, "sd_notify: sending RELOADING=1");
-
-    match sd_notify::notify(
-        false,
-        &[sd_notify::NotifyState::Custom(&format!(
-            "RELOADING=1\nMONOTONIC_USEC={mono_usec}"
-        ))],
-    ) {
+    tracing::info!(?now, "sd_notify: sending RELOADING=1");
+    match sd_notify::notify(&[NotifyState::Reloading, now]) {
         Ok(()) => tracing::info!("sd_notify: RELOADING=1 sent successfully"),
         Err(e) => tracing::error!(error = %e, "sd_notify: failed to send RELOADING=1"),
     }
@@ -50,12 +37,65 @@ pub fn notify_reloading() {
 
 /// Send a watchdog keepalive to systemd.
 pub fn notify_watchdog() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]) {
+    if let Err(e) = sd_notify::notify(&[NotifyState::Watchdog]) {
         tracing::warn!(error = %e, "sd_notify: watchdog ping failed");
     }
 }
 
 /// Update the daemon's status string visible in `systemctl status`.
 pub fn notify_status(status: &str) {
-    sd_notify::notify(false, &[sd_notify::NotifyState::Status(status)]).ok();
+    if let Err(e) = sd_notify::notify(&[NotifyState::Status(status)]) {
+        tracing::warn!(error = %e, "sd_notify: status update failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixDatagram;
+
+    const RELOADING_TEST: &str =
+        "systemd::tests::reloading_sends_the_state_and_a_monotonic_timestamp";
+
+    /// The reload datagram systemd receives: `RELOADING=1` then a
+    /// `MONOTONIC_USEC` timestamp, one state per line.
+    ///
+    /// Setting `NOTIFY_SOCKET` in-process is `unsafe` (`std::env::set_var`),
+    /// so the test re-runs itself as a child with the variable set; the
+    /// child only sends.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "NOTIFY_SOCKET is sd_notify(3)'s; set only marks the re-run child"
+    )]
+    fn reloading_sends_the_state_and_a_monotonic_timestamp() {
+        if std::env::var_os("NOTIFY_SOCKET").is_some() {
+            notify_reloading();
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("notify.sock");
+        let server = UnixDatagram::bind(&path).expect("bind notify socket");
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", RELOADING_TEST, "--test-threads=1"])
+            .env("NOTIFY_SOCKET", &path)
+            .status()
+            .expect("run child test");
+        assert!(status.success(), "child test failed: {status}");
+        server
+            .set_nonblocking(true)
+            .expect("nonblocking notify socket");
+        let mut buf = [0u8; 256];
+        let n = server.recv(&mut buf).expect("datagram");
+        let msg = std::str::from_utf8(&buf[..n]).expect("utf-8");
+        let mut lines = msg.lines();
+        assert_eq!(lines.next(), Some("RELOADING=1"));
+        let usec = lines
+            .next()
+            .and_then(|l| l.strip_prefix("MONOTONIC_USEC="))
+            .and_then(|v| v.parse::<u64>().ok())
+            .expect("MONOTONIC_USEC=<integer>");
+        assert!(usec > 0);
+        assert_eq!(lines.next(), None);
+    }
 }

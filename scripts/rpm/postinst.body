@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # %post for open-sesame (headless)
 # $1: 1=install, >=2=upgrade
 

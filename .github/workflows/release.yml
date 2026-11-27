@@ -319,7 +319,7 @@ jobs:
 
       - name: Generate source tarball
         run: |
-          git archive --format=tar.gz --prefix=open-sesame-${VERSION}/ \
+          git archive --format=tar.gz "--prefix=open-sesame-${VERSION}/" \
             -o "open-sesame-${VERSION}-source.tar.gz" HEAD
 
       - name: Generate checksums and install instructions
@@ -346,21 +346,27 @@ jobs:
     needs: semantic-release
     if: needs.semantic-release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
+    env:
+      # The repository's .mise.toml is trusted in its own checkout.
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
 
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.semantic-release.outputs.tag }}
 
-      - uses: jdx/mise-action@v4
+      - uses: cachix/install-nix-action@v31
         with:
-          minimum_release_age: 7d
-          install_args: "rust"
-          cache: true
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: mise run ci:docs:all
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scopecreep-zip
 
-      - run: mise run ci:docs:combine
+      # The devshell provides the toolchain, the system libraries, and mdbook.
+      - run: nix develop --accept-flake-config -c mise run ci:docs:all
+
+      - run: nix develop --accept-flake-config -c mise run ci:docs:combine
 
       - uses: actions/upload-artifact@v7
         with:
@@ -487,8 +493,8 @@ jobs:
       #   with:
       #     pkgname: open-sesame-bin
       #     asset_dir: aur/open-sesame-bin/
-      #     commit_username: usrbinkat
-      #     commit_email: usrbinkat@braincraft.io
+      #     commit_username: user
+      #     commit_email: user@example.invalid
       #     ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
       #     test: true
       #     test_flags: --clean --cleanbuild --nodeps

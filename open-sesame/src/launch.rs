@@ -1,70 +1,67 @@
-use comfy_table::{Table, presets::UTF8_FULL};
-use core_types::{EventKind, SecurityLevel, TrustProfileName};
+use core_layout::Layout;
+use core_types::{EventKind, LaunchOutcome, SecurityLevel, TrustProfileName};
 use owo_colors::OwoColorize;
 
+use crate::helpers::{table, unexpected};
 use crate::ipc::{connect, rpc};
 
 pub(crate) async fn cmd_launch_search(
+    layout: &Layout,
     query: &str,
     max_results: u32,
-    profile: Option<&str>,
+    profile: Option<TrustProfileName>,
 ) -> anyhow::Result<()> {
-    let client = connect().await?;
-    let profile = profile
-        .map(|s| TrustProfileName::try_from(s).map_err(|e| anyhow::anyhow!("{e}")))
-        .transpose()?;
-
+    let client = connect(layout).await?;
     let event = EventKind::LaunchQuery {
         query: query.to_owned(),
         max_results,
         profile,
     };
-
     match rpc(&client, event, SecurityLevel::Internal).await? {
-        EventKind::LaunchQueryResponse { results } => {
-            if results.is_empty() {
-                println!("{}", "No results.".dimmed());
-            } else {
-                let mut table = Table::new();
-                table.load_preset(UTF8_FULL);
-                table.set_header(vec!["Name", "ID", "Score"]);
-
-                for r in &results {
-                    table.add_row(vec![&r.name, &r.entry_id, &format!("{:.2}", r.score)]);
-                }
-
-                println!("{table}");
-            }
+        EventKind::LaunchQueryResponse { results } if results.is_empty() => {
+            println!("{}", "No results.".dimmed());
         }
-        other => anyhow::bail!("unexpected response: {other:?}"),
+        EventKind::LaunchQueryResponse { results } => {
+            let mut table = table(&["Name", "ID", "Score"]);
+            for r in &results {
+                table.add_row(vec![
+                    r.name.clone(),
+                    r.entry_id.clone(),
+                    format!("{:.2}", r.score),
+                ]);
+            }
+            println!("{table}");
+        }
+        other => return Err(unexpected(&other)),
     }
-
     Ok(())
 }
 
-pub(crate) async fn cmd_launch_run(entry_id: &str, profile: Option<&str>) -> anyhow::Result<()> {
-    let client = connect().await?;
-    let profile = profile
-        .map(|s| TrustProfileName::try_from(s).map_err(|e| anyhow::anyhow!("{e}")))
-        .transpose()?;
-
+pub(crate) async fn cmd_launch_run(
+    layout: &Layout,
+    entry_id: &str,
+    profile: Option<TrustProfileName>,
+) -> anyhow::Result<()> {
+    let client = connect(layout).await?;
     let event = EventKind::LaunchExecute {
         entry_id: entry_id.to_owned(),
         profile,
         tags: Vec::new(),
         launch_args: Vec::new(),
     };
-
     match rpc(&client, event, SecurityLevel::Internal).await? {
-        EventKind::LaunchExecuteResponse { pid, error, .. } => {
-            if pid == 0 {
-                let detail = error.as_deref().unwrap_or("unknown error");
-                anyhow::bail!("launch failed: {detail}");
-            }
-            println!("Launched {} (PID {})", entry_id.green(), pid);
+        EventKind::LaunchExecuteResponse {
+            outcome: LaunchOutcome::Launched { pid },
+        } => {
+            println!("Launched {} (PID {pid})", entry_id.green());
+            Ok(())
         }
-        other => anyhow::bail!("unexpected response: {other:?}"),
+        EventKind::LaunchExecuteResponse {
+            outcome: LaunchOutcome::Denied(denial),
+        } => anyhow::bail!("launch denied: {denial}"),
+        EventKind::LaunchExecuteResponse {
+            outcome: LaunchOutcome::Failed { reason },
+        } => anyhow::bail!("launch failed: {reason}"),
+        other => Err(unexpected(&other)),
     }
-
-    Ok(())
 }

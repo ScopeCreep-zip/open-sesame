@@ -12,8 +12,7 @@ use zeroize::Zeroize;
 /// - Canary verification on drop
 /// - Volatile zeroize before munmap
 ///
-/// Custom `Serialize`/`Deserialize` implementations ensure wire compatibility
-/// with postcard. Deserialization uses a custom `Visitor` that copies directly
+/// `Serialize` writes a byte string. Deserialization uses a custom `Visitor` that copies directly
 /// from the deserializer's input buffer into protected memory — no intermediate
 /// heap `Vec<u8>` is created when the deserializer supports `visit_bytes`
 /// (which postcard does for in-memory deserialization). If the deserializer
@@ -148,12 +147,6 @@ impl<'de> serde::de::Visitor<'de> for SensitiveBytesVisitor {
 impl<'de> Deserialize<'de> for SensitiveBytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_byte_buf(SensitiveBytesVisitor)
-    }
-}
-
-impl Drop for SensitiveBytes {
-    fn drop(&mut self) {
-        // ProtectedAlloc::drop handles canary check, volatile zero, munlock, munmap.
     }
 }
 

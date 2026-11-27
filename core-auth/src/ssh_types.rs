@@ -12,6 +12,10 @@ pub const ENROLLMENT_VERSION: u8 = 0x01;
 /// Expected ciphertext length: 32-byte master key + 16-byte GCM tag.
 const CIPHERTEXT_LEN: usize = 48;
 
+/// Longest key fingerprint a blob holds. SHA-256 fingerprints are about
+/// 50 bytes; the bound keeps a malformed blob from driving an allocation.
+const MAX_FINGERPRINT_LEN: usize = 256;
+
 /// Supported SSH key types for vault unlock.
 ///
 /// Only key types that produce deterministic signatures are supported,
@@ -21,8 +25,8 @@ const CIPHERTEXT_LEN: usize = 48;
 ///
 /// - **Ed25519**: deterministic by specification (RFC 8032).
 /// - **RSA (PKCS#1 v1.5)**: deterministic — the padding scheme uses no
-///   randomness. The ssh-agent-client-rs crate hard-codes RSA sign
-///   requests to SHA-512, which is stable.
+///   randomness. Sign requests for RSA keys always ask for `rsa-sha2-512`
+///   (`agent::SSH_AGENT_RSA_SHA2_512`).
 ///
 /// Excluded:
 /// - **ECDSA**: non-deterministic — uses a random `k` value per signature.
@@ -100,30 +104,38 @@ pub struct EnrollmentBlob {
 
 impl EnrollmentBlob {
     /// Serialize to the binary wire format.
-    #[must_use]
-    pub fn serialize(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// `AuthError::InvalidBlob` when the fingerprint exceeds
+    /// `MAX_FINGERPRINT_LEN` bytes: [`Self::deserialize`] would reject it.
+    pub fn serialize(&self) -> Result<Vec<u8>, AuthError> {
         let fp_bytes = self.key_fingerprint.as_bytes();
         let kt_bytes = self.key_type.wire_name().as_bytes();
+        if fp_bytes.len() > MAX_FINGERPRINT_LEN {
+            return Err(AuthError::InvalidBlob(format!(
+                "fingerprint length {} exceeds maximum of {MAX_FINGERPRINT_LEN} bytes",
+                fp_bytes.len()
+            )));
+        }
+        let fp_len = u16::try_from(fp_bytes.len()).map_err(|_| {
+            AuthError::InvalidBlob(format!("fingerprint length {} exceeds u16", fp_bytes.len()))
+        })?;
+        let kt_len = u8::try_from(kt_bytes.len()).map_err(|_| {
+            AuthError::InvalidBlob(format!("key type length {} exceeds u8", kt_bytes.len()))
+        })?;
 
         let mut buf = Vec::with_capacity(
             1 + 2 + fp_bytes.len() + 1 + kt_bytes.len() + 12 + self.ciphertext.len(),
         );
-
         buf.push(self.version);
-
-        let fp_len = u16::try_from(fp_bytes.len()).unwrap_or(u16::MAX);
         buf.extend_from_slice(&fp_len.to_be_bytes());
         buf.extend_from_slice(fp_bytes);
-
-        #[allow(clippy::cast_possible_truncation)]
-        let kt_len = kt_bytes.len() as u8;
         buf.push(kt_len);
         buf.extend_from_slice(kt_bytes);
-
         buf.extend_from_slice(&self.nonce);
         buf.extend_from_slice(&self.ciphertext);
-
-        buf
+        Ok(buf)
     }
 
     /// Deserialize from the binary wire format.
@@ -151,11 +163,9 @@ impl EnrollmentBlob {
         }
 
         let fp_len = u16::from_be_bytes([data[1], data[2]]) as usize;
-        // Cap fingerprint length to prevent memory allocation attacks from
-        // malformed blobs. SHA-256 fingerprints are ~47 bytes; 256 is generous.
-        if fp_len > 256 {
+        if fp_len > MAX_FINGERPRINT_LEN {
             return Err(AuthError::InvalidBlob(format!(
-                "fingerprint length {fp_len} exceeds maximum of 256 bytes"
+                "fingerprint length {fp_len} exceeds maximum of {MAX_FINGERPRINT_LEN} bytes"
             )));
         }
         let fp_end = 3 + fp_len;
@@ -217,9 +227,25 @@ mod tests {
     }
 
     #[test]
+    fn oversized_fingerprint_is_not_serialized() {
+        let mut blob = test_blob();
+        blob.key_fingerprint = "A".repeat(MAX_FINGERPRINT_LEN + 1);
+        assert!(matches!(blob.serialize(), Err(AuthError::InvalidBlob(_))));
+        blob.key_fingerprint = "A".repeat(MAX_FINGERPRINT_LEN);
+        let data = blob.serialize().unwrap();
+        assert_eq!(
+            EnrollmentBlob::deserialize(&data)
+                .unwrap()
+                .key_fingerprint
+                .len(),
+            MAX_FINGERPRINT_LEN
+        );
+    }
+
+    #[test]
     fn round_trip_ed25519() {
         let blob = test_blob();
-        let data = blob.serialize();
+        let data = blob.serialize().unwrap();
         let parsed = EnrollmentBlob::deserialize(&data).unwrap();
 
         assert_eq!(parsed.version, ENROLLMENT_VERSION);
@@ -238,7 +264,7 @@ mod tests {
             nonce: [0x11; 12],
             ciphertext: vec![0x22; CIPHERTEXT_LEN],
         };
-        let data = blob.serialize();
+        let data = blob.serialize().unwrap();
         let parsed = EnrollmentBlob::deserialize(&data).unwrap();
         assert_eq!(parsed.key_type, SshKeyType::Rsa);
         assert_eq!(parsed.key_fingerprint, "SHA256:rsafingerprint");
@@ -246,7 +272,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_version() {
-        let mut data = test_blob().serialize();
+        let mut data = test_blob().serialize().unwrap();
         data[0] = 0xFF;
         let result = EnrollmentBlob::deserialize(&data);
         assert!(matches!(result, Err(AuthError::InvalidBlob(_))));
@@ -254,7 +280,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_data() {
-        let data = test_blob().serialize();
+        let data = test_blob().serialize().unwrap();
         let result = EnrollmentBlob::deserialize(&data[..5]);
         assert!(matches!(result, Err(AuthError::InvalidBlob(_))));
     }

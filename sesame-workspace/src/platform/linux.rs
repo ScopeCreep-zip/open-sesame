@@ -5,7 +5,7 @@
 //! (`PolicyKit`) for desktop-native authentication prompts.
 
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use rustix::process::{getgid, getuid};
@@ -40,17 +40,69 @@ const SYSTEM_DIRS: &[&str] = &[
 ];
 
 /// Reject system directories as workspace roots to prevent pkexec abuse.
+///
+/// The root is compared as the directory it names once created
+/// ([`resolve_created`]), so a symlink to a system directory, a spelling
+/// such as `/etc/.`, and a `..` through a missing component
+/// (`/absent/../etc`, which `pkexec mkdir -p` creates and `pkexec chown`
+/// then resolves to `/etc`) are rejected too.
 fn validate_root_not_system(root: &Path) -> Result<(), WorkspaceError> {
-    let canonical = root.to_str().unwrap_or("");
-    for dir in SYSTEM_DIRS {
-        if canonical == *dir {
-            return Err(WorkspaceError::PathValidation(format!(
-                "refusing to use system directory as workspace root: {}",
-                root.display()
-            )));
-        }
+    let resolved = resolve_created(root).map_err(|e| WorkspaceError::io_at(root, e))?;
+    if SYSTEM_DIRS.iter().any(|dir| resolved == Path::new(dir)) {
+        return Err(WorkspaceError::PathValidation(format!(
+            "refusing to use system directory as workspace root: {} ({})",
+            root.display(),
+            resolved.display()
+        )));
     }
     Ok(())
+}
+
+/// The canonical path `root` resolves to once its missing components are
+/// created (`mkdir -p`): the deepest existing ancestor in canonical form,
+/// with the missing components applied to it. A missing component is
+/// created as a plain directory, so a `..` after it returns to the
+/// directory it was created in.
+///
+/// # Errors
+///
+/// Canonicalizing the existing ancestor fails other than with `NotFound`
+/// (a component that is not a directory, a permission error).
+fn resolve_created(root: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = root;
+    let mut missing = Vec::new();
+    loop {
+        // A relative root's last ancestor is "", the working directory.
+        let probe = if existing.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            existing
+        };
+        match std::fs::canonicalize(probe) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    match component {
+                        Component::ParentDir => {
+                            resolved.pop();
+                        }
+                        Component::CurDir => {}
+                        other => resolved.push(other),
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(parent), Some(last)) =
+                    (existing.parent(), existing.components().next_back())
+                else {
+                    return Err(e);
+                };
+                missing.push(last);
+                existing = parent;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Linux workspace platform implementation.
@@ -82,41 +134,17 @@ impl WorkspacePlatform for LinuxPlatform {
     }
 
     fn root_is_mount(&self, root: &Path) -> Result<bool, WorkspaceError> {
-        let root_meta = std::fs::metadata(root)?;
+        let root_meta = std::fs::metadata(root).map_err(|e| WorkspaceError::io_at(root, e))?;
 
         // A path is a mount point when its device ID differs from its parent's.
-        if let Some(parent) = root.parent()
-            && let Ok(parent_meta) = std::fs::metadata(parent)
-        {
-            return Ok(root_meta.dev() != parent_meta.dev());
-        }
-
         // No parent means filesystem root — always a mount point.
-        Ok(true)
+        let Some(parent) = root.parent() else {
+            return Ok(true);
+        };
+        let parent_meta =
+            std::fs::metadata(parent).map_err(|e| WorkspaceError::io_at(parent, e))?;
+        Ok(root_meta.dev() != parent_meta.dev())
     }
-
-    fn is_git_dir_nofollow(&self, dir: &Path) -> bool {
-        is_git_dir_nofollow(dir)
-    }
-}
-
-/// Check if `dir/.git` exists as a real directory, using `O_NOFOLLOW` to
-/// prevent TOCTOU symlink replacement attacks during discovery walks.
-#[must_use]
-pub fn is_git_dir_nofollow(dir: &Path) -> bool {
-    use rustix::fs::{CWD, Mode, OFlags, openat};
-
-    let git_path = dir.join(".git");
-    // O_NOFOLLOW causes the open to fail if the target is a symlink,
-    // preventing an attacker from replacing .git with a symlink between
-    // our check and subsequent use of the directory.
-    openat(
-        CWD,
-        &git_path,
-        OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::RDONLY,
-        Mode::empty(),
-    )
-    .is_ok()
 }
 
 /// Create the user directory inside the workspace root.
@@ -135,8 +163,7 @@ fn ensure_writable(root: &Path) -> Result<(), WorkspaceError> {
     let test_path = root.join(".sesame-write-test");
     match std::fs::write(&test_path, b"") {
         Ok(()) => {
-            let _ = std::fs::remove_file(&test_path);
-            Ok(())
+            std::fs::remove_file(&test_path).map_err(|e| WorkspaceError::io_at(&test_path, e))
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => elevate_ownership(root),
         Err(e) => Err(e.into()),
@@ -272,9 +299,10 @@ mod tests {
     }
 
     #[test]
-    fn uid_is_nonzero_in_test() {
-        let uid = getuid();
-        let _ = uid.as_raw();
+    fn ensure_root_leaves_no_write_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        LinuxPlatform.ensure_root(dir.path()).unwrap();
+        assert!(!dir.path().join(".sesame-write-test").exists());
     }
 
     #[test]
@@ -282,29 +310,43 @@ mod tests {
         assert!(validate_root_not_system(Path::new("/")).is_err());
         assert!(validate_root_not_system(Path::new("/etc")).is_err());
         assert!(validate_root_not_system(Path::new("/usr")).is_err());
-        assert!(validate_root_not_system(Path::new("/workspace")).is_ok());
+        assert!(validate_root_not_system(Path::new("/workspace-absent-for-test")).is_ok());
     }
 
     #[test]
-    fn git_dir_nofollow_real_dir() {
+    fn rejects_alternate_spellings_of_system_dirs() {
+        assert!(validate_root_not_system(Path::new("/etc/")).is_err());
+        assert!(validate_root_not_system(Path::new("/etc/.")).is_err());
+        assert!(validate_root_not_system(Path::new("/usr/../etc")).is_err());
+    }
+
+    /// `pkexec mkdir -p` creates the missing components and `pkexec chown`
+    /// then resolves `..` through them, so a root reaching a system
+    /// directory through a missing component would hand it to the user.
+    #[test]
+    fn rejects_system_dirs_reached_through_missing_components() {
+        let absent = "/workspace-absent-for-test";
+        assert!(!Path::new(absent).exists());
+        for root in [
+            format!("{absent}/../etc"),
+            format!("{absent}/deeper/../../usr"),
+            format!("{absent}/../../.."),
+        ] {
+            assert!(
+                validate_root_not_system(Path::new(&root)).is_err(),
+                "{root} reaches a system directory"
+            );
+        }
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        assert!(is_git_dir_nofollow(dir.path()));
+        let inside = dir.path().join("absent/../workspace");
+        assert!(validate_root_not_system(&inside).is_ok());
     }
 
     #[test]
-    fn git_dir_nofollow_absent() {
+    fn rejects_symlink_to_system_dir() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_git_dir_nofollow(dir.path()));
-    }
-
-    #[test]
-    fn git_dir_nofollow_rejects_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("real_dir");
-        std::fs::create_dir(&target).unwrap();
-        std::os::unix::fs::symlink(&target, dir.path().join(".git")).unwrap();
-        // O_NOFOLLOW should reject the symlink
-        assert!(!is_git_dir_nofollow(dir.path()));
+        let link = dir.path().join("root");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        assert!(validate_root_not_system(&link).is_err());
     }
 }

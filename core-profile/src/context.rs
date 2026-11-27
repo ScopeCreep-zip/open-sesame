@@ -20,7 +20,7 @@ pub struct ActivationRule {
 }
 
 /// What kind of signal triggers this rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleTrigger {
     Ssid,
     AppFocus,
@@ -112,6 +112,13 @@ impl ContextEngine {
     #[must_use]
     pub fn default_profile(&self) -> ProfileId {
         self.default_profile
+    }
+
+    /// Make `profile` the default (`sesame profile default`): the previous
+    /// default when it changed, `None` when `profile` already was.
+    pub fn set_default(&mut self, profile: ProfileId) -> Option<ProfileId> {
+        (profile != self.default_profile)
+            .then(|| std::mem::replace(&mut self.default_profile, profile))
     }
 
     fn matches_profile(profile: &ProfileActivation, signal: &ContextSignal) -> bool {
@@ -242,6 +249,17 @@ mod tests {
 
         let mut engine = ContextEngine::new(vec![profile], pid(2));
         // Only SSID matches — should NOT switch with All combinator
+        let result = engine.evaluate(&ContextSignal::SsidChanged("CorpWiFi".into()));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn set_default_reports_the_replaced_default_once() {
+        let mut engine = ContextEngine::new(vec![work_profile()], pid(2));
+        assert_eq!(engine.set_default(pid(1)), Some(pid(2)));
+        assert_eq!(engine.default_profile(), pid(1));
+        assert_eq!(engine.set_default(pid(1)), None);
+        // A context signal for the new default is no change.
         let result = engine.evaluate(&ContextSignal::SsidChanged("CorpWiFi".into()));
         assert_eq!(result, None);
     }

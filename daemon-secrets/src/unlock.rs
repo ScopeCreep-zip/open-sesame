@@ -1,646 +1,429 @@
-//! Vault unlock/lock lifecycle: password unlock, SSH unlock, multi-factor,
-//! vault auth query, lock, and salt/key derivation helpers.
+//! Vault unlock/lock lifecycle: factor submission under the vault's auth
+//! policy, vault auth query, and lock.
+//!
+//! Every unlock is a sequence of `FactorSubmit` requests. Clients unwrap
+//! the master key with a core-auth backend (password, SSH agent) and submit
+//! it as one factor; this module enforces the vault's policy (`Any`, `All`,
+//! `Policy`) over the factors received and verifies the resulting key
+//! against the vault database before it is installed.
 
 use crate::acl::audit_secret_access;
-use crate::dispatch::{MessageContext, send_response_early};
+use crate::dispatch::MessageContext;
 use crate::rate_limit::SecretRateLimiter;
-use crate::vault::{ALL_MODE_KDF_CONTEXT, PARTIAL_UNLOCK_TIMEOUT_SECS, PartialUnlock};
+use crate::vault::{
+    MasterKey, PARTIAL_UNLOCK_TIMEOUT, PartialUnlock, VaultState, existing_vault, open_vault,
+};
 
+use core_auth::{FactorContribution, VaultMetadata};
 use core_crypto::SecureBytes;
 use core_ipc::Message;
+use core_layout::Layout;
 use core_secrets::{JitDelivery, SqlCipherStore};
 use core_types::{AuthCombineMode, AuthFactorId, EventKind, TrustProfileName};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-use zeroize::Zeroize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::vault::UnlockResult;
-
-/// Per-profile salt file path: `{config_dir}/vaults/{profile}.salt`
-pub(crate) fn profile_salt_path(config_dir: &Path, profile: &TrustProfileName) -> PathBuf {
-    config_dir.join("vaults").join(format!("{profile}.salt"))
-}
-
-/// Derive the master key from password + salt via Argon2id.
-pub(crate) fn derive_master_key(
-    password: &[u8],
-    salt: &[u8; 16],
-) -> core_types::Result<SecureBytes> {
-    core_crypto::derive_key_argon2(password, salt)
-}
-
-/// Generate a new per-profile salt and persist to disk.
-pub(crate) fn generate_profile_salt(salt_path: &Path) -> core_types::Result<[u8; 16]> {
-    let mut salt = [0u8; 16];
-    getrandom::getrandom(&mut salt)
-        .map_err(|e| core_types::Error::Crypto(format!("getrandom failed: {e}")))?;
-    if let Some(parent) = salt_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            core_types::Error::Config(format!("failed to create vault directory: {e}"))
-        })?;
-    }
-    std::fs::write(salt_path, salt)
-        .map_err(|e| core_types::Error::Config(format!("failed to write profile salt: {e}")))?;
-    Ok(salt)
-}
-
-/// Load a salt file from disk.
-pub(crate) fn load_salt(path: &Path) -> core_types::Result<[u8; 16]> {
-    let salt_bytes = std::fs::read(path).map_err(|e| {
-        core_types::Error::Config(format!("failed to read salt from {}: {e}", path.display()))
-    })?;
-    salt_bytes
-        .try_into()
-        .map_err(|_| core_types::Error::Config("salt file is not 16 bytes".into()))
-}
-
-/// Unlock a specific profile's vault by deriving its master key from a
-/// per-profile salt via Argon2id. Fast path uses platform keyring.
-///
-/// Each profile has its own salt at `{config_dir}/vaults/{profile}.salt`.
-/// First unlock generates the salt. Subsequent unlocks read existing salt.
-/// If a vault DB exists, the derived key is verified against it and the
-/// opened store is returned for caching.
-pub(crate) async fn unlock_profile(
-    password: &[u8],
+/// Open `profile`'s vault database with `key` when it exists: the store
+/// (cached for the first activation), `None` when there is no database yet
+/// (the first open after unlock creates it under `key`).
+async fn verify_key(
+    layout: &Layout,
+    key: &MasterKey,
     profile: &TrustProfileName,
-    config_dir: &Path,
-) -> core_types::Result<UnlockResult> {
-    let salt_file = profile_salt_path(config_dir, profile);
-
-    // Fast path: try per-profile keyring retrieval (avoids Argon2id).
-    #[cfg(target_os = "linux")]
-    if salt_file.exists() {
-        let salt_bytes = std::fs::read(&salt_file)
-            .map_err(|e| core_types::Error::Config(format!("failed to read profile salt: {e}")))?;
-        if let Some(master_key) =
-            crate::keyring::keyring_retrieve_profile(password, &salt_bytes, profile).await
-        {
-            return Ok(UnlockResult {
-                master_key,
-                verified_store: None,
-            });
-        }
+) -> core_types::Result<Option<SqlCipherStore>> {
+    match existing_vault(layout, profile)? {
+        Some(path) => Ok(Some(open_vault(path, key, profile).await?)),
+        None => Ok(None),
     }
-
-    // Derive master key: load existing salt or generate new one.
-    let master_key = if salt_file.exists() {
-        let salt = load_salt(&salt_file)?;
-        derive_master_key(password, &salt)?
-    } else {
-        let new_salt = generate_profile_salt(&salt_file)?;
-        tracing::info!(profile = %profile, path = %salt_file.display(), "per-profile salt generated");
-        derive_master_key(password, &new_salt)?
-    };
-
-    // Verify against existing vault DB if it exists.
-    let vault_path = config_dir.join("vaults").join(format!("{profile}.db"));
-    let verified_store = if vault_path.exists() {
-        let vault_key = core_crypto::derive_vault_key(master_key.as_bytes(), profile);
-        let vp = vault_path;
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || SqlCipherStore::open(&vp, &vault_key)),
-        )
-        .await
-        .map_err(|_| {
-            core_types::Error::Secrets(
-                "vault open timed out (10s) — possible seccomp violation on blocking thread".into(),
-            )
-        })?
-        .map_err(|e| core_types::Error::Secrets(format!("spawn_blocking: {e}")))?;
-
-        match result {
-            Ok(store) => {
-                tracing::info!(profile = %profile, "vault key verified");
-                Some(store)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, profile = %profile, "vault key verification failed — wrong password");
-                return Err(core_types::Error::Secrets(
-                    "wrong password: vault key verification failed".into(),
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    Ok(UnlockResult {
-        master_key,
-        verified_store,
-    })
 }
 
-/// Handle `UnlockRequest` event.
-pub(crate) async fn handle_unlock_request(
-    msg: &Message<EventKind>,
-    ctx: &mut MessageContext<'_>,
-    password: &core_types::SensitiveBytes,
-    profile: &Option<TrustProfileName>,
-) -> anyhow::Result<Option<EventKind>> {
-    let target = profile
-        .clone()
-        .unwrap_or_else(|| ctx.default_profile.clone());
-
-    if ctx.vault_state.master_keys.contains_key(&target) {
-        tracing::warn!(audit = "security", profile = %target, "unlock request for already-unlocked profile — rejected");
-        audit_secret_access(
-            "unlock",
-            msg.sender,
-            &target,
-            None,
-            "rejected-already-unlocked",
-        );
-        return send_response_early(
-            ctx.client,
-            msg,
-            EventKind::UnlockRejected {
-                reason: core_types::UnlockRejectedReason::AlreadyUnlocked,
-                profile: Some(target),
-            },
-            ctx.daemon_id,
-        )
-        .await;
+/// A rejected `FactorResponse` for `profile`, carrying `error`.
+fn factor_rejected(profile: &TrustProfileName, error: String) -> EventKind {
+    EventKind::FactorResponse {
+        accepted: false,
+        unlock_complete: false,
+        remaining_factors: vec![],
+        remaining_additional: 0,
+        profile: profile.clone(),
+        error: Some(error),
     }
-    let outcome = match unlock_profile(password.as_bytes(), &target, ctx.config_dir).await {
-        Ok(result) => {
-            // Store per-profile keyring entry BEFORE transferring ownership
-            // to the map — avoids retrieving from map and eliminates unwrap.
-            #[cfg(target_os = "linux")]
-            {
-                let salt_path = profile_salt_path(ctx.config_dir, &target);
-                if let Ok(salt_bytes) = std::fs::read(&salt_path) {
-                    crate::keyring::keyring_store_profile(
-                        &result.master_key,
-                        password.as_bytes(),
-                        &salt_bytes,
-                        &target,
-                    )
-                    .await;
-                }
-            }
-
-            ctx.vault_state
-                .master_keys
-                .insert(target.clone(), result.master_key);
-
-            // Cache verified store to avoid redundant SQLCipher open on ProfileActivate.
-            if let Some(store) = result.verified_store {
-                let jit = JitDelivery::new(store, ctx.vault_state.ttl);
-                ctx.vault_state.vaults.insert(target.clone(), jit);
-            }
-
-            tracing::info!(profile = %target, "vault unlocked");
-            "success"
-        }
-        Err(e) => {
-            tracing::error!(error = %e, profile = %target, "unlock failed");
-            "failed"
-        }
-    };
-    audit_secret_access("unlock", msg.sender, &target, None, outcome);
-    Ok(Some(EventKind::UnlockResponse {
-        success: outcome == "success",
-        profile: target,
-    }))
 }
 
-/// Handle `SshUnlockRequest` event.
-pub(crate) async fn handle_ssh_unlock(
-    msg: &Message<EventKind>,
-    ctx: &mut MessageContext<'_>,
-    master_key: &core_types::SensitiveBytes,
+/// The factors the vault's policy requires, and how many additional
+/// factors beyond them.
+fn requirements(meta: &VaultMetadata) -> (HashSet<AuthFactorId>, u32) {
+    match &meta.auth_policy {
+        // Any single factor suffices.
+        AuthCombineMode::Any => (HashSet::new(), 0),
+        AuthCombineMode::All => (
+            meta.enrolled_factors.iter().map(|f| f.factor_id).collect(),
+            0,
+        ),
+        AuthCombineMode::Policy(policy) => (
+            policy.required.iter().copied().collect(),
+            policy.additional_required,
+        ),
+    }
+}
+
+/// Where a vault's unlock stands after a factor.
+enum Progress {
+    /// The policy is satisfied: every factor received.
+    Complete(HashMap<AuthFactorId, SecureBytes>),
+    /// The factors still required and how many additional ones.
+    Partial {
+        remaining: Vec<AuthFactorId>,
+        additional: u32,
+    },
+}
+
+/// Record `factor_id`'s `key` in `profile`'s partial unlock (created on
+/// the first factor). `None` when the partial unlock has expired; it is
+/// discarded.
+fn record_factor(
+    state: &mut VaultState,
     profile: &TrustProfileName,
-    ssh_fingerprint: &str,
-) -> anyhow::Result<Option<EventKind>> {
-    let target = profile.clone();
-
-    if ctx.vault_state.master_keys.contains_key(&target) {
-        tracing::warn!(audit = "security", profile = %target, "SSH unlock request for already-unlocked profile — rejected");
-        audit_secret_access(
-            "ssh-unlock",
-            msg.sender,
-            &target,
-            None,
-            "rejected-already-unlocked",
-        );
-        return send_response_early(
-            ctx.client,
-            msg,
-            EventKind::UnlockRejected {
-                reason: core_types::UnlockRejectedReason::AlreadyUnlocked,
-                profile: Some(target),
-            },
-            ctx.daemon_id,
-        )
-        .await;
-    }
-
-    // Copy directly from SensitiveBytes' ProtectedAlloc into SecureBytes' ProtectedAlloc.
-    // No heap intermediate — both sides are page-aligned, mlock'd memory.
-    let secure_master_key = SecureBytes::from_slice(master_key.as_bytes());
-
-    // Verify against existing vault DB if it exists.
-    let vault_path = ctx.config_dir.join("vaults").join(format!("{target}.db"));
-    let (success, verified_store) = if vault_path.exists() {
-        let vault_key = core_crypto::derive_vault_key(secure_master_key.as_bytes(), &target);
-        let vp = vault_path;
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || SqlCipherStore::open(&vp, &vault_key)),
-        )
-        .await
-        {
-            Ok(Ok(Ok(store))) => {
-                tracing::info!(profile = %target, ssh_fingerprint = %ssh_fingerprint, "vault key verified via SSH");
-                (true, Some(store))
-            }
-            Ok(Ok(Err(e))) => {
-                tracing::warn!(error = %e, profile = %target, "SSH unlock vault key verification failed");
-                (false, None)
-            }
-            Ok(Err(e)) => {
-                tracing::error!(error = %e, profile = %target, "SSH unlock spawn_blocking failed");
-                (false, None)
-            }
-            Err(_) => {
-                tracing::error!(profile = %target, "SSH unlock vault open timed out (10s) — possible seccomp violation");
-                (false, None)
-            }
-        }
-    } else {
-        // No vault DB yet — accept the master key on faith.
-        (true, None)
-    };
-
-    if success {
-        ctx.vault_state
-            .master_keys
-            .insert(target.clone(), secure_master_key);
-        if let Some(store) = verified_store {
-            let jit = JitDelivery::new(store, ctx.vault_state.ttl);
-            ctx.vault_state.vaults.insert(target.clone(), jit);
-        }
-        tracing::info!(profile = %target, ssh_fingerprint = %ssh_fingerprint, "vault unlocked via SSH");
-    }
-
-    audit_secret_access(
-        "ssh-unlock",
-        msg.sender,
-        &target,
-        None,
-        if success { "success" } else { "failed" },
-    );
-    Ok(Some(EventKind::UnlockResponse {
-        success,
-        profile: target,
-    }))
-}
-
-/// Handle `FactorSubmit` event.
-pub(crate) async fn handle_factor_submit(
-    msg: &Message<EventKind>,
-    ctx: &mut MessageContext<'_>,
-    factor_id: &AuthFactorId,
-    key_material: &core_types::SensitiveBytes,
-    profile: &TrustProfileName,
-    audit_metadata: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<Option<EventKind>> {
-    let target = profile.clone();
-
-    if ctx.vault_state.master_keys.contains_key(&target) {
-        return send_response_early(
-            ctx.client,
-            msg,
-            EventKind::FactorResponse {
-                accepted: false,
-                unlock_complete: false,
-                remaining_factors: vec![],
-                remaining_additional: 0,
-                profile: target,
-                error: Some("already unlocked".into()),
-            },
-            ctx.daemon_id,
-        )
-        .await;
-    }
-
-    // Load vault metadata.
-    let meta = match core_auth::VaultMetadata::load(&ctx.vault_state.config_dir, &target) {
-        Ok(m) => m,
-        Err(e) => {
-            return send_response_early(
-                ctx.client,
-                msg,
-                EventKind::FactorResponse {
-                    accepted: false,
-                    unlock_complete: false,
-                    remaining_factors: vec![],
-                    remaining_additional: 0,
-                    profile: target,
-                    error: Some(format!("vault metadata error: {e}")),
-                },
-                ctx.daemon_id,
-            )
-            .await;
-        }
-    };
-
-    // Verify factor is enrolled.
-    if !meta.has_factor(*factor_id) {
-        return send_response_early(
-            ctx.client,
-            msg,
-            EventKind::FactorResponse {
-                accepted: false,
-                unlock_complete: false,
-                remaining_factors: vec![],
-                remaining_additional: 0,
-                profile: target,
-                error: Some(format!("factor {factor_id} not enrolled")),
-            },
-            ctx.daemon_id,
-        )
-        .await;
-    }
-
-    // Copy directly from SensitiveBytes' ProtectedAlloc into SecureBytes' ProtectedAlloc.
-    let secure_key = SecureBytes::from_slice(key_material.as_bytes());
-
-    // For any/policy mode: verify the key against the vault DB.
-    let vault_path = ctx
-        .vault_state
-        .config_dir
-        .join("vaults")
-        .join(format!("{target}.db"));
-    if vault_path.exists()
-        && meta.contribution_type() == core_auth::FactorContribution::CompleteMasterKey
-    {
-        let vault_key = core_crypto::derive_vault_key(secure_key.as_bytes(), &target);
-        let vp = vault_path;
-        let verify_ok = matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tokio::task::spawn_blocking(move || SqlCipherStore::open(&vp, &vault_key)),
-            )
-            .await,
-            Ok(Ok(Ok(_store)))
-        );
-        if !verify_ok {
-            audit_secret_access(
-                "factor-submit",
-                msg.sender,
-                &target,
-                None,
-                "factor-verification-failed",
-            );
-            return send_response_early(
-                ctx.client,
-                msg,
-                EventKind::FactorResponse {
-                    accepted: false,
-                    unlock_complete: false,
-                    remaining_factors: vec![],
-                    remaining_additional: 0,
-                    profile: target,
-                    error: Some("factor key verification failed".into()),
-                },
-                ctx.daemon_id,
-            )
-            .await;
-        }
-    }
-
-    // Determine required factors based on policy.
-    let (remaining_required, remaining_additional) = match &meta.auth_policy {
-        AuthCombineMode::Any => {
-            // Any single factor suffices — no partial state needed.
-            (HashSet::new(), 0u32)
-        }
-        AuthCombineMode::All => {
-            let all_factors: HashSet<AuthFactorId> =
-                meta.enrolled_factors.iter().map(|f| f.factor_id).collect();
-            (all_factors, 0)
-        }
-        AuthCombineMode::Policy(policy) => {
-            let required: HashSet<AuthFactorId> = policy.required.iter().copied().collect();
-            (required, policy.additional_required)
-        }
-    };
-
-    // Get or create partial unlock state.
-    let partial = ctx
-        .vault_state
+    factor_id: AuthFactorId,
+    key: &SecureBytes,
+    meta: &VaultMetadata,
+) -> Option<Progress> {
+    let (required, additional) = requirements(meta);
+    let partial = state
         .partial_unlocks
-        .entry(target.clone())
+        .entry(profile.clone())
         .or_insert_with(|| PartialUnlock {
             received_factors: HashMap::new(),
-            remaining_required: remaining_required.clone(),
-            remaining_additional,
-            deadline: tokio::time::Instant::now()
-                + Duration::from_secs(PARTIAL_UNLOCK_TIMEOUT_SECS),
+            remaining_required: required.clone(),
+            remaining_additional: additional,
+            deadline: tokio::time::Instant::now() + PARTIAL_UNLOCK_TIMEOUT,
         });
-
-    // Check if expired.
     if partial.is_expired() {
-        ctx.vault_state.partial_unlocks.remove(&target);
-        return send_response_early(
-            ctx.client,
-            msg,
-            EventKind::FactorResponse {
-                accepted: false,
-                unlock_complete: false,
-                remaining_factors: vec![],
-                remaining_additional: 0,
-                profile: target,
-                error: Some("partial unlock expired".into()),
-            },
-            ctx.daemon_id,
-        )
-        .await;
+        state.partial_unlocks.remove(profile);
+        return None;
     }
-
-    // Record factor.
-    let partial = ctx.vault_state.partial_unlocks.get_mut(&target).unwrap();
-    partial
-        .received_factors
-        .insert(*factor_id, secure_key.clone());
-    partial.remaining_required.remove(factor_id);
-
-    // For policy mode: check if this factor counts as an additional.
-    if !remaining_required.contains(factor_id) && partial.remaining_additional > 0 {
+    partial.received_factors.insert(factor_id, key.clone());
+    partial.remaining_required.remove(&factor_id);
+    // A factor outside the required set counts as an additional one.
+    if !required.contains(&factor_id) && partial.remaining_additional > 0 {
         partial.remaining_additional -= 1;
     }
-
-    // For "any" mode: one factor is enough.
+    // Any mode: one factor is enough.
     if matches!(meta.auth_policy, AuthCombineMode::Any) {
         partial.remaining_required.clear();
         partial.remaining_additional = 0;
     }
-
-    let complete = partial.is_complete();
-    let remaining_factors_list: Vec<AuthFactorId> =
-        partial.remaining_required.iter().copied().collect();
-    let remaining_add = partial.remaining_additional;
-
-    if complete {
-        // Promote to unlocked.
-        let partial = ctx.vault_state.partial_unlocks.remove(&target).unwrap();
-
-        // For "all" mode: combine factor pieces via HKDF.
-        let master_key = if meta.contribution_type() == core_auth::FactorContribution::FactorPiece {
-            let mut pieces: Vec<_> = partial.received_factors.into_iter().collect();
-            pieces.sort_by_key(|(id, _)| *id);
-            let mut combined = Vec::new();
-            for (_id, piece) in &pieces {
-                combined.extend_from_slice(piece.as_bytes());
-            }
-            let ctx_str = format!("{ALL_MODE_KDF_CONTEXT} {target}");
-            let derived: [u8; 32] = blake3::derive_key(&ctx_str, &combined);
-            combined.zeroize();
-            SecureBytes::new(derived.to_vec())
-        } else {
-            // Any/policy mode: all factors unwrap to the same key.
-            // Use the first one.
-            partial
-                .received_factors
-                .into_values()
-                .next()
-                .expect("at least one factor received")
-        };
-
-        ctx.vault_state
-            .master_keys
-            .insert(target.clone(), master_key);
-
-        let fp = audit_metadata
-            .get("ssh_fingerprint")
-            .cloned()
-            .unwrap_or_default();
-        tracing::info!(
-            profile = %target,
-            factor = %factor_id,
-            ssh_fingerprint = %fp,
-            "vault unlocked via multi-factor"
-        );
-        audit_secret_access("factor-unlock", msg.sender, &target, None, "success");
+    if partial.is_complete() {
+        let received = std::mem::take(&mut partial.received_factors);
+        state.partial_unlocks.remove(profile);
+        Some(Progress::Complete(received))
     } else {
-        tracing::info!(
-            profile = %target,
-            factor = %factor_id,
-            remaining = ?remaining_factors_list,
-            remaining_additional = remaining_add,
-            "factor accepted, awaiting more"
-        );
+        Some(Progress::Partial {
+            remaining: partial.remaining_required.iter().copied().collect(),
+            additional: partial.remaining_additional,
+        })
+    }
+}
+
+/// What a submitted factor's key proved against the vault database.
+enum Submission {
+    /// A factor piece of an `All` vault: not a key on its own.
+    Piece,
+    /// A complete master key that opens the vault: its store, `None` when
+    /// no database exists yet.
+    Verified(Option<Box<SqlCipherStore>>),
+}
+
+/// Install `profile`'s master key once its policy is satisfied: the
+/// combined key of an `All` vault is derived from the `received` pieces
+/// and verified here, the first point it exists; any/policy keys were
+/// verified on submission.
+async fn complete_unlock(
+    msg: &Message<EventKind>,
+    ctx: &mut MessageContext<'_>,
+    profile: &TrustProfileName,
+    meta: &VaultMetadata,
+    received: HashMap<AuthFactorId, SecureBytes>,
+    submitted: MasterKey,
+    submission: Submission,
+) -> Result<(), String> {
+    let master_key = if meta.contribution_type() == FactorContribution::FactorPiece {
+        let pieces: Vec<(AuthFactorId, &[u8])> = received
+            .iter()
+            .map(|(id, piece)| (*id, piece.as_bytes()))
+            .collect();
+        let hkdf = meta.algorithms.hkdf;
+        MasterKey {
+            key: core_auth::combine_factor_pieces(profile, hkdf, &pieces),
+            hkdf,
+        }
+    } else {
+        // Every factor unwraps to the same master key; this factor's key is
+        // the one verified against the vault.
+        submitted
+    };
+    let verified_store = match submission {
+        Submission::Verified(store) => store.map(|store| *store),
+        Submission::Piece => verify_key(&ctx.vault_state.layout, &master_key, profile)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, %profile, "combined key verification failed");
+                audit_secret_access(
+                    "factor-unlock",
+                    msg.sender,
+                    profile,
+                    None,
+                    "combined-key-rejected",
+                );
+                format!("the submitted factors do not open the vault: {e}")
+            })?,
+    };
+    if let Some(store) = verified_store {
+        let jit = JitDelivery::new(store, ctx.vault_state.ttl);
+        ctx.vault_state.vaults.insert(profile.clone(), jit);
+    }
+    ctx.vault_state
+        .master_keys
+        .insert(profile.clone(), master_key);
+    Ok(())
+}
+
+/// Handle `FactorSubmit`: verify and record the factor under the vault's
+/// policy, installing the master key once the policy is satisfied.
+pub(crate) async fn handle_factor_submit(
+    msg: &Message<EventKind>,
+    ctx: &mut MessageContext<'_>,
+    factor_id: AuthFactorId,
+    key_material: &core_types::SensitiveBytes,
+    profile: &TrustProfileName,
+    audit_metadata: &BTreeMap<String, String>,
+) -> EventKind {
+    if ctx.vault_state.master_keys.contains_key(profile) {
         audit_secret_access(
             "factor-submit",
             msg.sender,
-            &target,
+            profile,
             None,
-            "accepted-partial",
+            "rejected-already-unlocked",
         );
+        return EventKind::UnlockRejected {
+            reason: core_types::UnlockRejectedReason::AlreadyUnlocked,
+            profile: Some(profile.clone()),
+        };
+    }
+    let meta = match VaultMetadata::load(&ctx.vault_state.layout, profile) {
+        Ok(meta) => meta,
+        Err(e) => return factor_rejected(profile, format!("vault metadata error: {e}")),
+    };
+    if !meta.has_factor(factor_id) {
+        return factor_rejected(profile, format!("factor {factor_id} not enrolled"));
     }
 
-    Ok(Some(EventKind::FactorResponse {
+    // Copied from SensitiveBytes' protected allocation into SecureBytes';
+    // every key of the vault derives under its metadata's algorithm.
+    let submitted = MasterKey {
+        key: SecureBytes::from_slice(key_material.as_bytes()),
+        hkdf: meta.algorithms.hkdf,
+    };
+    // Any/policy mode: every factor unwraps the master key itself, so it is
+    // verified against the vault database now (the opened store is kept
+    // for the unlock it may complete). All mode: a piece is not a key.
+    let submission = if meta.contribution_type() == FactorContribution::CompleteMasterKey {
+        match verify_key(&ctx.vault_state.layout, &submitted, profile).await {
+            Ok(store) => Submission::Verified(store.map(Box::new)),
+            Err(e) => {
+                tracing::warn!(error = %e, %profile, factor = %factor_id, "factor key verification failed");
+                audit_secret_access(
+                    "factor-submit",
+                    msg.sender,
+                    profile,
+                    None,
+                    "factor-verification-failed",
+                );
+                return factor_rejected(profile, "factor key verification failed".into());
+            }
+        }
+    } else {
+        Submission::Piece
+    };
+
+    let Some(progress) = record_factor(ctx.vault_state, profile, factor_id, &submitted.key, &meta)
+    else {
+        return factor_rejected(profile, "partial unlock expired".into());
+    };
+    let (complete, remaining_factors, remaining_additional) = match progress {
+        Progress::Complete(received) => {
+            if let Err(error) =
+                complete_unlock(msg, ctx, profile, &meta, received, submitted, submission).await
+            {
+                return factor_rejected(profile, error);
+            }
+            tracing::info!(
+                %profile,
+                factor = %factor_id,
+                ssh_fingerprint = audit_metadata.get("ssh_fingerprint").map(String::as_str),
+                "vault unlocked"
+            );
+            audit_secret_access("factor-unlock", msg.sender, profile, None, "success");
+            (true, vec![], 0)
+        }
+        Progress::Partial {
+            remaining,
+            additional,
+        } => {
+            tracing::info!(%profile, factor = %factor_id, ?remaining, additional, "factor accepted, awaiting more");
+            audit_secret_access(
+                "factor-submit",
+                msg.sender,
+                profile,
+                None,
+                "accepted-partial",
+            );
+            (false, remaining, additional)
+        }
+    };
+    EventKind::FactorResponse {
         accepted: true,
         unlock_complete: complete,
-        remaining_factors: remaining_factors_list,
-        remaining_additional: remaining_add,
-        profile: target,
+        remaining_factors,
+        remaining_additional,
+        profile: profile.clone(),
         error: None,
-    }))
+    }
 }
 
-/// Handle `VaultAuthQuery` event.
-pub(crate) fn handle_vault_auth_query(
-    ctx: &mut MessageContext<'_>,
-    profile: &TrustProfileName,
-) -> Option<EventKind> {
-    let target = profile.clone();
-    let meta = core_auth::VaultMetadata::load(&ctx.vault_state.config_dir, &target);
-
-    match meta {
-        Ok(m) => {
-            let enrolled: Vec<AuthFactorId> =
-                m.enrolled_factors.iter().map(|f| f.factor_id).collect();
-            let partial_in_progress = ctx.vault_state.partial_unlocks.contains_key(&target);
-            let received: Vec<AuthFactorId> = ctx
-                .vault_state
-                .partial_unlocks
-                .get(&target)
-                .map(|p| p.received_factors.keys().copied().collect())
-                .unwrap_or_default();
-            Some(EventKind::VaultAuthQueryResponse {
-                profile: target,
-                enrolled_factors: enrolled,
-                auth_policy: m.auth_policy,
-                partial_in_progress,
-                received_factors: received,
-            })
+/// The `VaultAuthQueryResponse` for `profile`: its enrolled factors and
+/// policy, and the factors a partial unlock has received; or the reason
+/// its metadata cannot be read.
+pub(crate) fn vault_auth_requirements(state: &VaultState, profile: &TrustProfileName) -> EventKind {
+    match VaultMetadata::load(&state.layout, profile) {
+        Ok(meta) => {
+            let partial = state.partial_unlocks.get(profile);
+            EventKind::VaultAuthQueryResponse {
+                profile: profile.clone(),
+                enrolled_factors: meta.enrolled_factors.iter().map(|f| f.factor_id).collect(),
+                auth_policy: meta.auth_policy,
+                partial_in_progress: partial.is_some(),
+                received_factors: partial
+                    .map(|p| p.received_factors.keys().copied().collect())
+                    .unwrap_or_default(),
+                error: None,
+            }
         }
         Err(e) => {
-            tracing::warn!(
-                profile = %target,
-                error = %e,
-                "vault auth query failed"
-            );
-            Some(EventKind::VaultAuthQueryResponse {
-                profile: target,
+            tracing::warn!(%profile, error = %e, "vault auth query failed");
+            EventKind::VaultAuthQueryResponse {
+                profile: profile.clone(),
                 enrolled_factors: vec![],
                 auth_policy: AuthCombineMode::Any,
                 partial_in_progress: false,
                 received_factors: vec![],
-            })
+                error: Some(format!("vault metadata error: {e}")),
+            }
         }
     }
 }
 
-/// Handle `LockRequest` event.
+/// Handle `LockRequest`: lock `profile`, or every vault.
 pub(crate) async fn handle_lock_request(
     msg: &Message<EventKind>,
     ctx: &mut MessageContext<'_>,
-    profile: &Option<TrustProfileName>,
-) -> Option<EventKind> {
-    let profiles_locked: Vec<TrustProfileName> = match profile {
+    profile: Option<&TrustProfileName>,
+) -> EventKind {
+    let profiles_locked = match profile {
         Some(target) => {
-            // Lock single profile.
-            ctx.vault_state.active_profiles.remove(target);
-            if let Some(vault) = ctx.vault_state.vaults.remove(target) {
-                vault.flush().await;
-                vault.store().pragma_rekey_clear();
-                drop(vault);
-            }
-            ctx.vault_state.master_keys.remove(target); // zeroizes on drop
-            ctx.vault_state.partial_unlocks.remove(target); // zeroizes on drop
-            #[cfg(target_os = "linux")]
-            crate::keyring::keyring_delete_profile(target).await;
-            tracing::info!(profile = %target, "vault locked, key material zeroized");
+            ctx.vault_state.lock(target).await;
             vec![target.clone()]
         }
-        None => {
-            // Lock all profiles.
-            let locked: Vec<TrustProfileName> =
-                ctx.vault_state.master_keys.keys().cloned().collect();
-            ctx.vault_state.active_profiles.clear();
-            for (_profile, vault) in ctx.vault_state.vaults.drain() {
-                vault.flush().await;
-                vault.store().pragma_rekey_clear();
-                drop(vault);
-            }
-            ctx.vault_state.master_keys.clear(); // each SecureBytes zeroizes on drop
-            ctx.vault_state.partial_unlocks.clear(); // each SecureBytes zeroizes on drop
-            #[cfg(target_os = "linux")]
-            crate::keyring::keyring_delete_all(&locked).await;
-            tracing::info!("all vaults locked, key material zeroized");
-            locked
-        }
+        None => ctx.vault_state.lock_all().await,
     };
     *ctx.rate_limiter = SecretRateLimiter::new();
     audit_secret_access("lock", msg.sender, "-", None, "success");
-    Some(EventKind::LockResponse {
+    EventKind::LockResponse {
         success: true,
         profiles_locked,
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{empty_vault_state, profile};
+    use core_types::{AuthPolicy, CryptoConfig};
+
+    fn vault(policy: AuthCombineMode) -> VaultMetadata {
+        VaultMetadata::new(
+            vec![
+                (AuthFactorId::Password, "master password".into()),
+                (AuthFactorId::SshAgent, "SHA256:abc".into()),
+            ],
+            policy,
+            &CryptoConfig::default(),
+        )
+        .unwrap()
+    }
+
+    /// Submit `factors` in order; the progress after each.
+    fn submit(meta: &VaultMetadata, factors: &[AuthFactorId]) -> Vec<Option<Progress>> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = empty_vault_state(dir.path());
+        factors
+            .iter()
+            .map(|&factor| {
+                let key = SecureBytes::from_slice(&[factor as u8; 32]);
+                record_factor(&mut state, &profile("work"), factor, &key, meta)
+            })
+            .collect()
+    }
+
+    fn is_complete(progress: Option<&Progress>, factors: usize) -> bool {
+        matches!(progress, Some(Progress::Complete(received)) if received.len() == factors)
+    }
+
+    #[test]
+    fn any_completes_on_the_first_factor() {
+        let progress = submit(&vault(AuthCombineMode::Any), &[AuthFactorId::SshAgent]);
+        assert!(is_complete(progress[0].as_ref(), 1));
+    }
+
+    #[test]
+    fn all_completes_once_every_factor_is_received() {
+        let progress = submit(
+            &vault(AuthCombineMode::All),
+            &[AuthFactorId::Password, AuthFactorId::SshAgent],
+        );
+        assert!(matches!(
+            &progress[0],
+            Some(Progress::Partial { remaining, additional: 0 }) if remaining == &[AuthFactorId::SshAgent]
+        ));
+        assert!(is_complete(progress[1].as_ref(), 2));
+    }
+
+    #[test]
+    fn a_policy_counts_factors_outside_the_required_set_as_additional() {
+        let policy = AuthCombineMode::Policy(AuthPolicy {
+            required: vec![AuthFactorId::Password],
+            additional_required: 1,
+        });
+        let progress = submit(
+            &vault(policy),
+            &[AuthFactorId::SshAgent, AuthFactorId::Password],
+        );
+        assert!(matches!(
+            &progress[0],
+            Some(Progress::Partial { remaining, additional: 0 }) if remaining == &[AuthFactorId::Password]
+        ));
+        assert!(is_complete(progress[1].as_ref(), 2));
+    }
+
+    #[test]
+    fn an_expired_partial_unlock_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = empty_vault_state(dir.path());
+        let meta = vault(AuthCombineMode::All);
+        let work = profile("work");
+        let key = SecureBytes::from_slice(&[1; 32]);
+        record_factor(&mut state, &work, AuthFactorId::Password, &key, &meta);
+        state.partial_unlocks.get_mut(&work).unwrap().deadline = tokio::time::Instant::now();
+        assert!(record_factor(&mut state, &work, AuthFactorId::SshAgent, &key, &meta).is_none());
+        assert!(!state.partial_unlocks.contains_key(&work));
+    }
 }

@@ -1,32 +1,33 @@
+# shellcheck shell=bash
 # %postinst for open-sesame (headless) -- deb
 case "$1" in
-    configure)
-        sesame_require_systemd
+configure)
+    sesame_require_systemd
 
-        systemctl --global enable \
-            open-sesame-profile.service \
-            open-sesame-secrets.service \
-            open-sesame-launcher.service \
-            open-sesame-snippets.service \
-            open-sesame-headless.target \
-            2>/dev/null || true
+    systemctl --global enable \
+        open-sesame-profile.service \
+        open-sesame-secrets.service \
+        open-sesame-launcher.service \
+        open-sesame-snippets.service \
+        open-sesame-headless.target \
+        2>/dev/null || true
 
-        for uid in $(sesame_active_user_uids); do
-            sesame_user_systemctl "$uid" daemon-reload
-            sesame_user_systemctl "$uid" restart open-sesame-profile.service
-            sesame_user_systemctl "$uid" restart open-sesame-secrets.service
-            sesame_user_systemctl "$uid" restart open-sesame-launcher.service
-            sesame_user_systemctl "$uid" restart open-sesame-snippets.service
-        done
+    for uid in $(sesame_active_user_uids); do
+        sesame_user_systemctl "$uid" daemon-reload
+        sesame_user_systemctl "$uid" restart open-sesame-profile.service
+        sesame_user_systemctl "$uid" restart open-sesame-secrets.service
+        sesame_user_systemctl "$uid" restart open-sesame-launcher.service
+        sesame_user_systemctl "$uid" restart open-sesame-snippets.service
+    done
 
-        echo ""
-        echo ":: open-sesame installed"
-        echo "   First-time setup:  sesame init"
-        echo "   Service control:   systemctl --user enable --now open-sesame-headless.target"
-        echo "   Verify:            sesame status"
-        echo ""
-        #DEBHELPER#
-        ;;
+    echo ""
+    echo ":: open-sesame installed"
+    echo "   First-time setup:  sesame init"
+    echo "   Service control:   systemctl --user enable --now open-sesame-headless.target"
+    echo "   Verify:            sesame status"
+    echo ""
+    #DEBHELPER#
+    ;;
 esac
 
 exit 0

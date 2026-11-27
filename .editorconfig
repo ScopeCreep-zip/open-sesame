@@ -1,0 +1,20 @@
+# EditorConfig: https://editorconfig.org
+# shfmt reads the shell sections (see `man shfmt`); lefthook `shell-format`
+# and `mise run qa:shell` run `shfmt -d` against them.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+[*.{sh,body}]
+indent_style = space
+indent_size = 4
+# Pipelines continue with the operator at the start of the next line.
+binary_next_line = true
+
+# Package scriptlet fragments: no shebang; `cargo:assemble-scriptlets`
+# concatenates them under `#!/bin/bash`.
+[*.body]
+shell_variant = bash

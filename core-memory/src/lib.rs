@@ -30,11 +30,15 @@
 //!
 //! # Platform support
 //!
-//! - **Linux 5.14+** with `CONFIG_SECRETMEM=y`: full protection (memfd_secret)
+//! - **Linux 5.14+** with `CONFIG_SECRETMEM=y`: full protection (`memfd_secret`)
 //! - **Linux < 5.14** or without `CONFIG_SECRETMEM`: degraded (mmap fallback, audit-logged)
 //! - **Non-Unix**: compiles with a stub that always returns `Unsupported`
 
 #![deny(clippy::undocumented_unsafe_blocks)]
+#![expect(
+    unsafe_code,
+    reason = "the workspace's one owner of mmap, mprotect, mlock, and memfd_secret"
+)]
 
 #[cfg(unix)]
 mod alloc;
@@ -51,19 +55,15 @@ pub use alloc::ProtectedAllocError;
 /// the probe would be killed. Calling `init()` pre-sandbox caches the
 /// result for all subsequent allocations.
 ///
-/// Logs the security posture at `INFO` (memfd_secret available) or
+/// Logs the security posture at `INFO` (`memfd_secret` available) or
 /// `ERROR` (fallback mode with degraded protection).
 ///
 /// Safe to call multiple times — all initializations are idempotent.
 pub fn init() {
     #[cfg(unix)]
     {
-        // SAFETY: getrlimit with RLIMIT_MEMLOCK is always safe.
-        let memlock_limit = unsafe {
-            let mut rlim: libc::rlimit = std::mem::zeroed();
-            libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim);
-            rlim.rlim_cur
-        };
+        // The soft limit; `None` is RLIM_INFINITY.
+        let memlock_limit = rustix::process::getrlimit(rustix::process::Resource::Memlock).current;
 
         match ProtectedAlloc::new(1) {
             Ok(probe) => {

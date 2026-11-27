@@ -1,50 +1,79 @@
-//! Installation identity file I/O.
-//!
-//! Handles reading and writing `~/.config/pds/installation.toml`.
+//! Installation identity file I/O (`Layout::installation_file`).
 
-use crate::loader::{atomic_write, config_dir};
-use std::path::PathBuf;
+use core_layout::Layout;
 
-/// Path to the installation identity file.
-#[must_use]
-pub fn installation_path() -> PathBuf {
-    config_dir().join("installation.toml")
-}
-
-/// Load installation identity from `installation.toml`.
+/// The installation identity from `installation.toml`, or `None` before
+/// `sesame init` has created it.
 ///
 /// # Errors
 ///
-/// Returns an error if the file does not exist or contains invalid TOML.
-pub fn load_installation() -> core_types::Result<crate::schema::InstallationConfig> {
-    let path = installation_path();
-    let contents = std::fs::read_to_string(&path).map_err(|e| {
-        core_types::Error::Config(format!(
-            "failed to read {}: {e} (run `sesame init` to create it)",
-            path.display()
-        ))
-    })?;
+/// The layout errors, and `core_types::Error::Config` naming the file when
+/// it exists but cannot be read or does not parse.
+pub fn load_installation(
+    layout: &Layout,
+) -> core_types::Result<Option<crate::schema::InstallationConfig>> {
+    let path = layout.installation_file()?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(core_types::Error::Config(format!(
+                "failed to read {}: {e}",
+                path.display()
+            )));
+        }
+    };
     toml::from_str(&contents)
+        .map(Some)
         .map_err(|e| core_types::Error::Config(format!("failed to parse {}: {e}", path.display())))
 }
 
-/// Write installation identity to `installation.toml` atomically.
+/// The machine ID from `Layout::machine_id_file`, or `None` when the
+/// platform has no such file, the file is absent, or it is empty (an
+/// image whose ID is not yet established, machine-id(5)).
 ///
 /// # Errors
 ///
-/// Returns an error if serialization or file I/O fails.
-pub fn write_installation(config: &crate::schema::InstallationConfig) -> core_types::Result<()> {
-    let path = installation_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            core_types::Error::Config(format!("failed to create {}: {e}", parent.display()))
-        })?;
+/// `core_types::Error::Config` naming the file when it exists but cannot
+/// be read.
+pub fn read_machine_id(layout: &Layout) -> core_types::Result<Option<String>> {
+    let Some(path) = layout.machine_id_file() else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let machine_id = contents.trim();
+            Ok((!machine_id.is_empty()).then(|| machine_id.to_owned()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(core_types::Error::Config(format!(
+            "failed to read {}: {e}",
+            path.display()
+        ))),
     }
+}
+
+/// Write installation identity to `installation.toml` atomically,
+/// owner-only.
+///
+/// # Errors
+///
+/// Returns an error if the config directory cannot be determined, or
+/// serialization or file I/O fails.
+pub fn write_installation(
+    layout: &Layout,
+    config: &crate::schema::InstallationConfig,
+) -> core_types::Result<()> {
+    let path = layout.installation_file()?;
     let contents = toml::to_string_pretty(config).map_err(|e| {
         core_types::Error::Config(format!("failed to serialize installation config: {e}"))
     })?;
-    atomic_write(&path, contents.as_bytes())
-        .map_err(|e| core_types::Error::Config(format!("failed to write {}: {e}", path.display())))
+    core_layout::file::write(
+        &path,
+        contents.as_bytes(),
+        core_layout::file::Mode::OwnerOnly,
+    )
+    .map_err(|e| core_types::Error::Config(e.to_string()))
 }
 
 #[cfg(test)]
@@ -52,39 +81,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn installation_config_roundtrips_toml() {
+    fn installation_config_roundtrips_through_the_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("installation.toml");
-        let config = crate::schema::InstallationConfig {
-            id: uuid::Uuid::from_u128(42),
-            namespace: uuid::Uuid::from_u128(99),
-            org: Some(crate::schema::OrgConfig {
-                domain: "braincraft.io".into(),
-                namespace: uuid::Uuid::from_u128(7),
-            }),
-            machine_binding: None,
-        };
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        atomic_write(&path, toml_str.as_bytes()).unwrap();
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let parsed: crate::schema::InstallationConfig = toml::from_str(&contents).unwrap();
-        assert_eq!(parsed.id, config.id);
-        assert_eq!(parsed.namespace, config.namespace);
-        assert_eq!(parsed.org.as_ref().unwrap().domain, "braincraft.io");
+        let layout = Layout::under(dir.path());
+        let config = crate::schema::InstallationConfig::new(
+            uuid::Uuid::from_u128(42),
+            Some("example.invalid"),
+            Some("0123abcd"),
+        );
+        write_installation(&layout, &config).unwrap();
+        assert!(layout.installation_file().unwrap().is_file());
+        let parsed = load_installation(&layout).unwrap().unwrap();
+        assert_eq!(parsed.identity().unwrap(), config.identity().unwrap());
     }
 
     #[test]
-    fn installation_config_missing_file_returns_error() {
-        // Calling load_installation when the file doesn't exist should error.
-        // We can't easily test this without mocking config_dir, so just verify
-        // the schema deserializes correctly from a string.
-        let toml_str = r#"
-            id = "00000000-0000-0000-0000-00000000002a"
-            namespace = "00000000-0000-0000-0000-000000000063"
-        "#;
-        let parsed: crate::schema::InstallationConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(parsed.id, uuid::Uuid::from_u128(42));
-        assert!(parsed.org.is_none());
-        assert!(parsed.machine_binding.is_none());
+    fn machine_id_is_trimmed_and_empty_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::under(dir.path());
+        assert_eq!(read_machine_id(&layout).unwrap(), None);
+        let path = layout.machine_id_file().unwrap().to_path_buf();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "\n").unwrap();
+        assert_eq!(read_machine_id(&layout).unwrap(), None);
+        std::fs::write(&path, "0123abcd\n").unwrap();
+        assert_eq!(
+            read_machine_id(&layout).unwrap().as_deref(),
+            Some("0123abcd")
+        );
+    }
+
+    #[test]
+    fn missing_installation_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            load_installation(&Layout::under(dir.path()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn malformed_installation_is_an_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::under(dir.path());
+        let path = layout.installation_file().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "id = 7\n").unwrap();
+        let err = load_installation(&layout).unwrap_err().to_string();
+        assert!(err.contains(&path.display().to_string()), "{err}");
     }
 }

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # %posttrans for open-sesame-desktop
 # Two-phase restart: mark units, then file triggers call enqueue-marked.
 

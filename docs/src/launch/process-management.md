@@ -63,7 +63,7 @@ been handed off to the child.
 Spawned processes have their I/O handles configured as:
 
 | Stream | Configuration |
-|---|---|
+| --- | --- |
 | stdin | `/dev/null` (`Stdio::null()`) |
 | stdout | `/dev/null` (`Stdio::null()`) |
 | stderr | Inherited from daemon-launcher (`Stdio::inherit()`) |

@@ -4,14 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 core-config.workspace = true
+core-layout.workspace = true
 core-types.workspace = true
 core-workspace-types.workspace = true
 serde.workspace = true
 toml.workspace = true
-dirs.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 gix.workspace = true
@@ -24,6 +25,10 @@ dua-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
+
+# Atomic no-replace rename (renameat2 RENAME_NOREPLACE / renameatx_np RENAME_EXCL).
+[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 

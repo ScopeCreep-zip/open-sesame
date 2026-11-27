@@ -8,7 +8,7 @@ module, and a development shell. The flake targets `x86_64-linux` and `aarch64-l
 The flake uses `nixpkgs` (nixos-unstable) as its sole input. It exposes the following outputs:
 
 | Output | Description |
-|--------|-------------|
+| --- | --- |
 | `packages.<system>.open-sesame` | Headless package (CLI + 4 daemons) |
 | `packages.<system>.open-sesame-desktop` | Desktop package (3 GUI daemons); depends on headless |
 | `packages.<system>.default` | Alias for `open-sesame-desktop` |
@@ -22,7 +22,7 @@ The headless package builds five binary crates with `--no-default-features`, dis
 desktop/GUI code paths:
 
 | Crate | Binary |
-|-------|--------|
+| --- | --- |
 | `open-sesame` | `sesame` |
 | `daemon-profile` | `daemon-profile` |
 | `daemon-secrets` | `daemon-secrets` |
@@ -47,7 +47,7 @@ Source filtering uses `lib.fileset.unions` to include only `Cargo.toml`, `Cargo.
 The desktop package builds four binary crates with default features (desktop enabled):
 
 | Crate | Binary |
-|-------|--------|
+| --- | --- |
 | `open-sesame` | `sesame` (rebuilt with desktop features) |
 | `daemon-wm` | `daemon-wm` |
 | `daemon-clipboard` | `daemon-clipboard` |
@@ -93,7 +93,7 @@ declaratively under `programs.open-sesame`.
 ### Options
 
 | Option | Type | Default | Description |
-|--------|------|---------|-------------|
+| --- | --- | --- | --- |
 | `enable` | `bool` | `false` | Enable the Open Sesame desktop suite |
 | `headless` | `bool` | `false` | Headless mode: only starts profile, secrets, launcher, and snippets daemons. Omits GUI daemons and graphical-session dependency. |
 | `package` | `package` | auto-selected | Defaults to `open-sesame-desktop` or `open-sesame` depending on `headless` |

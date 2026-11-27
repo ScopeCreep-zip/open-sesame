@@ -1,50 +1,37 @@
-//! Vault metadata: tracks enrolled factors, auth policy, and init mode.
+//! Vault metadata: enrolled factors, auth policy, and the vault's key
+//! derivation algorithms.
 //!
-//! Stored as JSON at `{config_dir}/vaults/{profile}.vault-meta`.
+//! Stored as JSON at `Layout::vault_file(profile, VaultFile::Metadata)`.
 //! JSON is used (not TOML) to distinguish machine-managed metadata from
 //! user-editable configuration.
 
 use crate::AuthError;
-use core_types::{AuthCombineMode, AuthFactorId};
+use crate::salt::SALT_LEN;
+use core_layout::{Layout, VaultFile};
+use core_types::{AuthCombineMode, AuthFactorId, CryptoConfig, HkdfAlgorithm, KdfAlgorithm};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Current metadata format version.
-pub const VAULT_META_VERSION: u32 = 1;
-
-/// Maximum metadata version this code can read.
-pub const MAX_SUPPORTED_VERSION: u32 = 1;
+/// The metadata format version this release reads and writes. A vault of
+/// any other version is re-created by a factory reset.
+pub const VAULT_META_VERSION: u32 = 2;
 
 /// Persistent metadata for a vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultMetadata {
     /// Metadata format version.
     pub version: u32,
-    /// How this vault was initialized.
-    pub init_mode: VaultInitMode,
     /// Which auth methods are enrolled.
     pub enrolled_factors: Vec<EnrolledFactor>,
     /// The unlock policy for this vault.
     pub auth_policy: AuthCombineMode,
+    /// The algorithms the vault's keys derive under (`kdf`, `hkdf`).
+    #[serde(flatten)]
+    pub algorithms: VaultAlgorithms,
     /// Timestamp of vault creation (Unix epoch seconds).
     pub created_at: u64,
     /// Timestamp of last policy change.
     pub policy_changed_at: u64,
-}
-
-/// How the vault was originally initialized.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum VaultInitMode {
-    /// Initialized with password only.
-    Password,
-    /// Initialized with SSH key only (random master key, no password).
-    SshKeyOnly,
-    /// Initialized with multiple factors.
-    MultiFactor {
-        /// The factors used at init time.
-        factors: Vec<AuthFactorId>,
-    },
 }
 
 /// Record of an enrolled authentication factor.
@@ -58,134 +45,160 @@ pub struct EnrolledFactor {
     pub enrolled_at: u64,
 }
 
-/// Get the current Unix epoch timestamp.
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
+/// The algorithms a vault's keys derive under, fixed at its creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultAlgorithms {
+    /// The password KDF of the vault's password factor.
+    pub kdf: KdfAlgorithm,
+    /// The derivation of every key derived from key material: vault key,
+    /// IPC key, entry key, SSH challenge and KEK, combined master key.
+    pub hkdf: HkdfAlgorithm,
+}
+
+/// What a backend derives a vault's keys from: its salt and its
+/// algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultKeying {
+    pub salt: [u8; SALT_LEN],
+    pub algorithms: VaultAlgorithms,
+}
+
+/// The version field alone, read before the rest of the file.
+#[derive(Deserialize)]
+struct Version {
+    version: u32,
+}
+
+/// The current Unix epoch timestamp. Enrollment and policy times are audit
+/// evidence, so a clock before the epoch is an error.
+fn now_epoch() -> Result<u64, AuthError> {
+    Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+        .map_err(AuthError::Clock)?
+        .as_secs())
 }
 
 impl VaultMetadata {
+    /// Metadata for a new vault enrolled with `factors` (each with its
+    /// label), all stamped with the creation time, deriving its keys with
+    /// the algorithms `crypto` selects.
+    ///
+    /// # Errors
+    ///
+    /// `AuthError::Clock` when the system clock is before the Unix epoch.
+    pub fn new(
+        factors: Vec<(AuthFactorId, String)>,
+        auth_policy: AuthCombineMode,
+        crypto: &CryptoConfig,
+    ) -> Result<Self, AuthError> {
+        let now = now_epoch()?;
+        Ok(Self {
+            version: VAULT_META_VERSION,
+            enrolled_factors: factors
+                .into_iter()
+                .map(|(factor_id, label)| EnrolledFactor {
+                    factor_id,
+                    label,
+                    enrolled_at: now,
+                })
+                .collect(),
+            auth_policy,
+            algorithms: VaultAlgorithms {
+                kdf: crypto.kdf,
+                hkdf: crypto.hkdf,
+            },
+            created_at: now,
+            policy_changed_at: now,
+        })
+    }
+
     /// Path to the metadata file for a profile.
-    #[must_use]
-    pub fn path(config_dir: &Path, profile: &core_types::TrustProfileName) -> PathBuf {
-        config_dir
-            .join("vaults")
-            .join(format!("{profile}.vault-meta"))
+    ///
+    /// # Errors
+    ///
+    /// The layout errors.
+    pub fn path(
+        layout: &Layout,
+        profile: &core_types::TrustProfileName,
+    ) -> Result<PathBuf, AuthError> {
+        Ok(layout.vault_file(profile, VaultFile::Metadata)?)
     }
 
     /// Read metadata from disk.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file does not exist, is unreadable, unparseable,
-    /// or has an unsupported version.
+    /// Returns an error if the file does not exist, is unreadable,
+    /// unparseable, or is not [`VAULT_META_VERSION`].
     pub fn load(
-        config_dir: &Path,
+        layout: &Layout,
         profile: &core_types::TrustProfileName,
     ) -> Result<Self, AuthError> {
-        let path = Self::path(config_dir, profile);
+        let path = Self::path(layout, profile)?;
         let data = std::fs::read_to_string(&path).map_err(|e| {
             AuthError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to read vault metadata {}: {e}", path.display()),
             ))
         })?;
-        let meta: Self = serde_json::from_str(&data).map_err(|e| {
-            AuthError::InvalidBlob(format!("corrupt vault metadata {}: {e}", path.display()))
-        })?;
-        if meta.version > MAX_SUPPORTED_VERSION {
-            return Err(AuthError::InvalidBlob(format!(
-                "vault metadata version {} exceeds max supported {}",
-                meta.version, MAX_SUPPORTED_VERSION
+        let corrupt = |e: serde_json::Error| {
+            AuthError::InvalidVaultFile(format!("corrupt vault metadata {}: {e}", path.display()))
+        };
+        let Version { version } = serde_json::from_str(&data).map_err(corrupt)?;
+        if version != VAULT_META_VERSION {
+            return Err(AuthError::InvalidVaultFile(format!(
+                "vault metadata {} is version {version}; this release reads version \
+                 {VAULT_META_VERSION}. Re-create the vault: sesame init --wipe-reset-destroy-all-data",
+                path.display()
             )));
         }
-        Ok(meta)
+        serde_json::from_str(&data).map_err(corrupt)
     }
 
-    /// Write metadata to disk atomically.
+    /// Write metadata to disk atomically with owner-only permissions.
     ///
     /// # Errors
     ///
-    /// Returns an I/O error if the write fails.
+    /// The layout errors, a serialization failure, and the
+    /// `core_layout::file::write` errors.
     pub fn save(
         &self,
-        config_dir: &Path,
+        layout: &Layout,
         profile: &core_types::TrustProfileName,
     ) -> Result<(), AuthError> {
-        let path = Self::path(config_dir, profile);
-        let vaults_dir = config_dir.join("vaults");
-        std::fs::create_dir_all(&vaults_dir)?;
-
         let json = serde_json::to_string_pretty(self).map_err(|e| {
-            AuthError::InvalidBlob(format!("failed to serialize vault metadata: {e}"))
+            AuthError::InvalidVaultFile(format!("failed to serialize vault metadata: {e}"))
         })?;
-
-        let tmp_path = path.with_extension("vault-meta.tmp");
-        std::fs::write(&tmp_path, json.as_bytes())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-
-        std::fs::rename(&tmp_path, &path)?;
+        core_layout::file::write(
+            &Self::path(layout, profile)?,
+            json.as_bytes(),
+            core_layout::file::Mode::OwnerOnly,
+        )?;
         Ok(())
     }
 
-    /// Create metadata for a new password-only vault.
+    /// The keying of this vault with `salt`.
     #[must_use]
-    pub fn new_password(auth_policy: AuthCombineMode) -> Self {
-        let now = now_epoch();
-        Self {
-            version: VAULT_META_VERSION,
-            init_mode: VaultInitMode::Password,
-            enrolled_factors: vec![EnrolledFactor {
-                factor_id: AuthFactorId::Password,
-                label: "master password".into(),
-                enrolled_at: now,
-            }],
-            auth_policy,
-            created_at: now,
-            policy_changed_at: now,
+    pub fn keying(&self, salt: [u8; SALT_LEN]) -> VaultKeying {
+        VaultKeying {
+            salt,
+            algorithms: self.algorithms,
         }
     }
 
-    /// Create metadata for a new SSH-key-only vault.
-    #[must_use]
-    pub fn new_ssh_only(fingerprint: &str, auth_policy: AuthCombineMode) -> Self {
-        let now = now_epoch();
-        Self {
-            version: VAULT_META_VERSION,
-            init_mode: VaultInitMode::SshKeyOnly,
-            enrolled_factors: vec![EnrolledFactor {
-                factor_id: AuthFactorId::SshAgent,
-                label: fingerprint.to_string(),
-                enrolled_at: now,
-            }],
-            auth_policy,
-            created_at: now,
-            policy_changed_at: now,
-        }
-    }
-
-    /// Create metadata for a new multi-factor vault.
-    #[must_use]
-    pub fn new_multi_factor(factors: Vec<EnrolledFactor>, auth_policy: AuthCombineMode) -> Self {
-        let now = now_epoch();
-        let factor_ids: Vec<AuthFactorId> = factors.iter().map(|f| f.factor_id).collect();
-        Self {
-            version: VAULT_META_VERSION,
-            init_mode: VaultInitMode::MultiFactor {
-                factors: factor_ids,
-            },
-            enrolled_factors: factors,
-            auth_policy,
-            created_at: now,
-            policy_changed_at: now,
-        }
+    /// `profile`'s metadata and the keying its factors derive under (its
+    /// salt and algorithms).
+    ///
+    /// # Errors
+    ///
+    /// The [`load`](Self::load) and [`crate::salt::require`] errors.
+    pub fn load_keying(
+        layout: &Layout,
+        profile: &core_types::TrustProfileName,
+    ) -> Result<(Self, VaultKeying), AuthError> {
+        let meta = Self::load(layout, profile)?;
+        let keying = meta.keying(crate::salt::require(layout, profile)?);
+        Ok((meta, keying))
     }
 
     /// Check whether a specific factor is enrolled.
@@ -195,15 +208,20 @@ impl VaultMetadata {
     }
 
     /// Add an enrolled factor. Does nothing if already enrolled with the same ID.
-    pub fn add_factor(&mut self, factor_id: AuthFactorId, label: String) {
+    ///
+    /// # Errors
+    ///
+    /// `AuthError::Clock` when the system clock is before the Unix epoch.
+    pub fn add_factor(&mut self, factor_id: AuthFactorId, label: String) -> Result<(), AuthError> {
         if self.has_factor(factor_id) {
-            return;
+            return Ok(());
         }
         self.enrolled_factors.push(EnrolledFactor {
             factor_id,
             label,
-            enrolled_at: now_epoch(),
+            enrolled_at: now_epoch()?,
         });
+        Ok(())
     }
 
     /// Remove an enrolled factor by ID.
@@ -226,110 +244,144 @@ impl VaultMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::TrustProfileName;
+    use crate::test_support::{keying, layout, password_vault, test_profile};
 
-    fn test_profile() -> TrustProfileName {
-        TrustProfileName::try_from("test-profile").unwrap()
+    fn write_metadata(layout: &Layout, json: &str) {
+        core_layout::file::write(
+            &VaultMetadata::path(layout, &test_profile()).unwrap(),
+            json.as_bytes(),
+            core_layout::file::Mode::OwnerOnly,
+        )
+        .unwrap();
     }
 
     #[test]
     fn load_fails_when_no_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let result = VaultMetadata::load(dir.path(), &test_profile());
+        let (_root, layout) = layout();
+        let result = VaultMetadata::load(&layout, &test_profile());
         assert!(result.is_err());
     }
 
     #[test]
-    fn save_and_load_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
+    fn save_and_load_round_trip_the_algorithms() {
+        let (_root, layout) = layout();
         let profile = test_profile();
-
-        let meta = VaultMetadata::new_password(AuthCombineMode::Any);
-
-        meta.save(dir.path(), &profile).unwrap();
-        let loaded = VaultMetadata::load(dir.path(), &profile).unwrap();
+        let crypto = CryptoConfig {
+            kdf: KdfAlgorithm::Pbkdf2Sha256,
+            hkdf: HkdfAlgorithm::HkdfSha256,
+            ..CryptoConfig::default()
+        };
+        password_vault(&crypto).save(&layout, &profile).unwrap();
+        let loaded = VaultMetadata::load(&layout, &profile).unwrap();
 
         assert_eq!(loaded.version, VAULT_META_VERSION);
         assert_eq!(loaded.enrolled_factors.len(), 1);
         assert_eq!(loaded.enrolled_factors[0].factor_id, AuthFactorId::Password);
         assert_eq!(loaded.auth_policy, AuthCombineMode::Any);
+        assert_eq!(
+            loaded.keying([3; SALT_LEN]),
+            keying(3, KdfAlgorithm::Pbkdf2Sha256, HkdfAlgorithm::HkdfSha256)
+        );
     }
 
     #[test]
-    fn rejects_unsupported_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let profile = test_profile();
-
-        let vaults = dir.path().join("vaults");
-        std::fs::create_dir_all(&vaults).unwrap();
-        let path = vaults.join("test-profile.vault-meta");
-        let json = r#"{"version":999,"init_mode":"password","enrolled_factors":[],"auth_policy":"any","created_at":0,"policy_changed_at":0}"#;
-        std::fs::write(&path, json).unwrap();
-
-        let result = VaultMetadata::load(dir.path(), &profile);
-        assert!(result.is_err());
+    fn other_versions_are_refused_with_the_reset_command() {
+        let (_root, layout) = layout();
+        for version in [1, 999] {
+            write_metadata(
+                &layout,
+                &format!(
+                    r#"{{"version":{version},"init_mode":"password","enrolled_factors":[],"auth_policy":"any","created_at":0,"policy_changed_at":0}}"#
+                ),
+            );
+            let err = VaultMetadata::load(&layout, &test_profile()).unwrap_err();
+            assert!(matches!(err, AuthError::InvalidVaultFile(_)), "{err:?}");
+            let err = err.to_string();
+            assert!(err.contains(&format!("version {version}")), "{err}");
+            assert!(err.contains("--wipe-reset-destroy-all-data"), "{err}");
+            assert!(!err.contains("enrollment blob"), "{err}");
+        }
     }
 
     #[test]
-    fn new_password_creates_correct_metadata() {
-        let meta = VaultMetadata::new_password(AuthCombineMode::Any);
-        assert_eq!(meta.enrolled_factors.len(), 1);
-        assert_eq!(meta.enrolled_factors[0].factor_id, AuthFactorId::Password);
-        assert!(matches!(meta.init_mode, VaultInitMode::Password));
-        assert_eq!(meta.auth_policy, AuthCombineMode::Any);
+    fn metadata_without_algorithms_is_corrupt() {
+        let (_root, layout) = layout();
+        write_metadata(
+            &layout,
+            r#"{"version":2,"enrolled_factors":[],"auth_policy":"any","created_at":0,"policy_changed_at":0}"#,
+        );
+        let err = VaultMetadata::load(&layout, &test_profile())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing field `kdf`"), "{err}");
     }
 
     #[test]
-    fn new_ssh_only_creates_correct_metadata() {
-        let meta = VaultMetadata::new_ssh_only("SHA256:test", AuthCombineMode::Any);
-        assert_eq!(meta.enrolled_factors.len(), 1);
-        assert_eq!(meta.enrolled_factors[0].factor_id, AuthFactorId::SshAgent);
-        assert_eq!(meta.enrolled_factors[0].label, "SHA256:test");
-        assert!(matches!(meta.init_mode, VaultInitMode::SshKeyOnly));
-    }
-
-    #[test]
-    fn new_multi_factor_creates_correct_metadata() {
+    fn new_stamps_every_factor_with_the_creation_time() {
         let factors = vec![
-            EnrolledFactor {
-                factor_id: AuthFactorId::Password,
-                label: "master password".into(),
-                enrolled_at: 0,
-            },
-            EnrolledFactor {
-                factor_id: AuthFactorId::SshAgent,
-                label: "SHA256:abc".into(),
-                enrolled_at: 0,
-            },
+            (AuthFactorId::Password, "master password".to_string()),
+            (AuthFactorId::SshAgent, "SHA256:abc".to_string()),
         ];
-        let meta = VaultMetadata::new_multi_factor(factors, AuthCombineMode::All);
+        let meta =
+            VaultMetadata::new(factors, AuthCombineMode::All, &CryptoConfig::default()).unwrap();
         assert_eq!(meta.enrolled_factors.len(), 2);
-        assert!(matches!(meta.init_mode, VaultInitMode::MultiFactor { .. }));
+        assert!(
+            meta.enrolled_factors
+                .iter()
+                .all(|f| f.enrolled_at == meta.created_at)
+        );
+        assert_eq!(meta.enrolled_factors[1].label, "SHA256:abc");
         assert_eq!(meta.auth_policy, AuthCombineMode::All);
+        assert_eq!(
+            meta.algorithms,
+            VaultAlgorithms {
+                kdf: KdfAlgorithm::Argon2id,
+                hkdf: HkdfAlgorithm::Blake3,
+            }
+        );
+    }
+
+    #[test]
+    fn keying_loads_with_the_metadata_and_requires_a_salt() {
+        let (_root, layout) = layout();
+        let profile = test_profile();
+        password_vault(&CryptoConfig::default())
+            .save(&layout, &profile)
+            .unwrap();
+        assert!(matches!(
+            VaultMetadata::load_keying(&layout, &profile),
+            Err(AuthError::NotInitialized(_))
+        ));
+        let salt = crate::salt::create(&layout, &profile).unwrap();
+        let (meta, keying) = VaultMetadata::load_keying(&layout, &profile).unwrap();
+        assert_eq!(keying, meta.keying(salt));
     }
 
     #[test]
     fn has_factor_works() {
-        let meta = VaultMetadata::new_password(AuthCombineMode::Any);
+        let meta = password_vault(&CryptoConfig::default());
         assert!(meta.has_factor(AuthFactorId::Password));
         assert!(!meta.has_factor(AuthFactorId::SshAgent));
     }
 
     #[test]
     fn add_factor_idempotent() {
-        let mut meta = VaultMetadata::new_password(AuthCombineMode::Any);
+        let mut meta = password_vault(&CryptoConfig::default());
 
-        meta.add_factor(AuthFactorId::Password, "duplicate".into());
+        meta.add_factor(AuthFactorId::Password, "duplicate".into())
+            .unwrap();
         assert_eq!(meta.enrolled_factors.len(), 1);
 
-        meta.add_factor(AuthFactorId::SshAgent, "SHA256:abc".into());
+        meta.add_factor(AuthFactorId::SshAgent, "SHA256:abc".into())
+            .unwrap();
         assert_eq!(meta.enrolled_factors.len(), 2);
     }
 
     #[test]
     fn remove_factor_works() {
-        let mut meta = VaultMetadata::new_password(AuthCombineMode::Any);
-        meta.add_factor(AuthFactorId::SshAgent, "ssh".into());
+        let mut meta = password_vault(&CryptoConfig::default());
+        meta.add_factor(AuthFactorId::SshAgent, "ssh".into())
+            .unwrap();
         assert_eq!(meta.enrolled_factors.len(), 2);
 
         meta.remove_factor(AuthFactorId::SshAgent);
@@ -339,33 +391,18 @@ mod tests {
 
     #[test]
     fn policy_mode_serializes_correctly() {
-        let meta = VaultMetadata::new_multi_factor(
+        let meta = VaultMetadata::new(
             vec![],
             AuthCombineMode::Policy(core_types::AuthPolicy {
                 required: vec![AuthFactorId::Password],
                 additional_required: 1,
             }),
-        );
+            &CryptoConfig::default(),
+        )
+        .unwrap();
 
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: VaultMetadata = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed.auth_policy, AuthCombineMode::Policy(_)));
-    }
-
-    #[test]
-    fn file_permissions_are_restrictive() {
-        let dir = tempfile::tempdir().unwrap();
-        let profile = test_profile();
-
-        let meta = VaultMetadata::new_password(AuthCombineMode::Any);
-        meta.save(dir.path(), &profile).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let path = VaultMetadata::path(dir.path(), &profile);
-            let perms = std::fs::metadata(&path).unwrap().permissions();
-            assert_eq!(perms.mode() & 0o777, 0o600);
-        }
     }
 }

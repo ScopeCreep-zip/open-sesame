@@ -19,6 +19,22 @@ config_version = 3
 
 [global]
 default_profile = "default"
+# The shortcut that opens the launcher overlay; with Shift added it opens it
+# backward. Alt+Tab and Alt+Shift+Tab are the window switcher. Bound through
+# the desktop's GlobalShortcuts portal (daemon-launcher) or COSMIC's shortcut
+# configuration (`sesame setup-keybinding`). Modifiers: super, ctrl, alt,
+# shift; the key is an XKB keysym name.
+launcher_key = "alt+space"
+
+[global.sandbox]
+# The daemons run under every Landlock protection the kernel enforces; one it
+# does not is a warning (`sesame status --doctor platform`). Each protection
+# listed here is a floor: on a kernel that does not enforce it, every
+# sandboxed daemon refuses to start and the doctor fails. Protections, with
+# the first Linux release that enforces each: filesystem (5.13),
+# reparenting (5.19), truncation (6.2), tcp (6.7), device-ioctl (6.10),
+# scopes (6.12), pathname-sockets (7.1), udp (7.2).
+# require = ["filesystem", "scopes", "pathname-sockets"]
 
 [global.ipc]
 # channel_capacity = 1024
@@ -54,13 +70,10 @@ mode = "any"
 # --- Window Manager ----------------------------------------------------------
 
 [profiles.default.wm]
-hint_keys = "asdfghjkl"
-overlay_delay_ms = 150          # ms before full overlay appears (border-only until then)
-activation_delay_ms = 200       # ms delay before committing a hint match
+hint_keys = "asdfghjkl" # hint keys for apps without a key binding or a letter in their name
+overlay_delay_ms = 150 # ms before full overlay appears (border-only until then)
 quick_switch_threshold_ms = 250 # Alt+Tab released within this = instant switch
-border_width = 4.0
-border_color = "#89b4fa"
-background_color = "#000000c8"
+border_color = "#89b4fa" # card outline
 card_color = "#1e1e1ef0"
 text_color = "#ffffff"
 hint_color = "#646464"
@@ -147,7 +160,7 @@ launch = "spotify"
 env = { RUST_LOG = "debug" }
 secrets = ["github-token"]
 # devshell = "/workspace/myproject#rust"
-# cwd = "/workspace/usrbinkat/github.com/org/repo"
+# cwd = "/workspace/alice/github.com/org/repo"
 
 # --- Launcher ----------------------------------------------------------------
 
@@ -184,7 +197,7 @@ retention_days = 90
 # [profiles.work.launch_profiles.corp]
 # env = { CORP_ENV = "production" }
 # secrets = ["corp-api-key", "corp-signing-key"]
-# cwd = "/workspace/usrbinkat/github.com/acme-corp"
+# cwd = "/workspace/alice/github.com/acme-corp"
 #
 # # Tag a key binding with a cross-profile launch profile:
 # # [profiles.default.wm.key_bindings.g]
@@ -200,9 +213,9 @@ retention_days = 90
 # =============================================================================
 
 [crypto]
-kdf = "argon2id"             # or "pbkdf2-sha256"
-hkdf = "blake3"              # or "hkdf-sha256"
+kdf = "argon2id" # or "pbkdf2-sha256"
+hkdf = "blake3" # or "hkdf-sha256"
 noise_cipher = "chacha-poly" # or "aes-gcm"
-noise_hash = "blake2s"       # or "sha256"
-audit_hash = "blake3"        # or "sha256"
+noise_hash = "blake2s" # or "sha256"
+audit_hash = "blake3" # or "sha256"
 minimum_peer_profile = "leading-edge" # or "governance-compatible", "custom"

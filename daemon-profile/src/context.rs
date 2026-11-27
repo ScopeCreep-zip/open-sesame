@@ -1,111 +1,163 @@
-//! Context engine helpers: activation rule construction, audit state recovery,
-//! and audit chain verification.
+//! What daemon-profile derives from the configuration: the activatable
+//! profile names and the context engine. Profile identity is
+//! `ProfileId::of_profile`.
 
-use anyhow::Context;
-use core_profile::context::{ProfileActivation, RuleCombinator};
-use std::path::PathBuf;
+use core_profile::ContextEngine;
+use core_profile::context::{ActivationRule, ProfileActivation, RuleCombinator, RuleTrigger};
+use core_types::{ProfileId, TrustProfileName};
 
-/// Build activation rules from the loaded config.
-///
-/// Parses `activation_rules`, `rule_combinator`, `priority` from
-/// each profile's config. For now: single default profile with no context rules.
-pub(crate) fn build_activation_rules(
-    config: &core_config::Config,
-    default_id: core_types::ProfileId,
+/// The configured profile names that are valid `TrustProfileName`s. An
+/// invalid name is logged and excluded; it cannot be activated.
+pub(crate) fn profile_names(config: &core_config::Config) -> Vec<TrustProfileName> {
+    config
+        .profiles
+        .keys()
+        .filter_map(|name| match TrustProfileName::try_from(name.as_str()) {
+            Ok(profile) => Some(profile),
+            Err(e) => {
+                tracing::error!(profile = %name, error = %e, "invalid profile name in config, excluded");
+                None
+            }
+        })
+        .collect()
+}
+
+/// The name among `names` whose installation-scoped identity is `id`.
+pub(crate) fn profile_named<'a>(
+    names: &'a [TrustProfileName],
     install_ns: &uuid::Uuid,
+    id: ProfileId,
+) -> Option<&'a TrustProfileName> {
+    names
+        .iter()
+        .find(|name| ProfileId::of_profile(install_ns, name.as_ref()) == id)
+}
+
+/// The context engine of `config`: each profile's activation rules, the
+/// configured default profile as its default.
+pub(crate) fn context_engine(
+    config: &core_config::Config,
+    install_ns: &uuid::Uuid,
+) -> ContextEngine {
+    let default_id = ProfileId::of_profile(install_ns, config.global.default_profile.as_ref());
+    ContextEngine::new(activation_rules(config, install_ns, default_id), default_id)
+}
+
+/// Each profile's Wi-Fi, USB, time-window, and security-key triggers, its
+/// position in the configuration as its priority; `default_id` alone when
+/// the configuration defines no profiles.
+fn activation_rules(
+    config: &core_config::Config,
+    install_ns: &uuid::Uuid,
+    default_id: ProfileId,
 ) -> Vec<ProfileActivation> {
-    use core_profile::context::{ActivationRule, RuleTrigger};
-
-    let mut activations = Vec::new();
-
-    for (idx, (name, profile)) in config.profiles.iter().enumerate() {
-        let act = &profile.activation;
-        let mut rules = Vec::new();
-
-        for ssid in &act.wifi_ssids {
-            rules.push(ActivationRule {
-                trigger: RuleTrigger::Ssid,
-                value: ssid.clone(),
-            });
-        }
-
-        for usb in &act.usb_devices {
-            rules.push(ActivationRule {
-                trigger: RuleTrigger::UsbDevice,
-                value: usb.clone(),
-            });
-        }
-
-        for time_rule in &act.time_rules {
-            rules.push(ActivationRule {
-                trigger: RuleTrigger::TimeWindow,
-                value: time_rule.clone(),
-            });
-        }
-
-        if act.require_security_key {
-            rules.push(ActivationRule {
-                trigger: RuleTrigger::HardwareKey,
-                value: "present".into(),
-            });
-        }
-
-        // Derive a deterministic ProfileId from the profile name so IDs are
-        // stable across restarts.  The default profile keeps its caller-supplied
-        // ID for backwards compatibility with the rest of daemon-profile.
-        let profile_id = if name == &config.global.default_profile.to_string() {
-            default_id
-        } else {
-            core_types::ProfileId::from_uuid(uuid::Uuid::new_v5(
-                install_ns,
-                format!("profile:{}", name).as_bytes(),
-            ))
-        };
-
-        activations.push(ProfileActivation {
-            profile_id,
-            rules,
-            combinator: RuleCombinator::Any,
-            priority: idx as u32,
-            switch_delay_ms: 0,
-        });
-    }
-
+    let activation = |profile_id, rules, priority| ProfileActivation {
+        profile_id,
+        rules,
+        combinator: RuleCombinator::Any,
+        priority,
+        switch_delay_ms: 0,
+    };
+    let activations: Vec<ProfileActivation> = config
+        .profiles
+        .iter()
+        .zip(0u32..)
+        .map(|((name, profile), priority)| {
+            let act = &profile.activation;
+            let rule = |trigger, value: &String| ActivationRule {
+                trigger,
+                value: value.clone(),
+            };
+            let security_key = String::from("present");
+            let rules = act
+                .wifi_ssids
+                .iter()
+                .map(|ssid| rule(RuleTrigger::Ssid, ssid))
+                .chain(
+                    act.usb_devices
+                        .iter()
+                        .map(|usb| rule(RuleTrigger::UsbDevice, usb)),
+                )
+                .chain(
+                    act.time_rules
+                        .iter()
+                        .map(|time| rule(RuleTrigger::TimeWindow, time)),
+                )
+                .chain(
+                    act.require_security_key
+                        .then(|| rule(RuleTrigger::HardwareKey, &security_key)),
+                )
+                .collect();
+            activation(ProfileId::of_profile(install_ns, name), rules, priority)
+        })
+        .collect();
     if activations.is_empty() {
-        activations.push(ProfileActivation {
-            profile_id: default_id,
-            rules: vec![],
-            combinator: RuleCombinator::Any,
-            priority: 0,
-            switch_delay_ms: 0,
-        });
-    }
-
-    activations
-}
-
-/// Load the last hash and sequence from an existing audit log.
-pub(crate) fn load_audit_state(path: &PathBuf) -> (String, u64) {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return (String::new(), 0);
-    };
-
-    let Some(last_line) = contents.lines().rev().find(|l| !l.trim().is_empty()) else {
-        return (String::new(), 0);
-    };
-
-    if let Ok(entry) = serde_json::from_str::<core_profile::AuditEntry>(last_line) {
-        let hash = blake3::hash(last_line.as_bytes());
-        (hash.to_hex().to_string(), entry.sequence)
+        vec![activation(default_id, vec![], 0)]
     } else {
-        tracing::warn!(path = %path.display(), "failed to parse last audit entry; starting fresh chain");
-        (String::new(), 0)
+        activations
     }
 }
 
-/// Verify the audit log hash chain integrity.
-pub(crate) fn verify_audit_chain(path: &PathBuf) -> anyhow::Result<u64> {
-    let contents = std::fs::read_to_string(path).context("failed to read audit log")?;
-    core_profile::verify_chain(&contents, &core_types::AuditHash::Blake3)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ns() -> uuid::Uuid {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"installation")
+    }
+
+    #[test]
+    fn activation_rules_follow_each_profile_in_order() {
+        let config: core_config::Config = toml::from_str(
+            "[global]\ndefault_profile = \"home\"\n\
+             [profiles.home]\n\
+             [profiles.work.activation]\nwifi_ssids = [\"corp\"]\nrequire_security_key = true\n",
+        )
+        .unwrap();
+        let default_id = ProfileId::of_profile(&ns(), "home");
+        let rules = activation_rules(&config, &ns(), default_id);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].profile_id, default_id);
+        assert!(rules[0].rules.is_empty());
+        assert_eq!(rules[1].profile_id, ProfileId::of_profile(&ns(), "work"));
+        assert_eq!(rules[1].priority, 1);
+        let triggers: Vec<RuleTrigger> = rules[1].rules.iter().map(|r| r.trigger).collect();
+        assert_eq!(triggers, [RuleTrigger::Ssid, RuleTrigger::HardwareKey]);
+        assert_eq!(context_engine(&config, &ns()).default_profile(), default_id);
+    }
+
+    #[test]
+    fn a_profile_id_names_its_configured_profile() {
+        let names = [
+            TrustProfileName::try_from("home").unwrap(),
+            TrustProfileName::try_from("work").unwrap(),
+        ];
+        let work = ProfileId::of_profile(&ns(), "work");
+        assert_eq!(profile_named(&names, &ns(), work), Some(&names[1]));
+        let other = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"other");
+        assert_eq!(
+            profile_named(&names, &other, work),
+            None,
+            "another installation's identity names no profile here"
+        );
+    }
+
+    #[test]
+    fn invalid_profile_names_are_excluded() {
+        let config: core_config::Config =
+            toml::from_str("[profiles.work]\n[profiles.\"bad name\"]\n").unwrap();
+        assert_eq!(
+            profile_names(&config),
+            [TrustProfileName::try_from("work").unwrap()]
+        );
+    }
+
+    #[test]
+    fn no_profiles_yields_the_default_alone() {
+        let config = core_config::Config::default();
+        let default_id = ProfileId::of_profile(&ns(), config.global.default_profile.as_ref());
+        let rules = activation_rules(&config, &ns(), default_id);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].profile_id, default_id);
+    }
 }

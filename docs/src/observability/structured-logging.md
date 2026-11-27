@@ -25,7 +25,7 @@ filter is `info`.
 Standard tracing levels are used throughout:
 
 | Level | Usage |
-|---|---|
+| --- | --- |
 | `error` | IPC failures, secret fetch denials, audit chain verification failures, sandbox application failures. |
 | `warn` | Non-fatal issues: systemd-run fallback, corrupt audit tail entry, HTTP git URL detected. |
 | `info` | Daemon lifecycle (starting, ready, shutting down), launch execution, watchdog ticks, config reloads, key rotation, audit chain verification on startup. |

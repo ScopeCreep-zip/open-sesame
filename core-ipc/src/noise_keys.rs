@@ -1,17 +1,20 @@
-//! Key management and persistence for Noise IK keypairs.
+//! Persistence of the bus endpoint and the per-daemon Noise IK keypairs.
 //!
-//! Handles generation, filesystem I/O, permissions, and tamper-detection
-//! checksums for both the bus server keypair and per-daemon keypairs.
-//!
-//! Key storage layout under `$XDG_RUNTIME_DIR/pds/`:
-//! - `bus.pub` (0644) — bus server public key, read by connecting daemons
-//! - `bus.key` (0600) — bus server private key
-//! - `bus.checksum` — BLAKE3 integrity checksum
-//! - `keys/<daemon>.pub` (0644) — per-daemon public key
-//! - `keys/<daemon>.key` (0600) — per-daemon private key
-//! - `keys/<daemon>.checksum` — per-daemon integrity checksum
+//! Every location comes from `core_layout::Layout` and every file is written
+//! through `core_layout::file` (atomic, mode set exactly):
+//! - `<runtime>/bus.endpoint` (0644) — the bus server's protocol name and
+//!   public key ([`BusEndpoint`]). The server's private key stays in memory.
+//! - `<runtime>/keys/<daemon>.key` (0600) — per-daemon private key
+//! - `<runtime>/keys/<daemon>.pub` (0644) — per-daemon public key
+//! - `<runtime>/keys/<daemon>.checksum` (0600) — integrity checksum, written
+//!   last; a keypair without a verifying checksum is rejected
 
 use std::path::{Path, PathBuf};
+
+use core_layout::file::Mode;
+use core_layout::{KeyFile, Layout};
+
+use crate::noise::NoiseSuite;
 
 /// Compute an integrity-detection checksum for a keypair.
 ///
@@ -27,19 +30,13 @@ fn keypair_checksum(public_key: &[u8; 32], private_key: &[u8]) -> [u8; 32] {
 
 /// Generate a new X25519 static keypair for Noise IK.
 ///
-/// Called once at daemon startup. The keypair is ephemeral to the process lifetime
-/// for connecting daemons, or persisted to `$XDG_RUNTIME_DIR/pds/` for the bus server.
+/// The keypair is the same for every [`NoiseSuite`]: each uses X25519.
 ///
 /// # Errors
 ///
 /// Returns an error if the crypto resolver fails.
 pub fn generate_keypair() -> core_types::Result<ZeroizingKeypair> {
-    let builder = snow::Builder::new(
-        crate::noise::NOISE_PARAMS
-            .parse()
-            .map_err(|e| core_types::Error::Platform(format!("invalid Noise params: {e}")))?,
-    );
-    let keypair = builder
+    let keypair = snow::Builder::new(NoiseSuite::default().params())
         .generate_keypair()
         .map_err(|e| core_types::Error::Platform(format!("keypair generation failed: {e}")))?;
     Ok(ZeroizingKeypair::new(keypair))
@@ -108,373 +105,243 @@ impl From<snow::Keypair> for ZeroizingKeypair {
     }
 }
 
-/// Override for the runtime directory path. Set by tests to avoid `set_var`
-/// race conditions (P7). Production code never sets this.
-static RUNTIME_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-
-/// Set the runtime directory override. Intended for testing only.
-/// Avoids `unsafe { set_var(...) }` which races with other threads reading env.
-#[doc(hidden)]
-pub fn set_runtime_dir_override(path: PathBuf) {
-    *RUNTIME_DIR_OVERRIDE.lock().unwrap() = Some(path);
-}
-
-/// Resolve the PDS runtime directory (`$XDG_RUNTIME_DIR/pds/`).
-fn runtime_dir() -> core_types::Result<PathBuf> {
-    if let Some(ref override_dir) = *RUNTIME_DIR_OVERRIDE.lock().unwrap() {
-        return Ok(override_dir.clone());
-    }
-    let runtime = std::env::var("XDG_RUNTIME_DIR")
-        .map_err(|_| core_types::Error::Platform("XDG_RUNTIME_DIR is not set".into()))?;
-    Ok(PathBuf::from(runtime).join("pds"))
-}
-
-/// Write the bus server's static keypair to the runtime directory.
+/// The bus server's published identity: the Noise protocol it bound with
+/// and its static public key. Clients handshake with exactly this.
 ///
-/// - `bus.pub` (32 bytes, world-readable) — read by connecting daemons
-/// - `bus.key` (32 bytes, mode 0600) — private key for the bus server
+/// On disk (`Layout::bus_endpoint_file`): the protocol name, a newline, the
+/// public key as 64 lowercase hex digits, a newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusEndpoint {
+    pub suite: NoiseSuite,
+    pub public_key: [u8; 32],
+}
+
+impl BusEndpoint {
+    fn encode(&self) -> String {
+        format!(
+            "{}\n{}\n",
+            self.suite.protocol_name(),
+            hex::encode(self.public_key)
+        )
+    }
+
+    fn decode(text: &str, path: &Path) -> core_types::Result<Self> {
+        let malformed = |what: &str| {
+            core_types::Error::Ipc(format!(
+                "{} is not a bus endpoint record: {what}",
+                path.display()
+            ))
+        };
+        let mut lines = text.split_terminator('\n');
+        let (Some(name), Some(key), None) = (lines.next(), lines.next(), lines.next()) else {
+            return Err(malformed("expected a protocol name line and a key line"));
+        };
+        let suite = NoiseSuite::from_protocol_name(name)?;
+        let public_key = hex::decode(key)
+            .ok()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .ok_or_else(|| malformed("the key line is not 64 hex digits"))?;
+        Ok(Self { suite, public_key })
+    }
+}
+
+fn platform_error(e: &dyn std::fmt::Display) -> core_types::Error {
+    core_types::Error::Platform(e.to_string())
+}
+
+/// Write `contents` to `path` with `mode` through `core_layout::file`, off
+/// the tokio runtime threads.
+async fn write_file(
+    path: PathBuf,
+    contents: zeroize::Zeroizing<Vec<u8>>,
+    mode: Mode,
+) -> core_types::Result<()> {
+    tokio::task::spawn_blocking(move || core_layout::file::write(&path, &contents, mode))
+        .await
+        .map_err(|e| platform_error(&e))?
+        .map_err(|e| platform_error(&e))
+}
+
+/// Publish the bus endpoint (`Layout::bus_endpoint_file`, 0644).
 ///
 /// # Errors
 ///
-/// Returns an error if directory creation or file I/O fails.
-pub async fn write_bus_keypair(keypair: &snow::Keypair) -> core_types::Result<()> {
-    let dir = runtime_dir()?;
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
-        core_types::Error::Platform(format!(
-            "failed to create runtime dir {}: {e}",
-            dir.display()
-        ))
-    })?;
-
-    let pub_path = dir.join("bus.pub");
-    let key_path = dir.join("bus.key");
-
-    tokio::fs::write(&pub_path, &keypair.public)
-        .await
-        .map_err(|e| core_types::Error::Platform(format!("failed to write bus.pub: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644))
-            .await
-            .map_err(|e| {
-                core_types::Error::Platform(format!("failed to set bus.pub permissions: {e}"))
-            })?;
-    }
-
-    // Write private key atomically: write to temp file with 0600 perms, then rename.
-    // This prevents a window where the key file exists with default (permissive) permissions.
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let tmp_key_path = dir.join("bus.key.tmp");
-        // Blocking file ops for atomic write with mode — wrapped in spawn_blocking
-        // to avoid blocking the tokio runtime.
-        let private_key = zeroize::Zeroizing::new(keypair.private.clone());
-        let tmp_path = tmp_key_path.clone();
-        let final_path = key_path.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            f.write_all(&private_key)?;
-            f.sync_all()?;
-            std::fs::rename(&tmp_path, &final_path)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| core_types::Error::Platform(format!("bus.key write task failed: {e}")))?
-        .map_err(|e| core_types::Error::Platform(format!("failed to write bus.key: {e}")))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        compile_error!(
-            "bus.key writing requires Unix file permissions (mode 0600). Non-Unix platforms are not supported in MVP."
-        );
-    }
-
-    // Write tamper-detection checksum.
-    {
-        let pub_array: [u8; 32] =
-            keypair.public.clone().try_into().map_err(|_| {
-                core_types::Error::Platform("bus public key is not 32 bytes".into())
-            })?;
-        let checksum = keypair_checksum(&pub_array, &keypair.private);
-        let checksum_path = dir.join("bus.checksum");
-        tokio::fs::write(&checksum_path, checksum)
-            .await
-            .map_err(|e| {
-                core_types::Error::Platform(format!("failed to write bus.checksum: {e}"))
-            })?;
-    }
-
+/// When the runtime directory cannot be placed or the file cannot be
+/// written.
+pub async fn publish_bus_endpoint(
+    layout: &Layout,
+    endpoint: &BusEndpoint,
+) -> core_types::Result<()> {
+    let path = layout.bus_endpoint_file()?;
+    write_file(
+        path.clone(),
+        zeroize::Zeroizing::new(endpoint.encode().into_bytes()),
+        Mode::PublicRead,
+    )
+    .await?;
     tracing::info!(
-        pub_path = %pub_path.display(),
-        key_path = %key_path.display(),
-        "bus keypair written"
+        path = %path.display(),
+        protocol = endpoint.suite.protocol_name(),
+        "bus endpoint published"
     );
     Ok(())
 }
 
-/// Directory for per-daemon keypair files.
-fn keys_dir() -> core_types::Result<PathBuf> {
-    Ok(runtime_dir()?.join("keys"))
-}
-
-/// Create the per-daemon keys directory if it does not exist.
+/// The published bus endpoint.
 ///
 /// # Errors
 ///
-/// Returns an error if the directory cannot be created.
-pub async fn create_keys_dir() -> core_types::Result<()> {
-    let dir = keys_dir()?;
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
-        core_types::Error::Platform(format!("failed to create keys dir {}: {e}", dir.display()))
+/// When the file does not exist (daemon-profile is not running), cannot
+/// be read, or is not an endpoint record.
+pub async fn read_bus_endpoint(layout: &Layout) -> core_types::Result<BusEndpoint> {
+    let path = layout.bus_endpoint_file()?;
+    let text = tokio::fs::read_to_string(&path).await.map_err(|e| {
+        core_types::Error::Platform(format!("failed to read {}: {e}", path.display()))
     })?;
-    // Restrict to owner-only (0700) — create_dir_all inherits umask
-    // (typically 0022 → 0755), which would let any local user enumerate daemons.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .await
-            .map_err(|e| {
-                core_types::Error::Platform(format!(
-                    "failed to set keys dir permissions on {}: {e}",
-                    dir.display()
-                ))
-            })?;
-    }
-    Ok(())
+    BusEndpoint::decode(&text, &path)
 }
 
-/// Write a daemon's keypair to disk. Private key gets 0600, public key gets 0644.
-///
-/// Uses write-to-temp-then-rename for atomicity, same pattern as `write_bus_keypair()`.
+/// Create the per-daemon keys directory owner-only (0700).
 ///
 /// # Errors
 ///
-/// Returns an error if writing the keypair files fails.
+/// Returns an error if the directory cannot be placed, created, or
+/// restricted.
+pub async fn create_keys_dir(layout: &Layout) -> core_types::Result<()> {
+    let dir = layout.keys_dir()?;
+    tokio::task::spawn_blocking(move || core_layout::file::create_private_dir(&dir))
+        .await
+        .map_err(|e| platform_error(&e))?
+        .map_err(|e| platform_error(&e))
+}
+
+/// The three files of one daemon's keypair.
+struct DaemonKeyFiles {
+    private: PathBuf,
+    public: PathBuf,
+    checksum: PathBuf,
+}
+
+impl DaemonKeyFiles {
+    fn of(layout: &Layout, daemon_name: &str) -> core_types::Result<Self> {
+        Ok(Self {
+            private: layout.daemon_key_file(daemon_name, KeyFile::Private)?,
+            public: layout.daemon_key_file(daemon_name, KeyFile::Public)?,
+            checksum: layout.daemon_key_file(daemon_name, KeyFile::Checksum)?,
+        })
+    }
+}
+
+/// Write a daemon's keypair (`Layout::daemon_key_file`): the private key
+/// 0600, the public key 0644, then the checksum 0600, and return the
+/// public key. The checksum is written last, so a keypair interrupted
+/// mid-write fails verification.
+///
+/// # Errors
+///
+/// Returns an error if the keys directory cannot be placed, the public key
+/// is not 32 bytes, or a key file cannot be written.
 pub async fn write_daemon_keypair(
+    layout: &Layout,
     daemon_name: &str,
     keypair: &snow::Keypair,
-) -> core_types::Result<()> {
-    let dir = keys_dir()?;
-
-    let pub_path = dir.join(format!("{daemon_name}.pub"));
-    let key_path = dir.join(format!("{daemon_name}.key"));
-
-    // Public key: world-readable (explicit 0644).
-    tokio::fs::write(&pub_path, &keypair.public)
-        .await
-        .map_err(|e| {
-            core_types::Error::Platform(format!("failed to write {daemon_name}.pub: {e}"))
-        })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644))
-            .await
-            .map_err(|e| {
-                core_types::Error::Platform(format!(
-                    "failed to set {daemon_name}.pub permissions: {e}"
-                ))
-            })?;
-    }
-
-    // Private key: atomic write with 0600 perms.
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let tmp_path = dir.join(format!("{daemon_name}.key.tmp"));
-        let private_key = zeroize::Zeroizing::new(keypair.private.clone());
-        let tmp = tmp_path.clone();
-        let final_path = key_path.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            f.write_all(&private_key)?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, &final_path)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| {
-            core_types::Error::Platform(format!("{daemon_name}.key write task failed: {e}"))
-        })?
-        .map_err(|e| {
-            core_types::Error::Platform(format!("failed to write {daemon_name}.key: {e}"))
-        })?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        compile_error!("daemon keypair writing requires Unix file permissions (mode 0600)");
-    }
-
-    // Write tamper-detection checksum.
-    {
-        let pub_array: [u8; 32] = keypair.public.clone().try_into().map_err(|_| {
-            core_types::Error::Platform(format!("{daemon_name} public key is not 32 bytes"))
-        })?;
-        let checksum = keypair_checksum(&pub_array, &keypair.private);
-        let checksum_path = dir.join(format!("{daemon_name}.checksum"));
-        tokio::fs::write(&checksum_path, checksum)
-            .await
-            .map_err(|e| {
-                core_types::Error::Platform(format!("failed to write {daemon_name}.checksum: {e}"))
-            })?;
-    }
-
+) -> core_types::Result<[u8; 32]> {
+    let public: [u8; 32] = keypair.public.clone().try_into().map_err(|_| {
+        core_types::Error::Platform(format!("{daemon_name}: public key is not 32 bytes"))
+    })?;
+    let files = DaemonKeyFiles::of(layout, daemon_name)?;
+    write_file(
+        files.private.clone(),
+        zeroize::Zeroizing::new(keypair.private.clone()),
+        Mode::OwnerOnly,
+    )
+    .await?;
+    write_file(
+        files.public.clone(),
+        zeroize::Zeroizing::new(public.to_vec()),
+        Mode::PublicRead,
+    )
+    .await?;
+    write_file(
+        files.checksum,
+        zeroize::Zeroizing::new(keypair_checksum(&public, &keypair.private).to_vec()),
+        Mode::OwnerOnly,
+    )
+    .await?;
     tracing::debug!(
         daemon = daemon_name,
-        pub_path = %pub_path.display(),
-        key_path = %key_path.display(),
+        pub_path = %files.public.display(),
+        key_path = %files.private.display(),
         "daemon keypair written"
     );
-    Ok(())
+    Ok(public)
 }
 
-/// Read a daemon's keypair from disk. Private key wrapped in `Zeroizing`.
+/// Generate a fresh keypair for `daemon_name`, persist it with
+/// [`write_daemon_keypair`], and return its public key for the clearance
+/// registry. The private key is zeroized when this returns.
 ///
 /// # Errors
 ///
-/// Returns an error if the keypair files cannot be read or have invalid size.
+/// The [`generate_keypair`] and [`write_daemon_keypair`] errors.
+pub async fn issue_daemon_keypair(
+    layout: &Layout,
+    daemon_name: &str,
+) -> core_types::Result<[u8; 32]> {
+    write_daemon_keypair(layout, daemon_name, generate_keypair()?.as_inner()).await
+}
+
+/// Read a file, naming it on error.
+async fn read_file(path: &Path) -> core_types::Result<Vec<u8>> {
+    tokio::fs::read(path)
+        .await
+        .map_err(|e| core_types::Error::Platform(format!("failed to read {}: {e}", path.display())))
+}
+
+/// Read a daemon's keypair and verify it against its checksum. Private key
+/// wrapped in `Zeroizing`.
+///
+/// # Errors
+///
+/// Returns an error if any of the three files cannot be read, the public
+/// key is not 32 bytes, or the checksum does not verify (`TAMPER DETECTED`,
+/// naming the files to delete).
 pub async fn read_daemon_keypair(
+    layout: &Layout,
     daemon_name: &str,
 ) -> core_types::Result<(zeroize::Zeroizing<Vec<u8>>, [u8; 32])> {
-    let dir = keys_dir()?;
-
-    let key_path = dir.join(format!("{daemon_name}.key"));
-    let pub_path = dir.join(format!("{daemon_name}.pub"));
-
-    let private_bytes = tokio::fs::read(&key_path).await.map_err(|e| {
-        core_types::Error::Platform(format!(
-            "failed to read {daemon_name}.key at {}: {e}",
-            key_path.display()
-        ))
-    })?;
-
-    let public_bytes = tokio::fs::read(&pub_path).await.map_err(|e| {
-        core_types::Error::Platform(format!(
-            "failed to read {daemon_name}.pub at {}: {e}",
-            pub_path.display()
-        ))
-    })?;
-
-    let public_key: [u8; 32] = public_bytes.try_into().map_err(|v: Vec<u8>| {
-        core_types::Error::Platform(format!(
-            "{daemon_name}.pub has wrong size: expected 32 bytes, got {}",
-            v.len()
-        ))
-    })?;
-
-    // Tamper detection.
-    let checksum_path = dir.join(format!("{daemon_name}.checksum"));
-    match tokio::fs::read(&checksum_path).await {
-        Ok(stored_checksum) => {
-            let expected = keypair_checksum(&public_key, &private_bytes);
-            if stored_checksum.len() != 32 || stored_checksum[..] != expected[..] {
-                return Err(core_types::Error::Platform(format!(
-                    "TAMPER DETECTED: {daemon_name} keypair checksum mismatch. \
-                     The private key or public key file may have been modified. \
-                     Delete $XDG_RUNTIME_DIR/pds/keys/{daemon_name}.* and restart daemon-profile."
-                )));
-            }
-            tracing::debug!(daemon = daemon_name, "keypair integrity verified");
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Backward compatibility: no checksum file from older installation.
-            tracing::warn!(
-                daemon = daemon_name,
-                "no checksum file found — keypair integrity cannot be verified. \
-                 Restart daemon-profile to generate checksums."
-            );
-        }
-        Err(e) => {
-            return Err(core_types::Error::Platform(format!(
-                "failed to read {daemon_name}.checksum: {e}"
-            )));
-        }
+    let files = DaemonKeyFiles::of(layout, daemon_name)?;
+    let private_bytes = zeroize::Zeroizing::new(read_file(&files.private).await?);
+    let public_key: [u8; 32] =
+        read_file(&files.public)
+            .await?
+            .try_into()
+            .map_err(|v: Vec<u8>| {
+                core_types::Error::Platform(format!(
+                    "{} has wrong size: expected 32 bytes, got {}",
+                    files.public.display(),
+                    v.len()
+                ))
+            })?;
+    let stored_checksum = read_file(&files.checksum).await?;
+    if stored_checksum[..] != keypair_checksum(&public_key, &private_bytes)[..] {
+        return Err(core_types::Error::Platform(format!(
+            "TAMPER DETECTED: {daemon_name} keypair checksum mismatch. \
+             The private key or public key file may have been modified. \
+             Delete {}, {} and {}, then restart daemon-profile.",
+            files.private.display(),
+            files.public.display(),
+            files.checksum.display()
+        )));
     }
-
-    Ok((zeroize::Zeroizing::new(private_bytes), public_key))
-}
-
-/// Read only a daemon's public key from disk.
-///
-/// # Errors
-///
-/// Returns an error if the public key file cannot be read or has invalid size.
-pub async fn read_daemon_public_key(daemon_name: &str) -> core_types::Result<[u8; 32]> {
-    let dir = keys_dir()?;
-    let pub_path = dir.join(format!("{daemon_name}.pub"));
-    let bytes = tokio::fs::read(&pub_path).await.map_err(|e| {
-        core_types::Error::Platform(format!(
-            "failed to read {daemon_name}.pub at {}: {e}",
-            pub_path.display()
-        ))
-    })?;
-    let key: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-        core_types::Error::Platform(format!(
-            "{daemon_name}.pub has wrong size: expected 32 bytes, got {}",
-            v.len()
-        ))
-    })?;
-    Ok(key)
-}
-
-/// Read the bus server's public key from the runtime directory.
-///
-/// Connecting daemons call this before initiating the Noise IK handshake
-/// (the "K" in IK — responder's static key is Known to the initiator).
-///
-/// # Errors
-///
-/// Returns an error if the file does not exist or is not exactly 32 bytes.
-pub async fn read_bus_public_key() -> core_types::Result<[u8; 32]> {
-    read_bus_public_key_from(&runtime_dir()?).await
-}
-
-/// Read the bus server's public key from a specific directory.
-///
-/// Allows callers to specify a custom path (useful for testing).
-///
-/// # Errors
-///
-/// Returns an error if the file does not exist or is not exactly 32 bytes.
-pub async fn read_bus_public_key_from(dir: &Path) -> core_types::Result<[u8; 32]> {
-    let pub_path = dir.join("bus.pub");
-    let bytes = tokio::fs::read(&pub_path).await.map_err(|e| {
-        core_types::Error::Platform(format!(
-            "failed to read bus.pub at {}: {e}",
-            pub_path.display()
-        ))
-    })?;
-    let key: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-        core_types::Error::Platform(format!(
-            "bus.pub has wrong size: expected 32 bytes, got {}",
-            v.len()
-        ))
-    })?;
-    Ok(key)
+    tracing::debug!(daemon = daemon_name, "keypair integrity verified");
+    Ok((private_bytes, public_key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_types::{NoiseCipher, NoiseHash};
 
     #[test]
     fn keypair_checksum_consistency() {
@@ -518,16 +385,51 @@ mod tests {
         );
 
         let extracted = kp.into_inner();
-        // The extracted keypair should have the original private key.
         assert_eq!(extracted.private, private_copy);
-        // After into_inner, the wrapper's field was mem::take'd (zeroed Vec).
-        // We can't inspect it post-move, but into_inner's implementation uses
-        // mem::take which replaces with empty Vec — verified by code review.
-        // This test validates the round-trip: generated key is non-zero,
-        // extraction preserves key material for the caller.
     }
 
-    // NOTE: daemon keypair persistence tests live in
-    // core-ipc/tests/daemon_keypair.rs (uses set_runtime_dir_override)
-    // (unsafe since Rust 2024) and the crate uses `#![forbid(unsafe_code)]`.
+    #[test]
+    fn endpoint_records_round_trip_for_every_suite() {
+        let path = Path::new("/r/runtime/pds/bus.endpoint");
+        for suite in NoiseSuite::ALL {
+            let endpoint = BusEndpoint {
+                suite,
+                public_key: [0xA7; 32],
+            };
+            let text = endpoint.encode();
+            assert_eq!(
+                text,
+                format!("{}\n{}\n", suite.protocol_name(), "a7".repeat(32))
+            );
+            assert_eq!(BusEndpoint::decode(&text, path).unwrap(), endpoint);
+        }
+    }
+
+    #[test]
+    fn malformed_endpoint_records_are_rejected() {
+        let path = Path::new("/r/runtime/pds/bus.endpoint");
+        let key = "a7".repeat(32);
+        for text in [
+            String::new(),
+            "Noise_IK_25519_ChaChaPoly_BLAKE2s\n".to_owned(),
+            format!("Noise_IK_25519_ChaChaPoly_BLAKE2s\n{key}\nextra\n"),
+            format!("Noise_IK_25519_ChaChaPoly_BLAKE2s\n{}\n", "a7".repeat(31)),
+            format!("Noise_XX_25519_ChaChaPoly_BLAKE2s\n{key}\n"),
+            // A raw 32-byte key, as `bus.pub` held, is not a record.
+            String::from_utf8_lossy(&[0xA7; 32]).into_owned(),
+        ] {
+            assert!(BusEndpoint::decode(&text, path).is_err(), "{text:?}");
+        }
+        let err = BusEndpoint::decode("Noise_IK_25519_AESGCM_MD5\n", path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a bus endpoint record"), "{err}");
+        let suite = NoiseSuite::new(NoiseCipher::AesGcm, NoiseHash::Sha256);
+        assert_eq!(
+            NoiseSuite::from_protocol_name(suite.protocol_name()).unwrap(),
+            suite
+        );
+    }
+
+    // Persistence, modes, and tamper detection: core-ipc/tests/daemon_keypair.rs.
 }

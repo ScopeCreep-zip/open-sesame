@@ -9,7 +9,7 @@ trust profiles.
 A desktop installation requires both packages:
 
 | Package | Contents |
-|---------|----------|
+| --- | --- |
 | `open-sesame` | CLI (`sesame`), headless daemons: profile, secrets, launcher, snippets |
 | `open-sesame-desktop` | Desktop daemons: wm, clipboard, input; Wayland/COSMIC integration |
 
@@ -88,7 +88,7 @@ namespace derived as `uuid5(NAMESPACE_URL, domain)`, per the `OrgConfig` type.
 All seven daemons run as systemd user services:
 
 | Daemon | Responsibility | Target | SecurityLevel |
-|--------|---------------|--------|---------------|
+| --- | --- | --- | --- |
 | `daemon-profile` | IPC bus host, key management, profile activation, audit | Headless | Internal |
 | `daemon-secrets` | SQLCipher vaults, ACL, rate limiting | Headless | SecretsOnly |
 | `daemon-launcher` | Application launching, frecency scoring | Headless | Internal |
@@ -109,7 +109,7 @@ clearance level.
 Two systemd targets compose the service graph:
 
 | Target | WantedBy | Daemons |
-|--------|----------|---------|
+| --- | --- | --- |
 | `open-sesame-headless.target` | `default.target` | profile, secrets, launcher, snippets |
 | `open-sesame-desktop.target` | `graphical-session.target` | wm, clipboard, input |
 
@@ -143,7 +143,7 @@ graphical-session.target
 ### Configuration
 
 | Path | Purpose |
-|------|---------|
+| --- | --- |
 | `~/.config/pds/config.toml` | User configuration: profiles, crypto, agents, extensions |
 | `~/.config/pds/installation.toml` | Installation identity: UUID, namespace, org, machine binding |
 | `~/.config/pds/ssh-agent.env` | SSH agent socket path for factor enrollment |
@@ -156,7 +156,7 @@ and source string (e.g., `/etc/pds/policy.toml`).
 ### Runtime
 
 | Path | Purpose |
-|------|---------|
+| --- | --- |
 | `$XDG_RUNTIME_DIR/pds/` | Runtime directory |
 | `$XDG_RUNTIME_DIR/pds/bus.sock` | Noise IK IPC bus socket |
 
@@ -167,7 +167,7 @@ timeout (`IpcConfig` in `core-config/src/schema.rs`).
 ### Data
 
 | Path | Purpose |
-|------|---------|
+| --- | --- |
 | `~/.config/pds/vaults/{profile}.db` | SQLCipher encrypted vault per trust profile |
 | `~/.config/pds/launcher/{profile}.frecency.db` | Application launch frecency database |
 | `~/.config/pds/audit/` | BLAKE3 hash-chained audit log |

@@ -4,6 +4,7 @@ xtask/target
 /result
 /tmp
 /docs/book
+/combined-docs
 /node_modules
 
 # Cache files

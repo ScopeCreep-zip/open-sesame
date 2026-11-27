@@ -76,7 +76,7 @@ Each pod receives a unique `InstallationId` via a pre-seeded `installation.toml`
 `InstallationConfig` (`core-config/src/schema_installation.rs`) for a pod includes:
 
 | Field | Value | Purpose |
-|-------|-------|---------|
+| --- | --- | --- |
 | `id` | UUID v4, unique per pod instance | Audit trail attribution |
 | `org.domain` | Organization domain | Fleet grouping |
 | `machine_binding.binding_type` | `machine-id` | Pod identity binding |
@@ -137,7 +137,7 @@ secrecy. In service mesh contexts, Noise IK can serve as an alternative to mTLS 
 service-to-service communication:
 
 | Property | mTLS (Istio/Linkerd) | Noise IK |
-|----------|---------------------|----------|
+| --- | --- | --- |
 | Key exchange | X.509 certificates, CA hierarchy | X25519 static keys, clearance registry |
 | Forward secrecy | Per-connection via TLS 1.3 | Per-connection via Noise IK |
 | Identity binding | SPIFFE ID in SAN | `AgentId` + `InstallationId` |
@@ -156,7 +156,7 @@ certificate authority.
 Minimum resource requests for the Open Sesame sidecar:
 
 | Resource | Request | Limit | Notes |
-|----------|---------|-------|-------|
+| --- | --- | --- | --- |
 | CPU | 10m | 100m | Idle after vault unlock |
 | Memory | 32Mi | 128Mi | `LimitMEMLOCK=64M` for secure memory |
 | Ephemeral storage | 10Mi | 50Mi | Vault DB + audit log |

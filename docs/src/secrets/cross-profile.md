@@ -107,7 +107,7 @@ applies identically regardless of which profile the secret originated from.
 ## What Crosses Profile Boundaries
 
 | Resource | Crosses boundaries? | Mechanism |
-|---|---|---|
+| --- | --- | --- |
 | Secret values | No | Each profile's vault is encrypted with a unique key. |
 | Secret key names | No | Key names are only visible within a single profile's `SecretList` response. |
 | Master keys | No | Each profile has an independent master key derived from its own salt. |

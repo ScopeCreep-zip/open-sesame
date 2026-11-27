@@ -1,36 +1,68 @@
-//! daemon-clipboard: Clipboard manager daemon.
+//! daemon-clipboard: clipboard history daemon.
 //!
-//! Monitors clipboard changes via Wayland data-control protocol, stores
-//! history per-profile in SQLite, detects and auto-expires sensitive content,
-//! and serves clipboard RPC requests over the encrypted IPC bus.
+//! Captures each text selection of the Wayland clipboard
+//! (`platform_linux::clipboard`, the data-control protocols) into the
+//! history of the default profile as daemon-profile reports it
+//! (`StatusResponse` at startup, then `DefaultProfileChanged`), and serves
+//! the per-profile history over the bus: listings, single-entry content,
+//! and clearing. Entries are filed under the installation-scoped profile
+//! identity (`ProfileId::of_profile`), so nothing is recorded before
+//! `sesame init` writes the installation identity.
 //!
-//! Landlock: Wayland socket, runtime dir (IPC), cache dir (history DB).
+//! A selection its source marks secret (the password manager hint) is
+//! held in memory only, for the profile's `clipboard.sensitive_ttl_s`, and
+//! then expires (`ClipboardEntryExpired`); it is never written to disk.
+//! Every other selection is written to the `SQLite` history, skipped when
+//! it repeats the newest entry, and pruned to `clipboard.max_history`.
+//!
+//! Landlock: bus client, configuration (read), the systemd notification
+//! socket, the Wayland socket, and the cache directory (history database).
 //! No network access beyond local IPC.
 
 use anyhow::Context;
 use clap::Parser;
+use core_config::{ClipboardConfig, Config};
+use core_daemon::{DaemonIdentity, EventLoop, LogFormat, Shutdown, Wake};
 use core_ipc::{BusClient, Message};
 use core_types::{
-    ClipboardEntry, ClipboardEntryId, DaemonId, EventKind, ProfileId, SecurityLevel,
-    SensitivityClass,
+    ClipboardEntry, ClipboardEntryId, Daemon, EventKind, ProfileId, SecurityLevel, SensitiveBytes,
+    SensitivityClass, TrustProfileName,
 };
 use rusqlite::Connection;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const IDENTITY: DaemonIdentity = DaemonIdentity {
+    daemon: Daemon::Clipboard,
+    version: env!("CARGO_PKG_VERSION"),
+    capabilities: &["clipboard", "history"],
+};
+
+/// How many characters of an entry its preview shows.
+const PREVIEW_CHARS: usize = 80;
+/// The preview of an entry held as a secret: none of its content.
+const SECRET_PREVIEW: &str = "[secret]";
+/// How long the startup query for the default profile waits.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser, Debug)]
-#[command(name = "daemon-clipboard", about = "Clipboard manager daemon")]
+#[command(name = IDENTITY.daemon.name(), about = "Clipboard history daemon")]
 struct Cli {
-    #[arg(long, default_value = "json", env = "PDS_LOG_FORMAT")]
-    log_format: String,
+    #[arg(long, value_enum, default_value = "json", env = "PDS_LOG_FORMAT")]
+    log_format: LogFormat,
 }
 
+/// Open the history database at `db_path` (in the cache directory
+/// `core_daemon::startup` creates) and create its schema.
 fn init_db(db_path: &std::path::Path) -> anyhow::Result<Connection> {
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create clipboard cache directory")?;
-    }
-    let conn = Connection::open(db_path).context("failed to open clipboard database")?;
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("failed to open clipboard database {}", db_path.display()))?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+/// The history schema. `profile_id` is the installation-scoped
+/// `ProfileId` of the entry's profile.
+fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard_entries (
             entry_id TEXT PRIMARY KEY,
@@ -44,520 +76,1022 @@ fn init_db(db_path: &std::path::Path) -> anyhow::Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_clipboard_profile
             ON clipboard_entries(profile_id, timestamp_ms DESC);",
     )
-    .context("failed to initialize clipboard schema")?;
-    Ok(conn)
+    .context("failed to initialize clipboard schema")
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+/// Every sensitivity class and its stored label.
+const SENSITIVITY_LABELS: [(SensitivityClass, &str); 4] = [
+    (SensitivityClass::Public, "public"),
+    (SensitivityClass::Confidential, "confidential"),
+    (SensitivityClass::Secret, "secret"),
+    (SensitivityClass::TopSecret, "topsecret"),
+];
 
-    init_logging(&cli.log_format)?;
+/// Parse a stored sensitivity label. An unknown label is `None`: it must
+/// not be downgraded to `Public`.
+fn parse_sensitivity(label: &str) -> Option<SensitivityClass> {
+    SENSITIVITY_LABELS
+        .iter()
+        .find(|(_, stored)| *stored == label)
+        .map(|(class, _)| *class)
+}
 
-    tracing::info!("daemon-clipboard starting");
+/// The stored label of `class`.
+fn sensitivity_label(class: SensitivityClass) -> Option<&'static str> {
+    SENSITIVITY_LABELS
+        .iter()
+        .find(|(known, _)| *known == class)
+        .map(|(_, label)| *label)
+}
 
-    #[cfg(target_os = "linux")]
-    platform_linux::security::harden_process();
+/// Decode a column holding a UUID string. A malformed value is a
+/// conversion error, not a freshly minted id.
+fn uuid_column(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<uuid::Uuid> {
+    let text: String = row.get(idx)?;
+    uuid::Uuid::parse_str(&text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
 
-    #[cfg(target_os = "linux")]
-    platform_linux::security::apply_resource_limits(&platform_linux::security::ResourceLimits {
-        nofile: 4096,
-        memlock_bytes: 0,
-    });
-
-    // -- Directory bootstrap --
-    core_config::bootstrap_dirs();
-
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("open-sesame");
-    let db_path = cache_dir.join("clipboard.db");
-    let db = Arc::new(Mutex::new(init_db(&db_path)?));
-
-    let config = core_config::load_config(None).context("failed to load config")?;
-
-    let config_paths = core_config::resolve_config_paths(None);
-    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
-    let (_config_watcher, _config_state) = core_config::ConfigWatcher::with_callback(
-        &config_paths,
-        config,
-        Some(Box::new(move || {
-            let _ = reload_tx.blocking_send(());
-        })),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let socket_path = core_ipc::socket_path().context("failed to resolve IPC socket path")?;
-    let server_pub = core_ipc::noise::read_bus_public_key()
-        .await
-        .context("daemon-profile is not running (no bus public key found)")?;
-    let daemon_id = DaemonId::new();
-    let msg_ctx = core_ipc::MessageContext::new(daemon_id);
-
-    let mut client = BusClient::connect_daemon_with_keypair_retry(
-        "daemon-clipboard",
-        daemon_id,
-        &socket_path,
-        &server_pub,
-        vec!["clipboard".into(), "history".into()],
-        env!("CARGO_PKG_VERSION"),
-        core_ipc::RetryConfig {
-            max_attempts: 5,
-            backoff: std::time::Duration::from_millis(500),
-        },
-    )
-    .await
-    .context("failed to connect to IPC bus")?;
-
-    core_types::init_secure_memory();
-
-    #[cfg(target_os = "linux")]
-    apply_sandbox();
-
-    client
-        .publish(
-            EventKind::DaemonStarted {
-                daemon_id,
-                version: env!("CARGO_PKG_VERSION").into(),
-                capabilities: vec!["clipboard".into(), "history".into()],
-            },
-            SecurityLevel::Internal,
+/// Decode one row of `SELECT entry_id, profile_id, content_type,
+/// sensitivity, preview, timestamp_ms`.
+fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry> {
+    let label: String = row.get(3)?;
+    let sensitivity = parse_sensitivity(&label).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            format!("unknown sensitivity label {label:?}").into(),
         )
-        .await
-        .ok();
+    })?;
+    let timestamp: i64 = row.get(5)?;
+    let timestamp_ms = u64::try_from(timestamp)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, timestamp))?;
+    Ok(ClipboardEntry {
+        entry_id: ClipboardEntryId::from_uuid(uuid_column(row, 0)?),
+        profile_id: ProfileId::from_uuid(uuid_column(row, 1)?),
+        content_type: row.get(2)?,
+        sensitivity,
+        preview: row.get(4)?,
+        timestamp_ms,
+    })
+}
 
-    #[cfg(target_os = "linux")]
-    platform_linux::systemd::notify_ready();
+/// The preview of `text`: its first [`PREVIEW_CHARS`] characters, with
+/// line breaks and other control characters shown as spaces.
+fn preview(text: &str) -> String {
+    text.chars()
+        .take(PREVIEW_CHARS)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
 
-    tracing::info!("daemon-clipboard ready, entering event loop");
+/// Milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
 
-    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(15));
-    let mut watchdog_count: u64 = 0;
+/// An entry held in memory as a secret until `expires`.
+struct Held {
+    entry: ClipboardEntry,
+    content: SensitiveBytes,
+    expires: Instant,
+}
 
-    loop {
-        tokio::select! {
-            _ = watchdog.tick() => {
-                watchdog_count += 1;
-                if watchdog_count <= 3 || watchdog_count.is_multiple_of(20) {
-                    tracing::debug!(watchdog_count, "watchdog tick");
-                }
-                #[cfg(target_os = "linux")]
-                platform_linux::systemd::notify_watchdog();
-            }
-            msg_opt = client.recv() => {
-                let Some(msg) = msg_opt else {
-                    tracing::error!("IPC bus disconnected — exiting for systemd restart");
-                    std::process::exit(1);
-                };
-                // Skip self-published messages to prevent feedback loops.
-                if msg.sender == daemon_id {
-                    continue;
-                }
+/// One selection to record.
+struct Selection<'a> {
+    content_type: &'a str,
+    text: &'a str,
+    /// Whether the source marked it a secret.
+    secret_hint: bool,
+}
 
-                let response_event = match &msg.payload {
-                    EventKind::ClipboardHistory { profile, limit } => {
-                        let profile_str = profile.to_string();
-                        let limit = *limit;
-                        let db_guard = db.lock().await;
-                        let result: Vec<ClipboardEntry> = (|| -> anyhow::Result<Vec<ClipboardEntry>> {
-                            let mut stmt = db_guard.prepare(
-                                "SELECT entry_id, profile_id, content_type, sensitivity, preview, timestamp_ms
-                                 FROM clipboard_entries WHERE profile_id = ?1
-                                 ORDER BY timestamp_ms DESC LIMIT ?2"
-                            )?;
-                            let rows = stmt.query_map(
-                                rusqlite::params![&profile_str, limit],
-                                |row| {
-                                    let entry_id_str: String = row.get(0)?;
-                                    let sensitivity_str: String = row.get(3)?;
-                                    let sensitivity = match sensitivity_str.as_str() {
-                                        "confidential" => SensitivityClass::Confidential,
-                                        "secret" => SensitivityClass::Secret,
-                                        "topsecret" => SensitivityClass::TopSecret,
-                                        _ => SensitivityClass::Public,
-                                    };
-                                    Ok(ClipboardEntry {
-                                        entry_id: ClipboardEntryId::from_uuid(
-                                            uuid::Uuid::parse_str(&entry_id_str).unwrap_or_else(|_| uuid::Uuid::now_v7())
-                                        ),
-                                        content_type: row.get(2)?,
-                                        sensitivity,
-                                        profile_id: ProfileId::from_uuid(
-                                            uuid::Uuid::parse_str(&row.get::<_, String>(1)?).unwrap_or_else(|_| uuid::Uuid::now_v7())
-                                        ),
-                                        preview: row.get(4)?,
-                                        timestamp_ms: row.get::<_, i64>(5)? as u64,
-                                    })
-                                },
-                            )?;
-                            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-                        })().unwrap_or_else(|e| {
-                            tracing::error!(error = %e, "ClipboardHistory query failed");
-                            vec![]
-                        });
-                        drop(db_guard);
-                        tracing::debug!(profile = %profile, count = result.len(), "ClipboardHistory");
-                        Some(EventKind::ClipboardHistoryResponse { entries: result })
-                    }
+/// The clipboard history: the database of persisted entries and the
+/// secrets held in memory.
+struct History {
+    db: Connection,
+    held: Vec<Held>,
+}
 
-                    EventKind::ClipboardClear { profile } => {
-                        let profile_str = profile.to_string();
-                        let db_guard = db.lock().await;
-                        let success = db_guard
-                            .execute("DELETE FROM clipboard_entries WHERE profile_id = ?1", rusqlite::params![&profile_str])
-                            .map(|deleted| {
-                                tracing::info!(profile = %profile, deleted, "ClipboardClear");
-                                true
-                            })
-                            .unwrap_or_else(|e| {
-                                tracing::error!(error = %e, "ClipboardClear failed");
-                                false
-                            });
-                        drop(db_guard);
-                        Some(EventKind::ClipboardClearResponse { success })
-                    }
-
-                    EventKind::ClipboardGet { entry_id } => {
-                        let entry_id_str = entry_id.as_uuid().to_string();
-                        let db_guard = db.lock().await;
-                        let (content, content_type) = db_guard
-                            .query_row(
-                                "SELECT content, content_type FROM clipboard_entries WHERE entry_id = ?1",
-                                rusqlite::params![&entry_id_str],
-                                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                            )
-                            .map(|(c, ct)| (Some(c), Some(ct)))
-                            .unwrap_or((None, None));
-                        drop(db_guard);
-                        Some(EventKind::ClipboardGetResponse { content, content_type })
-                    }
-
-                    _ => None,
-                };
-
-                if let Some(event) = response_event {
-                    let response = Message::new(
-                        &msg_ctx, event, msg.security_level, client.epoch(),
-                    ).with_correlation(msg.msg_id);
-                    if let Err(e) = client.send(&response).await {
-                        tracing::warn!(error = %e, "failed to send response");
-                    }
-                }
-            }
-            Some(()) = reload_rx.recv() => {
-                tracing::info!("config reloaded");
-                client.publish(
-                    EventKind::ConfigReloaded {
-                        daemon_id,
-                        changed_keys: vec!["clipboard".into()],
-                    },
-                    SecurityLevel::Internal,
-                ).await.ok();
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("SIGINT received, shutting down");
-                break;
-            }
-            _ = sigterm() => {
-                tracing::info!("SIGTERM received, shutting down");
-                break;
-            }
+impl History {
+    fn new(db: Connection) -> Self {
+        Self {
+            db,
+            held: Vec::new(),
         }
     }
 
-    client
-        .publish(
-            EventKind::DaemonStopped {
-                daemon_id,
-                reason: "shutdown".into(),
+    /// Record `selection` in `profile`'s history under its `config`, at
+    /// `timestamp_ms` (`now` for expiry): the new entry, or `None` when
+    /// nothing is kept (it repeats the newest entry, `max_history` is 0,
+    /// or a secret's `sensitive_ttl_s` is 0).
+    fn record(
+        &mut self,
+        profile: ProfileId,
+        config: &ClipboardConfig,
+        selection: &Selection<'_>,
+        timestamp_ms: u64,
+        now: Instant,
+    ) -> rusqlite::Result<Option<ClipboardEntry>> {
+        let secret = config.detect_sensitive && selection.secret_hint;
+        let entry = ClipboardEntry {
+            entry_id: ClipboardEntryId::new(),
+            content_type: selection.content_type.to_owned(),
+            sensitivity: if secret {
+                SensitivityClass::Secret
+            } else {
+                SensitivityClass::Public
             },
-            SecurityLevel::Internal,
-        )
-        .await
-        .ok();
+            profile_id: profile,
+            preview: if secret {
+                SECRET_PREVIEW.to_owned()
+            } else {
+                preview(selection.text)
+            },
+            timestamp_ms,
+        };
+        if secret {
+            if config.sensitive_ttl_s == 0 {
+                return Ok(None);
+            }
+            self.held.push(Held {
+                entry: entry.clone(),
+                content: SensitiveBytes::from_slice(selection.text.as_bytes()),
+                expires: now + Duration::from_secs(config.sensitive_ttl_s),
+            });
+            return Ok(Some(entry));
+        }
+        if config.max_history == 0 || self.repeats_newest(profile, selection)? {
+            return Ok(None);
+        }
+        let label = sensitivity_label(entry.sensitivity).ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(
+                format!("no stored label for {:?}", entry.sensitivity).into(),
+            )
+        })?;
+        let timestamp = i64::try_from(timestamp_ms)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+        let keep = i64::try_from(config.max_history).unwrap_or(i64::MAX);
+        let profile_text = profile.as_uuid().to_string();
+        let tx = self.db.transaction()?;
+        tx.execute(
+            "INSERT INTO clipboard_entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                entry.entry_id.as_uuid().to_string(),
+                profile_text,
+                selection.text,
+                entry.content_type,
+                label,
+                entry.preview,
+                timestamp
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM clipboard_entries WHERE profile_id = ?1 AND entry_id NOT IN (
+                SELECT entry_id FROM clipboard_entries WHERE profile_id = ?1
+                ORDER BY timestamp_ms DESC, entry_id DESC LIMIT ?2)",
+            rusqlite::params![profile_text, keep],
+        )?;
+        tx.commit()?;
+        Ok(Some(entry))
+    }
 
+    /// Whether `selection` is `profile`'s newest persisted entry.
+    fn repeats_newest(
+        &self,
+        profile: ProfileId,
+        selection: &Selection<'_>,
+    ) -> rusqlite::Result<bool> {
+        match self.db.query_row(
+            "SELECT content, content_type FROM clipboard_entries WHERE profile_id = ?1
+             ORDER BY timestamp_ms DESC, entry_id DESC LIMIT 1",
+            rusqlite::params![profile.as_uuid().to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok((content, content_type)) => {
+                Ok(content == selection.text && content_type == selection.content_type)
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `profile`'s `limit` newest entries, held and persisted, newest first.
+    fn history(&self, profile: ProfileId, limit: u32) -> rusqlite::Result<Vec<ClipboardEntry>> {
+        let mut entries: Vec<ClipboardEntry> = self
+            .db
+            .prepare(
+                "SELECT entry_id, profile_id, content_type, sensitivity, preview, timestamp_ms
+                 FROM clipboard_entries WHERE profile_id = ?1
+                 ORDER BY timestamp_ms DESC, entry_id DESC LIMIT ?2",
+            )?
+            .query_map(
+                rusqlite::params![profile.as_uuid().to_string(), limit],
+                entry_from_row,
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        entries.extend(
+            self.held
+                .iter()
+                .filter(|held| held.entry.profile_id == profile)
+                .map(|held| held.entry.clone()),
+        );
+        entries.sort_by(|a, b| {
+            b.timestamp_ms
+                .cmp(&a.timestamp_ms)
+                .then_with(|| b.entry_id.cmp(&a.entry_id))
+        });
+        entries.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(entries)
+    }
+
+    /// The content and content type of `entry_id`, `None` when absent or
+    /// expired.
+    fn content(&self, entry_id: &ClipboardEntryId) -> rusqlite::Result<Option<(String, String)>> {
+        if let Some(held) = self
+            .held
+            .iter()
+            .find(|held| held.entry.entry_id == *entry_id)
+        {
+            return Ok(Some((
+                String::from_utf8_lossy(held.content.as_bytes()).into_owned(),
+                held.entry.content_type.clone(),
+            )));
+        }
+        match self.db.query_row(
+            "SELECT content, content_type FROM clipboard_entries WHERE entry_id = ?1",
+            rusqlite::params![entry_id.as_uuid().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ) {
+            Ok(found) => Ok(Some(found)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete `profile`'s entries, held and persisted: how many.
+    fn clear(&mut self, profile: ProfileId) -> rusqlite::Result<usize> {
+        let deleted = self.db.execute(
+            "DELETE FROM clipboard_entries WHERE profile_id = ?1",
+            rusqlite::params![profile.as_uuid().to_string()],
+        )?;
+        let held = self.held.len();
+        self.held.retain(|entry| entry.entry.profile_id != profile);
+        Ok(deleted + held - self.held.len())
+    }
+
+    /// When the next held secret expires.
+    fn next_expiry(&self) -> Option<Instant> {
+        self.held.iter().map(|held| held.expires).min()
+    }
+
+    /// Drop the held secrets expired at `now`: their ids.
+    fn expire(&mut self, now: Instant) -> Vec<ClipboardEntryId> {
+        let (expired, kept): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|held| held.expires <= now);
+        self.held = kept;
+        expired
+            .into_iter()
+            .map(|held| held.entry.entry_id)
+            .collect()
+    }
+}
+
+/// Where entries are filed: the installation namespace profile identities
+/// derive from, and the default profile new selections go to.
+struct Scope {
+    namespace: Option<uuid::Uuid>,
+    default: TrustProfileName,
+}
+
+impl Scope {
+    /// The identity of profile `name`, `None` before `sesame init`.
+    fn id(&self, name: &TrustProfileName) -> Option<ProfileId> {
+        self.namespace
+            .map(|namespace| ProfileId::of_profile(&namespace, name.as_ref()))
+    }
+
+    /// The profile of `config` (a configured profile or the configured
+    /// default) whose identity is `id`.
+    fn name_of(&self, config: &Config, id: ProfileId) -> Option<TrustProfileName> {
+        config
+            .profiles
+            .keys()
+            .filter_map(|name| TrustProfileName::try_from(name.as_str()).ok())
+            .chain(std::iter::once(config.global.default_profile.clone()))
+            .find(|name| self.id(name) == Some(id))
+    }
+
+    /// Follow daemon-profile's `DefaultProfileChanged` to `current`. Only
+    /// the server-verified daemon-profile identity counts.
+    fn follow_default(&mut self, config: &Config, msg: &Message<EventKind>, current: ProfileId) {
+        if msg.verified_sender_name.as_deref() != Some(Daemon::Profile.name()) {
+            tracing::warn!(
+                audit = "security",
+                sender = %msg.sender,
+                "DefaultProfileChanged from a sender other than daemon-profile ignored"
+            );
+            return;
+        }
+        let Some(name) = self.name_of(config, current) else {
+            tracing::warn!(
+                profile = %current,
+                "default profile changed to one that is not configured here"
+            );
+            return;
+        };
+        tracing::info!(profile = %name, "new selections go to the new default profile");
+        self.default = name;
+    }
+}
+
+/// The installation namespace from `installation.toml`, `None` before
+/// `sesame init` writes it.
+fn installation_namespace(layout: &core_layout::Layout) -> Option<uuid::Uuid> {
+    match core_config::load_installation(layout) {
+        Ok(Some(installation)) => Some(installation.namespace),
+        Ok(None) => {
+            tracing::info!(
+                "no installation identity yet (sesame init): selections are not recorded"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "installation identity unreadable: selections are not recorded");
+            None
+        }
+    }
+}
+
+/// The response to `payload` when it is a clipboard request. A failed
+/// query is logged and answered empty: the responses carry no error.
+fn respond(history: &mut History, scope: &Scope, payload: &EventKind) -> Option<EventKind> {
+    Some(match payload {
+        EventKind::ClipboardHistory { profile, limit } => {
+            let entries = match scope.id(profile) {
+                Some(id) => history.history(id, *limit).unwrap_or_else(|e| {
+                    tracing::error!(%profile, error = %e, "ClipboardHistory query failed");
+                    vec![]
+                }),
+                None => vec![],
+            };
+            tracing::debug!(%profile, count = entries.len(), "ClipboardHistory");
+            EventKind::ClipboardHistoryResponse { entries }
+        }
+        EventKind::ClipboardClear { profile } => {
+            let success = match scope.id(profile).map(|id| history.clear(id)) {
+                Some(Ok(deleted)) => {
+                    tracing::info!(%profile, deleted, "ClipboardClear");
+                    true
+                }
+                Some(Err(e)) => {
+                    tracing::error!(%profile, error = %e, "ClipboardClear failed");
+                    false
+                }
+                None => {
+                    tracing::warn!(%profile, "ClipboardClear before sesame init");
+                    false
+                }
+            };
+            EventKind::ClipboardClearResponse { success }
+        }
+        EventKind::ClipboardGet { entry_id } => {
+            let found = history.content(entry_id).unwrap_or_else(|e| {
+                tracing::error!(error = %e, ?entry_id, "ClipboardGet query failed");
+                None
+            });
+            let (content, content_type) = found.unzip();
+            EventKind::ClipboardGetResponse {
+                content,
+                content_type,
+            }
+        }
+        _ => return None,
+    })
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    core_daemon::init_logging(cli.log_format)?;
+    tracing::info!("daemon-clipboard starting");
+
+    #[cfg(target_os = "linux")]
+    {
+        platform_linux::security::harden_process();
+        platform_linux::security::apply_resource_limits(
+            &platform_linux::security::ResourceLimits {
+                nofile: 4096,
+                memlock_bytes: 0,
+            },
+        );
+    }
+
+    let (layout, config) = core_daemon::startup()?;
+    let db = init_db(&layout.clipboard_db()?)?;
+
+    core_types::init_secure_memory();
+
+    // The sandbox is applied on the only thread; the configuration
+    // watcher and the capture thread start inside it.
+    #[cfg(target_os = "linux")]
+    apply_sandbox(&layout, &config)?;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?
+        .block_on(run(&layout, config, History::new(db)))
+}
+
+/// The selections captured from the compositor, `None` when capture is
+/// unavailable.
+#[cfg(target_os = "linux")]
+type Captures = Option<tokio::sync::mpsc::Receiver<platform_linux::clipboard::Capture>>;
+#[cfg(not(target_os = "linux"))]
+type Captures = ();
+
+/// Start capturing the clipboard of the Wayland session, if there is one
+/// and its compositor offers data-control.
+#[cfg(target_os = "linux")]
+fn start_capture(layout: &core_layout::Layout) -> Captures {
+    if layout.environment().wayland_display.is_none() {
+        tracing::info!("no Wayland session: clipboard capture is off");
+        return None;
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    match platform_linux::clipboard::spawn_capture(tx) {
+        Ok(()) => {
+            tracing::info!("clipboard capture started");
+            Some(rx)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "clipboard capture is off; history is served");
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_capture(_layout: &core_layout::Layout) -> Captures {}
+
+/// What the daemon's own sources produce.
+enum Source {
+    #[cfg(target_os = "linux")]
+    Captured(platform_linux::clipboard::Capture),
+    /// A held secret's time is up.
+    Expired,
+}
+
+/// The next selection or expiry. A closed capture channel (the capture
+/// thread ended, logging why) produces nothing more.
+async fn next_source(captures: &mut Captures, expiry: Option<Instant>) -> Source {
+    let expired = async {
+        match expiry {
+            Some(at) => tokio::time::sleep_until(at.into()).await,
+            None => std::future::pending().await,
+        }
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let selection = async {
+            match captures {
+                Some(rx) => match rx.recv().await {
+                    Some(capture) => capture,
+                    None => std::future::pending().await,
+                },
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            capture = selection => Source::Captured(capture),
+            () = expired => Source::Expired,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let () = captures;
+        expired.await;
+        Source::Expired
+    }
+}
+
+/// The daemon, from bus connection to shutdown, inside the sandbox.
+async fn run(
+    layout: &core_layout::Layout,
+    config: Config,
+    mut history: History,
+) -> anyhow::Result<()> {
+    let mut scope = Scope {
+        namespace: installation_namespace(layout),
+        default: config.global.default_profile.clone(),
+    };
+    let mut config_now = config.clone();
+    let mut events = EventLoop::new(
+        Shutdown::register()?,
+        core_daemon::watch_config(layout, config)?,
+    );
+    let mut captures = start_capture(layout);
+    let mut client = core_daemon::connect_bus(layout, &IDENTITY).await?;
+    if let Some(default) = reported_default(&client).await {
+        scope.default = default;
+    }
+
+    core_daemon::announce_started(&client, &IDENTITY).await;
+    #[cfg(target_os = "linux")]
+    platform_linux::systemd::notify_ready();
+    tracing::info!(profile = %scope.default, "daemon-clipboard ready, entering event loop");
+
+    loop {
+        let own = next_source(&mut captures, history.next_expiry());
+        match events.next(&mut client, own).await? {
+            Wake::Message(msg) => {
+                if let EventKind::DefaultProfileChanged { current, .. } = msg.payload {
+                    scope.follow_default(&config_now, &msg, current);
+                } else if let Some(response) = respond(&mut history, &scope, &msg.payload) {
+                    core_daemon::reply(&client, &msg, response).await;
+                }
+            }
+            Wake::ConfigReloaded(reloaded) => {
+                config_now = reloaded;
+                scope.namespace = installation_namespace(layout);
+                core_daemon::announce_config_reloaded(&client, &["clipboard"]).await;
+            }
+            #[cfg(target_os = "linux")]
+            Wake::Own(Source::Captured(mut capture)) => {
+                record(&client, &mut history, &scope, &config_now, &capture).await;
+                zeroize::Zeroize::zeroize(&mut capture.text);
+            }
+            Wake::Own(Source::Expired) => {
+                for entry_id in history.expire(Instant::now()) {
+                    tracing::debug!(?entry_id, "held secret expired");
+                    client
+                        .publish_or_log(
+                            "ClipboardEntryExpired",
+                            EventKind::ClipboardEntryExpired { entry_id },
+                            SecurityLevel::Internal,
+                        )
+                        .await;
+                }
+            }
+            Wake::Shutdown(_) => break,
+        }
+    }
+
+    core_daemon::announce_stopped(&client).await;
     tracing::info!("daemon-clipboard shut down");
     Ok(())
 }
 
-async fn sigterm() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sig = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-        sig.recv().await;
-    }
-    #[cfg(not(unix))]
-    {
-        std::future::pending::<()>().await;
+/// Record `capture` in the default profile's history and announce the
+/// entry (`ClipboardChanged`).
+#[cfg(target_os = "linux")]
+async fn record(
+    client: &BusClient,
+    history: &mut History,
+    scope: &Scope,
+    config: &Config,
+    capture: &platform_linux::clipboard::Capture,
+) {
+    let Some(profile) = scope.id(&scope.default) else {
+        tracing::debug!("selection not recorded before sesame init");
+        return;
+    };
+    let clipboard = config
+        .profiles
+        .get(scope.default.as_ref())
+        .map(|p| p.clipboard.clone())
+        .unwrap_or_default();
+    let selection = Selection {
+        content_type: &capture.content_type,
+        text: &capture.text,
+        secret_hint: capture.password_manager_hint,
+    };
+    match history.record(profile, &clipboard, &selection, now_ms(), Instant::now()) {
+        Ok(Some(entry)) => {
+            tracing::debug!(
+                entry_id = ?entry.entry_id,
+                sensitivity = ?entry.sensitivity,
+                "selection recorded"
+            );
+            client
+                .publish_or_log(
+                    "ClipboardChanged",
+                    EventKind::ClipboardChanged {
+                        entry_id: entry.entry_id,
+                        sensitivity: entry.sensitivity,
+                        content_type: entry.content_type,
+                        profile_id: profile,
+                    },
+                    SecurityLevel::Internal,
+                )
+                .await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!(error = %e, "selection could not be recorded"),
     }
 }
 
-#[cfg(target_os = "linux")]
-fn apply_sandbox() {
-    use platform_linux::sandbox::{FsAccess, LandlockRule, SeccompProfile, apply_sandbox};
-
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
-
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("open-sesame");
-
-    let pds_dir = PathBuf::from(&runtime_dir).join("pds");
-    let keys_dir = pds_dir.join("keys");
-
-    // Resolve config symlink targets (e.g. /nix/store) before Landlock.
-    let config_real_dirs = core_config::resolve_config_real_dirs(None);
-
-    let mut rules = vec![
-        LandlockRule {
-            path: keys_dir.clone(),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: pds_dir.join("bus.pub"),
-            access: FsAccess::ReadOnly,
-        },
-        LandlockRule {
-            path: pds_dir.join("bus.sock"),
-            access: FsAccess::ReadWriteFile,
-        },
-        LandlockRule {
-            path: PathBuf::from(&runtime_dir)
-                .join(std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-1".into())),
-            access: FsAccess::ReadWriteFile,
-        },
-        LandlockRule {
-            path: cache_dir,
-            access: FsAccess::ReadWrite,
-        },
-    ];
-
-    // Config symlink targets (e.g. /nix/store paths) need read access
-    // for config hot-reload to follow symlinks after Landlock is applied.
-    for dir in &config_real_dirs {
-        rules.push(LandlockRule {
-            path: dir.clone(),
-            access: FsAccess::ReadOnly,
-        });
-    }
-
-    let seccomp = SeccompProfile {
-        daemon_name: "daemon-clipboard".into(),
-        allowed_syscalls: vec![
-            "read".into(),
-            "write".into(),
-            "close".into(),
-            "openat".into(),
-            "lseek".into(),
-            "pread64".into(),
-            "fstat".into(),
-            "stat".into(),
-            "newfstatat".into(),
-            "statx".into(),
-            "access".into(),
-            "readlink".into(),
-            "fcntl".into(),
-            "flock".into(),
-            "mkdir".into(),
-            "getdents64".into(),
-            "fsync".into(),
-            "fdatasync".into(),
-            "ioctl".into(),
-            "mmap".into(),
-            "mprotect".into(),
-            "munmap".into(),
-            "madvise".into(),
-            "brk".into(),
-            "futex".into(),
-            "clone3".into(),
-            "clone".into(),
-            "set_robust_list".into(),
-            "set_tid_address".into(),
-            "rseq".into(),
-            "sched_getaffinity".into(),
-            "prlimit64".into(),
-            "prctl".into(),
-            "getpid".into(),
-            "gettid".into(),
-            "getuid".into(),
-            "geteuid".into(),
-            "kill".into(),
-            "epoll_wait".into(),
-            "epoll_ctl".into(),
-            "epoll_create1".into(),
-            "eventfd2".into(),
-            "poll".into(),
-            "ppoll".into(),
-            "clock_gettime".into(),
-            "timer_create".into(),
-            "timer_settime".into(),
-            "timer_delete".into(),
-            "socket".into(),
-            "connect".into(),
-            "sendto".into(),
-            "recvfrom".into(),
-            "recvmsg".into(),
-            "sendmsg".into(),
-            "getsockname".into(),
-            "getpeername".into(),
-            "setsockopt".into(),
-            "socketpair".into(),
-            "shutdown".into(),
-            "getsockopt".into(),
-            "sigaltstack".into(),
-            "rt_sigaction".into(),
-            "rt_sigprocmask".into(),
-            "rt_sigreturn".into(),
-            "tgkill".into(),
-            // Config hot-reload (notify crate uses inotify)
-            "inotify_init1".into(),
-            "inotify_add_watch".into(),
-            "inotify_rm_watch".into(),
-            "exit_group".into(),
-            "exit".into(),
-            "getrandom".into(),
-            "memfd_secret".into(),
-            "ftruncate".into(),
-            "restart_syscall".into(),
-            "pipe2".into(),
-            "dup".into(),
-        ],
-    };
-
-    match apply_sandbox(&rules, &seccomp) {
-        Ok(status) => {
-            tracing::info!(?status, "sandbox applied");
+/// The default profile daemon-profile reports, `None` (the configured
+/// default stands) when it does not answer.
+async fn reported_default(client: &BusClient) -> Option<TrustProfileName> {
+    match client
+        .request(
+            EventKind::StatusRequest,
+            SecurityLevel::Internal,
+            STATUS_TIMEOUT,
+        )
+        .await
+    {
+        Ok(msg) if msg.verified_sender_name.as_deref() == Some(Daemon::Profile.name()) => {
+            match msg.payload {
+                EventKind::StatusResponse {
+                    default_profile, ..
+                } => Some(default_profile),
+                other => {
+                    tracing::warn!(payload = ?other, "unexpected answer to StatusRequest");
+                    None
+                }
+            }
+        }
+        Ok(msg) => {
+            tracing::warn!(sender = %msg.sender, "StatusResponse from a sender other than daemon-profile ignored");
+            None
         }
         Err(e) => {
-            panic!("sandbox application failed: {e} -- refusing to run unsandboxed");
+            tracing::warn!(error = %e, "default profile not reported; the configured default stands");
+            None
         }
     }
 }
 
-fn init_logging(format: &str) -> anyhow::Result<()> {
-    use tracing_subscriber::EnvFilter;
+/// Apply Landlock + seccomp under `config`'s sandbox floor: bus client,
+/// configuration (read), the systemd notification socket, the Wayland
+/// socket, and the cache directory holding the history database.
+///
+/// # Errors
+///
+/// When a granted location cannot be placed, the kernel is below the
+/// floor, or the sandbox cannot be applied: the daemon does not run.
+#[cfg(target_os = "linux")]
+fn apply_sandbox(layout: &core_layout::Layout, config: &Config) -> anyhow::Result<()> {
+    use core_daemon::sandbox::{
+        config_rules, ipc_client_rules, notify_rules, seccomp_profile, wayland_rules,
+    };
+    use platform_linux::sandbox::{FsAccess, LandlockRule};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let mut rules = ipc_client_rules(layout)?;
+    rules.extend(config_rules(layout, FsAccess::ReadOnly)?);
+    rules.extend(notify_rules(layout)?);
+    rules.extend(wayland_rules(layout)?);
+    rules.push(LandlockRule {
+        path: layout.cache_dir()?,
+        access: FsAccess::ReadWrite,
+    });
 
-    match format {
-        "json" => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        _ => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
-        }
-    }
+    // SQLite: file locks and durable writes.
+    let seccomp = seccomp_profile(IDENTITY.daemon, &["flock", "fsync", "fdatasync"]);
 
-    Ok(())
+    core_daemon::sandbox::apply(layout, config, &rules, &seccomp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn init_db_creates_schema() {
+    const SELECT_ENTRY: &str = "SELECT entry_id, profile_id, content_type, sensitivity, preview, timestamp_ms \
+         FROM clipboard_entries WHERE entry_id = ?1";
+
+    fn ns() -> uuid::Uuid {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"installation")
+    }
+
+    fn schema() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS clipboard_entries (
-                entry_id TEXT PRIMARY KEY,
-                profile_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                content_type TEXT NOT NULL DEFAULT 'text/plain',
-                sensitivity TEXT NOT NULL DEFAULT 'public',
-                preview TEXT NOT NULL,
-                timestamp_ms INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_clipboard_profile
-                ON clipboard_entries(profile_id, timestamp_ms DESC);",
+        init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn insert(conn: &Connection, entry_id: &str, profile_id: &str, sensitivity: &str, ts: i64) {
+        conn.execute(
+            "INSERT INTO clipboard_entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                entry_id,
+                profile_id,
+                "data",
+                "text/plain",
+                sensitivity,
+                "d***",
+                ts
+            ],
         )
         .unwrap();
+    }
 
-        // Verify table exists by inserting and querying.
-        conn.execute(
-            "INSERT INTO clipboard_entries (entry_id, profile_id, content, content_type, sensitivity, preview, timestamp_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params!["e1", "p1", "hello", "text/plain", "public", "hello", 1000],
-        ).unwrap();
+    fn decode(conn: &Connection, entry_id: &str) -> rusqlite::Result<ClipboardEntry> {
+        conn.query_row(SELECT_ENTRY, rusqlite::params![entry_id], entry_from_row)
+    }
 
+    fn profile(name: &str) -> TrustProfileName {
+        TrustProfileName::try_from(name).unwrap()
+    }
+
+    fn scope(default: &str) -> Scope {
+        Scope {
+            namespace: Some(ns()),
+            default: profile(default),
+        }
+    }
+
+    fn text(text: &str, secret_hint: bool) -> Selection<'_> {
+        Selection {
+            content_type: "text/plain;charset=utf-8",
+            text,
+            secret_hint,
+        }
+    }
+
+    fn config(max_history: usize, sensitive_ttl_s: u64) -> ClipboardConfig {
+        ClipboardConfig {
+            max_history,
+            sensitive_ttl_s,
+            detect_sensitive: true,
+        }
+    }
+
+    #[test]
+    fn init_db_creates_an_idempotent_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = init_db(&dir.path().join("clipboard.db")).unwrap();
+        init_schema(&conn).unwrap();
+        insert(&conn, "e1", "p1", "public", 1000);
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM clipboard_entries WHERE profile_id = 'p1'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
 
     #[test]
-    fn sensitivity_mapping() {
-        let cases = [
-            ("public", "Public"),
-            ("confidential", "Confidential"),
-            ("secret", "Secret"),
-            ("topsecret", "TopSecret"),
-            ("unknown", "Public"),
-        ];
-        for (input, expected_variant) in cases {
-            let sensitivity = match input {
-                "confidential" => SensitivityClass::Confidential,
-                "secret" => SensitivityClass::Secret,
-                "topsecret" => SensitivityClass::TopSecret,
-                _ => SensitivityClass::Public,
-            };
-            assert_eq!(
-                format!("{sensitivity:?}"),
-                expected_variant,
-                "input: {input}"
-            );
+    fn every_class_has_one_label() {
+        for (class, label) in SENSITIVITY_LABELS {
+            assert_eq!(parse_sensitivity(label), Some(class));
+            assert_eq!(sensitivity_label(class), Some(label));
         }
     }
 
     #[test]
-    fn insert_and_query_roundtrip() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE clipboard_entries (
-                entry_id TEXT PRIMARY KEY,
-                profile_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                content_type TEXT NOT NULL DEFAULT 'text/plain',
-                sensitivity TEXT NOT NULL DEFAULT 'public',
-                preview TEXT NOT NULL,
-                timestamp_ms INTEGER NOT NULL
-            );",
-        )
-        .unwrap();
+    fn unknown_sensitivity_is_not_public() {
+        assert_eq!(parse_sensitivity("unknown"), None);
+        assert_eq!(parse_sensitivity("Secret"), None);
 
-        let entry_id = uuid::Uuid::now_v7().to_string();
-        conn.execute(
-            "INSERT INTO clipboard_entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                &entry_id,
-                "profile-a",
-                "secret data",
-                "text/plain",
-                "secret",
-                "sec***",
-                42
-            ],
-        )
-        .unwrap();
+        let conn = schema();
+        let id = uuid::Uuid::now_v7().to_string();
+        insert(&conn, &id, &uuid::Uuid::now_v7().to_string(), "unknown", 1);
+        assert!(matches!(
+            decode(&conn, &id),
+            Err(rusqlite::Error::FromSqlConversionFailure(3, _, _))
+        ));
+    }
 
-        let (content, sensitivity): (String, String) = conn
-            .query_row(
-                "SELECT content, sensitivity FROM clipboard_entries WHERE entry_id = ?1",
-                rusqlite::params![&entry_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+    #[test]
+    fn malformed_ids_are_errors_not_fresh_ids() {
+        let conn = schema();
+        let profile = uuid::Uuid::now_v7().to_string();
+        insert(&conn, "not-a-uuid", &profile, "public", 1);
+        assert!(matches!(
+            decode(&conn, "not-a-uuid"),
+            Err(rusqlite::Error::FromSqlConversionFailure(0, _, _))
+        ));
+
+        let id = uuid::Uuid::now_v7().to_string();
+        insert(&conn, &id, "p1", "public", 1);
+        assert!(matches!(
+            decode(&conn, &id),
+            Err(rusqlite::Error::FromSqlConversionFailure(1, _, _))
+        ));
+    }
+
+    #[test]
+    fn negative_timestamp_is_out_of_range() {
+        let conn = schema();
+        let id = uuid::Uuid::now_v7().to_string();
+        insert(&conn, &id, &uuid::Uuid::now_v7().to_string(), "public", -1);
+        assert!(matches!(
+            decode(&conn, &id),
+            Err(rusqlite::Error::IntegralValueOutOfRange(5, -1))
+        ));
+    }
+
+    #[test]
+    fn previews_are_one_line_and_bounded() {
+        assert_eq!(preview("a\nb\tc"), "a b c");
+        assert_eq!(preview(&"x".repeat(200)).chars().count(), PREVIEW_CHARS);
+    }
+
+    #[test]
+    fn a_recorded_selection_is_listed_and_served_by_profile_name() {
+        let scope = scope("work");
+        let work = scope.id(&profile("work")).unwrap();
+        let mut history = History::new(schema());
+        let entry = history
+            .record(
+                work,
+                &config(10, 30),
+                &text("copied", false),
+                5,
+                Instant::now(),
             )
+            .unwrap()
             .unwrap();
+        assert_eq!(entry.sensitivity, SensitivityClass::Public);
+        assert_eq!(entry.profile_id, work);
 
-        assert_eq!(content, "secret data");
-        assert_eq!(sensitivity, "secret");
+        let request = EventKind::ClipboardHistory {
+            profile: profile("work"),
+            limit: 10,
+        };
+        assert!(matches!(
+            respond(&mut history, &scope, &request),
+            Some(EventKind::ClipboardHistoryResponse { entries })
+                if entries.len() == 1 && entries[0].entry_id == entry.entry_id
+                    && entries[0].preview == "copied"
+        ));
+        let other = EventKind::ClipboardHistory {
+            profile: profile("home"),
+            limit: 10,
+        };
+        assert!(matches!(
+            respond(&mut history, &scope, &other),
+            Some(EventKind::ClipboardHistoryResponse { entries }) if entries.is_empty()
+        ));
+        assert!(matches!(
+            respond(&mut history, &scope, &EventKind::ClipboardGet { entry_id: entry.entry_id }),
+            Some(EventKind::ClipboardGetResponse { content: Some(c), content_type: Some(t) })
+                if c == "copied" && t == "text/plain;charset=utf-8"
+        ));
+    }
+
+    #[test]
+    fn a_repeated_selection_is_one_entry_and_history_is_pruned() {
+        let work = ProfileId::of_profile(&ns(), "work");
+        let mut history = History::new(schema());
+        let now = Instant::now();
+        let cfg = config(2, 30);
+        assert!(
+            history
+                .record(work, &cfg, &text("a", false), 1, now)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            history
+                .record(work, &cfg, &text("a", false), 2, now)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            history
+                .record(work, &cfg, &text("b", false), 3, now)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            history
+                .record(work, &cfg, &text("c", false), 4, now)
+                .unwrap()
+                .is_some()
+        );
+        let previews: Vec<String> = history
+            .history(work, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.preview)
+            .collect();
+        assert_eq!(previews, ["c", "b"]);
+        assert!(
+            history
+                .record(work, &config(0, 30), &text("d", false), 5, now)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_secret_is_held_in_memory_until_it_expires() {
+        let work = ProfileId::of_profile(&ns(), "work");
+        let mut history = History::new(schema());
+        let now = Instant::now();
+        let entry = history
+            .record(work, &config(10, 30), &text("hunter2", true), 7, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.sensitivity, SensitivityClass::Secret);
+        assert_eq!(entry.preview, SECRET_PREVIEW);
+        let persisted: i64 = history
+            .db
+            .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(persisted, 0, "a secret is never written to the database");
+        assert_eq!(
+            history.content(&entry.entry_id).unwrap(),
+            Some(("hunter2".into(), "text/plain;charset=utf-8".into()))
+        );
+        assert_eq!(history.history(work, 10).unwrap().len(), 1);
+
+        assert_eq!(history.next_expiry(), Some(now + Duration::from_secs(30)));
+        assert!(history.expire(now).is_empty());
+        assert_eq!(
+            history.expire(now + Duration::from_secs(30)),
+            [entry.entry_id]
+        );
+        assert_eq!(history.content(&entry.entry_id).unwrap(), None);
+        assert_eq!(history.next_expiry(), None);
+
+        // A TTL of 0 keeps no secret; without detection the hint is ignored.
+        assert!(
+            history
+                .record(work, &config(10, 0), &text("x", true), 8, now)
+                .unwrap()
+                .is_none()
+        );
+        let undetected = ClipboardConfig {
+            detect_sensitive: false,
+            ..config(10, 30)
+        };
+        let public = history
+            .record(work, &undetected, &text("y", true), 9, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(public.sensitivity, SensitivityClass::Public);
+    }
+
+    #[test]
+    fn clearing_a_profile_removes_held_and_persisted_entries() {
+        let scope = scope("work");
+        let work = scope.id(&profile("work")).unwrap();
+        let home = scope.id(&profile("home")).unwrap();
+        let mut history = History::new(schema());
+        let now = Instant::now();
+        history
+            .record(work, &config(10, 30), &text("a", false), 1, now)
+            .unwrap();
+        history
+            .record(work, &config(10, 30), &text("s", true), 2, now)
+            .unwrap();
+        history
+            .record(home, &config(10, 30), &text("h", false), 3, now)
+            .unwrap();
+        assert!(matches!(
+            respond(
+                &mut history,
+                &scope,
+                &EventKind::ClipboardClear {
+                    profile: profile("work")
+                }
+            ),
+            Some(EventKind::ClipboardClearResponse { success: true })
+        ));
+        assert!(history.history(work, 10).unwrap().is_empty());
+        assert_eq!(history.history(home, 10).unwrap().len(), 1);
+        assert!(respond(&mut history, &scope, &EventKind::StatusRequest).is_none());
+    }
+
+    #[test]
+    fn before_init_nothing_is_filed_or_cleared() {
+        let scope = Scope {
+            namespace: None,
+            default: profile("work"),
+        };
+        let mut history = History::new(schema());
+        assert_eq!(scope.id(&profile("work")), None);
+        assert!(matches!(
+            respond(
+                &mut history,
+                &scope,
+                &EventKind::ClipboardClear {
+                    profile: profile("work")
+                }
+            ),
+            Some(EventKind::ClipboardClearResponse { success: false })
+        ));
+    }
+
+    #[test]
+    fn the_default_profile_is_resolved_from_its_identity() {
+        let config: Config = toml::from_str(
+            "[global]\ndefault_profile = \"home\"\n[profiles.work]\n[profiles.home]\n",
+        )
+        .unwrap();
+        let scope = scope("home");
+        let work = ProfileId::of_profile(&ns(), "work");
+        assert_eq!(scope.name_of(&config, work), Some(profile("work")));
+        let unknown = ProfileId::of_profile(&ns(), "elsewhere");
+        assert_eq!(scope.name_of(&config, unknown), None);
     }
 }

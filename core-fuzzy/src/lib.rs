@@ -1,7 +1,7 @@
 //! Fuzzy matching, frecency scoring, and index management for PDS.
 //!
-//! Uses nucleo for interactive fuzzy matching and SQLite for frecency
-//! persistence. Frecency uses Mozilla double-exponential decay.
+//! Uses nucleo for interactive fuzzy matching and `SQLite` for frecency
+//! persistence. Frecency uses exponential decay with a 30-day half-life.
 //!
 //! This crate is consumed by daemon-launcher and provides:
 //! - `FuzzyMatcher`: nucleo-backed parallel fuzzy matcher
@@ -15,4 +15,4 @@ mod search;
 
 pub use frecency::FrecencyDb;
 pub use matcher::{FuzzyMatcher, MatchItem, inject_items};
-pub use search::{SearchEngine, SearchResult};
+pub use search::SearchEngine;

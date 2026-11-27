@@ -1,106 +1,146 @@
 //! `sesame status --doctor` — system health and security posture diagnostics.
 //!
-//! Each check category is a separate module returning `Vec<Check>`.
-//! The runner collects, filters, formats, and optionally sets the exit code.
+//! Each check category is a module returning its checks. A probe that
+//! cannot be completed is a failed check carrying the error as its value,
+//! never a guessed value.
 
 mod daemon;
 mod memory;
 mod network;
 mod platform;
+mod probe;
 mod sandbox;
 
+use std::process::ExitCode;
+
+use core_layout::Layout;
 use owo_colors::OwoColorize;
 
+use open_sesame::cli::{DoctorCategory, DoctorFormat};
+
 /// Result of a single diagnostic check.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Check {
     /// Unique identifier (e.g. "daemon.wm.running").
     pub id: String,
-    /// Category for grouping and filtering.
+    /// Category for grouping.
     pub category: &'static str,
     /// Pass / Warn / Fail.
     pub status: Status,
     /// Human-readable value (e.g. "active", "19 MB / 128 MB").
     pub value: String,
-    /// Description of what this check verifies.
+    /// What the check verifies, or the remedy when it does not pass.
     pub description: String,
 }
 
+impl Check {
+    pub fn new(
+        id: impl Into<String>,
+        category: &'static str,
+        status: Status,
+        value: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            category,
+            status,
+            value: value.into(),
+            description: description.into(),
+        }
+    }
+
+    /// The failed check of a probe that could not be completed.
+    pub fn probe_failed(
+        id: impl Into<String>,
+        category: &'static str,
+        error: &anyhow::Error,
+    ) -> Self {
+        Self::new(
+            id,
+            category,
+            Status::Fail,
+            format!("{error:#}"),
+            "the probe could not be completed",
+        )
+    }
+}
+
 /// Check result severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Pass,
     Warn,
     Fail,
 }
 
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pass => write!(f, "PASS"),
-            Self::Warn => write!(f, "WARN"),
-            Self::Fail => write!(f, "FAIL"),
-        }
+/// The categories `selection` names, in their canonical order, each once.
+fn expand(selection: &[DoctorCategory]) -> Vec<DoctorCategory> {
+    const ORDER: [DoctorCategory; 5] = [
+        DoctorCategory::Daemon,
+        DoctorCategory::Memory,
+        DoctorCategory::Network,
+        DoctorCategory::Sandbox,
+        DoctorCategory::Platform,
+    ];
+    if selection.contains(&DoctorCategory::All) {
+        return ORDER.to_vec();
     }
+    ORDER
+        .into_iter()
+        .filter(|category| selection.contains(category))
+        .collect()
 }
 
-/// Known check categories.
-const ALL_CATEGORIES: &[&str] = &["daemon", "memory", "network", "sandbox", "platform"];
-
-/// Run diagnostic checks and produce output.
+/// Run the checks of `categories` and print them in `format`. With
+/// `exit_code`, the exit status is 1 when any check fails and 2 when any
+/// warns.
+///
+/// # Errors
+///
+/// When the clock is before the Unix epoch or JSON cannot be written.
 pub fn cmd_doctor(
-    categories: &str,
-    output_format: &str,
+    layout: &Layout,
+    categories: &[DoctorCategory],
+    format: DoctorFormat,
     exit_code: bool,
     quiet: bool,
-) -> anyhow::Result<()> {
-    let selected: Vec<&str> = if categories == "all" {
-        ALL_CATEGORIES.to_vec()
-    } else {
-        categories.split(',').map(str::trim).collect()
-    };
-
+) -> anyhow::Result<ExitCode> {
     let mut checks = Vec::new();
+    for category in expand(categories) {
+        checks.extend(match category {
+            DoctorCategory::Daemon => daemon::checks(layout),
+            DoctorCategory::Memory => memory::checks(layout),
+            DoctorCategory::Network => network::checks(),
+            DoctorCategory::Sandbox => sandbox::checks(layout),
+            DoctorCategory::Platform => platform::checks(layout),
+            DoctorCategory::All => unreachable!("expand resolves All"),
+        });
+    }
 
-    for cat in &selected {
-        match *cat {
-            "daemon" => checks.extend(daemon::checks()),
-            "memory" => checks.extend(memory::checks()),
-            "network" => checks.extend(network::checks()),
-            "sandbox" => checks.extend(sandbox::checks()),
-            "platform" => checks.extend(platform::checks()),
-            other => {
-                eprintln!("Unknown doctor category: {other}");
-                eprintln!("Available: {}", ALL_CATEGORIES.join(", "));
-            }
+    let count = |status| checks.iter().filter(|c| c.status == status).count();
+    let (pass, warn, fail) = (
+        count(Status::Pass),
+        count(Status::Warn),
+        count(Status::Fail),
+    );
+
+    if !quiet {
+        match format {
+            DoctorFormat::Text => print_text(&checks, pass, warn, fail),
+            DoctorFormat::Json => print_json(&checks, pass, warn, fail)?,
         }
     }
 
-    let pass_count = checks.iter().filter(|c| c.status == Status::Pass).count();
-    let warn_count = checks.iter().filter(|c| c.status == Status::Warn).count();
-    let fail_count = checks.iter().filter(|c| c.status == Status::Fail).count();
-
-    match output_format {
-        "json" => print_json(&checks, pass_count, warn_count, fail_count, quiet),
-        _ => print_text(&checks, pass_count, warn_count, fail_count, quiet),
-    }
-
-    if exit_code {
-        if fail_count > 0 {
-            std::process::exit(1);
-        } else if warn_count > 0 {
-            std::process::exit(2);
-        }
-    }
-
-    Ok(())
+    Ok(match (exit_code, fail, warn) {
+        (false, ..) | (true, 0, 0) => ExitCode::SUCCESS,
+        (true, 0, _) => ExitCode::from(2),
+        (true, ..) => ExitCode::from(1),
+    })
 }
 
-fn print_text(checks: &[Check], pass: usize, warn: usize, fail: usize, quiet: bool) {
-    if quiet {
-        return;
-    }
-
+fn print_text(checks: &[Check], pass: usize, warn: usize, fail: usize) {
     let mut current_category = "";
     for check in checks {
         if check.category != current_category {
@@ -110,20 +150,12 @@ fn print_text(checks: &[Check], pass: usize, warn: usize, fail: usize, quiet: bo
             println!("{}", check.category.to_uppercase().bold());
             current_category = check.category;
         }
-
-        let icon = match check.status {
-            Status::Pass => "✓".green().to_string(),
-            Status::Warn => "⚠".yellow().to_string(),
-            Status::Fail => "✗".red().to_string(),
+        let (icon, value) = match check.status {
+            Status::Pass => ("✓".green().to_string(), check.value.green().to_string()),
+            Status::Warn => ("⚠".yellow().to_string(), check.value.yellow().to_string()),
+            Status::Fail => ("✗".red().to_string(), check.value.red().to_string()),
         };
-
-        let value_display = match check.status {
-            Status::Pass => check.value.green().to_string(),
-            Status::Warn => check.value.yellow().to_string(),
-            Status::Fail => check.value.red().to_string(),
-        };
-
-        println!("  {icon} {:<32} {value_display}", check.id,);
+        println!("  {icon} {:<32} {value}", check.id);
         if check.status != Status::Pass && !check.description.is_empty() {
             println!("    {}", check.description.dimmed());
         }
@@ -140,44 +172,82 @@ fn print_text(checks: &[Check], pass: usize, warn: usize, fail: usize, quiet: bo
     }
 }
 
-fn print_json(checks: &[Check], pass: usize, warn: usize, fail: usize, quiet: bool) {
-    if quiet {
-        return;
-    }
-
-    let checks_json: Vec<serde_json::Value> = checks
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "id": c.id,
-                "category": c.category,
-                "status": c.status.to_string().to_lowercase(),
-                "value": c.value,
-                "description": c.description,
-            })
-        })
-        .collect();
-
+fn print_json(checks: &[Check], pass: usize, warn: usize, fail: usize) -> anyhow::Result<()> {
     let output = serde_json::json!({
-        "timestamp": chrono_now(),
+        "timestamp": rfc3339_utc(std::time::SystemTime::now())?,
         "version": env!("CARGO_PKG_VERSION"),
         "summary": { "pass": pass, "warn": warn, "fail": fail },
-        "checks": checks_json,
+        "checks": checks,
     });
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).unwrap_or_default()
-    );
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
 }
 
-fn chrono_now() -> String {
-    // Simple ISO 8601 without pulling in chrono crate.
-    let output = std::process::Command::new("date")
-        .arg("-Iseconds")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    output.trim().to_string()
+/// `time` as an RFC 3339 UTC timestamp with second precision
+/// (`2026-11-25T08:15:00Z`).
+///
+/// # Errors
+///
+/// When `time` is before the Unix epoch.
+fn rfc3339_utc(time: std::time::SystemTime) -> anyhow::Result<String> {
+    let secs = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| anyhow::anyhow!("system clock is before the Unix epoch: {e}"))?
+        .as_secs();
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (year, month, day) = civil_from_days(days);
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    ))
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01 (H. Hinnant's
+/// `civil_from_days`, restricted to non-negative day counts).
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamps_are_rfc3339_utc() {
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        assert_eq!(rfc3339_utc(at(0)).unwrap(), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            rfc3339_utc(at(951_782_400)).unwrap(),
+            "2000-02-29T00:00:00Z"
+        );
+        assert_eq!(
+            rfc3339_utc(at(1_798_761_599)).unwrap(),
+            "2026-12-31T23:59:59Z"
+        );
+        assert!(rfc3339_utc(at(0) - std::time::Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn categories_expand_in_canonical_order_once() {
+        assert_eq!(
+            expand(&[
+                DoctorCategory::Platform,
+                DoctorCategory::Daemon,
+                DoctorCategory::Platform
+            ]),
+            [DoctorCategory::Daemon, DoctorCategory::Platform]
+        );
+        assert_eq!(expand(&[DoctorCategory::All]).len(), 5);
+    }
 }

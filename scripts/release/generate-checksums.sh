@@ -10,7 +10,7 @@ set -euo pipefail
 : "${TAG:?TAG must be set}"
 : "${VERSION:?VERSION must be set}"
 
-sha256sum ./*.deb ./*.rpm ./*.tar.gz ./*.pkg.tar.zst > SHA256SUMS.txt
+sha256sum ./*.deb ./*.rpm ./*.tar.gz ./*.pkg.tar.zst >SHA256SUMS.txt
 cat SHA256SUMS.txt
 
 get_sha() { grep "$1" SHA256SUMS.txt | cut -d' ' -f1; }
@@ -51,4 +51,4 @@ sed -e "s/\${TAG}/${TAG}/g" \
     -e "s/\${SHA256_TAR_DESKTOP_X86_64}/${SHA_TAR_DESKTOP_X86_64}/g" \
     -e "s/\${SHA256_TAR_DESKTOP_AARCH64}/${SHA_TAR_DESKTOP_AARCH64}/g" \
     -e "s/\${SHA256_SOURCE}/${SHA_SOURCE}/g" \
-    .github/templates/RELEASE_BODY.md > install_instructions.md
+    .github/templates/RELEASE_BODY.md >install_instructions.md

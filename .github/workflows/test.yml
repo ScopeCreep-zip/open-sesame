@@ -37,6 +37,26 @@ jobs:
           sudo prlimit --pid $$ --memlock=268435456:268435456
           mise run ci:test
 
+  qa:
+    name: QA (TOML, Markdown, links, shell, workflows, dependencies)
+    runs-on: ubuntu-24.04
+    env:
+      # The repository's .mise.toml is trusted in its own checkout.
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scopecreep-zip
+
+      - name: Run QA tasks in the devshell
+        run: nix develop --accept-flake-config -c mise run ci:qa
+
   lint-pkgbuild:
     name: Lint PKGBUILDs (namcap)
     runs-on: ubuntu-24.04

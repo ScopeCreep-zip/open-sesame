@@ -33,100 +33,73 @@ with an invalid configuration.
 
 ## Algorithm Axes
 
-### KDF: Password to Master Key
+### KDF: Password to Password KEK
 
-The KDF converts a user password and 16-byte salt into a 32-byte master
-key. Two algorithms are available, selected by the `kdf` config field
-and dispatched through `derive_key_kdf()`
-(`core-crypto/src/kdf.rs:60-69`).
+The KDF converts a user password and the vault's 16-byte salt into the
+vault's password key-encrypting key (KEK), the AES-256-GCM key that wraps
+the vault's master key (`WrappedKey` in `.password-wrap`). Two algorithms are
+available; `derive_password_key(algorithm, password, salt)`
+(`core-crypto/src/kdf.rs`) dispatches on the vault's `KdfAlgorithm`.
 
 **argon2id** (default, `KdfAlgorithm::Argon2id`):
 
-- Algorithm: Argon2id (hybrid mode, resists both side-channel and GPU
-  attacks)
-- Memory cost: 19,456 KiB (19 MiB) (`kdf.rs:28`)
-- Time cost: 2 iterations (`kdf.rs:29`)
-- Parallelism: 1 lane (`kdf.rs:30`)
-- Output: 32 bytes (`kdf.rs:31`)
-- Version: 0x13 (`kdf.rs:35`)
-- Parameters follow OWASP minimum recommendations (`kdf.rs:14-17`)
-- Implementation: `argon2` crate with
-  `Argon2::new(Algorithm::Argon2id, Version::V0x13, params)`
-  (`kdf.rs:35`)
+- Algorithm: Argon2id v1.3 (hybrid mode, resists both side-channel and
+  GPU attacks)
+- Memory cost: 19,456 KiB (19 MiB)
+- Time cost: 2 iterations
+- Parallelism: 1 lane
+- Output: 32 bytes
+- Parameters follow the OWASP minimum recommendation
+- Implementation: `argon2` crate,
+  `Argon2::new(Algorithm::Argon2id, Version::V0x13, params)` with
+  `hash_password_into`
 
 **pbkdf2-sha256** (`KdfAlgorithm::Pbkdf2Sha256`):
 
-- Algorithm: PBKDF2-HMAC-SHA256
-- Iterations: 600,000 (`kdf.rs:51`)
+- Algorithm: PBKDF2-HMAC-SHA256 (RFC 8018)
+- Iterations: 600,000 (OWASP recommendation)
 - Output: 32 bytes
-- Parameters follow OWASP recommendations for PBKDF2-SHA256
-  (`kdf.rs:47`)
-- Implementation: `pbkdf2` crate with `Hmac<Sha256>` (`kdf.rs:51`)
+- Implementation: `pbkdf2::pbkdf2_hmac::<Sha256>`
 
-Both functions return `SecureBytes` --- mlock'd, zeroize-on-drop memory
-backed by `core_memory::ProtectedAlloc`. Intermediate stack arrays are
-zeroized via `zeroize::Zeroizing` before the function returns
-(`kdf.rs:37`, `kdf.rs:50`).
+The derived bytes are held in `zeroize::Zeroizing` and returned as an
+`EncryptionKey`.
 
-### HKDF: Master Key to Per-Purpose Keys
+### HKDF: Key Material to Per-Purpose Keys
 
-The HKDF layer derives per-profile, per-purpose 32-byte keys from the
-master key. Two algorithms are available, dispatched through the
-`*_with_algorithm()` family of functions in `core-crypto/src/hkdf.rs`.
+Every other 32-byte key is derived from key material (a master key, a
+vault key, a salt, a signature, or factor pieces) by
+`derive_key(algorithm, context, ikm)` or, for a key that only encrypts,
+`derive_encryption_key` (`core-crypto/src/derive.rs`), under the vault's
+`HkdfAlgorithm`.
 
 **blake3** (default, `HkdfAlgorithm::Blake3`):
 
-- Uses BLAKE3's built-in `derive_key` mode, which provides
-  extract-then-expand semantics equivalent to HKDF (`hkdf.rs:1-5`)
-- Context string format: `"pds v2 <purpose> <profile_id>"`
-  (`hkdf.rs:39-41`)
-- Domain separation is achieved via BLAKE3's context string parameter,
-  which internally derives a context key from the string and uses it to
-  key the hash of the input keying material (`hkdf.rs:27-33`)
-- Implementation: `blake3::derive_key(context, ikm)` (`hkdf.rs:31`)
-- Performance: 5-14x faster than SHA-256 with hardware acceleration via
-  AVX2/AVX512/NEON (`hkdf.rs:5`)
+- BLAKE3's `derive_key` mode with the context string, which provides
+  extract-then-expand semantics equivalent to HKDF
+- Implementation: `blake3::derive_key(context, ikm)`
 
 **hkdf-sha256** (`HkdfAlgorithm::HkdfSha256`):
 
-- Standard HKDF extract-then-expand per RFC 5869
-- Salt: `None` (the IKM serves as both input keying material and
-  implicit salt) (`hkdf.rs:121`)
-- Info: the context string bytes, providing domain separation
-  (`hkdf.rs:123`)
-- Output: 32 bytes (`hkdf.rs:122`)
-- Implementation: `Hkdf::<Sha256>::new(None, ikm)` followed by
-  `hk.expand(context.as_bytes(), &mut key)` (`hkdf.rs:121-124`)
-- Intermediate output array is zeroized before return (`hkdf.rs:126`)
+- HKDF extract-then-expand per RFC 5869, no salt, the context string as
+  `info`, 32 bytes of output
+- Implementation: `Hkdf::<Sha256>::new(None, ikm)` and
+  `expand(context.as_bytes(), &mut key)`
 
-The key hierarchy derived through HKDF (`hkdf.rs:7-14`):
+The context is a `KeyContext`, one variant per purpose; its string is
+`"pds v2 <purpose>"`, followed by the profile for a per-profile purpose:
 
-```text
-User password -> Argon2id -> Master Key (32 bytes)
-  -> HKDF "vault-key"          -> per-profile vault key (encrypts SQLCipher DB)
-  -> HKDF "clipboard-key"      -> per-profile clipboard key (zeroed on profile deactivation)
-  -> HKDF "ipc-auth-token"     -> per-profile IPC authentication token
-  -> HKDF "ipc-encryption-key" -> per-profile IPC field encryption key
-```
+| `KeyContext` | Context string | Derived from | Key |
+| --- | --- | --- | --- |
+| `Vault(profile)` | `pds v2 vault-key <profile>` | Master key | `SQLCipher` page key |
+| `IpcEncryption(profile)` | `pds v2 ipc-encryption-key <profile>` | Master key | Per-field IPC encryption key |
+| `CombinedMasterKey(profile)` | `pds v2 combined-master-key <profile>` | Factor pieces | Master key of an `All`-policy vault |
+| `SshChallenge(profile)` | `pds v2 ssh-challenge <profile>` | Vault salt | Challenge the SSH agent signs |
+| `SshVaultKek(profile)` | `pds v2 ssh-vault-kek <profile>` | Challenge signature | KEK of the SSH enrollment |
+| `SqlCipherEntry` | `pds v2 entry-encryption-key` | Page key | Per-entry AES-256-GCM key |
 
-Each purpose has a dedicated public function (`derive_vault_key`,
-`derive_clipboard_key`, `derive_ipc_auth_token`,
-`derive_ipc_encryption_key`) with a corresponding `*_with_algorithm()`
-variant that accepts an `HkdfAlgorithm` parameter. The
-algorithm-dispatching variants use a `match` statement to route to the
-correct implementation (`hkdf.rs:137-141`).
-
-A key-encrypting-key (KEK) for platform keyring storage is derived
-separately via `derive_kek()` (`hkdf.rs:91-101`). The KEK uses the
-hardcoded context string `"pds v2 key-encrypting-key"` and concatenates
-password + salt as the IKM, ensuring cryptographic independence from the
-Argon2id master key derivation path. The concatenated IKM is zeroized
-after use (`hkdf.rs:99`).
-
-An extensibility function `derive_key()` (`hkdf.rs:107-110`) accepts an
-arbitrary purpose string, allowing new key purposes to be added without
-modifying the module. Callers must ensure purpose strings are globally
-unique.
+New purposes are new `KeyContext` variants, so every context string is
+declared in one place and none can collide. Intermediate key bytes are
+held in `zeroize::Zeroizing`; `derive_key` returns `SecureBytes`.
 
 ### Noise Cipher: IPC Transport Encryption
 
@@ -190,24 +163,26 @@ The `AuditHash` enum is defined in `core-types/src/crypto.rs:55-61`.
 
 ## At-Rest Encryption
 
-Vault data at rest is encrypted with AES-256-GCM via the
-`EncryptionKey` type (`core-crypto/src/encryption.rs:13`). This cipher
-is not configurable --- it is always AES-256-GCM regardless of the
+Key wrapping and per-entry vault encryption use AES-256-GCM via the
+`EncryptionKey` type (`core-crypto/src/encryption.rs`). This cipher is
+not configurable --- it is always AES-256-GCM regardless of the
 `[crypto]` config section. The implementation uses the RustCrypto
-`aes-gcm` crate (`encryption.rs:5-6`).
+`aes-gcm` crate.
 
-- Key size: 32 bytes (AES-256) (`encryption.rs:24`)
-- Nonce size: 12 bytes (`encryption.rs:42`)
+- Key size: 32 bytes (AES-256)
+- Nonce size: 12 bytes (`NONCE_LEN`)
 - Output: ciphertext with appended 16-byte authentication tag
-  (`encryption.rs:37`)
+  (`TAG_LEN`)
 - Decrypted plaintext is returned as `SecureBytes` (mlock'd,
-  zeroize-on-drop) (`encryption.rs:61`)
+  zeroize-on-drop)
 - The `Debug` implementation redacts key material, printing
-  `"EncryptionKey([REDACTED])"` (`encryption.rs:66-68`)
+  `"EncryptionKey([REDACTED])"`
 
 Nonce reuse catastrophically breaks both confidentiality and
-authenticity. Callers are responsible for ensuring nonce uniqueness per
-encryption with the same key (`encryption.rs:36-37`).
+authenticity. `EncryptionKey::seal` is the one random-nonce path: it
+draws a fresh nonce from the OS random source (`random_bytes`) for every
+encryption. `seal_wire` returns `nonce || ciphertext || tag` in one
+buffer and `open_wire` decrypts it.
 
 ## Pre-Defined Crypto Profiles
 
@@ -218,7 +193,7 @@ profile via the `CryptoProfile` enum
 **leading-edge** (default, `CryptoProfile::LeadingEdge`):
 
 | Axis | Algorithm |
-|------|-----------|
+| --- | --- |
 | KDF | Argon2id (19 MiB, 2 iterations) |
 | HKDF | BLAKE3 |
 | Noise cipher | ChaCha20-Poly1305 |
@@ -232,7 +207,7 @@ acceleration.
 **governance-compatible** (`CryptoProfile::GovernanceCompatible`):
 
 | Axis | Algorithm |
-|------|-----------|
+| --- | --- |
 | KDF | PBKDF2-SHA256 (600K iterations) |
 | HKDF | HKDF-SHA256 |
 | Noise cipher | AES-256-GCM |
@@ -249,12 +224,11 @@ Individual algorithm selection via the per-axis config fields. Allows
 mixing algorithms across profiles (e.g., Argon2id KDF with AES-GCM
 Noise cipher).
 
-The `minimum_peer_profile` field specifies the minimum cryptographic
-profile that the local node will accept from federation peers. A node
-configured with `"leading-edge"` will reject connections from peers
-advertising a weaker profile. This field is defined in `CryptoConfig`
-as `minimum_peer_profile: CryptoProfile`
-(`core-types/src/crypto.rs:89`).
+The `minimum_peer_profile` field names the minimum cryptographic
+profile a node is to accept from federation peers. It is parsed and
+validated into `CryptoConfig::minimum_peer_profile: CryptoProfile`
+(`core-types/src/crypto.rs`), but nothing reads it yet: federation is
+not implemented, so no peer connection is checked against it.
 
 ## Config-to-Runtime Dispatch
 
@@ -271,45 +245,31 @@ pipeline:
    result is a `core_types::CryptoConfig` struct with typed fields
    (`core-types/src/crypto.rs:82-90`).
 
-3. **Dispatch**: Runtime code calls algorithm-dispatching functions that
-   accept the typed enum and route to the correct implementation. For
-   example, `derive_key_kdf()` (`core-crypto/src/kdf.rs:60-69`) matches
-   on `KdfAlgorithm`:
+3. **Dispatch**: one function per axis takes the typed enum and matches
+   on it. `derive_password_key(algorithm, password, salt)`
+   (`core-crypto/src/kdf.rs`) matches on `KdfAlgorithm`, and every key
+   derived from key material goes through the one `match` on
+   `HkdfAlgorithm` in `core-crypto/src/derive.rs`:
 
     ```rust
-    pub fn derive_key_kdf(
-        algorithm: &KdfAlgorithm,
-        password: &[u8],
-        salt: &[u8; 16],
-    ) -> core_types::Result<SecureBytes> {
+    fn derive(algorithm: HkdfAlgorithm, context: &KeyContext<'_>, ikm: &[u8]) -> Zeroizing<[u8; 32]> {
+        let context = context.string();
         match algorithm {
-            KdfAlgorithm::Argon2id => derive_key_argon2(password, salt),
-            KdfAlgorithm::Pbkdf2Sha256 => derive_key_pbkdf2(password, salt),
+            HkdfAlgorithm::Blake3 => Zeroizing::new(blake3::derive_key(&context, ikm)),
+            HkdfAlgorithm::HkdfSha256 => {
+                let mut key = Zeroizing::new([0u8; 32]);
+                hkdf::Hkdf::<sha2::Sha256>::new(None, ikm)
+                    .expand(context.as_bytes(), &mut *key)
+                    .expect("32 bytes is within the HKDF-SHA256 output limit of 8160");
+                key
+            }
         }
     }
     ```
 
-    Similarly, `derive_vault_key_with_algorithm()`
-    (`core-crypto/src/hkdf.rs:131-141`) matches on `HkdfAlgorithm`:
-
-    ```rust
-    pub fn derive_vault_key_with_algorithm(
-        algorithm: &HkdfAlgorithm,
-        master_key: &[u8],
-        profile_id: &str,
-    ) -> SecureBytes {
-        let ctx = build_context("vault-key", profile_id);
-        match algorithm {
-            HkdfAlgorithm::Blake3 => derive_32(&ctx, master_key),
-            HkdfAlgorithm::HkdfSha256 => derive_32_hkdf_sha256(&ctx, master_key),
-        }
-    }
-    ```
-
-This pattern ensures that adding a new algorithm requires three changes:
-add a variant to the `core_types` enum, add a `match` arm in the TOML
-validator, and add a `match` arm in the dispatch function. No call sites
-need modification.
+Adding a new algorithm therefore requires three changes: a variant in the
+`core_types` enum, a `match` arm in the TOML validator, and a `match`
+arm in the dispatch function. No call sites need modification.
 
 ## FIPS Considerations
 
@@ -327,23 +287,23 @@ FIPS-validated cryptographic module would need to replace the RustCrypto
 backends with a certified implementation (e.g., AWS-LC, BoringCrypto)
 and re-validate.
 
-The `minimum_peer_profile` mechanism provides a policy enforcement
-point: setting it to `"governance-compatible"` ensures that no peer in
-a federated deployment can negotiate a session using non-NIST
-algorithms, even if the local node supports them.
+`minimum_peer_profile` is the intended enforcement point for peers:
+set to `"governance-compatible"`, it is to refuse a federation session
+using non-NIST algorithms. It enforces nothing until federation
+exists; today the local `[crypto]` axes are the whole policy.
 
 ## Memory Protection
 
-All key material derived through the KDF and HKDF paths is returned as
-`SecureBytes` (`core-crypto/src/lib.rs:16`), which is backed by
-`core_memory::ProtectedAlloc`. This provides:
+Key material derived through `derive_key` is returned as `SecureBytes`
+(`core-crypto/src/secure_bytes.rs`), and decrypted plaintext likewise;
+`SecureBytes` is backed by `core_memory::ProtectedAlloc`. This provides:
 
 - Page-aligned allocation with guard pages
 - `mlock` to prevent swapping to disk
 - Volatile zeroization on drop
 - Canary bytes for buffer overflow detection
 
-The `init_secure_memory()` function (`core-crypto/src/lib.rs:29-31`)
-must be called before the seccomp sandbox is applied, because it probes
+The `core_types::init_secure_memory()` function (`core-types/src/lib.rs`) must be
+called before the seccomp sandbox is applied, because it probes
 `memfd_secret` availability. After seccomp is active, `memfd_secret`
 remains in the allowlist for all sandboxed daemons.

@@ -6,42 +6,42 @@
 ### open-sesame DEB (headless)
 
 | File | SHA256 |
-|------|--------|
+| --- | --- |
 | `open-sesame-linux-x86_64.deb` | `${SHA256_HEADLESS_X86_64}` |
 | `open-sesame-linux-aarch64.deb` | `${SHA256_HEADLESS_AARCH64}` |
 
 ### open-sesame-desktop DEB
 
 | File | SHA256 |
-|------|--------|
+| --- | --- |
 | `open-sesame-desktop-linux-x86_64.deb` | `${SHA256_DESKTOP_X86_64}` |
 | `open-sesame-desktop-linux-aarch64.deb` | `${SHA256_DESKTOP_AARCH64}` |
 
 ### open-sesame RPM (headless)
 
 | File | SHA256 |
-|------|--------|
+| --- | --- |
 | `open-sesame-linux-x86_64.rpm` | `${SHA256_RPM_HEADLESS_X86_64}` |
 | `open-sesame-linux-aarch64.rpm` | `${SHA256_RPM_HEADLESS_AARCH64}` |
 
 ### open-sesame-desktop RPM
 
 | File | SHA256 |
-|------|--------|
+| --- | --- |
 | `open-sesame-desktop-linux-x86_64.rpm` | `${SHA256_RPM_DESKTOP_X86_64}` |
 | `open-sesame-desktop-linux-aarch64.rpm` | `${SHA256_RPM_DESKTOP_AARCH64}` |
 
 ### open-sesame tarball (headless)
 
 | File | SHA256 |
-|------|--------|
+| --- | --- |
 | `open-sesame-v${VERSION}-x86_64.tar.gz` | `${SHA256_TAR_HEADLESS_X86_64}` |
 | `open-sesame-v${VERSION}-aarch64.tar.gz` | `${SHA256_TAR_HEADLESS_AARCH64}` |
 
 ### open-sesame-desktop tarball
 
 | File | SHA256 |
-|------|--------|
+| --- | --- |
 | `open-sesame-desktop-v${VERSION}-x86_64.tar.gz` | `${SHA256_TAR_DESKTOP_X86_64}` |
 | `open-sesame-desktop-v${VERSION}-aarch64.tar.gz` | `${SHA256_TAR_DESKTOP_AARCH64}` |
 

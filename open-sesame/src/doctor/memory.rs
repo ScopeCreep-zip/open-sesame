@@ -1,175 +1,250 @@
-//! Memory protection checks — memfd_secret, core limits, swap exposure.
+//! Memory protection checks — `memfd_secret`, kernel support, core limits,
+//! swap exposure.
 
+use std::io::Read;
+
+use anyhow::Context;
+use core_layout::Layout;
+
+use super::probe;
 use super::{Check, Status};
 
-pub fn checks() -> Vec<Check> {
-    let mut results = Vec::new();
+const CATEGORY: &str = "memory";
 
-    // mem.backend — memfd_secret vs mmap fallback.
-    let backend = match core_memory::ProtectedAlloc::new(1) {
-        Ok(probe) if probe.is_secret_mem() => (
-            "memfd_secret",
+/// A check over the running daemons.
+type DaemonCheck = fn(&Layout, &[(&'static str, u32)]) -> anyhow::Result<Check>;
+
+/// Check `id` over the running daemons, or the check reporting why none
+/// can be inspected.
+fn over_daemons(layout: &Layout, id: &str, check: DaemonCheck) -> Check {
+    match probe::inspectable_daemons(id, CATEGORY) {
+        Err(check) => check,
+        Ok(pids) => check(layout, &pids).unwrap_or_else(|e| Check::probe_failed(id, CATEGORY, &e)),
+    }
+}
+
+pub fn checks(layout: &Layout) -> Vec<Check> {
+    vec![
+        backend_check(),
+        secretmem_check(layout)
+            .unwrap_or_else(|e| Check::probe_failed("mem.config_secretmem", CATEGORY, &e)),
+        over_daemons(layout, "mem.core_limit", core_limit_check),
+        over_daemons(layout, "mem.swap_usage", swap_check),
+    ]
+}
+
+/// Whether this process obtains `memfd_secret` pages.
+fn backend_check() -> Check {
+    let (status, value, description) = match core_memory::ProtectedAlloc::new(1) {
+        Ok(alloc) if alloc.is_secret_mem() => (
             Status::Pass,
-            "Pages removed from kernel direct map",
+            "memfd_secret".to_owned(),
+            "pages removed from the kernel direct map",
         ),
         Ok(_) => (
-            "mmap fallback",
             Status::Fail,
-            "Secret pages visible in kernel direct map — CONFIG_SECRETMEM may be disabled",
+            "mmap fallback".to_owned(),
+            "secret pages visible in the kernel direct map; CONFIG_SECRETMEM may be disabled",
         ),
-        Err(_) => (
-            "allocation failed",
+        Err(e) => (
             Status::Fail,
-            "Secure memory probe failed — check RLIMIT_MEMLOCK",
+            format!("allocation failed: {e}"),
+            "secure memory probe failed; check RLIMIT_MEMLOCK",
         ),
     };
-    results.push(Check {
-        id: "mem.backend".into(),
-        category: "memory",
-        status: backend.1,
-        value: backend.0.into(),
-        description: backend.2.into(),
-    });
-
-    // mem.config_secretmem — kernel config check.
-    let secretmem = check_kernel_config("CONFIG_SECRETMEM");
-    results.push(Check {
-        id: "mem.config_secretmem".into(),
-        category: "memory",
-        status: match secretmem.as_deref() {
-            Some("y") => Status::Pass,
-            _ => Status::Fail,
-        },
-        value: secretmem.unwrap_or_else(|| "unknown".into()),
-        description: "Kernel CONFIG_SECRETMEM enables memfd_secret syscall".into(),
-    });
-
-    // mem.core_limit — check each daemon's core dump limit.
-    let core_ok = check_all_daemon_limits("Max core file size", "0");
-    results.push(Check {
-        id: "mem.core_limit".into(),
-        category: "memory",
-        status: if core_ok { Status::Pass } else { Status::Fail },
-        value: if core_ok {
-            "0 (disabled)".into()
-        } else {
-            "nonzero (core dumps possible)".into()
-        },
-        description: "LimitCORE=0 prevents secret material in core dumps".into(),
-    });
-
-    // mem.swap_usage — check if any daemon has pages in swap.
-    let swap_kb = total_daemon_swap();
-    results.push(Check {
-        id: "mem.swap_usage".into(),
-        category: "memory",
-        status: if swap_kb == 0 {
-            Status::Pass
-        } else {
-            Status::Warn
-        },
-        value: format!("{swap_kb} kB"),
-        description: if swap_kb > 0 {
-            "Daemon pages in swap — secret material may be on disk".into()
-        } else {
-            String::new()
-        },
-    });
-
-    results
+    Check::new("mem.backend", CATEGORY, status, value, description)
 }
 
-/// Check a kernel config option from /proc/config.gz or /boot/config-*.
-fn check_kernel_config(key: &str) -> Option<String> {
-    // Try /proc/config.gz first (requires CONFIG_IKCONFIG_PROC).
-    if let Ok(output) = std::process::Command::new("zgrep")
-        .arg(format!("^{key}="))
-        .arg("/proc/config.gz")
-        .output()
-        && output.status.success()
-    {
-        let line = String::from_utf8_lossy(&output.stdout);
-        return line.trim().split('=').nth(1).map(|v| v.to_string());
-    }
-
-    // Fallback: /boot/config-$(uname -r).
-    let uname = std::process::Command::new("uname")
-        .arg("-r")
-        .output()
-        .ok()?;
-    let release = String::from_utf8_lossy(&uname.stdout).trim().to_string();
-    let config_path = format!("/boot/config-{release}");
-    let content = std::fs::read_to_string(config_path).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix(&format!("{key}=")) {
-            return Some(rest.to_string());
-        }
-    }
-    None
-}
-
-/// Check that all daemon PIDs have a specific `/proc/<pid>/limits` value.
-fn check_all_daemon_limits(limit_name: &str, expected: &str) -> bool {
-    let pids = daemon_pids();
-    if pids.is_empty() {
-        return false;
-    }
-    pids.iter().all(|pid| {
-        let path = format!("/proc/{pid}/limits");
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return false;
-        };
-        content
-            .lines()
-            .any(|line| line.contains(limit_name) && line.contains(expected))
+/// The value of option `key` in kernel build configuration `config`:
+/// `Some("y")` for `KEY=y`, `None` when it is unset (`# KEY is not set`
+/// or absent).
+fn kernel_option<'c>(config: &'c str, key: &str) -> Option<&'c str> {
+    config.lines().find_map(|line| {
+        line.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
     })
 }
 
-/// Sum VmSwap across all daemon PIDs.
-fn total_daemon_swap() -> u64 {
-    daemon_pids()
-        .iter()
-        .filter_map(|pid| {
-            let path = format!("/proc/{pid}/status");
-            let content = std::fs::read_to_string(path).ok()?;
-            for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("VmSwap:") {
-                    let num = rest.split_whitespace().next()?;
-                    return num.parse::<u64>().ok();
-                }
-            }
-            None
+/// The running kernel's build configuration: `/proc/config.gz`
+/// (`CONFIG_IKCONFIG_PROC`), else the distribution's
+/// `/boot/config-<release>`; `None` when neither exists.
+fn kernel_config(layout: &Layout) -> anyhow::Result<Option<String>> {
+    if let Some(compressed) = probe::proc_bytes(layout, "config.gz")? {
+        let mut config = String::new();
+        flate2::read::GzDecoder::new(compressed.as_slice())
+            .read_to_string(&mut config)
+            .context("failed to decompress config.gz in the process filesystem")?;
+        return Ok(Some(config));
+    }
+    let release = super::platform::kernel_release()?;
+    let Some(path) = layout.kernel_config_file(&release) else {
+        return Ok(None);
+    };
+    probe::read_optional(&path)?
+        .map(|bytes| {
+            String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
         })
-        .sum()
+        .transpose()
 }
 
-/// Get PIDs of all running open-sesame daemons.
-fn daemon_pids() -> Vec<u32> {
-    let binaries = [
-        "daemon-profile",
-        "daemon-secrets",
-        "daemon-wm",
-        "daemon-launcher",
-        "daemon-clipboard",
-        "daemon-input",
-        "daemon-snippets",
-    ];
-    binaries
-        .iter()
-        .filter_map(|name| {
-            let output = std::process::Command::new("pidof")
-                .arg(name)
-                .output()
-                .ok()?;
-            if output.status.success() {
-                String::from_utf8_lossy(&output.stdout)
-                    .split_whitespace()
-                    .next()?
-                    .parse()
-                    .ok()
-            } else {
-                None
-            }
-        })
-        .collect()
+fn secretmem_check(layout: &Layout) -> anyhow::Result<Check> {
+    let description = "kernel CONFIG_SECRETMEM enables the memfd_secret syscall";
+    let Some(config) = kernel_config(layout)? else {
+        return Ok(Check::new(
+            "mem.config_secretmem",
+            CATEGORY,
+            Status::Warn,
+            "kernel configuration unavailable",
+            "neither config.gz in the process filesystem nor the boot configuration exists; mem.backend reports the effective backend",
+        ));
+    };
+    Ok(match kernel_option(&config, "CONFIG_SECRETMEM") {
+        Some("y") => Check::new(
+            "mem.config_secretmem",
+            CATEGORY,
+            Status::Pass,
+            "y",
+            description,
+        ),
+        Some(other) => Check::new(
+            "mem.config_secretmem",
+            CATEGORY,
+            Status::Fail,
+            other,
+            description,
+        ),
+        None => Check::new(
+            "mem.config_secretmem",
+            CATEGORY,
+            Status::Fail,
+            "not set",
+            description,
+        ),
+    })
+}
+
+/// The soft and hard values of limit `name` in a `/proc/<pid>/limits`
+/// table, proc(5); `None` when the table has no such limit.
+fn limit_values<'t>(table: &'t str, name: &str) -> Option<(&'t str, &'t str)> {
+    table.lines().find_map(|line| {
+        let mut values = line.strip_prefix(name)?.split_whitespace();
+        Some((values.next()?, values.next()?))
+    })
+}
+
+fn core_limit_check(layout: &Layout, pids: &[(&'static str, u32)]) -> anyhow::Result<Check> {
+    let mut dumping = Vec::new();
+    for &(name, pid) in pids {
+        let Some(table) = probe::proc_file(layout, &format!("{pid}/limits"))? else {
+            continue;
+        };
+        let (soft, hard) = limit_values(&table, "Max core file size")
+            .ok_or_else(|| anyhow::anyhow!("process {pid} limits have no core file size"))?;
+        if soft != "0" {
+            dumping.push(format!("{name} (soft {soft}, hard {hard})"));
+        }
+    }
+    Ok(if dumping.is_empty() {
+        Check::new(
+            "mem.core_limit",
+            CATEGORY,
+            Status::Pass,
+            "0 (disabled)",
+            "LimitCORE=0 prevents secret material in core dumps",
+        )
+    } else {
+        Check::new(
+            "mem.core_limit",
+            CATEGORY,
+            Status::Fail,
+            format!("core dumps possible: {}", dumping.join(", ")),
+            "set LimitCORE=0 in the daemon units",
+        )
+    })
+}
+
+fn swap_check(layout: &Layout, pids: &[(&'static str, u32)]) -> anyhow::Result<Check> {
+    let mut swapped = Vec::new();
+    let mut total = 0;
+    for &(name, pid) in pids {
+        let Some(swap) = probe::process_status_field(layout, pid, "VmSwap")? else {
+            continue;
+        };
+        let kib = probe::kib(&swap)?;
+        if kib > 0 {
+            swapped.push(name);
+            total += kib;
+        }
+    }
+    Ok(if swapped.is_empty() {
+        Check::new("mem.swap_usage", CATEGORY, Status::Pass, "0 kB", "")
+    } else {
+        Check::new(
+            "mem.swap_usage",
+            CATEGORY,
+            Status::Warn,
+            format!("{total} kB ({})", swapped.join(", ")),
+            "daemon pages in swap; secret material may be on disk",
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_options_match_whole_keys() {
+        let config = "CONFIG_SECRETMEM_X=y\n# CONFIG_FOO is not set\nCONFIG_SECRETMEM=y\n";
+        assert_eq!(kernel_option(config, "CONFIG_SECRETMEM"), Some("y"));
+        assert_eq!(kernel_option(config, "CONFIG_FOO"), None);
+        assert_eq!(
+            kernel_option("# CONFIG_SECRETMEM is not set\n", "CONFIG_SECRETMEM"),
+            None
+        );
+    }
+
+    #[test]
+    fn core_limits_read_soft_and_hard_columns() {
+        let table = "Limit                     Soft Limit           Hard Limit           Units     \n\
+                     Max cpu time              unlimited            unlimited            seconds   \n\
+                     Max core file size        1024000              unlimited            bytes     \n";
+        assert_eq!(
+            limit_values(table, "Max core file size"),
+            Some(("1024000", "unlimited"))
+        );
+        assert_eq!(limit_values(table, "Max open files"), None);
+    }
+
+    #[test]
+    fn gzip_kernel_config_is_read_from_the_process_filesystem() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let layout = Layout::under(root.path());
+        let proc_root = layout.proc_root().unwrap();
+        std::fs::create_dir_all(proc_root).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"CONFIG_SECRETMEM=y\n").unwrap();
+        std::fs::write(proc_root.join("config.gz"), gz.finish().unwrap()).unwrap();
+        let check = secretmem_check(&layout).unwrap();
+        assert_eq!((check.status, check.value.as_str()), (Status::Pass, "y"));
+    }
+
+    #[test]
+    fn boot_kernel_config_is_read_when_config_gz_is_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = Layout::under(root.path());
+        let path = layout
+            .kernel_config_file(&super::super::platform::kernel_release().unwrap())
+            .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# CONFIG_SECRETMEM is not set\n").unwrap();
+        let check = secretmem_check(&layout).unwrap();
+        assert_eq!(
+            (check.status, check.value.as_str()),
+            (Status::Fail, "not set")
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(secretmem_check(&layout).unwrap().status, Status::Warn);
+    }
 }

@@ -6,7 +6,7 @@ set -euo pipefail
 curl -fsSL https://scopecreep-zip.github.io/open-sesame/RPM-GPG-KEY \
     -o /etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
 
-cat > /etc/yum.repos.d/open-sesame.repo << 'EOF'
+cat >/etc/yum.repos.d/open-sesame.repo <<'EOF'
 [open-sesame]
 name=Open Sesame RPMs (GitHub Pages)
 baseurl=https://scopecreep-zip.github.io/open-sesame/repo/

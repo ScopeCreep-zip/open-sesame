@@ -5,53 +5,75 @@
 //! accepts client connections with `UCred` authentication, and routes
 //! postcard-framed messages between connected daemons.
 //!
-//! Every socket connection performs a Noise IK handshake before any application
-//! data flows. The `bind()` method requires a mandatory keypair.
+//! Every socket connection performs a Noise IK handshake, under the suite
+//! the server was bound with, before any application data flows.
 
-use core_types::{DaemonId, EventKind, SecurityLevel};
+use core_types::{DaemonId, EventKind, SecurityLevel, TrustVector};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::framing::{decode_frame, encode_frame};
 use crate::message::Message;
+use crate::noise::{BusEndpoint, Connection, NoiseSuite};
 use crate::registry::ClearanceRegistry;
-use crate::transport::{extract_ucred, local_credentials};
+use crate::transport::{PeerCredentials, extract_ucred, local_credentials};
 
-/// Subscription filter for event routing.
-#[derive(Debug, Clone)]
-pub struct SubscriptionFilter {
-    /// Event kind prefix match (e.g. "Secret" matches all secret events).
-    pub kind_prefix: Option<String>,
-    /// Minimum security level required to receive events.
-    pub min_level: SecurityLevel,
-}
+/// How long a request waits for its response before the bus forgets its
+/// sender: longer than any client request timeout, so an answer is never
+/// dropped while its requester still waits.
+const PENDING_REQUEST_TTL: Duration = Duration::from_mins(2);
 
-/// Per-connection state tracked by the bus server.
-#[allow(dead_code)] // subscriptions used in future subscription-based routing
+/// Per-connection state tracked by the bus server. Routing delivers a
+/// frame to every other connection whose clearance is at least the
+/// frame's security level.
 struct ConnectionState {
     daemon_id: Option<DaemonId>,
     /// Registry-verified daemon name from Noise IK handshake.
     /// `None` for unregistered clients (CLI, Open clearance).
     verified_name: Option<String>,
     tx: mpsc::Sender<Vec<u8>>,
-    peer: crate::transport::PeerCredentials,
     security_clearance: SecurityLevel,
-    subscriptions: Vec<SubscriptionFilter>,
     /// Trust assessment computed at connection time from handshake evidence.
-    trust_vector: Option<core_types::TrustVector>,
+    trust_vector: Option<TrustVector>,
+}
+
+/// A request awaiting its response: the connection that sent it, `None`
+/// once that connection has closed, and when it was sent.
+struct PendingRequest {
+    conn_id: Option<u64>,
+    sent_at: Instant,
+}
+
+/// Where the response to a request goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requester {
+    /// The connection that sent the request, still open.
+    Connected(u64),
+    /// The requester disconnected before its response (it gave up
+    /// waiting): there is nothing to deliver.
+    Disconnected,
+    /// No request with this id awaits a response: it was never tracked, or
+    /// is older than the pending-request TTL.
+    Unknown,
 }
 
 /// Shared state for the bus server, accessible from per-connection tasks.
 struct ServerState {
+    /// The server's Noise IK static keypair. Held in memory only.
+    keypair: snow::Keypair,
+    /// The suite every connection handshakes with and the public half of
+    /// `keypair`, as clients receive it.
+    endpoint: BusEndpoint,
     connections: RwLock<HashMap<u64, ConnectionState>>,
-    /// Maps request `msg_id` -> originating `connection_id` for response routing.
-    pending_requests: RwLock<HashMap<Uuid, u64>>,
+    /// Requests awaiting a response (`Message::expects_response`), by
+    /// `msg_id`, for routing the response back to its sender.
+    pending_requests: RwLock<HashMap<Uuid, PendingRequest>>,
     next_conn_id: AtomicU64,
     epoch: Instant,
     /// Maps public keys to daemon identities and security clearance levels.
@@ -94,97 +116,61 @@ impl Drop for ConfirmationGuard {
     }
 }
 
-/// The IPC bus server.
+/// The IPC bus server: a bound socket and the state its connections share.
 pub struct BusServer {
-    listener: Option<UnixListener>,
-    socket_path: Option<PathBuf>,
+    listener: UnixListener,
+    /// The bound socket, removed when the server is dropped.
+    socket_path: PathBuf,
     state: Arc<ServerState>,
-    /// Noise IK static keypair for the bus server.
-    /// Always `Some` from `bind()`. `None` only from `new()` (channel-wired mode).
-    keypair: Option<Arc<snow::Keypair>>,
 }
 
 impl BusServer {
-    /// Create a new bus server without a listener (for in-process channel wiring).
+    /// Bind a Unix domain socket listener at `path`, handshaking every
+    /// connection with `keypair` under `suite`.
     ///
-    /// Used only for `register()`/`unregister()` based in-process testing where
-    /// clients are pre-wired via channels rather than socket connections.
-    /// Does NOT support socket accept — use `bind()` for socket-based servers.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            listener: None,
-            socket_path: None,
-            state: Arc::new(ServerState {
-                connections: RwLock::new(HashMap::new()),
-                pending_requests: RwLock::new(HashMap::new()),
-                next_conn_id: AtomicU64::new(1),
-                epoch: Instant::now(),
-                registry: RwLock::new(ClearanceRegistry::new()),
-                confirmations: RwLock::new(HashMap::new()),
-                name_to_conn: RwLock::new(HashMap::new()),
-            }),
-            keypair: None,
-        }
-    }
-
-    /// Bind a Unix domain socket listener at the given path.
-    ///
-    /// The `keypair` is the server's Noise IK static keypair (mandatory),
-    /// used to perform encrypted handshakes with connecting clients. Generated
-    /// via [`crate::generate_keypair()`] and published via
-    /// [`crate::noise::write_bus_keypair()`].
-    ///
-    /// Creates the parent directory if it does not exist. Removes any stale
-    /// socket file at the path before binding.
+    /// Creates a missing parent directory owner-only and restricts the
+    /// socket to its owner. A stale socket at `path` is removed first.
+    /// Clients reach this server through [`Self::endpoint`], published with
+    /// [`crate::noise::publish_bus_endpoint`].
     ///
     /// # Errors
     ///
-    /// Returns an error if directory creation or socket binding fails.
+    /// When the directory cannot be created, a stale socket cannot be
+    /// removed, the public key is not 32 bytes, or binding fails.
     pub fn bind(
         path: &Path,
         keypair: snow::Keypair,
         registry: ClearanceRegistry,
+        suite: NoiseSuite,
     ) -> core_types::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                core_types::Error::Ipc(format!(
-                    "failed to create socket directory {}: {e}",
-                    parent.display()
-                ))
+        let public_key: [u8; 32] =
+            keypair.public.as_slice().try_into().map_err(|_| {
+                core_types::Error::Ipc("bus server public key is not 32 bytes".into())
             })?;
+        if let Some(parent) = path.parent() {
+            core_layout::file::create_private_dir(parent)?;
         }
-
-        // Remove stale socket if it exists.
-        if path.exists() {
-            std::fs::remove_file(path).map_err(|e| {
-                core_types::Error::Ipc(format!(
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(core_types::Error::Ipc(format!(
                     "failed to remove stale socket {}: {e}",
                     path.display()
-                ))
-            })?;
+                )));
+            }
         }
 
         let listener = UnixListener::bind(path).map_err(|e| {
             core_types::Error::Ipc(format!("failed to bind socket {}: {e}", path.display()))
         })?;
 
-        // Defense-in-depth: restrict socket and parent directory permissions to owner-only.
-        // UCred UID validation is the real security boundary, but this hardens against
-        // misconfigured XDG_RUNTIME_DIR permissions.
+        // Defense-in-depth: UCred same-UID validation is the security
+        // boundary; an owner-only socket also refuses other users at
+        // connect().
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Some(parent) = path.parent() {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |e| {
-                        core_types::Error::Ipc(format!(
-                            "failed to set directory permissions on {}: {e}",
-                            parent.display()
-                        ))
-                    },
-                )?;
-            }
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
                 |e| {
                     core_types::Error::Ipc(format!(
@@ -195,12 +181,18 @@ impl BusServer {
             )?;
         }
 
-        tracing::info!(path = %path.display(), "IPC bus server bound");
+        tracing::info!(
+            path = %path.display(),
+            protocol = suite.protocol_name(),
+            "IPC bus server bound"
+        );
 
         Ok(Self {
-            listener: Some(listener),
-            socket_path: Some(path.to_owned()),
+            listener,
+            socket_path: path.to_owned(),
             state: Arc::new(ServerState {
+                keypair,
+                endpoint: BusEndpoint { suite, public_key },
                 connections: RwLock::new(HashMap::new()),
                 pending_requests: RwLock::new(HashMap::new()),
                 next_conn_id: AtomicU64::new(1),
@@ -209,30 +201,22 @@ impl BusServer {
                 confirmations: RwLock::new(HashMap::new()),
                 name_to_conn: RwLock::new(HashMap::new()),
             }),
-            keypair: Some(Arc::new(keypair)),
         })
     }
 
-    /// Run the accept loop. This future never completes unless the listener
-    /// encounters a fatal error. Cancel it via `tokio::select!` with a
-    /// shutdown signal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no listener was bound (created via `new()` instead
-    /// of `bind()`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a `BusServer` created via `bind()` whose keypair
-    /// was somehow removed (should be unreachable).
-    pub async fn run(&self) -> core_types::Result<()> {
-        let listener = self.listener.as_ref().ok_or_else(|| {
-            core_types::Error::Ipc("BusServer::run() called without bind()".into())
-        })?;
+    /// The endpoint clients handshake with: the suite this server binds
+    /// every connection with and its static public key.
+    #[must_use]
+    pub fn endpoint(&self) -> BusEndpoint {
+        self.state.endpoint
+    }
 
+    /// Run the accept loop until the future is dropped (cancel it with
+    /// `tokio::select!` against a shutdown signal). A failed accept is
+    /// logged and retried after 50 ms.
+    pub async fn run(&self) -> std::convert::Infallible {
         loop {
-            match listener.accept().await {
+            match self.listener.accept().await {
                 Ok((stream, _addr)) => {
                     let peer = match extract_ucred(&stream) {
                         Ok(creds) => creds,
@@ -254,20 +238,9 @@ impl BusServer {
                     }
 
                     let conn_id = self.state.next_conn_id.fetch_add(1, Ordering::Relaxed);
-
                     tracing::info!(conn_id, pid = peer.pid, uid = peer.uid, "client connected");
-
-                    // Per-connection outbound channel (server -> client).
-                    let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
-
                     let state = Arc::clone(&self.state);
-                    let keypair = self
-                        .keypair
-                        .clone()
-                        .expect("BusServer::run() requires bind() — keypair is always set");
-                    tokio::spawn(async move {
-                        handle_connection(state, conn_id, stream, tx, rx, peer, keypair).await;
-                    });
+                    tokio::spawn(handle_connection(state, conn_id, stream, peer));
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "accept failed");
@@ -279,13 +252,13 @@ impl BusServer {
         }
     }
 
-    /// Register a subscriber with pre-wired channels (for in-process testing).
+    /// Register an in-process subscriber (the bus host itself): frames
+    /// routed to it arrive on `tx`, filtered by `security_clearance` like
+    /// any socket connection.
     pub async fn register(
         &self,
         daemon_id: DaemonId,
-        peer: crate::transport::PeerCredentials,
         security_clearance: SecurityLevel,
-        subscriptions: Vec<SubscriptionFilter>,
         tx: mpsc::Sender<Vec<u8>>,
     ) {
         let conn_id = self.state.next_conn_id.fetch_add(1, Ordering::Relaxed);
@@ -294,8 +267,6 @@ impl BusServer {
             verified_name: None, // In-process subscribers have no Noise handshake.
             tx,
             security_clearance,
-            subscriptions,
-            peer,
             trust_vector: None,
         };
         self.state.connections.write().await.insert(conn_id, state);
@@ -338,28 +309,15 @@ impl BusServer {
         self.state.epoch
     }
 
-    /// Return the socket path if bound.
-    #[must_use]
-    pub fn socket_path(&self) -> Option<&Path> {
-        self.socket_path.as_deref()
-    }
-
-    /// Return the number of active connections.
-    pub async fn connection_count(&self) -> usize {
-        self.state.connections.read().await.len()
-    }
-
     /// Send a frame to a specific connection by ID (unicast).
     ///
     /// Returns `true` if the frame was enqueued, `false` if the connection
     /// was not found or its channel was full.
     pub async fn send_to(&self, conn_id: u64, frame: &[u8]) -> bool {
         let conns = self.state.connections.read().await;
-        if let Some(conn) = conns.get(&conn_id) {
-            conn.tx.try_send(frame.to_vec()).is_ok()
-        } else {
-            false
-        }
+        conns
+            .get(&conn_id)
+            .is_some_and(|conn| conn.tx.try_send(frame.to_vec()).is_ok())
     }
 
     /// Access the clearance registry for mutation (key rotation, revocation).
@@ -367,18 +325,10 @@ impl BusServer {
         self.state.registry.write().await
     }
 
-    /// Look up and remove the originating connection for a correlated response.
-    ///
-    /// When a request arrives via `route_frame()`, the server records
-    /// `(msg_id -> sender_conn_id)` in `pending_requests`. This method
-    /// retrieves and removes that mapping so the response can be unicast
-    /// back to the original requester instead of broadcast.
-    pub async fn take_pending_request(&self, correlation_id: &uuid::Uuid) -> Option<u64> {
-        self.state
-            .pending_requests
-            .write()
-            .await
-            .remove(correlation_id)
+    /// Look up and forget the requester of request `correlation_id`, so its
+    /// response is unicast back to it instead of broadcast.
+    pub async fn take_pending_request(&self, correlation_id: &uuid::Uuid) -> Requester {
+        take_requester(&self.state, correlation_id).await
     }
 
     /// Register a confirmation route for confirmed RPC.
@@ -402,193 +352,170 @@ impl BusServer {
         }
     }
 
-    /// Send a frame to a named daemon via O(1) lookup.
-    ///
-    /// Resolves `daemon_name` to a connection ID via `name_to_conn`, then delegates
-    /// to `send_to()`. Returns `Ok(())` on success, `Err` if the daemon is not
-    /// connected or the channel is full.
+    /// Send a frame to the connection of the daemon `daemon_name` (the
+    /// registry name it announced with `DaemonStarted`).
     ///
     /// # Errors
     ///
-    /// Returns an error string if the daemon is not in `name_to_conn` (not connected)
-    /// or if the connection's outbound channel is full/closed.
-    pub async fn send_to_named(&self, daemon_name: &str, frame: &[u8]) -> Result<(), String> {
-        let conn_id = {
-            let map = self.state.name_to_conn.read().await;
-            map.get(daemon_name).copied()
-        };
+    /// `core_types::Error::Ipc` naming the daemon when it has not announced
+    /// itself on a connection, or that connection is gone or its outbound
+    /// channel is full.
+    pub async fn send_to_named(&self, daemon_name: &str, frame: &[u8]) -> core_types::Result<()> {
+        let conn_id = self
+            .state
+            .name_to_conn
+            .read()
+            .await
+            .get(daemon_name)
+            .copied();
         match conn_id {
-            Some(id) => {
-                if self.send_to(id, frame).await {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "send_to_named({daemon_name}): connection gone or channel full"
-                    ))
-                }
-            }
-            None => Err(format!(
-                "send_to_named({daemon_name}): daemon not connected"
-            )),
+            Some(id) if self.send_to(id, frame).await => Ok(()),
+            Some(_) => Err(core_types::Error::Ipc(format!(
+                "{daemon_name}: connection gone or outbound channel full"
+            ))),
+            None => Err(core_types::Error::Ipc(format!(
+                "{daemon_name}: not connected"
+            ))),
         }
-    }
-}
-
-impl Default for BusServer {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 impl Drop for BusServer {
     fn drop(&mut self) {
-        // Clean up the socket file.
-        if let Some(path) = &self.socket_path {
-            let _ = std::fs::remove_file(path);
+        match std::fs::remove_file(&self.socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                path = %self.socket_path.display(),
+                error = %e,
+                "failed to remove the bus socket"
+            ),
         }
     }
 }
 
-/// Hex-encode a 32-byte key for logging. No `hex` crate dependency needed.
-fn hex_encode(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
+// ---------------------------------------------------------------------------
+// Connections
+// ---------------------------------------------------------------------------
 
-/// Handle a single client connection: perform Noise handshake, then read/write encrypted frames.
+/// Handle a client connection: handshake, register, serve, and clean up.
 ///
-/// The connection is registered in `state.connections` only AFTER the handshake
-/// succeeds. This prevents the race where broadcast frames arrive on the
-/// outbound channel before the writer task (which needs the `NoiseTransport`)
-/// is spawned.
-#[allow(clippy::too_many_lines)]
+/// The connection is registered in `state.connections` only after the
+/// handshake succeeds, so no frame is routed to it before a transport
+/// exists to encrypt it.
 async fn handle_connection(
     state: Arc<ServerState>,
     conn_id: u64,
     stream: UnixStream,
-    tx: mpsc::Sender<Vec<u8>>,
-    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
-    peer_creds: crate::transport::PeerCredentials,
-    keypair: Arc<snow::Keypair>,
+    peer: PeerCredentials,
 ) {
-    let (reader, writer) = stream.into_split();
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut writer = tokio::io::BufWriter::new(writer);
-
-    // Perform Noise IK handshake — mandatory for all socket connections.
-    let local_creds = local_credentials();
     let connected_at = Instant::now();
+    let connection =
+        match Connection::server(stream, &state.keypair, state.endpoint.suite, &peer).await {
+            Ok(connection) => connection,
+            Err(e) => {
+                tracing::error!(
+                    audit = "connection-lifecycle",
+                    event_type = "handshake-failed",
+                    conn_id,
+                    peer_pid = peer.pid,
+                    peer_uid = peer.uid,
+                    error = %e,
+                    "Noise handshake failed, dropping connection"
+                );
+                return;
+            }
+        };
+    let (security_clearance, verified_name) =
+        identify(&state, conn_id, &connection.remote_static_key(), &peer).await;
 
-    let mut transport = match crate::noise::server_handshake(
-        &mut reader,
-        &mut writer,
-        &keypair,
-        &local_creds,
-        &peer_creds,
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(e) => {
-            // Structured handshake failure audit.
-            tracing::error!(
-                audit = "connection-lifecycle",
-                event_type = "handshake-failed",
-                conn_id,
-                peer_pid = peer_creds.pid,
-                peer_uid = peer_creds.uid,
-                error = %e,
-                "Noise handshake failed, dropping connection"
-            );
-            return;
-        }
-    };
-
-    // Extract client's X25519 static public key from completed Noise IK handshake.
-    let client_pubkey: [u8; 32] = transport
-        .remote_static()
-        .expect("Noise IK pattern guarantees remote static key after handshake")
-        .try_into()
-        .expect("Curve25519 public key is exactly 32 bytes");
-
-    // Registry lookup: cryptographic identity -> (name, clearance).
-    let (security_clearance, verified_name) = {
-        let reg = state.registry.read().await;
-        if let Some(identity) = reg.lookup(&client_pubkey)
-            && let Some(name) = reg.lookup_name(&client_pubkey).map(str::to_owned)
-        {
-            tracing::info!(
-                audit = "connection-lifecycle",
-                event_type = "handshake-success",
-                conn_id,
-                daemon = %name,
-                clearance = ?identity.security_level,
-                pubkey = %hex_encode(&client_pubkey),
-                peer_pid = peer_creds.pid,
-                peer_uid = peer_creds.uid,
-                "daemon authenticated via registry"
-            );
-            (identity.security_level, Some(name))
-        } else {
-            tracing::info!(
-                audit = "connection-lifecycle",
-                event_type = "ephemeral-client-accepted",
-                conn_id,
-                clearance = ?core_types::SecurityLevel::SecretsOnly,
-                pubkey = %hex_encode(&client_pubkey),
-                peer_pid = peer_creds.pid,
-                peer_uid = peer_creds.uid,
-                "ephemeral client accepted via UCred same-UID validation"
-            );
-            (core_types::SecurityLevel::SecretsOnly, None)
-        }
-    };
-
-    // Register connection AFTER handshake succeeds — no frames can arrive
-    // on `tx` before the writer task is ready to handle them.
-    // Compute initial trust vector from handshake evidence.
-    let trust_vector = core_types::TrustVector {
-        authn_strength: core_types::TrustLevel::Low,
-        authz_freshness: std::time::Duration::ZERO,
-        delegation_depth: 0,
-        device_posture: 0.0,
-        network_exposure: core_types::NetworkTrust::Local,
-        agent_type: core_types::AgentType::Human,
-    };
-
+    // Per-connection outbound channel (server -> client).
+    let (tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
     let conn = ConnectionState {
         daemon_id: None,
         verified_name,
         tx,
-        peer: peer_creds,
         security_clearance,
-        subscriptions: vec![],
-        trust_vector: Some(trust_vector),
+        trust_vector: Some(TrustVector {
+            authn_strength: core_types::TrustLevel::Low,
+            authz_freshness: Duration::ZERO,
+            delegation_depth: 0,
+            device_posture: 0.0,
+            network_exposure: core_types::NetworkTrust::Local,
+            agent_type: core_types::AgentType::Human,
+        }),
     };
     state.connections.write().await.insert(conn_id, conn);
 
-    // Single-task multiplexed I/O for encrypted transport.
-    //
-    // snow::TransportState requires &mut self for both encrypt and decrypt,
-    // so we cannot split it between separate reader/writer tasks without a
-    // Mutex. But the reader would hold the lock while awaiting socket I/O,
-    // starving the writer (deadlock). Instead, we use tokio::select! to
-    // multiplex reads and writes in a single task that owns the transport.
+    serve(&state, conn_id, connection, outbound_rx, connected_at).await;
+    close(&state, conn_id, connected_at).await;
+}
+
+/// The clearance and registry name of the client with static key
+/// `client_key`: its registration, or `SecretsOnly` and no name for an
+/// ephemeral client (the CLI), admitted by `UCred` same-UID validation.
+async fn identify(
+    state: &ServerState,
+    conn_id: u64,
+    client_key: &[u8; 32],
+    peer: &PeerCredentials,
+) -> (SecurityLevel, Option<String>) {
+    let registry = state.registry.read().await;
+    if let Some(identity) = registry.lookup(client_key)
+        && let Some(name) = registry.lookup_name(client_key).map(str::to_owned)
+    {
+        tracing::info!(
+            audit = "connection-lifecycle",
+            event_type = "handshake-success",
+            conn_id,
+            daemon = %name,
+            clearance = ?identity.security_level,
+            pubkey = %hex::encode(client_key),
+            peer_pid = peer.pid,
+            peer_uid = peer.uid,
+            "daemon authenticated via registry"
+        );
+        (identity.security_level, Some(name))
+    } else {
+        tracing::info!(
+            audit = "connection-lifecycle",
+            event_type = "ephemeral-client-accepted",
+            conn_id,
+            clearance = ?SecurityLevel::SecretsOnly,
+            pubkey = %hex::encode(client_key),
+            peer_pid = peer.pid,
+            peer_uid = peer.uid,
+            "ephemeral client accepted via UCred same-UID validation"
+        );
+        (SecurityLevel::SecretsOnly, None)
+    }
+}
+
+/// Route the connection's frames and write the frames routed to it until
+/// either direction fails.
+///
+/// `snow::TransportState` needs `&mut self` to encrypt and to decrypt, so
+/// one task owns it and multiplexes reads and writes with `tokio::select!`:
+/// split across tasks behind a lock, the reader would hold the lock while
+/// it awaits the socket and starve the writer.
+async fn serve(
+    state: &ServerState,
+    conn_id: u64,
+    mut connection: Connection,
+    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
+    connected_at: Instant,
+) {
     loop {
         tokio::select! {
-            result = transport.read_encrypted_frame(&mut reader) => {
+            result = connection.transport.read_encrypted_frame(&mut connection.reader) => {
                 match result {
-                    Ok(mut payload) => {
-                        route_frame(&state, conn_id, &payload).await;
-                        // Zeroize decrypted postcard buffer — may contain secret values.
-                        zeroize::Zeroize::zeroize(&mut payload);
+                    Ok(payload) => {
+                        // The decrypted postcard buffer may hold secret values.
+                        let payload = zeroize::Zeroizing::new(payload);
+                        route_frame(state, conn_id, &payload).await;
                     }
                     Err(e) => {
-                        let session_ms = connected_at.elapsed().as_millis();
-                        let daemon_name = state.connections.read().await
+                        let daemon = state.connections.read().await
                             .get(&conn_id)
                             .and_then(|c| c.daemon_id)
                             .map(|id| id.to_string());
@@ -596,49 +523,56 @@ async fn handle_connection(
                             audit = "connection-lifecycle",
                             event_type = "disconnect",
                             conn_id,
-                            daemon = daemon_name.as_deref().unwrap_or("unknown"),
-                            session_duration_ms = %session_ms,
+                            daemon = daemon.as_deref().unwrap_or("unknown"),
+                            session_duration_ms = %connected_at.elapsed().as_millis(),
                             error = %e,
                             "client disconnected"
                         );
-                        break;
+                        return;
                     }
                 }
             }
-            Some(mut payload) = outbound_rx.recv() => {
-                let result = transport.write_encrypted_frame(&mut writer, &payload).await;
-                // Zeroize plaintext postcard buffer after encryption.
-                zeroize::Zeroize::zeroize(&mut payload);
-                if let Err(e) = result {
+            Some(payload) = outbound_rx.recv() => {
+                // The plaintext postcard buffer may hold secret values.
+                let payload = zeroize::Zeroizing::new(payload);
+                if let Err(e) = connection.transport.write_encrypted_frame(&mut connection.writer, &payload).await {
                     tracing::debug!(conn_id, error = %e, "encrypted write failed, closing");
-                    break;
+                    return;
                 }
             }
-            else => break,
+            else => return,
         }
     }
+}
 
+/// Forget the connection: its state and its daemon name. Its unanswered
+/// requests stay tracked as disconnected until the pending-request TTL, so
+/// a response arriving after the requester gave up is told apart from a
+/// response to no request.
+async fn close(state: &ServerState, conn_id: u64, connected_at: Instant) {
     state.connections.write().await.remove(&conn_id);
-    state
-        .pending_requests
-        .write()
-        .await
-        .retain(|_, cid| *cid != conn_id);
-    // Clean up name_to_conn on disconnect.
+    for pending in state.pending_requests.write().await.values_mut() {
+        if pending.conn_id == Some(conn_id) {
+            pending.conn_id = None;
+        }
+    }
     state
         .name_to_conn
         .write()
         .await
         .retain(|_, cid| *cid != conn_id);
-    let session_ms = connected_at.elapsed().as_millis();
     tracing::debug!(
         audit = "connection-lifecycle",
         event_type = "cleanup",
         conn_id,
-        session_duration_ms = %session_ms,
+        session_duration_ms = %connected_at.elapsed().as_millis(),
         "connection cleaned up"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
 
 /// Send an `AccessDenied` error response back to the sender so the client
 /// gets an actionable error instead of a silent timeout.
@@ -656,21 +590,22 @@ fn send_access_denied(
         epoch,
     )
     .with_correlation(request_msg_id);
-
-    if let Ok(reply_bytes) = encode_frame(&reply) {
-        let _ = conn.tx.try_send(reply_bytes);
+    match encode_frame(&reply) {
+        Ok(frame) => {
+            if conn.tx.try_send(frame).is_err() {
+                tracing::warn!(%request_msg_id, "access-denied reply dropped: channel full or closed");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, %request_msg_id, "failed to encode an access-denied reply");
+        }
     }
 }
 
-/// Route a received frame to the appropriate destination(s).
-///
-/// - If the message has a `correlation_id`, it's a response — route only to
-///   the connection that originated the request.
-/// - Otherwise, it's a new request or broadcast — record the `msg_id` for
-///   response routing and forward to all other subscribers.
-#[allow(clippy::too_many_lines)]
+/// Route a received frame: admit it, stamp the server-verified sender
+/// identity, then deliver it as a response (it has a `correlation_id`) or
+/// as a request or broadcast to every other connection cleared for it.
 async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
-    // Decode the message header to extract routing information.
     let mut msg: Message<EventKind> = match decode_frame(payload) {
         Ok(m) => m,
         Err(e) => {
@@ -678,187 +613,325 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
             return;
         }
     };
-
-    // Update daemon_id, enforce sender clearance, and capture verified_name
-    // in a single lock acquisition to prevent TOCTOU.
-    let verified_name: Option<String>;
-    let conn_trust_vector: Option<core_types::TrustVector>;
-    {
-        let mut conns = state.connections.write().await;
-        if let Some(conn) = conns.get_mut(&sender_conn_id) {
-            // Sender identity verification: first message records the self-declared
-            // DaemonId. Subsequent messages verify consistency — a connection must
-            // not change its DaemonId mid-session (impersonation attempt).
-            if let Some(known_id) = conn.daemon_id {
-                if known_id != msg.sender {
-                    tracing::warn!(
-                        audit = "security",
-                        event_type = "sender-identity-mismatch",
-                        conn_id = sender_conn_id,
-                        expected_sender = %known_id,
-                        claimed_sender = %msg.sender,
-                        verified_name = conn.verified_name.as_deref().unwrap_or("unregistered"),
-                        "sender DaemonId changed mid-session, dropping frame"
-                    );
-                    send_access_denied(
-                        conn,
-                        msg.msg_id,
-                        state.epoch,
-                        "sender identity changed mid-session".into(),
-                    );
-                    return;
-                }
-            } else {
-                conn.daemon_id = Some(msg.sender);
-
-                // Log the binding between verified name and self-declared DaemonId.
-                if let Some(ref name) = conn.verified_name {
-                    tracing::info!(
-                        audit = "identity-binding",
-                        conn_id = sender_conn_id,
-                        daemon_name = %name,
-                        daemon_id = %msg.sender,
-                        "daemon identity bound: registry name <-> self-declared DaemonId"
-                    );
-                }
-            }
-
-            // Sender clearance enforcement: a daemon may only
-            // emit messages at or below its own clearance level. This prevents a
-            // compromised low-clearance daemon from injecting high-clearance messages.
-            if conn.security_clearance < msg.security_level {
-                tracing::warn!(
-                    conn_id = sender_conn_id,
-                    sender_clearance = ?conn.security_clearance,
-                    msg_level = ?msg.security_level,
-                    "sender clearance below message security level, rejecting"
-                );
-                send_access_denied(
-                    conn,
-                    msg.msg_id,
-                    state.epoch,
-                    format!(
-                        "sender clearance {:?} below message security level {:?}",
-                        conn.security_clearance, msg.security_level,
-                    ),
-                );
-                return;
-            }
-
-            // Capture verified_name and trust_vector from connection state.
-            verified_name = conn.verified_name.clone();
-            conn_trust_vector = conn.trust_vector.clone();
-        } else {
-            verified_name = None;
-            conn_trust_vector = None;
-        }
+    let Some((verified_name, trust_vector)) = admit(state, sender_conn_id, &msg).await else {
+        return;
+    };
+    if let (EventKind::DaemonStarted { .. }, Some(name)) = (&msg.payload, &verified_name) {
+        bind_name(state, name, sender_conn_id).await;
     }
 
-    // Populate name_to_conn on DaemonStarted for O(1) unicast lookup.
-    // On key rotation, a daemon reconnects with a new connection while the old
-    // one is still technically alive (TCP hasn't noticed the drop yet). We must
-    // accept the new registration and evict the stale old connection, otherwise
-    // messages get routed to the dead old connection and the daemon starves.
-    if let EventKind::DaemonStarted { .. } = &msg.payload
-        && let Some(ref name) = verified_name
-    {
-        let existing = state.name_to_conn.read().await.get(name).copied();
-        if let Some(existing_conn_id) = existing
-            && existing_conn_id != sender_conn_id
-        {
-            // New connection for the same daemon name (key rotation).
-            // Evict the old connection and accept the new one.
-            state.connections.write().await.remove(&existing_conn_id);
-            tracing::info!(
-                audit = "connection-lifecycle",
-                event_type = "key-rotation-reconnect",
-                daemon_name = %name,
-                old_conn_id = existing_conn_id,
-                new_conn_id = sender_conn_id,
-                "evicted stale connection, accepting reconnect"
-            );
-        }
-        state
-            .name_to_conn
-            .write()
-            .await
-            .insert(name.clone(), sender_conn_id);
-        tracing::info!(
-            daemon_name = %name,
-            conn_id = sender_conn_id,
-            "name_to_conn mapping registered"
-        );
-    }
-
-    // Stamp server-verified sender identity onto the message.
-    // This prevents daemons from self-declaring any name via capabilities.
-    // Re-encode after stamping so downstream receivers get the verified name.
-    // Note: re-encode adds serialization overhead on every routed frame. For a
-    // local IPC bus with <10 daemons this is negligible (~µs per frame).
+    // The server-verified identity replaces whatever the sender claimed;
+    // receivers get it in the re-encoded frame.
     msg.verified_sender_name = verified_name;
     if msg.trust_snapshot.is_none() {
-        msg.trust_snapshot = conn_trust_vector;
+        msg.trust_snapshot = trust_vector;
     }
-    let stamped_payload = match encode_frame(&msg) {
-        Ok(p) => p,
+    let stamped = match encode_frame(&msg) {
+        Ok(p) => zeroize::Zeroizing::new(p),
         Err(e) => {
             tracing::error!(conn_id = sender_conn_id, error = %e, "failed to re-encode stamped frame");
             return;
         }
     };
 
-    if let Some(corr_id) = msg.correlation_id {
-        // Check confirmed RPC routing table FIRST.
-        // If the host registered a confirmation for this correlation_id,
-        // deliver to the confirmation channel instead of normal routing.
-        let confirm_tx = state.confirmations.read().await.get(&corr_id).cloned();
-        if let Some(ref tx) = confirm_tx {
-            let _ = tx.try_send(stamped_payload.clone()).inspect_err(|_| {
-                tracing::warn!(
-                    correlation_id = %corr_id,
-                    "confirmed RPC response dropped: confirmation channel full"
-                );
-            });
-        }
+    if let Some(correlation_id) = msg.correlation_id {
+        deliver_response(state, correlation_id, &stamped).await;
+        return;
+    }
+    if msg.expects_response {
+        track_request(state, msg.msg_id, sender_conn_id).await;
+    }
+    broadcast(state, sender_conn_id, msg.security_level, &stamped).await;
+}
 
-        // This is a response — route to the originating connection.
-        let target_conn = state.pending_requests.write().await.remove(&corr_id);
-        if let Some(target_id) = target_conn {
-            let conns = state.connections.read().await;
-            if let Some(target) = conns.get(&target_id)
-                && target.tx.try_send(stamped_payload.clone()).is_err()
-            {
-                tracing::warn!(
-                    conn_id = target_id,
-                    correlation_id = %corr_id,
-                    "response dropped: channel full"
-                );
-            }
-        } else if confirm_tx.is_none() {
-            tracing::debug!(
-                correlation_id = %corr_id,
-                "response for unknown request, dropping"
+/// Admit `msg` from connection `sender_conn_id`, returning the sender's
+/// verified name and trust vector; `None` (answered with `AccessDenied`)
+/// when the frame is refused. One lock acquisition covers the checks and
+/// the identity binding, so they cannot interleave with another frame.
+///
+/// - The first frame binds the connection to its self-declared
+///   `DaemonId`; a later frame claiming another is an impersonation
+///   attempt.
+/// - A sender may only emit at or below its own clearance, so a
+///   compromised low-clearance daemon cannot inject high-clearance frames.
+async fn admit(
+    state: &ServerState,
+    sender_conn_id: u64,
+    msg: &Message<EventKind>,
+) -> Option<(Option<String>, Option<TrustVector>)> {
+    let mut conns = state.connections.write().await;
+    let Some(conn) = conns.get_mut(&sender_conn_id) else {
+        return Some((None, None));
+    };
+    match conn.daemon_id {
+        Some(known) if known != msg.sender => {
+            tracing::warn!(
+                audit = "security",
+                event_type = "sender-identity-mismatch",
+                conn_id = sender_conn_id,
+                expected_sender = %known,
+                claimed_sender = %msg.sender,
+                verified_name = conn.verified_name.as_deref().unwrap_or("unregistered"),
+                "sender DaemonId changed mid-session, dropping frame"
             );
+            send_access_denied(
+                conn,
+                msg.msg_id,
+                state.epoch,
+                "sender identity changed mid-session".into(),
+            );
+            return None;
         }
-    } else {
-        // New request or broadcast — record for response routing and forward.
-        state
-            .pending_requests
-            .write()
-            .await
-            .insert(msg.msg_id, sender_conn_id);
+        Some(_) => {}
+        None => {
+            conn.daemon_id = Some(msg.sender);
+            if let Some(name) = &conn.verified_name {
+                tracing::info!(
+                    audit = "identity-binding",
+                    conn_id = sender_conn_id,
+                    daemon_name = %name,
+                    daemon_id = %msg.sender,
+                    "daemon identity bound: registry name <-> self-declared DaemonId"
+                );
+            }
+        }
+    }
+    if conn.security_clearance < msg.security_level {
+        tracing::warn!(
+            conn_id = sender_conn_id,
+            sender_clearance = ?conn.security_clearance,
+            msg_level = ?msg.security_level,
+            "sender clearance below message security level, rejecting"
+        );
+        send_access_denied(
+            conn,
+            msg.msg_id,
+            state.epoch,
+            format!(
+                "sender clearance {:?} below message security level {:?}",
+                conn.security_clearance, msg.security_level,
+            ),
+        );
+        return None;
+    }
+    Some((conn.verified_name.clone(), conn.trust_vector.clone()))
+}
 
-        let conns = state.connections.read().await;
-        for (&cid, conn) in conns.iter() {
-            if cid == sender_conn_id {
-                continue; // Don't echo back to sender.
-            }
-            if conn.security_clearance < msg.security_level {
-                continue; // Recipient clearance too low for this message.
-            }
-            if conn.tx.try_send(stamped_payload.clone()).is_err() {
-                tracing::warn!(conn_id = cid, "subscriber channel full, frame dropped");
+/// Bind daemon `name` (its `DaemonStarted`) to connection `conn_id` for
+/// unicast. A daemon reconnecting with a rotated key opens a new
+/// connection while the old one may not have closed yet: the old one is
+/// evicted, or frames would keep going to the dead connection.
+async fn bind_name(state: &ServerState, name: &str, conn_id: u64) {
+    let previous = state
+        .name_to_conn
+        .write()
+        .await
+        .insert(name.to_owned(), conn_id);
+    if let Some(stale) = previous.filter(|&previous| previous != conn_id) {
+        state.connections.write().await.remove(&stale);
+        tracing::info!(
+            audit = "connection-lifecycle",
+            event_type = "key-rotation-reconnect",
+            daemon_name = %name,
+            old_conn_id = stale,
+            new_conn_id = conn_id,
+            "evicted stale connection, accepting reconnect"
+        );
+    }
+    tracing::info!(daemon_name = %name, conn_id, "name_to_conn mapping registered");
+}
+
+/// Remember that connection `conn_id` waits for the response to request
+/// `msg_id`, forgetting requests older than [`PENDING_REQUEST_TTL`]: their
+/// requesters have given up.
+async fn track_request(state: &ServerState, msg_id: Uuid, conn_id: u64) {
+    let now = Instant::now();
+    let mut pending = state.pending_requests.write().await;
+    pending.retain(|_, request| now.duration_since(request.sent_at) < PENDING_REQUEST_TTL);
+    pending.insert(
+        msg_id,
+        PendingRequest {
+            conn_id: Some(conn_id),
+            sent_at: now,
+        },
+    );
+}
+
+/// Forget request `correlation_id` and return its requester.
+async fn take_requester(state: &ServerState, correlation_id: &Uuid) -> Requester {
+    match state.pending_requests.write().await.remove(correlation_id) {
+        Some(PendingRequest {
+            conn_id: Some(conn_id),
+            ..
+        }) => Requester::Connected(conn_id),
+        Some(PendingRequest { conn_id: None, .. }) => Requester::Disconnected,
+        None => Requester::Unknown,
+    }
+}
+
+/// Deliver the response to request `correlation_id`: to a confirmed-RPC
+/// waiter of the host when one is registered, and to the connection that
+/// sent the request.
+async fn deliver_response(state: &ServerState, correlation_id: Uuid, frame: &[u8]) {
+    let confirmation = state
+        .confirmations
+        .read()
+        .await
+        .get(&correlation_id)
+        .cloned();
+    if let Some(tx) = &confirmation
+        && tx.try_send(frame.to_vec()).is_err()
+    {
+        tracing::warn!(%correlation_id, "confirmed RPC response dropped: confirmation channel full");
+    }
+    match take_requester(state, &correlation_id).await {
+        Requester::Connected(target) => {
+            let conns = state.connections.read().await;
+            if let Some(conn) = conns.get(&target)
+                && conn.tx.try_send(frame.to_vec()).is_err()
+            {
+                tracing::warn!(conn_id = target, %correlation_id, "response dropped: channel full");
             }
         }
+        Requester::Disconnected => {
+            tracing::debug!(%correlation_id, "requester disconnected before its response, dropping");
+        }
+        Requester::Unknown if confirmation.is_none() => {
+            tracing::debug!(%correlation_id, "response to no waiting request, dropping");
+        }
+        Requester::Unknown => {}
+    }
+}
+
+/// Deliver `frame` at `level` to every connection but its sender whose
+/// clearance admits it.
+async fn broadcast(state: &ServerState, sender_conn_id: u64, level: SecurityLevel, frame: &[u8]) {
+    let conns = state.connections.read().await;
+    for (&cid, conn) in conns.iter() {
+        if cid == sender_conn_id || conn.security_clearance < level {
+            continue;
+        }
+        if conn.tx.try_send(frame.to_vec()).is_err() {
+            tracing::warn!(conn_id = cid, "subscriber channel full, frame dropped");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Server state with one Internal connection, `conn_id` 1.
+    async fn state_with_one_connection() -> ServerState {
+        let state = ServerState {
+            keypair: crate::noise::generate_keypair().unwrap().into_inner(),
+            endpoint: BusEndpoint {
+                suite: NoiseSuite::default(),
+                public_key: [0; 32],
+            },
+            connections: RwLock::new(HashMap::new()),
+            pending_requests: RwLock::new(HashMap::new()),
+            next_conn_id: AtomicU64::new(2),
+            epoch: Instant::now(),
+            registry: RwLock::new(ClearanceRegistry::new()),
+            confirmations: RwLock::new(HashMap::new()),
+            name_to_conn: RwLock::new(HashMap::new()),
+        };
+        let (tx, _rx) = mpsc::channel(8);
+        state.connections.write().await.insert(
+            1,
+            ConnectionState {
+                daemon_id: None,
+                verified_name: None,
+                tx,
+                security_clearance: SecurityLevel::Internal,
+                trust_vector: None,
+            },
+        );
+        state
+    }
+
+    fn frame(msg: &Message<EventKind>) -> Vec<u8> {
+        encode_frame(msg).unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_requests_awaiting_a_response_are_tracked() {
+        let state = state_with_one_connection().await;
+        let ctx = crate::message::MessageContext::new(DaemonId::new());
+        let broadcast = Message::new(
+            &ctx,
+            EventKind::WmActivateOverlay,
+            SecurityLevel::Internal,
+            state.epoch,
+        );
+        for _ in 0..100 {
+            route_frame(&state, 1, &frame(&broadcast)).await;
+        }
+        assert!(
+            state.pending_requests.read().await.is_empty(),
+            "broadcasts never get responses and must not be tracked"
+        );
+        let request = Message::new(
+            &ctx,
+            EventKind::StatusRequest,
+            SecurityLevel::Internal,
+            state.epoch,
+        )
+        .expecting_response();
+        route_frame(&state, 1, &frame(&request)).await;
+        let pending = state.pending_requests.read().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[&request.msg_id].conn_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_requester_that_disconnected_is_told_apart_from_no_request() {
+        let state = state_with_one_connection().await;
+        let (answered, abandoned) = (Uuid::now_v7(), Uuid::now_v7());
+        track_request(&state, answered, 1).await;
+        assert_eq!(
+            take_requester(&state, &answered).await,
+            Requester::Connected(1)
+        );
+        assert_eq!(
+            take_requester(&state, &answered).await,
+            Requester::Unknown,
+            "a response is delivered once"
+        );
+
+        track_request(&state, abandoned, 1).await;
+        close(&state, 1, Instant::now()).await;
+        assert_eq!(
+            take_requester(&state, &abandoned).await,
+            Requester::Disconnected
+        );
+        assert_eq!(
+            take_requester(&state, &Uuid::now_v7()).await,
+            Requester::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_past_their_ttl_are_forgotten() {
+        let state = state_with_one_connection().await;
+        let expired = Uuid::now_v7();
+        state.pending_requests.write().await.insert(
+            expired,
+            PendingRequest {
+                conn_id: Some(1),
+                sent_at: Instant::now()
+                    .checked_sub(PENDING_REQUEST_TTL)
+                    .expect("the monotonic clock is past the TTL"),
+            },
+        );
+        let current = Uuid::now_v7();
+        track_request(&state, current, 1).await;
+        let pending = state.pending_requests.read().await;
+        assert!(
+            !pending.contains_key(&expired),
+            "a request past the TTL is forgotten"
+        );
+        assert!(pending.contains_key(&current));
     }
 }

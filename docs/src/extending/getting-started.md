@@ -21,7 +21,7 @@ enforced from its manifest.
 ### Dependencies
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `wasmtime` | WebAssembly runtime engine with component model support |
 | `wasmtime-wasi` | WASI preview 2 implementation for Wasmtime |
 | `core-types` | Shared types for the extension/host boundary |
@@ -55,7 +55,7 @@ that extension authors use to build WASM component model extensions targeting th
 ### Dependencies
 
 | Crate | Purpose |
-|-------|---------|
+| --- | --- |
 | `core-types` | Shared types for the extension/host boundary |
 | `wit-bindgen` | Code generation from WIT (WebAssembly Interface Type) definitions |
 | `serde` | Serialization for extension configuration and data exchange |

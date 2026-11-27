@@ -34,7 +34,7 @@ Each extension Store is configured with a WASI context that restricts what
 the guest can access. The sandbox follows a deny-by-default model:
 
 | Resource | Default | With Capability Grant |
-|---|---|---|
+| --- | --- | --- |
 | Filesystem read | Denied | Scoped to declared directories |
 | Filesystem write | Denied | Scoped to declared directories |
 | Network sockets | Denied | Denied (no current grant path) |

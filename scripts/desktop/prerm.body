@@ -1,32 +1,33 @@
+# shellcheck shell=bash
 # %prerm for open-sesame-desktop -- deb
 case "$1" in
-    remove|deconfigure)
-        sesame_require_systemd
+remove | deconfigure)
+    sesame_require_systemd
 
-        for uid in $(sesame_active_user_uids); do
-            sesame_user_systemctl "$uid" stop open-sesame-input.service
-            sesame_user_systemctl "$uid" stop open-sesame-clipboard.service
-            sesame_user_systemctl "$uid" stop open-sesame-wm.service
-        done
+    for uid in $(sesame_active_user_uids); do
+        sesame_user_systemctl "$uid" stop open-sesame-input.service
+        sesame_user_systemctl "$uid" stop open-sesame-clipboard.service
+        sesame_user_systemctl "$uid" stop open-sesame-wm.service
+    done
 
-        systemctl --global disable \
-            open-sesame-wm.service \
-            open-sesame-clipboard.service \
-            open-sesame-input.service \
-            open-sesame-desktop.target \
-            2>/dev/null || true
-        #DEBHELPER#
-        ;;
-    upgrade)
-        sesame_require_systemd
+    systemctl --global disable \
+        open-sesame-wm.service \
+        open-sesame-clipboard.service \
+        open-sesame-input.service \
+        open-sesame-desktop.target \
+        2>/dev/null || true
+    #DEBHELPER#
+    ;;
+upgrade)
+    sesame_require_systemd
 
-        for uid in $(sesame_active_user_uids); do
-            sesame_user_systemctl "$uid" stop open-sesame-input.service
-            sesame_user_systemctl "$uid" stop open-sesame-clipboard.service
-            sesame_user_systemctl "$uid" stop open-sesame-wm.service
-        done
-        #DEBHELPER#
-        ;;
+    for uid in $(sesame_active_user_uids); do
+        sesame_user_systemctl "$uid" stop open-sesame-input.service
+        sesame_user_systemctl "$uid" stop open-sesame-clipboard.service
+        sesame_user_systemctl "$uid" stop open-sesame-wm.service
+    done
+    #DEBHELPER#
+    ;;
 esac
 
 exit 0

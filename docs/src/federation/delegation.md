@@ -21,7 +21,7 @@ pub struct DelegationGrant {
 ```
 
 | Field | Purpose |
-|-------|---------|
+| --- | --- |
 | `delegator` | The `AgentId` of the agent issuing the grant |
 | `scope` | Maximum capabilities the delegatee may exercise |
 | `initial_ttl` | Time-to-live from grant creation; the grant expires after this duration |
@@ -42,7 +42,7 @@ effective = delegator_scope.intersection(grant.scope)
 The `CapabilitySet` type (`core-types/src/security.rs`) implements lattice operations:
 
 | Operation | Method | Semantics |
-|-----------|--------|-----------|
+| --- | --- | --- |
 | Union | `a.union(b)` | All capabilities from both sets |
 | Intersection | `a.intersection(b)` | Only capabilities in both sets |
 | Subset test | `a.is_subset(b)` | True if every capability in `a` is in `b` |

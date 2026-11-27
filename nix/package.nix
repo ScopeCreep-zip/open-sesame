@@ -1,57 +1,18 @@
 {
   lib,
   stdenv,
-  makeRustPlatform,
-  rust-bin,
+  callPackage,
   pkg-config,
   installShellFiles,
   perl,
   openssl,
+  libgit2,
   libseccomp,
+  sqlcipher,
 }:
 
 let
-  rustToolchain = rust-bin.stable."1.97.0".minimal.override {
-    extensions = [ "rust-src" ];
-  };
-  rustPlatform = makeRustPlatform {
-    cargo = rustToolchain;
-    rustc = rustToolchain;
-  };
-
-  workspaceToml = builtins.fromTOML (builtins.readFile ../Cargo.toml);
-
-  # Source filter: only include files needed for cargo build.
-  # Excludes docs, analysis files, CI configs, v1 source, and other non-build assets.
-  # NOTE: All crate dirs are included because Cargo.lock references workspace members
-  # and cargo needs their Cargo.toml files to resolve the lock, even if they aren't built.
-  rootDir = ./..;
-  rootEntries = builtins.attrNames (builtins.readDir rootDir);
-  isCrateDir =
-    name:
-    lib.hasPrefix "core-" name
-    || lib.hasPrefix "daemon-" name
-    || lib.hasPrefix "platform-" name
-    || lib.hasPrefix "extension-" name
-    || lib.hasPrefix "sesame-" name
-    || name == "open-sesame"
-    || name == "xtask";
-  crateDirs = lib.filter isCrateDir rootEntries;
-
-  filteredSrc = lib.fileset.toSource {
-    root = rootDir;
-    fileset = lib.fileset.unions (
-      [
-        ../Cargo.toml
-        ../Cargo.lock
-        ../rust-toolchain.toml
-        ../config.example.toml
-        ../.cargo
-        ../contrib
-      ]
-      ++ map (name: rootDir + "/${name}") crateDirs
-    );
-  };
+  common = callPackage ./common.nix { };
 
   # Headless binary crates only — no GUI daemons.
   binaryCrates = [
@@ -70,25 +31,9 @@ let
     "daemon-snippets"
   ];
 in
-rustPlatform.buildRustPackage {
+common.rustPlatform.buildRustPackage {
   pname = "open-sesame";
-  version = workspaceToml.workspace.package.version;
-
-  src = filteredSrc;
-
-  cargoLock = {
-    lockFile = ../Cargo.lock;
-    outputHashes = {
-      # Required by Cargo.lock even though headless doesn't build these crates.
-      "cosmic-client-toolkit-0.2.0" = "sha256-FL2YkCVrJ6JWUGMDg+jJJa51oar/PWDfgPgCyjcv6gk=";
-      "cosmic-protocols-0.2.0" = "sha256-FL2YkCVrJ6JWUGMDg+jJJa51oar/PWDfgPgCyjcv6gk=";
-      "atomicwrites-0.4.2" = "sha256-QZSuGPrJXh+svMeFWqAXoqZQxLq/WfIiamqvjJNVhxA=";
-      "cosmic-theme-1.0.0" = "sha256-xO92nOzovgOnzvPshIDImlzpCB6W7pLGVzhxN4D9O/k=";
-      "smithay-clipboard-0.8.0" = "sha256-GojAFRbhJcP0Rpr+v9WOivgW9x38PZdeBWTbMhkDB3A=";
-      "window_clipboard-0.4.1" = "sha256-WO3JFbE+6ESRAfkxrnEFeZyGuhUHLOKOVHcGQyHwoK0=";
-      "nucleo-0.5.0" = "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=";
-    };
-  };
+  inherit (common) version src cargoLock;
 
   nativeBuildInputs = [
     pkg-config
@@ -96,25 +41,19 @@ rustPlatform.buildRustPackage {
     perl
   ];
 
+  # cargoUseSystemLibs sets OPENSSL_NO_VENDOR, LIBGIT2_NO_VENDOR, and
+  # LIBSQLITE3_SYS_USE_PKG_CONFIG: git2's vendored-openssl and
+  # vendored-libgit2 and rusqlite's bundled-sqlcipher yield to these.
   buildInputs = [
     openssl
+    libgit2
     libseccomp
+    sqlcipher
   ];
 
   # Build headless crates with desktop features disabled.
-  cargoBuildFlags =
-    (lib.concatMap (c: [
-      "--package"
-      c
-    ]) binaryCrates)
-    ++ [ "--no-default-features" ];
-
-  cargoTestFlags =
-    (lib.concatMap (c: [
-      "--package"
-      c
-    ]) binaryCrates)
-    ++ [ "--no-default-features" ];
+  cargoBuildFlags = common.packageFlags binaryCrates ++ [ "--no-default-features" ];
+  cargoTestFlags = common.packageFlags binaryCrates ++ [ "--no-default-features" ];
 
   preCheck = ''
     export HOME=$(mktemp -d)
@@ -151,12 +90,7 @@ rustPlatform.buildRustPackage {
     runHook postInstall
   '';
 
-  meta = with lib; {
+  meta = lib.recursiveUpdate common.meta {
     description = "Open Sesame — secrets, profiles, launcher, snippets (headless)";
-    homepage = "https://github.com/ScopeCreep-zip/open-sesame";
-    license = licenses.mit;
-    maintainers = [ ];
-    platforms = platforms.linux;
-    mainProgram = "sesame";
   };
 }

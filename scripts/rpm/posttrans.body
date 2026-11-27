@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # %posttrans for open-sesame (headless)
 # Runs after ALL packages in the transaction complete.
 # Two-phase restart: mark units, then file triggers call enqueue-marked.

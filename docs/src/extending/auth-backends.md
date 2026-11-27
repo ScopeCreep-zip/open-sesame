@@ -1,184 +1,242 @@
 # Authentication Backends
 
 The `core-auth` crate defines a pluggable authentication system for vault
-unlock. Each authentication factor (password, SSH agent, hardware token)
-is implemented as a struct that implements the `VaultAuthBackend` trait.
-This page describes how to implement a new backend.
+unlock. Each authentication factor (password, SSH agent, platform keyring) is a struct that
+implements the `VaultAuthBackend` trait. This page describes how to implement
+a new backend.
 
 ## The VaultAuthBackend Trait
 
-The trait is defined in `core-auth/src/backend.rs`. A backend must implement
-all of the following methods:
+The trait is defined in `core-auth/src/backend.rs`:
 
 ```rust
-#[async_trait]
+#[async_trait::async_trait]
 pub trait VaultAuthBackend: Send + Sync {
     fn factor_id(&self) -> AuthFactorId;
-    fn name(&self) -> &str;
-    fn backend_id(&self) -> &str;
-    fn is_enrolled(&self, profile: &TrustProfileName, config_dir: &Path) -> bool;
-    async fn can_unlock(&self, profile: &TrustProfileName, config_dir: &Path) -> bool;
+    fn name(&self) -> &'static str;
+    fn backend_id(&self) -> &'static str;
+    fn is_enrolled(&self, profile: &TrustProfileName, layout: &Layout) -> Result<bool, AuthError>;
+    async fn can_unlock(
+        &self,
+        profile: &TrustProfileName,
+        layout: &Layout,
+    ) -> Result<bool, AuthError>;
     fn requires_interaction(&self) -> AuthInteraction;
     async fn unlock(
         &self,
         profile: &TrustProfileName,
-        config_dir: &Path,
-        salt: &[u8],
+        layout: &Layout,
+        keying: &VaultKeying,
     ) -> Result<UnlockOutcome, AuthError>;
     async fn enroll(
         &self,
         profile: &TrustProfileName,
         master_key: &SecureBytes,
-        config_dir: &Path,
-        salt: &[u8],
-        selected_key_index: Option<usize>,
+        layout: &Layout,
+        keying: &VaultKeying,
+        credential: Option<&str>,
     ) -> Result<(), AuthError>;
-    async fn revoke(
-        &self, profile: &TrustProfileName, config_dir: &Path,
-    ) -> Result<(), AuthError>;
+    async fn revoke(&self, profile: &TrustProfileName, layout: &Layout) -> Result<(), AuthError>;
 }
 ```
+
+`layout` is the `core_layout::Layout` every vault file path derives from;
+`keying` is the vault's `VaultKeying`, its salt and the algorithms its keys
+derive under (`VaultMetadata::load_keying`).
 
 ### Method Descriptions
 
 #### `factor_id()`
 
-Returns the `AuthFactorId` enum variant that identifies this factor. Used in
-policy evaluation and audit logging.
+The `AuthFactorId` variant this backend provides. Used in policy evaluation,
+in `FactorSubmit`, and in audit logging.
 
 #### `name()`
 
-Human-readable name for audit logs and overlay display (e.g., `"SSH Agent"`,
-`"FIDO2 Token"`).
+Human-readable name for audit logs and overlay display (`"SSH Agent"`).
 
 #### `backend_id()`
 
-Short machine-readable identifier for IPC messages and configuration files
-(e.g., `"ssh-agent"`, `"fido2"`).
+Short machine-readable identifier for IPC messages and configuration
+(`"ssh-agent"`, `"password"`).
 
-#### `is_enrolled(profile, config_dir)`
+#### `is_enrolled(profile, layout)`
 
-Synchronous check for whether enrollment data exists for the given profile.
-Reads from the filesystem under `config_dir`. Must not perform I/O that
-could block.
+Whether the backend's enrollment file exists. A failure to determine it (for
+example, a permission error) is an error, not `false`.
 
-#### `can_unlock(profile, config_dir)`
+#### `can_unlock(profile, layout)`
 
-Asynchronous readiness check. Returns `true` if the backend can currently
-perform an unlock. Must complete in under 100 ms. For example, an SSH agent
-backend checks whether `SSH_AUTH_SOCK` is set and the agent is reachable; a
-FIDO2 backend checks whether a token is plugged in.
+Whether the backend can unlock now: it is enrolled and its external
+dependency is present. Must complete in under 100 ms. The SSH agent backend
+reads its enrollment and checks that a reachable agent holds the enrolled
+key; an unreachable agent is `false`, an agent that answers and fails the
+protocol is an error, and an unparseable enrollment is
+`AuthError::InvalidBlob`, naming the file. The platform keyring backend is
+ready when enrolled; reaching the store happens in `unlock()`, which may
+raise the keyring's unlock prompt.
 
 #### `requires_interaction()`
 
-Returns an `AuthInteraction` variant:
+An `AuthInteraction` variant:
 
-- `AuthInteraction::None` -- No user interaction needed (SSH software key,
-  TPM, OS keyring).
-- `AuthInteraction::PasswordEntry` -- Keyboard input required.
-- `AuthInteraction::HardwareTouch` -- Physical touch on a hardware device.
+- `AuthInteraction::None` -- No user interaction (an SSH agent holding a
+  software key, the platform keyring): clients submit the factor at once.
+- `AuthInteraction::PasswordEntry` -- Keyboard input: clients ask for the
+  password.
+- `AuthInteraction::HardwareTouch` -- Physical touch on a hardware device. The
+  CLI and the overlay report such a factor as unsupported.
 
-#### `unlock(profile, config_dir, salt)`
+#### `unlock(profile, layout, keying)`
 
-The core unlock operation. Derives or unwraps the master key and returns an
-`UnlockOutcome`.
+Derives the backend's key-encrypting key, unwraps the master key from the
+enrollment file, and returns an `UnlockOutcome`. A missing enrollment is
+`AuthError::NotEnrolled`; a wrong key or tampered file is
+`AuthError::UnwrapFailed`.
 
-#### `enroll(profile, master_key, config_dir, salt, selected_key_index)`
+#### `enroll(profile, master_key, layout, keying, credential)`
 
-Enrolls this backend for a profile. Receives the master key so the backend
-can wrap or encrypt it for later retrieval. `selected_key_index` optionally
-specifies which eligible key to use (e.g., which SSH key from the agent).
+Wraps `master_key` under the backend's key-encrypting key and writes the
+enrollment file. `credential` names which of the backend's credentials to
+enroll: the SSH agent backend requires the key fingerprint (with or without
+the `SHA256:` prefix) and fails with `AuthError::BackendNotApplicable`
+without one. A backend with a single credential ignores it.
 
-#### `revoke(profile, config_dir)`
+#### `revoke(profile, layout)`
 
-Removes enrollment data for this backend from the profile.
+Zero-fills and removes the enrollment file. An absent enrollment is not an
+error.
 
 ## UnlockOutcome
 
-A successful `unlock()` call returns:
+A successful `unlock()` returns:
 
 ```rust
 pub struct UnlockOutcome {
     pub master_key: SecureBytes,
     pub audit_metadata: BTreeMap<String, String>,
-    pub ipc_strategy: IpcUnlockStrategy,
     pub factor_id: AuthFactorId,
 }
 ```
 
-- **`master_key`** -- The 32-byte master key (for `DirectMasterKey` strategy)
-  or password bytes (for `PasswordUnlock` strategy). Held in `SecureBytes`,
-  which is zeroized on drop.
-- **`audit_metadata`** -- Key-value pairs for audit logging (e.g.,
-  `"key_fingerprint" => "SHA256:..."`, `"key_comment" => "user@host"`).
-- **`ipc_strategy`** -- Determines which IPC message type carries the key to
-  daemon-secrets:
-  - `IpcUnlockStrategy::PasswordUnlock` -- daemon-secrets performs the KDF.
-  - `IpcUnlockStrategy::DirectMasterKey` -- The master key is pre-derived;
-    daemon-secrets uses it directly.
-- **`factor_id`** -- Echoes back the factor identifier for correlation.
+- **`master_key`** -- The unwrapped 32-byte master key, in `SecureBytes`
+  (protected allocation, zeroized on drop).
+- **`audit_metadata`** -- Key-value pairs for audit logging (the SSH agent
+  backend records `backend`, `ssh_fingerprint`, and `key_type`).
+- **`factor_id`** -- The factor this outcome represents.
+
+`UnlockOutcome::into_factor_submit(profile)` produces the one unlock message,
+`EventKind::FactorSubmit`, moving the master key into the message's protected
+allocation without a heap copy. Every backend unlocks this way: the key is
+unwrapped client-side, and daemon-secrets receives it as one factor of the
+vault's auth policy.
 
 ## FactorContribution
 
-The `FactorContribution` enum determines how a backend's output participates
-in multi-factor composition:
+The `FactorContribution` enum states how a factor's key material participates
+in the vault's policy. `VaultMetadata::contribution_type()` derives it from
+the policy:
 
-- **`CompleteMasterKey`** -- This backend produces a complete, independently
-  valid master key. Used in `Any` mode (any single factor suffices) and in
-  `Policy` mode where individual factors can stand alone.
-- **`FactorPiece`** -- This backend produces one piece of a combined key.
-  Used in `All` mode, where the final master key is derived via HKDF from
-  all factor pieces concatenated.
-
-Backends that unwrap an encrypted copy of the master key (SSH agent, FIDO2
-with hmac-secret) should use `CompleteMasterKey`. Backends that contribute
-entropy toward a combined derivation (e.g., a partial PIN) should use
-`FactorPiece`.
+- **`CompleteMasterKey`** (`Any` and `Policy` modes) -- Each factor unwraps a
+  complete, independently valid master key.
+- **`FactorPiece`** (`All` mode) -- Each factor contributes a piece; the master
+  key is `combine_factor_pieces(profile, hkdf, pieces)`, the vault's `hkdf`
+  derivation with `KeyContext::CombinedMasterKey(profile)` over the pieces
+  concatenated in `AuthFactorId` order. Vault creation and unlock both derive
+  it with that one function.
 
 ## Registration with AuthDispatcher
 
-After implementing the trait, register the backend with the `AuthDispatcher`:
+`AuthDispatcher::new(credential_store)` (`core-auth/src/dispatcher.rs`) is the
+registry of backends, one per factor. A new backend is added to its list:
 
 ```rust
-let fido2_backend = Fido2Backend::new(/* config */);
-dispatcher.register(Box::new(fido2_backend));
+pub fn new(credential_store: Option<Arc<dyn CredentialStore>>) -> Self {
+    let mut backends: Vec<Box<dyn VaultAuthBackend>> = vec![
+        Box::new(SshAgentBackend::new()),
+        Box::new(PasswordBackend::new()),
+        Box::new(Fido2Backend::new()),
+    ];
+    if let Some(store) = credential_store {
+        backends.push(Box::new(PlatformKeyringBackend::new(store)));
+    }
+    Self { backends }
+}
 ```
 
-The dispatcher iterates registered backends during unlock, filtering by
-enrollment status and the active vault's auth policy.
+A backend over a platform service does not reach the platform from
+`core-auth`: it takes the service as a `core_types` interface, implemented by
+the platform crate and passed in by the client, as `PlatformKeyringBackend`
+takes the `CredentialStore` that `core_daemon::credential_store()` connects.
+Without one, the factor has no backend, and a vault requiring it reports the
+factor by name. A platform service a sandboxed daemon cannot reach (the
+credential store is on the session D-Bus bus) is used through a broker
+outside the sandbox, as daemon-wm has daemon-launcher submit the platform
+keyring factor (`KeyringUnlockRequest`).
 
-## VaultMetadata Integration
+`AuthDispatcher::backend(factor)` finds the backend of each factor daemon-secrets
+reports a vault still requires (`core_auth::remaining_factors`); the CLI and
+the overlay act on its `requires_interaction()`. The dispatcher applies no
+policy: daemon-secrets owns the vault's policy. See
+[Factor Architecture](../authentication/factor-architecture.md#the-unlock-loop).
 
-Enrollment data is persisted alongside the vault's `VaultMetadata`. Each
-backend is responsible for writing its own enrollment artifacts under
-`config_dir/profiles/<profile>/auth/<backend_id>/`. The format is
-backend-specific; common patterns include:
+## Enrollment Files
 
-- A wrapped (encrypted) copy of the master key.
-- A credential ID or public key for verification during unlock.
-- Parameters for key derivation (iteration count, algorithm identifiers).
+A backend's enrollment file lives in the vault directory beside the vault's
+other files, at a path the layout derives:
+`Layout::vault_file(profile, VaultFile::<Kind>)`, which is
+`<config dir>/vaults/<profile>.<extension>`. The existing kinds are
+`PasswordWrap` (`.password-wrap`), `SshEnrollment` (`.ssh-enrollment`), and
+`KeyringEnrollment` (`.keyring-enrollment`); a
+new backend adds its own `VaultFile` variant in `core-layout`, so the code
+that opens the file and the daemon sandboxes that grant access to it derive
+the same path.
 
-The `is_enrolled()` method checks for the existence and validity of these
-artifacts.
+Enrollment files hold wrapped key material, so they are written, scrubbed,
+and removed only through `core_layout::file`, the one writer of files PDS
+owns:
+
+- `write(path, contents, Mode::OwnerOnly)` -- creates missing parents `0700`,
+  writes `<path>.tmp` with mode `0600`, syncs it, renames it over `path`, and
+  syncs the directory. On error `path` is unchanged and no temporary remains.
+- `destroy(path)` -- zero-fills the file in place, syncs, and removes it;
+  `false` when it was absent. A file that cannot be scrubbed is not removed.
+- `exists(path)` -- whether it exists; a failure to determine it is an error.
+
+A backend whose file holds only the wrapped master key uses `WrappedKey`
+(`core-auth/src/wrapped_key.rs`: version, nonce, AES-256-GCM ciphertext), as
+the password and platform keyring backends do, choosing its file with the
+`VaultFile` argument of `WrappedKey::load` and `WrappedKey::save`. A backend
+that must also record a credential identifier defines its own format, as the
+SSH agent backend's `EnrollmentBlob` records the key fingerprint and type.
+
+The factor's command enrolls and revokes it through
+`open-sesame/src/enrollment.rs`: the enrollment is proven by unlocking with it
+before the vault metadata records the factor, and a failed enrollment is
+revoked ([Factor Architecture](../authentication/factor-architecture.md#enrollment-and-revocation)).
 
 ## Example: Skeleton FIDO2 Backend
 
-The following skeleton illustrates the structure of a hypothetical FIDO2
-backend. It does not compile as-is; it shows the trait method signatures
-and their responsibilities.
+The skeleton below shows the structure of a hypothetical FIDO2 backend. It
+assumes a `VaultFile::Fido2Enrollment` variant, an `Fido2Enrollment` blob
+type, and platform helpers (`authenticator_present`, `make_credential`,
+`hmac_secret`) that do not exist in the tree; it does not compile as is.
 
 ```rust
-use core_auth::{
-    AuthError, AuthInteraction, FactorContribution, IpcUnlockStrategy,
-    UnlockOutcome, VaultAuthBackend,
-};
+use core_auth::{AuthError, AuthInteraction, UnlockOutcome, VaultAuthBackend, VaultKeying};
 use core_crypto::SecureBytes;
+use core_layout::file::{self, Mode};
+use core_layout::{Layout, VaultFile};
 use core_types::{AuthFactorId, TrustProfileName};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 
-pub struct Fido2Backend {
-    // Configuration: acceptable authenticator AAGUIDs, timeout, etc.
+pub struct Fido2Backend;
+
+impl Fido2Backend {
+    fn enrollment_path(layout: &Layout, profile: &TrustProfileName) -> Result<PathBuf, AuthError> {
+        Ok(layout.vault_file(profile, VaultFile::Fido2Enrollment)?)
+    }
 }
 
 #[async_trait::async_trait]
@@ -187,26 +245,25 @@ impl VaultAuthBackend for Fido2Backend {
         AuthFactorId::Fido2
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "FIDO2 Token"
     }
 
-    fn backend_id(&self) -> &str {
+    fn backend_id(&self) -> &'static str {
         "fido2"
     }
 
-    fn is_enrolled(&self, profile: &TrustProfileName, config_dir: &Path) -> bool {
-        let cred_path = config_dir
-            .join("profiles")
-            .join(profile.as_str())
-            .join("auth/fido2/credential.json");
-        cred_path.exists()
+    fn is_enrolled(&self, profile: &TrustProfileName, layout: &Layout) -> Result<bool, AuthError> {
+        Ok(file::exists(&Self::enrollment_path(layout, profile)?)?)
     }
 
-    async fn can_unlock(&self, _profile: &TrustProfileName, _config_dir: &Path) -> bool {
-        // Check if a FIDO2 authenticator is available via platform API.
-        // Must return within 100 ms.
-        check_authenticator_present().await
+    async fn can_unlock(
+        &self,
+        profile: &TrustProfileName,
+        layout: &Layout,
+    ) -> Result<bool, AuthError> {
+        // Enrolled, and an authenticator is present; within 100 ms.
+        Ok(self.is_enrolled(profile, layout)? && authenticator_present().await)
     }
 
     fn requires_interaction(&self) -> AuthInteraction {
@@ -216,27 +273,23 @@ impl VaultAuthBackend for Fido2Backend {
     async fn unlock(
         &self,
         profile: &TrustProfileName,
-        config_dir: &Path,
-        salt: &[u8],
+        layout: &Layout,
+        keying: &VaultKeying,
     ) -> Result<UnlockOutcome, AuthError> {
-        // 1. Load credential ID from enrollment data.
-        let cred = load_credential(profile, config_dir)?;
-
-        // 2. Perform FIDO2 assertion with hmac-secret extension.
-        //    This requires user touch on the authenticator.
-        let hmac_secret = perform_assertion(&cred, salt).await?;
-
-        // 3. Use the hmac-secret output to unwrap the stored master key.
-        let wrapped_key = load_wrapped_key(profile, config_dir)?;
-        let master_key = unwrap_master_key(&wrapped_key, &hmac_secret)?;
-
+        let data = std::fs::read(Self::enrollment_path(layout, profile)?)?;
+        let enrollment = Fido2Enrollment::deserialize(&data)?;
+        // The hmac-secret output (user touch) is the key-encrypting key.
+        let kek = hmac_secret(&enrollment.credential_id, &keying.salt).await?;
+        let master_key = core_crypto::EncryptionKey::from_bytes(kek.as_bytes())
+            .map_err(|_| AuthError::UnwrapFailed)?
+            .decrypt(&enrollment.nonce, &enrollment.ciphertext)
+            .map_err(|_| AuthError::UnwrapFailed)?;
         Ok(UnlockOutcome {
             master_key,
             audit_metadata: BTreeMap::from([
-                ("credential_id".into(), hex::encode(&cred.id)),
-                ("authenticator_aaguid".into(), cred.aaguid.to_string()),
+                ("backend".into(), "fido2".into()),
+                ("credential_id".into(), enrollment.credential_id_hex()),
             ]),
-            ipc_strategy: IpcUnlockStrategy::DirectMasterKey,
             factor_id: AuthFactorId::Fido2,
         })
     }
@@ -245,30 +298,21 @@ impl VaultAuthBackend for Fido2Backend {
         &self,
         profile: &TrustProfileName,
         master_key: &SecureBytes,
-        config_dir: &Path,
-        salt: &[u8],
-        _selected_key_index: Option<usize>,
+        layout: &Layout,
+        keying: &VaultKeying,
+        _credential: Option<&str>,
     ) -> Result<(), AuthError> {
-        // 1. Perform FIDO2 credential creation (MakeCredential).
-        // 2. Use hmac-secret extension to derive a wrapping key.
-        // 3. Wrap the master_key with the derived wrapping key.
-        // 4. Persist credential ID + wrapped key under config_dir.
+        let credential_id = make_credential().await?;
+        let kek = hmac_secret(&credential_id, &keying.salt).await?;
+        let (nonce, ciphertext) =
+            core_crypto::EncryptionKey::from_bytes(kek.as_bytes())?.seal(master_key.as_bytes())?;
+        let blob = Fido2Enrollment { credential_id, nonce, ciphertext };
+        file::write(&Self::enrollment_path(layout, profile)?, &blob.serialize()?, Mode::OwnerOnly)?;
         Ok(())
     }
 
-    async fn revoke(
-        &self,
-        profile: &TrustProfileName,
-        config_dir: &Path,
-    ) -> Result<(), AuthError> {
-        let auth_dir = config_dir
-            .join("profiles")
-            .join(profile.as_str())
-            .join("auth/fido2");
-        if auth_dir.exists() {
-            std::fs::remove_dir_all(&auth_dir)
-                .map_err(|e| AuthError::Io(e.to_string()))?;
-        }
+    async fn revoke(&self, profile: &TrustProfileName, layout: &Layout) -> Result<(), AuthError> {
+        file::destroy(&Self::enrollment_path(layout, profile)?)?;
         Ok(())
     }
 }
@@ -276,24 +320,22 @@ impl VaultAuthBackend for Fido2Backend {
 
 ## Testing a New Backend
 
-A backend implementation should verify the following:
+Tests build a `Layout::under(tempdir)`, so every vault file lands beneath a
+temporary root. A backend's tests cover:
 
-1. **Enrollment round-trip** -- Enroll with a known master key, then confirm
-   `is_enrolled()` returns `true` and the enrollment artifacts exist on disk.
-
-2. **Unlock round-trip** -- After enrollment, call `unlock()` and verify the
-   returned `master_key` matches the original.
-
-3. **Wrong-key rejection** -- Tamper with enrollment data or use a different
-   salt, and verify `unlock()` returns `AuthError`.
-
-4. **Revocation** -- Call `revoke()`, confirm `is_enrolled()` returns `false`,
-   and confirm the enrollment directory is removed.
-
-5. **Readiness check** -- Verify `can_unlock()` returns `false` when the
-   backing resource is unavailable (e.g., no SSH agent socket, no FIDO2
-   token connected).
-
-6. **Interaction declaration** -- Verify `requires_interaction()` returns the
-   correct variant. The unlock UX uses this to decide whether to show a
-   password prompt or a "touch your token" message.
+1. **Enrollment round-trip** -- Enroll with a known master key; `is_enrolled()`
+   is `true` and the enrollment file is mode `0600`.
+2. **Unlock round-trip** -- After enrollment, `unlock()` returns the original
+   master key.
+3. **Wrong-key rejection** -- A tampered enrollment file or a different salt
+   makes `unlock()` fail with `AuthError::UnwrapFailed`.
+4. **Damaged enrollment** -- An unparseable enrollment file is
+   `AuthError::InvalidBlob` naming the file from both `can_unlock()` and
+   `unlock()`, not a silent `false`.
+5. **Revocation** -- After `revoke()`, `is_enrolled()` is `false` and the file
+   is gone; revoking again succeeds.
+6. **Readiness** -- `can_unlock()` is `false` when the backing resource is
+   unavailable (no agent socket, no token).
+7. **Interaction declaration** -- `requires_interaction()` returns the right
+   variant; the CLI and the overlay use it to decide whether to submit the
+   factor at once, ask for a password, or report a touch as unsupported.

@@ -127,7 +127,7 @@ The CRDT merge rule:
 ### Convergence Properties
 
 | Property | Guarantee |
-|----------|-----------|
+| --- | --- |
 | Eventual consistency | All connected peers converge to the same state |
 | Commutativity | Updates can be applied in any order |
 | Idempotency | Re-applying an update has no additional effect |

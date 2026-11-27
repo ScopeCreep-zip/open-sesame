@@ -1,11 +1,12 @@
 //! SCTK + wayland-client overlay surface for the window switcher.
 //!
 //! Manages the full overlay lifecycle: layer-shell surface creation, keyboard
-//! input capture, blur protocol binding, and rendering dispatch. Runs on a
-//! dedicated thread with its own poll-based event loop.
+//! input capture, background blur (SCTK `background_effect`), and rendering
+//! dispatch. Runs on a dedicated thread with its own poll-based event loop;
+//! the daemon drives it with [`OverlayCmd`] and hears from it through
+//! [`OverlayEvent`].
 
 pub mod app;
-pub mod blur;
 pub mod commands;
 pub mod compositor;
 pub mod event_loop;
@@ -45,8 +46,8 @@ pub enum OverlayCmd {
         password_len: usize,
         error: Option<String>,
     },
+    /// Unlock progress; the message names the profile.
     ShowUnlockProgress {
-        profile: String,
         message: String,
     },
     ResetGrace,
@@ -70,49 +71,31 @@ pub enum OverlayEvent {
 }
 
 /// Minimal window info passed to the overlay for display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowInfo {
     pub app_id: String,
     pub title: String,
 }
 
-// ---------------------------------------------------------------------------
-// Overlay phase tracking
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OverlayPhase {
-    Hidden,
-    BorderOnly,
-    Full,
-    Launching,
-    LaunchError,
-    UnlockPrompt,
-    UnlockProgress,
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Spawn the SCTK overlay on a dedicated thread.
-pub fn spawn_overlay(
-    theme: crate::render::OverlayTheme,
-    show_app_id: bool,
-    show_title: bool,
-) -> (
+/// The overlay thread's command sender and event receiver.
+pub type OverlayChannels = (
     mpsc::Sender<OverlayCmd>,
     tokio::sync::mpsc::Receiver<OverlayEvent>,
-) {
+);
+
+/// Spawn the SCTK overlay, themed and laid out by `config`, on a
+/// dedicated thread.
+///
+/// # Errors
+///
+/// When the thread cannot be spawned.
+pub fn spawn_overlay(config: &core_config::WmConfig) -> std::io::Result<OverlayChannels> {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<OverlayEvent>(64);
     let (cmd_tx, cmd_rx) = mpsc::channel::<OverlayCmd>();
-
+    let theme = crate::render::OverlayTheme::from_config(config);
+    let columns = crate::render::Columns::of(config);
     std::thread::Builder::new()
         .name("overlay-sctk".into())
-        .spawn(move || {
-            event_loop::run_sctk_overlay(cmd_rx, event_tx, theme, show_app_id, show_title);
-        })
-        .expect("failed to spawn overlay thread");
-
-    (cmd_tx, event_rx)
+        .spawn(move || event_loop::run_sctk_overlay(&cmd_rx, &event_tx, theme, columns))?;
+    Ok((cmd_tx, event_rx))
 }

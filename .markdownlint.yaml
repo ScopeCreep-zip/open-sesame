@@ -56,6 +56,13 @@ MD033:
     - "kbd"
     - "sup"
     - "sub"
+    # README layout: centered header block, side-by-side panes, bold
+    # <details> summaries.
+    - "div"
+    - "table"
+    - "tr"
+    - "td"
+    - "b"
 
 # MD035/hr-style - Horizontal rule style
 MD035:
@@ -80,3 +87,9 @@ MD049:
 # MD050/strong-style - Strong style
 MD050:
   style: "asterisk"
+
+# MD060/table-column-style - Table column style
+# One space of padding around cell content; delimiter rows `| --- |`.
+# Deterministic and auto-fixable with `markdownlint-cli2 --fix`.
+MD060:
+  style: "compact"

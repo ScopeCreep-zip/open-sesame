@@ -1,4 +1,4 @@
-//! Input capture and injection via evdev and uinput.
+//! Keyboard capture via evdev.
 //!
 //! Provides:
 //! - `DeviceInfo`: metadata about an evdev input device.
@@ -6,9 +6,8 @@
 //! - `open_keyboard_stream()`: open an evdev device as an async `EventStream` for
 //!   tokio-native keyboard event reading.
 //!
-//! Requires `input` group membership (never root).
-//! `/dev/uinput` access via udev rule (for future remap support):
-//!   `KERNEL=="uinput", GROUP="uinput", MODE="0660"`
+//! Requires `input` group membership (never root). Nothing is injected:
+//! there is no uinput device.
 
 use evdev::{Device, EventStream, KeyCode};
 use std::path::{Path, PathBuf};
@@ -22,37 +21,32 @@ pub struct DeviceInfo {
     pub is_pointer: bool,
 }
 
-/// Enumerate evdev devices under `/dev/input/`.
+/// The evdev devices under `/dev/input/` this process can open.
 ///
-/// Uses the evdev crate's built-in `enumerate()` which reads `/dev/input/event*`
-/// and silently skips devices that fail to open (EACCES, etc.).
+/// Uses the evdev crate's `enumerate()`, which reads `/dev/input/event*`
+/// and skips devices that fail to open (EACCES, etc.): a process outside
+/// the `input` group sees none.
 ///
 /// A device is classified as a keyboard if it supports `KEY_A`, `KEY_Z`, and
 /// `KEY_ENTER`. This heuristic excludes power buttons, media controllers, and
 /// other devices that report KEY events but are not full keyboards.
-pub fn enumerate_devices() -> core_types::Result<Vec<DeviceInfo>> {
-    let mut devices = Vec::new();
-
-    for (path, device) in evdev::enumerate() {
-        let name = device.name().unwrap_or("Unknown").to_string();
-        let is_keyboard = device.supported_keys().is_some_and(|keys| {
-            keys.contains(KeyCode::KEY_A)
-                && keys.contains(KeyCode::KEY_Z)
-                && keys.contains(KeyCode::KEY_ENTER)
-        });
-        let is_pointer = device
-            .supported_keys()
-            .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT));
-
-        devices.push(DeviceInfo {
-            path,
-            name,
-            is_keyboard,
-            is_pointer,
-        });
-    }
-
-    Ok(devices)
+#[must_use]
+pub fn enumerate_devices() -> Vec<DeviceInfo> {
+    evdev::enumerate()
+        .map(|(path, device)| {
+            let keys = device.supported_keys();
+            DeviceInfo {
+                name: device.name().unwrap_or("Unknown").to_owned(),
+                is_keyboard: keys.is_some_and(|keys| {
+                    keys.contains(KeyCode::KEY_A)
+                        && keys.contains(KeyCode::KEY_Z)
+                        && keys.contains(KeyCode::KEY_ENTER)
+                }),
+                is_pointer: keys.is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT)),
+                path,
+            }
+        })
+        .collect()
 }
 
 /// Open an evdev device as an async `EventStream` for tokio-native reading.

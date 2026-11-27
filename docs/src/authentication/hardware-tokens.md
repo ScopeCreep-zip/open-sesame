@@ -25,7 +25,7 @@ keys in hardware slots. The private key never leaves the card.
 PIV slots relevant to Open Sesame:
 
 | Slot | Purpose | PIN Policy | Touch Policy |
-|------|---------|-----------|--------------|
+| --- | --- | --- | --- |
 | 9a | PIV Authentication | Once per session | Configurable |
 | 9c | Digital Signature | Always | Configurable |
 | 9d | Key Management | Once per session | Configurable |
@@ -201,7 +201,7 @@ physically touch a contact sensor before performing a cryptographic operation. T
 proof of physical presence, mitigating malware that silently uses the token while plugged in.
 
 | Policy | Behavior |
-|--------|----------|
+| --- | --- |
 | Never | No touch required (default for HMAC-SHA1 on some firmware) |
 | Always | Touch required for every operation |
 | Cached | Touch required once, cached for 15 seconds |
@@ -225,7 +225,7 @@ HKDF-SHA256 expansion step stretches this to 32 bytes:
 ## Integration Dependencies
 
 | Dependency | Type | Purpose |
-|-----------|------|---------|
+| --- | --- | --- |
 | `pcsc-lite` + `libpcsclite-dev` | System library | PCSC smart card access |
 | `pcscd` | System service | Smart card daemon (must be running for PIV/PKCS#11) |
 | `opensc` (optional) | System package | PKCS#11 module and generic smart card drivers |

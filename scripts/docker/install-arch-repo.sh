@@ -9,6 +9,8 @@ KEY_ID=$(curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
     | awk -F: '/^pub/{print $5; exit}')
 pacman-key --lsign-key "${KEY_ID}"
 
-printf '\n[open-sesame]\nSigLevel = Required DatabaseRequired\nServer = https://scopecreep-zip.github.io/open-sesame/arch/$arch\n' >> /etc/pacman.conf
+# $arch is pacman.conf's own variable, expanded by pacman, not the shell.
+# shellcheck disable=SC2016
+printf '\n[open-sesame]\nSigLevel = Required DatabaseRequired\nServer = https://scopecreep-zip.github.io/open-sesame/arch/$arch\n' >>/etc/pacman.conf
 
 pacman -Syu --noconfirm open-sesame-bin

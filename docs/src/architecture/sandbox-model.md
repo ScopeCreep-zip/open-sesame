@@ -1,448 +1,216 @@
 # Sandbox Model
 
-Open Sesame enforces a three-layer process containment model on Linux:
-Landlock filesystem sandboxing, seccomp-bpf syscall filtering, and
-systemd unit hardening. Each daemon receives a tailored sandbox that
-grants the minimum privileges required for its function. Sandbox
-application is mandatory --- every daemon treats sandbox failure as fatal
-and refuses to start unsandboxed.
+Every daemon but daemon-launcher runs inside three layers of containment on Linux: Landlock
+(filesystem, sockets, scopes), seccomp-bpf (system calls and socket families), and systemd unit
+hardening. Each daemon is granted what its work needs and nothing else. Every daemon runs under the
+strongest sandbox the running kernel enforces: Landlock's rights and scopes are requested
+best-effort, so a newer kernel tightens the sandbox and an older one runs with its own subset,
+reported at startup and by `sesame status --doctor`. seccomp and the unit hardening apply on every
+kernel, and a sandbox that cannot be built or applied (a rule that cannot be opened, a failed
+system call) is fatal.
 
 ## Process Hardening
 
-Before any sandbox is applied, every daemon calls `harden_process()`
-(`platform-linux/src/security.rs:14`). This function performs two
-operations:
+Before the sandbox, every daemon calls `platform_linux::security::harden_process()`
+(`PR_SET_DUMPABLE(0)`: no `ptrace` attach by other processes of the user, no core dump content;
+`RLIMIT_CORE` 0) and `apply_resource_limits()` (`RLIMIT_NOFILE` 4096). These log a failure and
+continue; Landlock and seccomp are the boundary.
 
-1. **`PR_SET_DUMPABLE(0)`** --- prevents `ptrace` attachment by
-   non-root processes and prevents core dumps from containing process
-   memory (`security.rs:19`).
-2. **`RLIMIT_CORE(0,0)`** --- sets both soft and hard core dump limits
-   to zero, preventing core files even if dumpable is re-enabled by
-   setuid (`security.rs:32-36`).
+## Applying the Sandbox
 
-Resource limits are applied via `apply_resource_limits()`
-(`security.rs:66`). All daemons set `RLIMIT_NOFILE` to 4096. The
-`memlock_bytes` parameter is set to 0 at the application level; systemd
-units provide the actual `LimitMEMLOCK=64M` constraint.
+`core_daemon::sandbox::apply(layout, rules, seccomp)` applies Landlock, then seccomp. It runs in
+`main` while the process has exactly one thread, before the async runtime, the configuration
+watcher, or any other thread starts, so every thread of the daemon is inside the sandbox: a second
+thread is an error, not a partial sandbox. Everything a daemon opens afterwards (the bus, Wayland,
+its keys, the vaults) is reached through a rule. `core_types::init_secure_memory()` probes
+`memfd_secret` before the sandbox, and `memfd_secret` stays in every allowlist.
 
-These hardening calls log errors but do not abort. A daemon still
-proceeds to Landlock and seccomp even if `prctl` or `setrlimit` fails.
-The Landlock and seccomp layers are the hard security boundary.
+## Landlock
 
-## Landlock Filesystem Sandbox
+`platform-linux/src/sandbox.rs` holds the one Landlock ruleset definition; each daemon supplies
+only its rules, derived from `core_layout::Layout` by the rule functions of
+`core-daemon/src/sandbox.rs`, so the granted paths and the paths the daemon opens are one
+derivation.
 
-Landlock provides unprivileged filesystem sandboxing on Linux
-kernels >= 5.13. The shared implementation lives in
-`platform-linux/src/sandbox.rs`. Each daemon defines its own ruleset in
-a per-daemon `apply_sandbox()` function.
+### Coverage: Every Right the Kernel Enforces
 
-### ABI Level and Enforcement Policy
+The ruleset requests every access right and scope of Landlock ABI 10 (Linux 7.2) under
+`CompatLevel::BestEffort`, the compatibility model of the kernel's Landlock documentation
+("Backward and forward compatibility") and of the landlock crate: the kernel enforces the rights
+of its own ABI and the rest are dropped. The daemons therefore run on every kernel, and inherit
+each protection a newer kernel adds without a change to the code. `restrict_self` reports the
+result: fully enforced, partially enforced, or not enforced (no Landlock).
 
-The sandbox targets Landlock ABI V6 (`sandbox.rs:77`), which covers
-filesystem access (`AccessFs`), network access (`AccessNet`), and scope
-restrictions (abstract Unix sockets and cross-process signals via
-`Scope`). The `Ruleset` is created with
-`handle_access(AccessFs::from_all(abi))` and
-`handle_access(AccessNet::from_all(abi))` to handle all access types at
-the V6 level (`sandbox.rs:85-96`).
+What a kernel does not enforce is a `core_types::SandboxProtection`, found by building a
+`HardRequirement` ruleset of that protection's rights alone (nothing is created in the kernel and
+nothing is restricted):
 
-Partial enforcement is treated as a fatal error. If the kernel ABI
-cannot fully enforce the requested rules, `apply_landlock()` returns an
-error and the daemon aborts (`sandbox.rs:157-161`). There is no graceful
-degradation path.
+| Protection | Rights | Linux |
+| --- | --- | --- |
+| `Filesystem` | `AccessFs` of ABI 1 | 5.13 |
+| `Reparenting` | `Refer` | 5.19 |
+| `Truncation` | `Truncate` | 6.2 |
+| `Tcp` | `BindTcp`, `ConnectTcp` | 6.7 |
+| `DeviceIoctl` | `IoctlDev` | 6.10 |
+| `Scopes` | abstract Unix sockets, signals | 6.12 |
+| `PathnameSockets` | `ResolveUnix` | 7.1 |
+| `Udp` | `BindUdp`, `ConnectSendUdp` | 7.2 |
 
-### ENOENT Handling
+A daemon on a kernel that lacks some logs `landlock: partially enforced` at warning level with
+each missing protection and its consequence, and continues; without Landlock it logs
+`landlock: not enforced` and continues under seccomp and its unit. `sesame status --doctor
+platform` reports the same: `platform.kernel` carries the release and the enforcement
+(`7.2.15, Landlock fully enforced`), and passes with no protection missing or warns naming each
+missing one with the Linux release that enforces it.
 
-Paths that do not exist at sandbox application time are silently skipped
-(`sandbox.rs:114-120`). This is strictly more restrictive than granting
-the path, because Landlock denies access to any path not present in the
-ruleset. This design handles the case where directories have not yet
-been created --- for example, the vaults directory before `sesame init`
-runs, or `$XDG_RUNTIME_DIR/pds/` before daemon-profile creates it.
+### Floor: `[global.sandbox] require`
 
-### Nix Symlink Resolution
+A protection named in `require` (the table's names in kebab case: `filesystem`, `reparenting`,
+`truncation`, `tcp`, `device-ioctl`, `scopes`, `pathname-sockets`, `udp`) is a floor:
 
-On NixOS, configuration files are symlinks into `/nix/store`. Each
-daemon calls `core_config::resolve_config_real_dirs()` before applying
-Landlock to discover the real filesystem paths behind config symlinks.
-These resolved paths are added as read-only Landlock rules so that
-config hot-reload can follow symlinks after the sandbox is applied.
+```toml
+[global.sandbox]
+require = ["filesystem", "scopes", "pathname-sockets"]
+```
 
-daemon-wm additionally grants blanket read-only access to `/nix/store`
-(`daemon-wm/src/sandbox.rs:68-69`) for shared libraries, GLib schemas,
-locale data, and XKB keyboard rules.
+On a kernel that does not enforce one, every sandboxed daemon refuses to start with an error
+naming each unmet protection, before anything is restricted, and `platform.kernel` fails, naming
+the floor and what the kernel lacks of it. On a kernel that meets it, the floor's rights are
+requested as `CompatLevel::HardRequirement` and every other right best-effort (the landlock
+crate's pattern for a minimum with opportunistic additions). An unknown name fails the
+configuration load, listing the accepted ones. The floor is read when a daemon starts; a reload
+does not re-sandbox a running daemon.
 
-daemon-profile creates its Landlock target directories if they do not
-exist before opening `PathFd` handles
-(`daemon-profile/src/sandbox.rs:38-42`). This handles the race condition
-where systemd restarts daemon-profile after a
-`sesame init --wipe-reset-destroy-all-data` before the directories are
-recreated.
+`PathnameSockets` is the one whose absence opens a path out of the sandbox. Below ABI 9, Landlock
+does not mediate `connect(2)` or addressed `sendmsg(2)` to a pathname Unix socket, so a sandboxed
+process reaches every socket it can name: the session D-Bus bus among them, where
+`org.freedesktop.systemd1` (`StartTransientUnit`) runs any command outside the sandbox. Under
+systemd, `InaccessiblePaths=-%t/bus` removes the session bus socket from each sandboxed unit's
+mount namespace on every kernel (see [systemd Unit Hardening](#systemd-unit-hardening)); a daemon
+started outside its unit has only Landlock. With `ResolveUnix` handled, a socket is reachable only
+under a rule granting it (`FsAccess::ReadWriteFile` on the socket, `FsAccess::ReadWrite` on its
+directory).
 
-### Non-Directory Inode Handling
+### Scopes
 
-The implementation performs `fstat()` on each `PathFd` after opening it
-to detect whether the inode is a directory or a non-directory file
-(`sandbox.rs:130-136`). For non-directory inodes (sockets, regular
-files), directory-only access flags (`ReadDir`, `MakeDir`, etc.) are
-masked off using `AccessFs::from_file(abi)`. This prevents the Landlock
-crate's `PathBeneath::try_compat_inner` from reporting
-`PartiallyEnforced` on non-directory fds.
+On a kernel that enforces them (Linux 6.12), every daemon runs with both scopes: it cannot connect
+to an abstract-namespace Unix socket created outside its domain (Xwayland and some session buses
+listen on abstract addresses), and it cannot signal a process outside it. Abstract sockets cannot
+be granted by a rule; every socket a daemon uses is a pathname socket (the user service manager's
+`NOTIFY_SOCKET` is `$XDG_RUNTIME_DIR/systemd/notify`).
 
-The `FsAccess::ReadWriteFile` variant (`sandbox.rs:22-24`) exists
-specifically for non-directory paths such as Unix domain sockets,
-granting file-level read-write access without directory-only flags.
+### Rules
 
-### Scope Restrictions
+| Rule function | Grants |
+| --- | --- |
+| `ipc_client_rules` | `<runtime>/pds/keys` (read), `<runtime>/pds/bus.endpoint` (read), `<runtime>/pds/bus.sock` (connect) |
+| `config_rules(access)` | `~/.config/pds` with `access`, and read access to the directories its symlinks resolve into (`/nix/store` on NixOS) |
+| `notify_rules` | The systemd notification socket, when it is a filesystem socket that exists |
+| `ssh_agent_rules` | Every SSH agent socket candidate (`$SSH_AUTH_SOCK`, `~/.ssh/agent.sock`) and its directory, and, for a symlink, its resolved target and the target's directory |
+| `wayland_rules` | The Wayland compositor socket |
+| `system_bus_rules` | The system D-Bus socket of `Layout::system_bus_socket` (`$DBUS_SYSTEM_BUS_ADDRESS`, one `unix:path=` address, or `/var/run/dbus/system_bus_socket`) |
 
-Two scope modes are available via the `LandlockScope` enum
-(`sandbox.rs:54-60`):
+No rule function grants the session D-Bus bus, and no daemon is granted it. The platform keyring
+factor of the overlay's inline unlock is read by daemon-launcher (`KeyringUnlockRequest`), outside
+the sandboxes.
 
-- **`Full`** --- blocks both abstract Unix sockets and cross-process
-  signals. Uses `Scope::from_all(abi)` which on ABI V6 includes
-  `AbstractUnixSocket` and `Signal`.
-- **`SignalOnly`** --- blocks cross-process signals only, permitting
-  abstract Unix sockets. Uses `Scope::Signal` alone.
+A rule for a path that does not exist yet (the vaults before `sesame init`) is skipped: Landlock
+denies every path outside the ruleset, so a skipped rule grants less. A path whose existence cannot
+be determined is an error. On a non-directory inode (a socket, a file), directory-only rights are
+masked off before the rule is added.
 
-Daemons that need D-Bus or Wayland communication via abstract Unix
-sockets use `SignalOnly`. Daemons with no such requirement use `Full`.
+| Daemon | Rules |
+| --- | --- |
+| daemon-profile | `config_rules(ReadWrite)`, `<runtime>/pds` (read-write: it binds the bus socket and writes the keys and endpoint), `notify_rules`; with the `desktop` feature `system_bus_rules` (the Wi-Fi monitor) and, in a Wayland session, `wayland_rules` (the focus monitor) |
+| daemon-secrets | `ipc_client_rules`, `config_rules(ReadWrite)` (vault databases, salts, metadata), `notify_rules` |
+| daemon-wm | `ipc_client_rules`, `wayland_rules`, `config_rules(ReadOnly)` (vault salts and enrollments for inline unlock), `ssh_agent_rules`, `notify_rules`; `~/.cache/open-sesame` (read-write: MRU stack); read: `~/.config/cosmic` (the COSMIC theme, opened only where its config directories exist), user data, `/etc/fonts`, `/usr/share/fonts`, `/lib`, `/nix/store`, `/proc`, `/usr/share`, `/usr/share/X11/xkb`. No DRI or GPU paths: rendering is `wl_shm` |
+| daemon-clipboard | `ipc_client_rules`, `config_rules(ReadOnly)`, `notify_rules`, `wayland_rules`, `~/.cache/open-sesame` (read-write: history database) |
+| daemon-input | `ipc_client_rules`, `config_rules(ReadOnly)`, `notify_rules`; read: `/dev/input`, `/sys/class/input`, `/sys/devices` (evdev) |
+| daemon-snippets | `ipc_client_rules`, `config_rules(ReadOnly)`, `notify_rules` |
 
-### Per-Daemon Filesystem Rules
+### daemon-launcher
 
-#### daemon-profile
+daemon-launcher applies neither Landlock nor seccomp: both are inherited across `fork` and `exec`
+and would confine every application it launches. Its boundary is bus authentication (Noise IK).
+It is also the broker of the platform keyring factor for daemon-wm, serving
+`KeyringUnlockRequest` only from the bus-verified sender `daemon-wm`: the request unlocks a vault
+without the user.
 
-Source: `daemon-profile/src/sandbox.rs:29`. Scope: **SignalOnly**
-(needs D-Bus).
+## seccomp-bpf
 
-| Path | Access | Purpose |
-|------|--------|---------|
-| `~/.config/pds/` | ReadWrite | Audit log, config, vault metadata |
-| `$XDG_RUNTIME_DIR/pds/` | ReadWrite | IPC bus socket, keys, runtime state |
-| `$NOTIFY_SOCKET` | ReadWriteFile | systemd sd_notify keepalives |
-| `$SSH_AUTH_SOCK` + canonicalized target + parent | ReadWriteFile / ReadOnly | SSH agent auto-unlock |
-| `~/.ssh/` + `agent.sock` + canonicalized target + parent | ReadOnly / ReadWriteFile | Stable SSH agent symlink fallback |
-| Resolved config symlink targets | ReadOnly | Config hot-reload on NixOS |
+`apply_seccomp` loads a libseccomp filter whose default action kills the process
+(`SECCOMP_RET_KILL_PROCESS`): killing a thread would leave the daemon running without it, and an
+error return would let a compromised process probe the allowlist. A system call through another
+architecture's ABI also kills the process (`set_act_badarch`), which closes `socketcall(2)`
+multiplexing and 32-bit entry points. The filter is synchronized onto every thread (`TSYNC`). The
+kernel records each kill (`type=SECCOMP`) when `kill_process` is listed in
+`/proc/sys/kernel/seccomp/actions_logged`.
 
-daemon-profile is the only daemon that hosts the IPC bus server socket.
-It requires ReadWrite on the entire `$XDG_RUNTIME_DIR/pds/` directory
-because it creates the `bus.sock` and `bus.pub` files at startup.
+`socket` and `socketpair` are admitted only with `AF_UNIX` as their family (argument 0): every
+socket a daemon opens is Unix-domain, so no daemon creates a network, netlink, packet, or vsock
+socket. `io_uring` is in no allowlist, so it cannot create sockets around the filter.
 
-SSH agent socket handling resolves symlinks to their target inodes. On
-Konductor VMs, `~/.ssh/agent.sock` is a stable symlink to a per-session
-`/tmp/ssh-XXXX/agent.PID` path. Landlock resolves symlinks to their
-target inodes, so the implementation grants access to the symlink path,
-the canonicalized target, and the parent directory of the target for
-path traversal (`daemon-profile/src/sandbox.rs:81-149`).
+Every allowlist is `core_daemon::sandbox::BASE_SYSCALLS` (file I/O, memory, threads, the tokio
+event loop and timers, Unix sockets, signals, inotify, `memfd_secret`, `getrandom`, `getcwd`,
+which backtrace capture of an error report makes, and `mlock`/`munlock`: SQLCipher locks its
+private heap at the first database use and unlocks it in its `atexit` shutdown, inside the
+sandbox, as does `ProtectedAlloc` without `memfd_secret`) plus the calls of the daemon's own work. Work
+that needs more than the base only once, before the sandbox, is done before it: daemon-input
+compiles its XKB keymap before the sandbox, so neither the XKB data nor libxkbcommon's
+real-versus-effective ID check (`getgid`, `getegid`) is granted afterwards.
 
-#### daemon-secrets
+| Daemon | Calls beyond the base |
+| --- | --- |
+| daemon-profile | `bind`, `listen`, `accept4` (bus server); `unlink`, `rename`, `chmod`, `fchmod`, `fchown`, `flock`, `fsync`, `fdatasync` (owner-only files written atomically); `getresuid`, `getresgid`, `getgid`, `getegid` (D-Bus credentials); `writev`, `readv`, `readlinkat`, `uname`, `memfd_create`, `nanosleep`, `clock_nanosleep`, `sched_yield`, `timerfd_create`, `timerfd_settime`, `timerfd_gettime` |
+| daemon-secrets | `pwrite64`, `fallocate`, `flock`, `fsync`, `fdatasync`, `rename`, `unlink` (SQLCipher); `writev`, `readv`, `readlinkat`, `uname`, `nanosleep`, `clock_nanosleep` |
+| daemon-wm | `flock`, `rename`, `unlink`, `chmod`, `fchmod`, `fsync`, `fdatasync` (MRU stack); `getresuid`, `getresgid`, `getgid`, `getegid`; `statfs`, `fstatfs`, `memfd_create`, `mlock2`, `mremap`, `writev`, `readv`, `readlinkat`, `uname`, `accept4`, `bind`, `listen`, `nanosleep`, `clock_nanosleep`, `sched_yield`, `sched_get_priority_max`, `timerfd_create`, `timerfd_settime`, `timerfd_gettime`, `sysinfo` (Wayland and SCTK runtime) |
+| daemon-clipboard | `flock`, `fsync`, `fdatasync` (SQLite) |
+| daemon-input | none |
+| daemon-snippets | none |
 
-Source: `daemon-secrets/src/sandbox.rs:7`. Scope: **Full** (no abstract
-Unix sockets needed).
-
-| Path | Access | Purpose |
-|------|--------|---------|
-| `~/.config/pds/` | ReadWrite | Vault SQLCipher databases, salt storage |
-| `$XDG_RUNTIME_DIR/pds/keys/` | ReadOnly | IPC client keypair |
-| `$XDG_RUNTIME_DIR/pds/bus.pub` | ReadOnly | Bus server public key |
-| `$XDG_RUNTIME_DIR/pds/bus.sock` | ReadWriteFile | IPC bus socket |
-| `$XDG_RUNTIME_DIR/bus` | ReadWriteFile | D-Bus filesystem socket |
-| `$NOTIFY_SOCKET` | ReadWriteFile | systemd sd_notify keepalives |
-| Resolved config symlink targets | ReadOnly | Config hot-reload on NixOS |
-
-daemon-secrets has the narrowest Landlock ruleset of all daemons that
-handle secret material. It uses `LandlockScope::Full` to block abstract
-Unix sockets. The D-Bus filesystem socket at `$XDG_RUNTIME_DIR/bus` is
-granted as a `ReadWriteFile` rule because it is a non-directory inode
-(`daemon-secrets/src/sandbox.rs:44-47`).
-
-#### daemon-wm
-
-Source: `daemon-wm/src/sandbox.rs:8`. Scope: **SignalOnly** (Wayland
-uses abstract sockets).
-
-| Path | Access | Purpose |
-|------|--------|---------|
-| `$XDG_RUNTIME_DIR/pds/keys/` | ReadOnly | IPC client keypair |
-| `$XDG_RUNTIME_DIR/pds/bus.pub` | ReadOnly | Bus server public key |
-| `$XDG_RUNTIME_DIR/pds/bus.sock` | ReadWriteFile | IPC bus socket |
-| `$WAYLAND_DISPLAY` socket | ReadWriteFile | Wayland compositor protocol |
-| `~/.cache/open-sesame/` | ReadWrite | MRU state, overlay cache |
-| `/etc/fonts` | ReadOnly | Fontconfig configuration |
-| `/usr/share/fonts` | ReadOnly | System font files |
-| `~/.config/cosmic/` | ReadOnly | COSMIC desktop theme integration |
-| `/nix/store` | ReadOnly | Shared libs, schemas, XKB (NixOS) |
-| `/proc` | ReadOnly | xdg-desktop-portal PID verification |
-| `/usr/share` | ReadOnly | System shared data (fonts, icons, mime, locale) |
-| `/usr/share/X11/xkb` | ReadOnly | XKB system rules (non-NixOS) |
-| `~/.local/share/` | ReadOnly | User fonts and theme data |
-| `~/.config/pds/vaults/` | ReadOnly | Salt files and SSH enrollment blobs |
-| `$SSH_AUTH_SOCK` + canonicalized paths | ReadWriteFile / ReadOnly | SSH agent auto-unlock |
-| `$NOTIFY_SOCKET` | ReadWriteFile | systemd sd_notify keepalives |
-| Resolved config symlink targets | ReadOnly | Config hot-reload on NixOS |
-
-daemon-wm has the broadest Landlock ruleset because it renders a Wayland
-overlay using SCTK and tiny-skia. It requires access to fonts, theme
-data, and system shared resources. GPU/DRI access is intentionally
-excluded --- rendering uses `wl_shm` CPU shared memory buffers only
-(`daemon-wm/src/sandbox.rs:91-93`).
-
-#### daemon-clipboard
-
-Source: `daemon-clipboard/src/main.rs:306`. Scope: **Full**.
-
-| Path | Access | Purpose |
-|------|--------|---------|
-| `$XDG_RUNTIME_DIR/pds/keys/` | ReadOnly | IPC client keypair |
-| `$XDG_RUNTIME_DIR/pds/bus.pub` | ReadOnly | Bus server public key |
-| `$XDG_RUNTIME_DIR/pds/bus.sock` | ReadWriteFile | IPC bus socket |
-| `$WAYLAND_DISPLAY` socket | ReadWriteFile | Wayland data-control protocol |
-| `~/.cache/open-sesame/` | ReadWrite | Clipboard history SQLite database |
-| Resolved config symlink targets | ReadOnly | Config hot-reload on NixOS |
-
-#### daemon-input
-
-Source: `daemon-input/src/main.rs:319`. Scope: **Full**.
-
-| Path | Access | Purpose |
-|------|--------|---------|
-| `$XDG_RUNTIME_DIR/pds/keys/` | ReadOnly | IPC client keypair |
-| `$XDG_RUNTIME_DIR/pds/bus.pub` | ReadOnly | Bus server public key |
-| `$XDG_RUNTIME_DIR/pds/bus.sock` | ReadWriteFile | IPC bus socket |
-| `/dev/input` | ReadOnly | evdev keyboard device nodes |
-| `/sys/class/input` | ReadOnly | evdev device enumeration symlinks |
-| `/sys/devices` | ReadOnly | evdev device metadata via sysfs |
-| Resolved config symlink targets | ReadOnly | Config hot-reload on NixOS |
-
-daemon-input is the only daemon with access to `/dev/input` and
-`/sys/class/input`. It reads raw keyboard events via evdev.
-
-#### daemon-snippets
-
-Source: `daemon-snippets/src/main.rs:241`. Scope: **Full**.
-
-| Path | Access | Purpose |
-|------|--------|---------|
-| `$XDG_RUNTIME_DIR/pds/keys/` | ReadOnly | IPC client keypair |
-| `$XDG_RUNTIME_DIR/pds/bus.pub` | ReadOnly | Bus server public key |
-| `$XDG_RUNTIME_DIR/pds/bus.sock` | ReadWriteFile | IPC bus socket |
-| `~/.config/pds/` | ReadOnly | Config directory (snippet templates) |
-| Resolved config symlink targets | ReadOnly | Config hot-reload on NixOS |
-
-daemon-snippets has the narrowest Landlock ruleset of all sandboxed
-daemons. It requires only IPC bus access and read-only config access.
-
-#### daemon-launcher
-
-daemon-launcher does **not** apply Landlock or seccomp. It spawns
-arbitrary desktop applications as child processes via `fork`+`exec`.
-Landlock and seccomp filters inherit across `fork`+`exec` and would kill
-every spawned application (`daemon-launcher/src/main.rs:119-121`). The
-security boundary for daemon-launcher is IPC bus authentication via
-Noise IK. systemd unit hardening provides the process containment layer.
-
-## seccomp-bpf Syscall Filtering
-
-The seccomp implementation uses `libseccomp` to build per-daemon BPF
-filters (`platform-linux/src/sandbox.rs:259`). seccomp is always applied
-**after** Landlock because Landlock setup requires syscalls
-(`landlock_create_ruleset`, `landlock_add_rule`,
-`landlock_restrict_self`) that the seccomp filter does not permit.
-
-### Default Action
-
-The default action for disallowed syscalls is
-`ScmpAction::KillThread` (`SECCOMP_RET_KILL_THREAD`)
-(`sandbox.rs:268`). This sends `SIGSYS` to the offending thread rather
-than using `KillProcess`, which would skip the signal handler entirely.
-The choice of `KillThread` over `Errno` or `Log` is deliberate ---
-`Errno` or `Log` would allow an attacker to probe for allowed syscalls
-(`sandbox.rs:256-258`).
-
-### SIGSYS Handler
-
-A custom `SIGSYS` signal handler is installed before the seccomp filter
-is loaded (`sandbox.rs:173-238`). The handler is designed to be
-async-signal-safe:
-
-- It uses no allocator and makes no heap allocations.
-- It extracts the syscall number from `siginfo_t` at byte offset 24 from
-  the struct base on x86_64 (`sandbox.rs:201`). This offset corresponds
-  to `si_call_addr` (8-byte pointer) followed by `si_syscall` (4-byte
-  int) within the `_sigsys` union member, which starts at byte offset 16
-  from the struct base.
-- It formats the number into a stack-allocated buffer and writes
-  `"SECCOMP VIOLATION: syscall=NNN"` to stderr via raw `libc::write()`
-  on fd 2.
-- After logging, it resets `SIGSYS` to `SIG_DFL` via `libc::signal()`
-  and re-raises the signal via `libc::raise()`
-  (`sandbox.rs:226-228`).
-
-The handler is registered with `SA_SIGINFO | SA_RESETHAND` flags
-(`sandbox.rs:235`). `SA_RESETHAND` ensures the handler fires only
-once --- subsequent `SIGSYS` deliveries use the default disposition.
-
-### Per-Daemon Syscall Differences
-
-All six sandboxed daemons share a common baseline of approximately 50
-syscalls covering I/O basics (`read`, `write`, `close`, `openat`,
-`lseek`, `pread64`, `fstat`, `stat`, `newfstatat`, `statx`, `access`),
-memory management (`mmap`, `mprotect`, `munmap`, `madvise`, `brk`),
-process/threading (`futex`, `clone3`, `clone`, `set_robust_list`,
-`set_tid_address`, `rseq`, `sched_getaffinity`, `prlimit64`, `prctl`,
-`getpid`, `gettid`, `getuid`, `geteuid`, `kill`), epoll (`epoll_wait`,
-`epoll_ctl`, `epoll_create1`, `eventfd2`, `poll`, `ppoll`), timers
-(`clock_gettime`, `timer_create`, `timer_settime`, `timer_delete`),
-networking (`socket`, `connect`, `sendto`, `recvfrom`, `recvmsg`,
-`sendmsg`, `getsockname`, `getpeername`, `setsockopt`, `socketpair`,
-`shutdown`, `getsockopt`), signals (`sigaltstack`, `rt_sigaction`,
-`rt_sigprocmask`, `rt_sigreturn`, `tgkill`), inotify
-(`inotify_init1`, `inotify_add_watch`, `inotify_rm_watch`), and misc
-(`exit_group`, `exit`, `getrandom`, `memfd_secret`, `ftruncate`,
-`restart_syscall`, `pipe2`, `dup`).
-
-The following table lists syscalls that differentiate the daemons:
-
-| Syscall | profile | secrets | wm | clipboard | input | snippets | Purpose |
-|---------|:-------:|:-------:|:--:|:---------:|:-----:|:--------:|---------|
-| `bind` | Y | - | Y | - | - | - | Server socket / Wayland |
-| `listen` | Y | - | Y | - | - | - | Server socket / Wayland |
-| `accept4` | Y | - | Y | - | - | - | Server socket / Wayland |
-| `mlock` | - | Y | Y | - | - | - | Secret zeroization / SCTK buffers |
-| `munlock` | - | Y | - | - | - | - | Secret zeroization |
-| `mlock2` | - | - | Y | - | - | - | SCTK/Wayland runtime |
-| `mremap` | - | - | Y | - | - | - | SCTK buffer reallocation |
-| `pwrite64` | - | Y | - | - | - | - | SQLCipher journal writes |
-| `fallocate` | - | Y | - | - | - | - | SQLCipher space preallocation |
-| `flock` | Y | Y | Y | Y | - | - | Database/file locking |
-| `chmod` / `fchmod` | Y | - | Y | - | - | - | File permission management |
-| `fchown` | Y | - | - | - | - | - | IPC socket ownership |
-| `rename` | Y | Y | Y | - | - | - | Atomic file replacement |
-| `unlink` | Y | Y | Y | - | - | - | File/socket cleanup |
-| `statfs` / `fstatfs` | - | - | Y | - | - | - | Filesystem info (SCTK) |
-| `sched_get_priority_max` | - | - | Y | - | - | - | Thread priority (SCTK) |
-| `sysinfo` | - | - | Y | - | - | - | System memory info (SCTK) |
-| `memfd_create` | Y | - | Y | - | - | - | D-Bus / Wayland shared memory |
-| `nanosleep` | Y | Y | Y | - | - | - | Event loop timing |
-| `clock_nanosleep` | Y | Y | Y | - | - | - | Event loop timing |
-| `sched_yield` | Y | - | Y | - | - | - | Cooperative thread scheduling |
-| `timerfd_create` | Y | - | Y | - | - | - | D-Bus / Wayland event loops |
-| `timerfd_settime` | Y | - | Y | - | - | - | D-Bus / Wayland event loops |
-| `timerfd_gettime` | Y | - | Y | - | - | - | D-Bus / Wayland event loops |
-| `getresuid` / `getresgid` | Y | Y | Y | - | - | - | D-Bus credential passing |
-| `getgid` / `getegid` | Y | Y | Y | - | - | - | D-Bus credential passing |
-| `writev` / `readv` | Y | Y | Y | - | - | - | Scatter/gather I/O |
-| `readlinkat` | Y | Y | Y | - | - | - | Symlink resolution |
-| `uname` | Y | Y | Y | - | - | - | D-Bus / Wayland runtime |
-| `getcwd` | Y | Y | Y | - | - | - | Working directory resolution |
-
-Key observations:
-
-- **daemon-secrets** uniquely requires `mlock`/`munlock` for zeroization
-  of secret material in memory, plus `pwrite64` and `fallocate` for
-  SQLCipher database journal operations.
-- **daemon-wm** has the broadest syscall allowlist (~88 syscalls) due to
-  Wayland/SCTK runtime requirements including `mremap`, `mlock2`,
-  `statfs`/`fstatfs`, `sysinfo`, and `sched_get_priority_max`.
-- **daemon-profile** requires `bind`/`listen`/`accept4` because it hosts
-  the IPC bus server socket. It also requires `fchown` for setting socket
-  ownership.
-- **daemon-input** and **daemon-snippets** have the narrowest allowlists
-  (~57-60 syscalls).
-- All sandboxed daemons permit `memfd_secret` for secure memory
-  allocation and `getrandom` for cryptographic random number generation.
+`platform-linux/src/sandbox.rs` tests each property in a child process, since both layers last for
+the process's life, and expects of each kernel what it enforces: an ungranted pathname socket is
+refused where `PathnameSockets` is enforced and reachable where it is not, a granted one is
+reachable, an abstract socket outside the domain is refused where `Scopes` is enforced, the status
+`apply_landlock` returns is the one the kernel's gaps predict, and `socket(AF_INET)` kills the
+process while `AF_UNIX` is admitted. A table test checks that the protections name every requested
+right exactly once. `tests/protocol_validation.sh` runs every daemon of a build through its
+lifecycle under an isolated root, checks that each reports the enforcement the doctor predicts,
+and fails on any seccomp kill the kernel records for them.
 
 ## systemd Unit Hardening
 
-Each daemon runs as a `Type=notify` systemd user service with
-`WatchdogSec=30`. Service files are located in `contrib/systemd/`.
+Each daemon is a systemd user service (`contrib/systemd/`), `Type=notify` (daemon-profile
+`Type=notify-reload`) with `WatchdogSec=30`, `NoNewPrivileges=yes`, `LimitCORE=0`, and
+`LimitMEMLOCK=64M`.
 
-### Common Directives
+The six sandboxed daemons also set, as a second layer over the in-process filters:
 
-All seven daemons share the following systemd hardening:
+| Directive | Effect |
+| --- | --- |
+| `ProtectSystem=strict`, `ProtectHome=read-only` | The file system is read-only except the unit's `ReadWritePaths` |
+| `RestrictAddressFamilies=AF_UNIX` | systemd's socket family filter, the same as the in-process rule |
+| `SystemCallArchitectures=native` | Only the native system call ABI |
+| `InaccessiblePaths=-%t/bus` | The session D-Bus socket is absent from the daemon's mount namespace |
 
-| Directive | Value | Effect |
-|-----------|-------|--------|
-| `NoNewPrivileges` | `yes` | Prevents privilege escalation via setuid/setgid binaries |
-| `LimitCORE` | `0` | Disables core dumps at the cgroup level |
-| `LimitMEMLOCK` | `64M` | Caps locked memory at 64 MiB |
-| `Restart` | `on-failure` | Automatic restart on non-zero exit |
-| `RestartSec` | `5` | Five-second delay between restarts |
-| `WatchdogSec` | `30` | Daemon must call `sd_notify(WATCHDOG=1)` within 30 seconds |
+For a user service, the mount namespace options imply `PrivateUsers=` and require unprivileged
+user namespaces. daemon-secrets also sets `PrivateNetwork=yes`.
 
-### Per-Daemon systemd Differences
+daemon-launcher sets no mount namespace options: they would apply to every application it
+launches (`systemd-run --user --scope` children share its namespace). It sets
+`ProtectClock`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
+`ProtectControlGroups`, `LockPersonality`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`,
+an empty `CapabilityBoundingSet`, and `KillMode=process` so launched applications survive a
+launcher restart.
 
-| Directive | profile | secrets | wm | launcher | clipboard | input | snippets |
-|-----------|:-------:|:-------:|:--:|:--------:|:---------:|:-----:|:--------:|
-| `ProtectHome` | read-only | read-only | read-only | - | read-only | read-only | read-only |
-| `ProtectSystem` | strict | strict | strict | - | strict | strict | strict |
-| `PrivateNetwork` | - | **yes** | - | - | - | - | - |
-| `ProtectClock` | - | - | - | **yes** | - | - | - |
-| `ProtectKernelTunables` | - | - | - | **yes** | - | - | - |
-| `ProtectKernelModules` | - | - | - | **yes** | - | - | - |
-| `ProtectKernelLogs` | - | - | - | **yes** | - | - | - |
-| `ProtectControlGroups` | - | - | - | **yes** | - | - | - |
-| `LockPersonality` | - | - | - | **yes** | - | - | - |
-| `RestrictSUIDSGID` | - | - | - | **yes** | - | - | - |
-| `SystemCallArchitectures` | - | - | - | **native** | - | - | - |
-| `CapabilityBoundingSet` | - | - | - | **(empty)** | - | - | - |
-| `KillMode` | - | - | - | **process** | - | - | - |
-| `LimitNOFILE` | 4096 | **1024** | 4096 | 4096 | 4096 | 4096 | 4096 |
-| `MemoryMax` | 128M | **256M** | 128M | - | 128M | 128M | 128M |
+## Daemon Matrix
 
-Notable design decisions:
-
-- **daemon-secrets** (`open-sesame-secrets.service:18`) is the only
-  daemon with `PrivateNetwork=yes`, placing it in its own network
-  namespace with no connectivity. It communicates exclusively via the
-  Unix domain IPC bus socket. It has the lowest `LimitNOFILE` (1024) but
-  the highest `MemoryMax` (256M) to accommodate Argon2id, which
-  allocates 19 MiB per key derivation.
-- **daemon-launcher** (`open-sesame-launcher.service:17-21`) does not
-  set `ProtectHome` or `ProtectSystem` because these mount namespace
-  restrictions inherit to child processes spawned via
-  `systemd-run --scope`. Firefox, for example, writes to
-  `/run/user/1000/dconf/` and fails with "Read-only file system" when
-  `ProtectSystem=strict` is applied to the launcher. Instead,
-  daemon-launcher uses kernel control plane protections and an empty
-  `CapabilityBoundingSet` to drop all Linux capabilities.
-  `KillMode=process` ensures spawned applications survive launcher
-  restarts.
-- **ReadWritePaths** vary per daemon: daemon-profile and daemon-secrets
-  get `%t/pds` and `%h/.config/pds`; daemon-wm and daemon-clipboard get
-  `%h/.cache/open-sesame`; daemon-wm additionally gets
-  `%h/.cache/fontconfig`.
-
-## Sandbox Application Order
-
-The sandbox layers are applied in a strict sequence during daemon
-startup:
-
-1. `harden_process()` --- `PR_SET_DUMPABLE(0)`, `RLIMIT_CORE(0,0)`
-2. `apply_resource_limits()` --- `RLIMIT_NOFILE`, `RLIMIT_MEMLOCK`
-3. Pre-sandbox I/O --- open file descriptors, connect to IPC bus, read
-   keypairs, scan desktop entries (daemon-launcher), open evdev devices
-   (daemon-input)
-4. `init_secure_memory()` --- probe `memfd_secret` before seccomp locks
-   down syscalls
-5. `apply_landlock()` --- filesystem containment (implicitly sets
-   `PR_SET_NO_NEW_PRIVS` via `landlock_restrict_self`)
-6. `apply_seccomp()` --- syscall filtering (must follow Landlock)
-
-This ordering is critical. Landlock setup requires the
-`landlock_create_ruleset`, `landlock_add_rule`, and
-`landlock_restrict_self` syscalls, which are not in any daemon's seccomp
-allowlist. The IPC bus connection must be established before Landlock
-restricts filesystem access, because the daemon reads its keypair from
-`$XDG_RUNTIME_DIR/pds/keys/`.
-
-## Daemon Sandbox Capability Matrix
-
-| Daemon | harden_process | Landlock | seccomp | Landlock Scope | PrivateNetwork | ProtectSystem | Approx. Syscalls |
-|--------|:--------------:|:--------:|:-------:|:--------------:|:--------------:|:-------------:|:----------------:|
-| daemon-profile | Y | Y | Y | SignalOnly | - | strict | ~80 |
-| daemon-secrets | Y | Y | Y | Full | Y | strict | ~72 |
-| daemon-wm | Y | Y | Y | SignalOnly | - | strict | ~88 |
-| daemon-launcher | Y | - | - | N/A | - | - | N/A |
-| daemon-clipboard | Y | Y | Y | Full | - | strict | ~60 |
-| daemon-input | Y | Y | Y | Full | - | strict | ~60 |
-| daemon-snippets | Y | Y | Y | Full | - | strict | ~57 |
+| Daemon | Landlock | seccomp | Session D-Bus | Network sockets | Unit mount namespace |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| daemon-profile | Y | Y | - | - | Y |
+| daemon-secrets | Y | Y | - | - (and `PrivateNetwork`) | Y |
+| daemon-wm | Y | Y | - | - | Y |
+| daemon-clipboard | Y | Y | - | - | Y |
+| daemon-input | Y | Y | - | - | Y |
+| daemon-snippets | Y | Y | - | - | Y |
+| daemon-launcher | - | - | Y (`systemd-run`, keyring broker) | Y (launched applications) | - |

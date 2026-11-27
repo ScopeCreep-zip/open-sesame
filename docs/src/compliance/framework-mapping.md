@@ -9,7 +9,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### AC -- Access Control
 
 | Control | Title | Open Sesame Mechanism | Status |
-|---------|-------|----------------------|--------|
+| --- | --- | --- | --- |
 | AC-3 | Access Enforcement | `SecurityLevel` clearance hierarchy (`core-types/src/security.rs`): `Open < Internal < ProfileScoped < SecretsOnly`. Each daemon registers at a clearance level; messages are routed only to peers at sufficient clearance. `CapabilitySet` enforces per-agent authorization. | Implemented |
 | AC-4 | Information Flow Enforcement | IPC bus enforces sender clearance: a daemon cannot emit messages above its own `SecurityLevel`. Recipient filtering ensures low-clearance daemons never receive high-clearance messages (`core-ipc/src/server.rs`). | Implemented |
 | AC-6 | Least Privilege | Per-daemon Landlock filesystem sandboxing, seccomp-bpf syscall allowlists, systemd `NoNewPrivileges=yes`, empty capability bounding set, `ProtectSystem=strict`. | Implemented |
@@ -20,7 +20,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### AU -- Audit and Accountability
 
 | Control | Title | Open Sesame Mechanism | Status |
-|---------|-------|----------------------|--------|
+| --- | --- | --- | --- |
 | AU-2 | Event Logging | Structured JSON logging (`global.logging.json = true`), journald integration. Events include: unlock/lock, secret CRUD, profile activation, daemon lifecycle. | Implemented |
 | AU-3 | Content of Audit Records | Each entry includes: timestamp, agent identity, operation, profile, security level. `AgentIdentity` provides agent type, delegation chain, attestations. | Implemented |
 | AU-10 | Non-repudiation | BLAKE3 hash-chained audit log. Each entry's hash chains to the previous. `sesame audit verify` detects tampering. | Implemented |
@@ -30,7 +30,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### IA -- Identification and Authentication
 
 | Control | Title | Open Sesame Mechanism | Status |
-|---------|-------|----------------------|--------|
+| --- | --- | --- | --- |
 | IA-2 | Identification and Authentication (Organizational Users) | `AuthFactorId` enum: Password, SshAgent, Fido2, Tpm, Fingerprint, Yubikey (`core-types/src/auth.rs`). Password and SshAgent backends implemented. | Partially Implemented |
 | IA-2(1) | Multi-Factor Authentication to Privileged Accounts | `AuthCombineMode`: Any, All, Policy (`core-types/src/auth.rs`). Policy mode supports threshold-based MFA (N required factors + M additional). | Implemented |
 | IA-2(6) | Access to Accounts -- Separate Device | Hardware security keys (FIDO2, YubiKey) as separate physical devices. SSH agent forwarding uses the operator's local key. | Partially Implemented (SSH agent implemented; FIDO2/YubiKey defined but backends not yet implemented) |
@@ -40,7 +40,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### SC -- System and Communications Protection
 
 | Control | Title | Open Sesame Mechanism | Status |
-|---------|-------|----------------------|--------|
+| --- | --- | --- | --- |
 | SC-8 | Transmission Confidentiality and Integrity | Noise IK protocol: X25519 + ChaChaPoly + BLAKE2s with forward secrecy. All IPC authenticated and encrypted. | Implemented |
 | SC-12 | Cryptographic Key Establishment and Management | BLAKE3 domain-separated key hierarchy. Master key derived from auth factors. Sub-keys derived via `BLAKE3 derive_key` with unique context strings per purpose. | Implemented |
 | SC-13 | Cryptographic Protection | `CryptoConfig` (`core-types/src/crypto.rs`) with configurable algorithm selection. `GovernanceCompatible` profile uses NIST-approved algorithms (PBKDF2-SHA256, HKDF-SHA256, AES-GCM, SHA-256). | Implemented |
@@ -51,14 +51,14 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### SI -- System and Information Integrity
 
 | Control | Title | Open Sesame Mechanism | Status |
-|---------|-------|----------------------|--------|
+| --- | --- | --- | --- |
 | SI-7 | Software, Firmware, and Information Integrity | GPG-signed APT packages. SLSA build provenance. `OciReference` with provenance digest for extensions. WASM extensions identified by content hash (`AgentType::Extension { manifest_hash }`). | Implemented |
 | SI-16 | Memory Protection | `memfd_secret(2)` removes pages from kernel direct map. Guard pages (PROT_NONE). Volatile zeroize on drop. `LimitCORE=0`, `MADV_DONTDUMP`. | Implemented |
 
 ## DISA STIG
 
 | STIG Requirement | Open Sesame Mechanism | Status |
-|------------------|----------------------|--------|
+| --- | --- | --- |
 | Encrypted storage at rest | SQLCipher AES-256-CBC + HMAC-SHA512, per-profile encryption keys | Implemented |
 | Memory protection for credentials | `memfd_secret(2)`, guard pages, canary verification, volatile zeroize | Implemented |
 | Audit trail integrity | BLAKE3 hash chain with tamper detection via `sesame audit verify` | Implemented |
@@ -73,7 +73,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### Requirement 3: Protect Stored Account Data
 
 | Sub-Requirement | Open Sesame Mechanism |
-|-----------------|----------------------|
+| --- | --- |
 | 3.5.1 Restrict access to cryptographic keys | Master key held in `memfd_secret(2)` memory, accessible only to the owning daemon process. Key derivation hierarchy: master key -> per-profile vault key -> SQLCipher page key. |
 | 3.5.1.2 Store secret keys in fewest possible locations | One master key per installation, derived into per-profile keys. Master key exists only in protected memory; never on disk in plaintext. |
 | 3.6.1 Key management procedures | `sesame init` generates keys. `AuthCombineMode` defines unlock policy. Key rotation via re-enrollment. |
@@ -81,14 +81,14 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### Requirement 7: Restrict Access to System Components and Cardholder Data
 
 | Sub-Requirement | Open Sesame Mechanism |
-|-----------------|----------------------|
+| --- | --- |
 | 7.2.1 Access control system | `CapabilitySet` per agent. `SecurityLevel` per daemon. `DelegationGrant` for scoped access transfer. |
 | 7.2.2 Assign access based on job classification | Trust profiles map to roles. Each profile has its own vault with its own secrets. |
 
 ### Requirement 8: Identify Users and Authenticate Access
 
 | Sub-Requirement | Open Sesame Mechanism |
-|-----------------|----------------------|
+| --- | --- |
 | 8.3.1 All user access authenticated | All IPC authenticated via Noise IK. Vault unlock requires enrolled factor(s). |
 | 8.3.2 Strong authentication for all access | Argon2id (memory-hard). Multi-factor via `AuthCombineMode`. Hardware factors defined. |
 | 8.6.1 System and application accounts managed | `AgentIdentity` with typed `AgentType`, capability scoping, delegation chains. |
@@ -96,7 +96,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ### Requirement 10: Log and Monitor All Access
 
 | Sub-Requirement | Open Sesame Mechanism |
-|-----------------|----------------------|
+| --- | --- |
 | 10.2.1 Audit logs capture events | BLAKE3 hash-chained audit log, structured JSON logging. |
 | 10.2.1.2 All actions by administrative accounts | `Capability::Admin` operations logged with full agent identity and delegation chain. |
 | 10.3.1 Audit log protected from tampering | Hash chain provides tamper evidence. `sesame audit verify` detects modification. |
@@ -104,7 +104,7 @@ crate or configuration. Controls that depend on design-intent features are marke
 ## SOC 2 Trust Service Criteria
 
 | Criteria | Category | Open Sesame Mechanism |
-|----------|----------|----------------------|
+| --- | --- | --- |
 | CC6.1 | Logical and Physical Access Controls | `SecurityLevel` hierarchy, `CapabilitySet`, Noise IK authentication, per-daemon sandbox |
 | CC6.2 | Prior to Issuing System Credentials | `sesame init` with factor enrollment. `AgentIdentity` creation with attestation. |
 | CC6.3 | Based on Authorization | `CapabilitySet` intersection for delegation. Policy-based approval gates (Design Intent). |
@@ -127,7 +127,7 @@ FedRAMP requires FIPS 140-validated cryptographic modules. Open Sesame provides 
 NIST-approved algorithms:
 
 | Component | LeadingEdge (Default) | GovernanceCompatible |
-|-----------|-----------------------|---------------------|
+| --- | --- | --- |
 | KDF | Argon2id | PBKDF2-SHA256 (600K iterations) |
 | HKDF | BLAKE3 | HKDF-SHA256 |
 | Noise cipher | ChaChaPoly | AES-256-GCM |

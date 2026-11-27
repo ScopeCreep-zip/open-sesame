@@ -19,12 +19,12 @@ HEADLESS_COUNT=${#HEADLESS[@]}
 DESKTOP_COUNT=${#DESKTOP[@]}
 
 if [[ "$HEADLESS_COUNT" -ne 1 ]]; then
-  echo "ERROR: expected 1 headless RPM, found ${HEADLESS_COUNT}: ${HEADLESS[*]}" >&2
-  exit 1
+    echo "ERROR: expected 1 headless RPM, found ${HEADLESS_COUNT}: ${HEADLESS[*]}" >&2
+    exit 1
 fi
 if [[ "$DESKTOP_COUNT" -ne 1 ]]; then
-  echo "ERROR: expected 1 desktop RPM, found ${DESKTOP_COUNT}: ${DESKTOP[*]}" >&2
-  exit 1
+    echo "ERROR: expected 1 desktop RPM, found ${DESKTOP_COUNT}: ${DESKTOP[*]}" >&2
+    exit 1
 fi
 
 mv "${HEADLESS[0]}" "open-sesame-linux-${ARCH}.rpm"

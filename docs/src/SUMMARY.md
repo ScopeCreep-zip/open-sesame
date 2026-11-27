@@ -1,5 +1,8 @@
 # Summary
 
+<!-- mdBook SUMMARY.md format: each `#` heading is a part title. -->
+<!-- markdownlint-disable MD025 -->
+
 [Introduction](introduction.md)
 
 ---
@@ -29,6 +32,7 @@
 - [Policy Engine](authentication/policy-engine.md)
 - [Password](authentication/password.md)
 - [SSH Agent](authentication/ssh-agent.md)
+- [Platform Keyring](authentication/platform-keyring.md)
 - [FIDO2 / WebAuthn](authentication/fido2-webauthn.md)
 - [TPM 2.0](authentication/tpm.md)
 - [Biometrics](authentication/biometrics.md)

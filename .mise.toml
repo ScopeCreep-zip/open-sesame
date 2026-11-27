@@ -2,8 +2,11 @@
 # Usage: mise run <task>
 # Help:  mise run help
 
-# Local dev tools provided by nix flake devshell (flake.nix devShells.default).
-# CI-only tools below: GitHub Actions runners install these via mise-action.
+# Local dev tools provided by nix flake devshell (flake.nix devShells.default),
+# including mise itself and the QA tools (taplo, markdownlint-cli2, lychee,
+# shellcheck, shfmt, actionlint, cargo-deny, mdbook); the CI `qa` and
+# documentation jobs (`ci:qa`, `ci:docs`, `ci:docs:all`) run inside it.
+# CI-only tools below: the other GitHub Actions jobs install these via mise-action.
 # Local dev: `direnv allow` loads the devshell with all deps including cargo-deb.
 [tools]
 node = "22"
@@ -49,11 +52,17 @@ run = "cargo fmt --check"
 
 [tasks."cargo:clippy"]
 hide = true
-run = "cargo clippy -- -D warnings"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
 
 [tasks."cargo:test"]
 hide = true
 run = "cargo test"
+
+[tasks."cargo:doc"]
+hide = true
+description = "rustdoc for every crate, warnings denied (broken and private intra-doc links)"
+env.RUSTDOCFLAGS = "-D warnings"
+run = "cargo doc --no-deps --all-features"
 
 [tasks."cargo:build"]
 hide = true
@@ -201,44 +210,44 @@ run = "cargo clean"
 # =============================================================================
 
 [tasks.fmt]
-alias = [ "f" ]
+alias = ["f"]
 description = "Format code"
-depends = [ "cargo:fmt" ]
+depends = ["cargo:fmt"]
 
 [tasks.lint]
-alias = [ "l" ]
-description = "Lint code (clippy)"
-depends = [ "cargo:fmt", "cargo:clippy" ]
+alias = ["l"]
+description = "Lint code (rustfmt check, clippy, rustdoc)"
+depends = ["cargo:fmt:check", "cargo:clippy", "cargo:doc"]
 
 [tasks.test]
-alias = [ "t" ]
+alias = ["t"]
 description = "Run all quality gates + tests"
-depends = [ "cargo:fmt", "cargo:clippy", "cargo:test" ]
+depends = ["cargo:fmt:check", "cargo:clippy", "cargo:doc", "cargo:test"]
 
 # =============================================================================
 # BUILD (all gated by quality checks)
 # =============================================================================
 
 [tasks.build]
-alias = [ "b" ]
+alias = ["b"]
 description = "Build release binary"
-depends = [ "test", "cargo:build" ]
+depends = ["test", "cargo:build"]
 
 [tasks."build:debug"]
-alias = [ "bd" ]
+alias = ["bd"]
 description = "Build debug binary"
-depends = [ "test", "cargo:build:debug" ]
+depends = ["test", "cargo:build:debug"]
 
 [tasks."build:amd64"]
-depends = [ "test", "cargo:build:amd64" ]
+depends = ["test", "cargo:build:amd64"]
 description = "Build release binary (amd64)"
 
 [tasks."build:arm64"]
-depends = [ "test", "cargo:build:arm64" ]
+depends = ["test", "cargo:build:arm64"]
 description = "Build release binary (arm64)"
 
 [tasks."build:deb"]
-alias = [ "bde" ]
+alias = ["bde"]
 description = "Build all .deb packages (headless + desktop)"
 run = """
 #!/usr/bin/env bash
@@ -280,14 +289,14 @@ mise run cargo:deb:arm64
 """
 
 [tasks."build:deb:all"]
-alias = [ "bda" ]
+alias = ["bda"]
 description = "Build all .deb packages (all architectures)"
-depends = [ "build:deb", "build:deb:arm64" ]
+depends = ["build:deb", "build:deb:arm64"]
 
 [tasks."build:rpm"]
-alias = [ "brpm" ]
+alias = ["brpm"]
 description = "Build all .rpm packages (headless + desktop)"
-depends = [ "test" ]
+depends = ["test"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -300,9 +309,9 @@ mise run cargo:rpm:desktop
 """
 
 [tasks."build:arch"]
-alias = [ "barch" ]
+alias = ["barch"]
 description = "Build Arch tarballs (headless + desktop)"
-depends = [ "test" ]
+depends = ["test"]
 env.TARGET = "{{vars.arch_amd64}}"
 env.ARCH = "x86_64"
 run = """
@@ -318,9 +327,9 @@ export VERSION
 """
 
 [tasks."build:all"]
-alias = [ "ba" ]
+alias = ["ba"]
 description = "Build all packages"
-depends = [ "build:deb:all", "build:rpm", "build:arch" ]
+depends = ["build:deb:all", "build:rpm", "build:arch"]
 
 # =============================================================================
 # TEST: ARCH PACKAGING
@@ -332,16 +341,16 @@ run = "./scripts/arch/lint-pkgbuild.sh"
 
 [tasks."test:arch:pkg"]
 description = "Build .pkg.tar.zst + install + verify in Arch container (from local tarballs)"
-depends = [ "build:arch" ]
+depends = ["build:arch"]
 run = "./scripts/arch/test-install.sh"
 
 [tasks."test:arch:ci"]
 description = "Reproduce CI arch build on ubuntu:24.04 (from local tarballs)"
-depends = [ "build:arch" ]
+depends = ["build:arch"]
 run = "./scripts/arch/test-ci-build.sh"
 
 [tasks."clean:docker"]
-alias = [ "cd" ]
+alias = ["cd"]
 description = "Stop and remove open-sesame containers"
 run = """
 #!/usr/bin/env bash
@@ -350,7 +359,7 @@ echo "Containers removed"
 """
 
 [tasks."clean:docker:volumes"]
-alias = [ "cdv" ]
+alias = ["cdv"]
 description = "Stop and remove open-sesame containers + volumes"
 run = """
 #!/usr/bin/env bash
@@ -396,7 +405,7 @@ docker exec --user fedora open-sesame-fedora-repo post-install.sh
 
 [tasks."test:docker:arch:local"]
 description = "Arch: install from locally built .pkg.tar.zst"
-depends = [ "test:arch:pkg" ]
+depends = ["test:arch:pkg"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -409,7 +418,7 @@ docker exec --user arch open-sesame-arch-local post-install.sh
 
 [tasks."test:docker:ubuntu:local"]
 description = "Ubuntu: install from locally built .deb"
-depends = [ "build:deb" ]
+depends = ["build:deb"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -422,7 +431,7 @@ docker exec --user ubuntu open-sesame-ubuntu-local post-install.sh
 
 [tasks."test:docker:fedora:local"]
 description = "Fedora: install from locally built .rpm"
-depends = [ "build:rpm" ]
+depends = ["build:rpm"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -449,9 +458,9 @@ docker exec --user ubuntu open-sesame-ubuntu-source post-install.sh
 # =============================================================================
 
 [tasks.install]
-alias = [ "i" ]
+alias = ["i"]
 description = "Build, install, and start all .deb packages (headless + desktop)"
-depends = [ "build:deb" ]
+depends = ["build:deb"]
 env.BIN = "{{vars.bin}}"
 run = """
 #!/usr/bin/env bash
@@ -482,14 +491,14 @@ systemctl --user list-units "open-sesame-*" --no-pager 2>/dev/null || true
 """
 
 [tasks."install:desktop"]
-alias = [ "id" ]
+alias = ["id"]
 description = "Build, install, and start all .deb packages (headless + desktop)"
-depends = [ "install" ]
+depends = ["install"]
 
 [tasks."install:headless"]
-alias = [ "ih" ]
+alias = ["ih"]
 description = "Build, install, and start headless .deb only"
-depends = [ "build:deb" ]
+depends = ["build:deb"]
 env.BIN = "{{vars.bin}}"
 run = """
 #!/usr/bin/env bash
@@ -513,7 +522,7 @@ systemctl --user list-units "open-sesame-*" --no-pager 2>/dev/null || true
 """
 
 [tasks."install:debug"]
-alias = [ "idbg" ]
+alias = ["idbg"]
 description = "Nuclear clean + install debug .deb + start services"
 env.BIN = "{{vars.bin}}"
 env.DIR_CFG = "{{vars.dir_cfg}}"
@@ -552,7 +561,7 @@ systemctl --user status open-sesame-headless.target --no-pager 2>/dev/null || tr
 # =============================================================================
 
 [tasks.clean]
-alias = [ "c" ]
+alias = ["c"]
 description = "Clean build artifacts (target/, docs/book/)"
 run = """
 #!/usr/bin/env bash
@@ -563,7 +572,7 @@ echo "✓ Clean complete"
 """
 
 [tasks."clean:install"]
-alias = [ "ci" ]
+alias = ["ci"]
 description = "Uninstall package (dpkg + ~/.local/bin)"
 env.BIN = "{{vars.bin}}"
 env.PKG = "open-sesame"
@@ -577,7 +586,7 @@ echo "✓ Uninstall complete"
 """
 
 [tasks."clean:all"]
-alias = [ "ca" ]
+alias = ["ca"]
 description = "Nuclear clean (uninstall + config + cache + build)"
 env.BIN = "{{vars.bin}}"
 env.PKG = "open-sesame"
@@ -601,14 +610,14 @@ echo "✓ Nuclear clean complete"
 # =============================================================================
 
 [tasks.dev]
-alias = [ "d" ]
+alias = ["d"]
 description = "Build debug + run"
-depends = [ "build:debug" ]
+depends = ["build:debug"]
 env.BIN = "{{vars.bin}}"
 run = "./target/debug/${BIN}"
 
 [tasks."dev:run"]
-alias = [ "dr" ]
+alias = ["dr"]
 description = "Run debug binary"
 env.BIN = "{{vars.bin}}"
 run = "./target/debug/${BIN}"
@@ -618,7 +627,7 @@ run = "./target/debug/${BIN}"
 # =============================================================================
 
 [tasks.setup]
-alias = [ "s" ]
+alias = ["s"]
 description = "Install tools + deps"
 run = """
 #!/usr/bin/env bash
@@ -652,7 +661,7 @@ npm install --no-save \
 # =============================================================================
 
 [tasks.status]
-alias = [ "ss" ]
+alias = ["ss"]
 description = "Show installation status"
 env.BIN = "{{vars.bin}}"
 env.DIR_CFG = "{{vars.dir_cfg}}"
@@ -665,13 +674,13 @@ command -v ${BIN} && echo "✓ $(which ${BIN}): $(${BIN} --version)" || echo "�
 """
 
 [tasks."config:edit"]
-alias = [ "ce" ]
+alias = ["ce"]
 description = "Edit config"
 env.DIR_CFG = "{{vars.dir_cfg}}"
 run = "${EDITOR:-nano} ~/${DIR_CFG}/config.toml"
 
 [tasks."config:show"]
-alias = [ "cs" ]
+alias = ["cs"]
 description = "Show config"
 env.DIR_CFG = "{{vars.dir_cfg}}"
 run = "cat ~/${DIR_CFG}/config.toml 2>/dev/null || echo 'No config file'"
@@ -697,7 +706,7 @@ description = "Build rustdoc API documentation"
 run = "cargo xtask docs"
 
 [tasks."docs:all"]
-alias = [ "da" ]
+alias = ["da"]
 description = "Generate all documentation"
 run = "cargo xtask all"
 
@@ -724,9 +733,9 @@ cd docs && mdbook serve --port 3000
 # =============================================================================
 
 [tasks."qa:all"]
-alias = [ "qa" ]
+alias = ["qa"]
 description = "Run all QA checks"
-depends = [ "lint", "qa:toml", "qa:markdown", "qa:shell", "qa:actions" ]
+depends = ["lint", "qa:toml", "qa:markdown", "qa:links", "qa:shell", "qa:actions", "qa:deps"]
 
 [tasks."qa:toml"]
 description = "Lint and format TOML files"
@@ -753,16 +762,25 @@ description = "Check links in markdown (online)"
 run = "lychee '**/*.md'"
 
 [tasks."qa:shell"]
-description = "Lint shell scripts"
-run = "shellcheck scripts/* 2>/dev/null || echo 'No shell scripts found'"
+description = "Lint and format-check shell scripts and scriptlet fragments (shellcheck, shfmt via .editorconfig)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+git ls-files -z '*.sh' '*.body' | xargs -0 -r shellcheck
+git ls-files -z '*.sh' '*.body' | xargs -0 -r shfmt -d
+"""
 
 [tasks."qa:shell:fix"]
-description = "Format shell scripts"
-run = "shfmt -w scripts/* 2>/dev/null || echo 'No shell scripts found'"
+description = "Format shell scripts and scriptlet fragments (shfmt via .editorconfig)"
+run = "git ls-files -z '*.sh' '*.body' | xargs -0 -r shfmt -w"
 
 [tasks."qa:actions"]
 description = "Lint GitHub Actions workflows"
-run = "actionlint .github/workflows/*.yml 2>/dev/null || true"
+run = "actionlint"
+
+[tasks."qa:deps"]
+description = "Check dependency advisories, licenses, sources, and bans (deny.toml)"
+run = "cargo deny --locked check"
 
 # =============================================================================
 # CI (GitHub Actions entry points - mirrors local workflows)
@@ -793,13 +811,16 @@ mise run cargo:test
 mise run cargo:build:debug
 """
 
+[tasks."ci:qa"]
+description = "CI QA job (TOML, Markdown, links, shell, workflows, dependencies); tools come from the nix devshell"
+depends = ["qa:toml", "qa:markdown", "qa:links", "qa:shell", "qa:actions", "qa:deps"]
+
 [tasks."ci:docs"]
-description = "CI documentation job (rustdoc + man + completions + mdbook)"
+description = "CI documentation job (rustdoc + man + completions + mdbook); tools come from the nix devshell"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
-cargo doc --no-deps --all-features
+mise run cargo:doc
 mise run docs:man
 mise run docs:completions
 mise run docs:book
@@ -810,7 +831,6 @@ test -f target/completions/sesame.fish
 test -d docs/book/
 echo "✓ All documentation artifacts generated successfully"
 """
-env.RUSTDOCFLAGS = "-D warnings"
 
 [tasks."ci:build:deb"]
 description = "CI build both .deb packages (amd64)"
@@ -983,11 +1003,10 @@ export VERSION SHA256SUMS=SHA256SUMS.txt PKGBUILD_DIR=aur/open-sesame-bin
 """
 
 [tasks."ci:docs:all"]
-description = "CI generate all documentation for release"
+description = "CI generate all documentation for release; tools come from the nix devshell"
 run = """
 #!/usr/bin/env bash
 set -euxo pipefail
-mise run ci:setup
 cargo xtask all
 """
 
@@ -1130,7 +1149,7 @@ description = "Run semantic-release in CI mode"
 run = "semantic-release"
 
 [tasks."release:dry-run"]
-alias = [ "rd" ]
+alias = ["rd"]
 description = "Dry-run semantic-release for testing"
 run = "semantic-release --dry-run --branches $(git rev-parse --abbrev-ref HEAD)"
 
@@ -1185,7 +1204,7 @@ hide = true
 run = "mise run help"
 
 [tasks.help]
-alias = [ "h" ]
+alias = ["h"]
 description = "Show help"
 run = """
 #!/usr/bin/env bash
@@ -1194,8 +1213,8 @@ Open Sesame
 
 QUALITY GATES:
   fmt              (f)    Format code
-  lint             (l)    Format + clippy
-  test             (t)    Format + clippy + test
+  lint             (l)    Format check + clippy + rustdoc
+  test             (t)    Format check + clippy + rustdoc + test
 
 BUILD (all run quality gates first):
   build            (b)    Release binary
@@ -1245,8 +1264,10 @@ QA (linting, formatting, validation):
   qa:markdown:fix         Fix markdown issues
   qa:links                Check links (offline)
   qa:links:online         Check links (online)
-  qa:shell                Lint shell scripts
+  qa:shell                Lint + format-check shell scripts and scriptlet fragments
+  qa:shell:fix            Format shell scripts and scriptlet fragments
   qa:actions              Lint GitHub Actions
+  qa:deps                 Check dependency advisories, licenses, sources, bans
 
 GIT HOOKS:
   hooks:install           Install lefthook git hooks
@@ -1273,6 +1294,7 @@ CI (GitHub Actions entry points):
   ci:setup:apt-repo       Install APT repository tools
   ci:setup:rpm-repo       Install RPM repository tools
   ci:test                 CI test job (fmt + clippy + test + build)
+  ci:qa                   CI QA job (TOML, Markdown, links, shell, workflows, dependencies)
   ci:docs                 CI documentation job
   ci:build:deb            CI build .deb package (amd64)
   ci:build:deb:arm64      CI build .deb package (arm64)

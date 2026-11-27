@@ -1,0 +1,19 @@
+# Locations are derived from core_layout::Layout, which reads the process
+# environment once (core_layout::Environment::from_process). Reading a
+# location-bearing input anywhere else re-derives the layout and bypasses the
+# test root, so it fails the build.
+disallowed-methods = [
+  { path = "dirs::config_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::config_local_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::cache_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::data_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::data_local_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::home_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::runtime_dir", reason = "use core_layout::Layout" },
+  { path = "dirs::state_dir", reason = "use core_layout::Layout" },
+  { path = "std::env::home_dir", reason = "use core_layout::Layout" },
+  { path = "std::env::var", reason = "location inputs come from core_layout::Environment; other inputs carry #[expect] naming their owner" },
+  { path = "std::env::var_os", reason = "location inputs come from core_layout::Environment; other inputs carry #[expect] naming their owner" },
+  { path = "std::env::vars", reason = "enumerating the environment bypasses every owner" },
+  { path = "std::env::vars_os", reason = "enumerating the environment bypasses every owner" },
+]

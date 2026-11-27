@@ -1,96 +1,82 @@
 # Snippets Daemon
 
-The `daemon-snippets` process manages text snippet templates with profile-scoped namespaces. It
-runs as a single-threaded tokio process (`current_thread` runtime) connected to the Noise IK IPC
-bus as a `BusClient`.
+The `daemon-snippets` process holds text snippets per trust profile and answers list, expand, and
+add requests over the Noise IK IPC bus. It runs a single-threaded tokio runtime
+(`current_thread`) and connects to the bus as a `BusClient`.
 
 ## Storage
 
-Snippets are stored in an in-memory `HashMap<(String, String), String>` keyed by
-`(profile_name, trigger)` with the template string as the value. The type alias `SnippetMap`
-defines this type.
+Snippets live in memory only, in a `BTreeMap<(String, String), String>` (the `SnippetMap` alias)
+keyed by `(profile, trigger)` with the template as the value. The ordered map makes listings
+deterministic: `SnippetList` returns a profile's snippets sorted by trigger.
 
-The config schema does not yet include a dedicated snippets section, so `build_snippet_map()`
-returns an empty `HashMap` on startup and after every config reload. All snippet data is
-populated at runtime via `SnippetAdd` IPC messages.
-
-On config hot-reload, the snippet map is rebuilt by calling `build_snippet_map()` with the new
-config, which currently clears all runtime-added snippets. This behavior will change when a
-persistent config-based snippet definition is added to the schema.
+The configuration schema has no snippets section. `build_snippet_map()` returns an empty map at
+startup and on every configuration reload, so snippets exist only from a `SnippetAdd` until the
+next reload or restart; a reload clears them.
 
 ## Profile Scoping
 
-Every snippet is associated with a trust profile name as the first element of its
-`(profile, trigger)` composite key. This ensures that two profiles can define different
-expansions for the same trigger string without collision.
+The profile is the first half of every key, so two profiles hold the same trigger without
+collision, and no operation crosses profiles:
 
-All operations are profile-scoped:
-
-- **`SnippetList`**: Filters the entire map with
-  `.filter(|((p, _), _)| p == &profile_str)`, returning only snippets belonging to the
-  requested profile.
-- **`SnippetExpand`**: Performs an exact `HashMap::get()` lookup with the `(profile, trigger)`
-  tuple.
-- **`SnippetAdd`**: Inserts or overwrites at the `(profile, trigger)` key. A snippet added
-  under profile `"work"` is not visible from profile `"personal"`.
+- **`SnippetList`** returns the entries whose key's profile is the requested one.
+- **`SnippetExpand`** looks up the exact `(profile, trigger)` key.
+- **`SnippetAdd`** inserts or replaces the `(profile, trigger)` key.
 
 ## IPC Interface
 
-| Message | Response | Description |
-|---------|----------|-------------|
-| `SnippetList` | `SnippetListResponse` | Returns all snippets for the given profile |
-| `SnippetExpand` | `SnippetExpandResponse` | Looks up the template for an exact trigger |
-| `SnippetAdd` | `SnippetAddResponse` | Inserts or overwrites a snippet |
-| `KeyRotationPending` | -- | Reconnects with a rotated IPC keypair |
+| Message | Response | Behavior |
+| --- | --- | --- |
+| `SnippetList { profile }` | `SnippetListResponse { snippets }` | The profile's snippets, by trigger |
+| `SnippetExpand { profile, trigger }` | `SnippetExpandResponse { expanded }` | The template, or `None` |
+| `SnippetAdd { profile, trigger, template }` | `SnippetAddResponse { success: true }` | Insert or replace |
 
-The `SnippetList` response returns `Vec<SnippetInfo>` where each entry contains `trigger` and
-`template_preview`. Previews are truncated to 80 characters: templates longer than 80 characters
-are cut to 77 characters with `...` appended.
+Each `SnippetInfo` in a list carries `trigger` and `template_preview`. A template of at most 80
+characters is its own preview; a longer one previews as its first 77 characters followed by
+`...`. Previews count characters, not bytes, so a multibyte template never splits a code point.
 
-All IPC responses are correlated to the original request via
-`Message::with_correlation(msg.msg_id)`.
+Responses carry the request's message ID (`Message::with_correlation`). The daemon ignores
+messages it published itself, and other message kinds.
 
-## Trigger Matching
+## Triggers and Templates
 
-Trigger matching is exact and case-sensitive. The `trigger` field from a `SnippetExpand` request
-must match the stored trigger string byte-for-byte. The snippet map uses `HashMap::get()` with
-the `(profile.to_string(), trigger.clone())` tuple as the key. No fuzzy matching, prefix
-matching, or normalization is performed.
+Trigger lookup is exact and case-sensitive: the requested trigger must equal the stored one
+byte for byte. `SnippetExpand` returns the stored template verbatim; templates are plain text,
+with no variable or secret substitution.
 
-## Template Format
+## CLI
 
-Templates are stored and returned as plain strings. The module-level documentation describes
-variable substitution and secret injection as design goals, but the current implementation
-returns the template string verbatim from `SnippetExpand` without any processing. The expansion
-pipeline for variable substitution (`${VAR}`) and secret injection (`${secret:name}`) is not yet
-implemented.
+`sesame snippet list -p <profile>`, `sesame snippet expand -p <profile> <trigger>`, and
+`sesame snippet add -p <profile> <trigger> <template>` send these requests. `expand` prints the
+template, or fails naming the trigger when the profile has no such snippet.
 
 ## Process Hardening
 
-On Linux, daemon-snippets applies the following security measures:
+On Linux the daemon calls `platform_linux::security::harden_process()`, sets resource limits
+(`nofile = 4096`, `memlock_bytes = 0`), probes `memfd_secret` (`core_types::init_secure_memory()`),
+and applies a Landlock and seccomp sandbox built from the layout (`core_daemon::sandbox`):
 
-- `platform_linux::security::harden_process()` for process-level hardening.
-- Resource limits: `nofile = 4096`, `memlock_bytes = 0`.
-- `core_types::init_secure_memory()` for `memfd_secret` probing.
-- Landlock filesystem sandbox restricting access to:
-  - IPC key directory (`$XDG_RUNTIME_DIR/pds/keys/`) -- read-only.
-  - Bus public key (`$XDG_RUNTIME_DIR/pds/bus.pub`) -- read-only.
-  - Bus socket (`$XDG_RUNTIME_DIR/pds/bus.sock`) -- read-write.
-  - Config directory (`~/.config/pds/`) -- read-only.
-  - Config symlink targets (e.g., `/nix/store` paths) -- read-only.
-- Seccomp syscall filter with an allowlist for standard I/O, memory management, networking (IPC
-  socket), inotify (config hot-reload), `memfd_secret`, and process lifecycle syscalls.
-- The sandbox panics on application failure, refusing to run unsandboxed.
+- **Bus client** (`ipc_client_rules`): the per-daemon key directory
+  (`$XDG_RUNTIME_DIR/pds/keys`, read), the bus public key (`$XDG_RUNTIME_DIR/pds/bus.pub`,
+  read), and the bus socket (`$XDG_RUNTIME_DIR/pds/bus.sock`, connect).
+- **Configuration** (`config_rules`, read-only): the configuration directory (`~/.config/pds`)
+  and the directories its symlinks resolve into (for example `/nix/store`).
+- **systemd notification** (`notify_rules`): the `$NOTIFY_SOCKET` socket when it is a filesystem
+  socket that exists.
 
-The sandbox is notably more restrictive than other desktop daemons: daemon-snippets requires no
-Wayland socket access, no `/dev/input` access, and no cache directory writes.
+It needs no Wayland socket, no `/dev/input`, and no cache directory. The seccomp allowlist covers
+standard I/O, memory management, the IPC socket, inotify for configuration reload,
+`memfd_secret`, and process lifecycle calls. When the sandbox cannot be applied, startup fails
+with "refusing to run unsandboxed"; the daemon never runs unconfined.
 
 ## Lifecycle
 
-1. **Startup**: Process hardening, directory bootstrap, config load, snippet map build (empty),
-   IPC bus connection with keypair retry (5 attempts, 500ms interval), sandbox application.
-2. **Announcement**: Publishes `DaemonStarted { capabilities: ["snippets", "expansion"] }`.
-3. **Readiness**: Calls `platform_linux::systemd::notify_ready()`.
-4. **Event loop**: `tokio::select!` over watchdog timer (15s), IPC messages, config reload
-   notifications (rebuilds snippet map from config), SIGINT, and SIGTERM.
-5. **Shutdown**: Publishes `DaemonStopped { reason: "shutdown" }`.
+1. **Startup**: process hardening; `core_daemon::startup()` (layout, directory bootstrap,
+   configuration load); the empty snippet map; the configuration watch; the bus connection
+   (`core_daemon::connect_bus`, up to 5 attempts 500 ms apart); the sandbox.
+2. **Announcement**: `DaemonStarted { capabilities: ["snippets", "expansion"] }`.
+3. **Readiness**: `READY=1` (`platform_linux::systemd::notify_ready()`).
+4. **Event loop**: `tokio::select!` over the 15-second watchdog, bus messages, configuration
+   reloads (the map is rebuilt, and `ConfigReloaded { changed_keys: ["snippets"] }` published),
+   and SIGINT/SIGTERM. A closed bus ends the process (exit status 1) for systemd to restart.
+5. **Shutdown**: `DaemonStopped { reason: "shutdown" }`.

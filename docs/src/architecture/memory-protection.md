@@ -44,7 +44,7 @@ pages are sized to fit the 16-byte canary plus the requested user data length.
 Given a system page size `P` (typically 4096) and a requested allocation of `N` bytes:
 
 | Component | Formula | Example (N=32, P=4096) |
-|-----------|---------|----------------------|
+| --- | --- | --- |
 | `data_pages` | `ceil((16 + N) / P)` | 1 |
 | `data_region_len` | `data_pages * P` | 4096 |
 | `mmap_total` | `(4 + data_pages) * P` | 20480 (5 pages) |
@@ -88,7 +88,7 @@ The metadata page (`alloc.rs:438-451`) stores allocation bookkeeping at
 fixed offsets, then is downgraded to `PROT_READ`:
 
 | Offset | Size | Content |
-|--------|------|---------|
+| --- | --- | --- |
 | 0 | 8 bytes | `mmap_total` (total mapped size) |
 | 8 | 8 bytes | Data region offset from `mmap_base` |
 | 16 | 8 bytes | User data offset from `mmap_base` |
@@ -419,7 +419,7 @@ Each test case consists of a parent test and a child harness:
 ### Test Cases
 
 | Test | Action | Expected Signal |
-|------|--------|----------------|
+| --- | --- | --- |
 | `overflow_hits_trailing_guard_page` | Reads one byte past `ptr.add(len)` (`guard_page_sigsegv.rs:78`) | SIGSEGV (11) |
 | `underflow_hits_leading_guard_page` | Reads one page before `ptr` via `ptr.sub(page_size)` (`guard_page_sigsegv.rs:112`) | SIGSEGV (11) or SIGBUS (7) |
 
@@ -436,7 +436,7 @@ unsafe operations.
 ## Platform Support Summary
 
 | Platform | Backend | Protection Level |
-|----------|---------|-----------------|
+| --- | --- | --- |
 | Linux 5.14+ with `CONFIG_SECRETMEM=y` | `memfd_secret(2)` | Full: pages removed from kernel direct map |
 | Linux < 5.14 or without `CONFIG_SECRETMEM` | `mmap(MAP_ANONYMOUS)` + `mlock` + `MADV_DONTDUMP` | Degraded: pages on direct map, audit-logged |
 | Non-Unix | Compile-time stub | `ProtectedAlloc::new()` returns `Err(Unsupported)` |

@@ -13,7 +13,7 @@ machine in a specific boot state. It maps to `AuthFactorId::Tpm` (config string 
 ## Relevant Standards
 
 | Specification | Role |
-|--------------|------|
+| --- | --- |
 | **TPM 2.0 Library Specification** (TCG) | Defines the TPM command set, key hierarchies, sealing, and PCR operations. |
 | **TCG PC Client Platform TPM Profile** (PTP) | Specifies PCR allocation and boot measurement conventions for PC platforms. |
 | **tpm2-tss** (TCG Software Stack) | Userspace C library providing ESAPI, FAPI, and TCTI layers for TPM communication. |
@@ -38,7 +38,7 @@ hardware-enforced link between the vault key and boot integrity state:
 The default PCR selection for desktop Linux:
 
 | PCR | Measures |
-|-----|----------|
+| --- | --- |
 | 0 | UEFI firmware code |
 | 1 | UEFI firmware configuration |
 | 2 | Option ROMs / external firmware |
@@ -190,7 +190,7 @@ bound to that specific TPM -- it cannot be moved to another machine. This provid
 ## Integration Dependencies
 
 | Dependency | Type | Purpose |
-|-----------|------|---------|
+| --- | --- | --- |
 | `tpm2-tss` >= 4.0 | System C library | ESAPI, FAPI, and TCTI for TPM communication |
 | `tpm2-tss-devel` | System package | Build-time headers |
 | Rust crate: `tss-esapi` | Cargo dependency | Safe Rust bindings to tpm2-tss ESAPI |

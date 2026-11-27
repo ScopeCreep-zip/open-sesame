@@ -6,12 +6,13 @@ Sesame, where it is used, the key sizes and parameters, and the relevant standar
 ## Algorithm Summary
 
 | Algorithm | Purpose | Key Size | Standard | Crate |
-|-----------|---------|----------|----------|-------|
-| Argon2id | Password -> master key derivation | 32 bytes output | RFC 9106 | `core-crypto` (kdf.rs) |
-| PBKDF2-SHA256 | Password -> master key (governance-compatible) | 32 bytes output | NIST SP 800-132, RFC 8018 | `core-crypto` (kdf.rs) |
-| BLAKE3 derive_key | Master key -> per-purpose sub-keys | 32 bytes output | BLAKE3 spec (domain-separated KDF mode) | `core-crypto` (hkdf.rs) |
-| HKDF-SHA256 | Master key -> per-purpose sub-keys (governance-compatible) | 32 bytes output | RFC 5869, NIST SP 800-56C | `core-crypto` (hkdf.rs) |
-| AES-256-GCM | Key wrapping (PasswordWrapBlob, EnrollmentBlob) | 256-bit key | NIST SP 800-38D, FIPS 197 | `core-crypto` |
+| --- | --- | --- | --- | --- |
+| Argon2id | Password -> password KEK | 32 bytes output | RFC 9106 | `core-crypto` (kdf.rs) |
+| PBKDF2-SHA256 | Password -> password KEK (governance-compatible) | 32 bytes output | NIST SP 800-132, RFC 8018 | `core-crypto` (kdf.rs) |
+| BLAKE3 derive_key | Key material -> per-purpose keys | 32 bytes output | BLAKE3 spec (domain-separated KDF mode) | `core-crypto` (derive.rs) |
+| HKDF-SHA256 | Key material -> per-purpose keys (governance-compatible) | 32 bytes output | RFC 5869, NIST SP 800-56C | `core-crypto` (derive.rs) |
+| AES-256-GCM | Key wrapping (WrappedKey, EnrollmentBlob), per-entry vault encryption | 256-bit key | NIST SP 800-38D, FIPS 197 | `core-crypto` (encryption.rs) |
+| OS random source | Platform keyring KEK (256-bit), salts, nonces | 32 bytes (KEK) | `getrandom(2)` | `core-crypto` (random.rs) |
 | AES-256-CBC + HMAC-SHA512 | SQLCipher page encryption | 256-bit key (encrypt) + 512-bit key (MAC) | FIPS 197, FIPS 198-1 | SQLCipher (via `rusqlite`) |
 | X25519 | Noise IK key agreement | 256-bit (32 bytes) | RFC 7748 | `snow` (via `core-ipc`) |
 | ChaChaPoly | Noise IK transport encryption (default) | 256-bit key | RFC 7539 | `snow` (via `core-ipc`) |
@@ -26,20 +27,22 @@ Sesame, where it is used, the key sizes and parameters, and the relevant standar
 
 **Standard:** RFC 9106
 
-**Purpose:** Derives the master key from a user-supplied password. Used by the `Password`
+**Purpose:** Derives the password key-encrypting key (KEK), which wraps the vault's master
+key, from a user-supplied password and the vault's salt. Used by the `Password`
 authentication factor (`AuthFactorId::Password` in `core-types/src/auth.rs`).
 
 **Parameters:**
 
 | Parameter | Value | Rationale |
-|-----------|-------|-----------|
+| --- | --- | --- |
 | Memory | 19 MiB (19,456 KiB) | Memory-hard to resist GPU/ASIC attacks |
 | Iterations | 2 | Balanced with memory cost for interactive use |
 | Parallelism | 1 | Single-threaded derivation |
-| Output | 32 bytes | 256-bit master key |
+| Output | 32 bytes | 256-bit AES-256-GCM KEK |
 | Salt | 16 bytes, per-profile, random | Unique per vault |
 
-**Implementation:** `core-crypto/src/kdf.rs`, function `derive_key_argon2`.
+**Implementation:** `core-crypto/src/kdf.rs`, function `derive_password_key` with
+`KdfAlgorithm::Argon2id`.
 
 **Known residual:** The Argon2id working memory (19 MiB) resides on the unprotected heap
 during derivation. This is an upstream limitation of the `argon2` crate. See GitHub
@@ -49,23 +52,23 @@ issue #14.
 
 **Standard:** BLAKE3 specification, KDF mode
 
-**Purpose:** Derives per-purpose sub-keys from the master key using domain-separated context
-strings. Each context string is globally unique and hardcoded.
+**Purpose:** Derives per-purpose keys from key material (a master key, a vault key, a salt, a
+signature, or factor pieces) using domain-separated context strings. Every context string is
+declared once, as a `KeyContext` variant in `core-crypto/src/derive.rs`.
 
 **Context strings used in the system:**
 
-| Context String | Purpose | Source |
-|---------------|---------|--------|
-| `"pds v2 vault-key {profile}"` | SQLCipher vault encryption key | `core-crypto/src/hkdf.rs` |
-| `"pds v2 clipboard-key {profile}"` | Clipboard encryption key | `core-crypto/src/hkdf.rs` |
-| `"pds v2 ipc-auth-token {profile}"` | IPC bus authentication token | `core-crypto/src/hkdf.rs` |
-| `"pds v2 ipc-encryption-key {profile}"` | IPC field encryption key | `core-crypto/src/hkdf.rs` |
-| `"pds v2 ssh-vault-kek {profile}"` | SSH agent KEK derivation | `core-auth` |
-| `"pds v2 combined-master-key {profile}"` | Combined key from all factors (All mode) | `core-auth` |
-| `"pds v2 kek-salt {profile}"` | Salt derivation for KEK wrapping | `core-crypto/src/hkdf.rs` |
+| Context String | Purpose | Derived From |
+| --- | --- | --- |
+| `"pds v2 vault-key {profile}"` | SQLCipher page key | Master key |
+| `"pds v2 ipc-encryption-key {profile}"` | IPC field encryption key | Master key |
+| `"pds v2 combined-master-key {profile}"` | Master key of an `All`-policy vault | Factor pieces |
+| `"pds v2 ssh-challenge {profile}"` | Challenge the SSH agent signs | Vault salt |
+| `"pds v2 ssh-vault-kek {profile}"` | KEK of the SSH enrollment | Challenge signature |
+| `"pds v2 entry-encryption-key"` | Per-entry AES-256-GCM key | SQLCipher page key |
 
-**Implementation:** `core-crypto/src/hkdf.rs`, function `derive_32` wrapping
-`blake3::derive_key`.
+**Implementation:** `core-crypto/src/derive.rs`, functions `derive_key` and
+`derive_encryption_key`, under the vault's `HkdfAlgorithm` (`blake3::derive_key` for BLAKE3).
 
 BLAKE3's KDF mode internally derives a context key from the context string, then uses it as
 keying material with extract-then-expand semantics equivalent to HKDF.
@@ -77,11 +80,11 @@ keying material with extract-then-expand semantics equivalent to HKDF.
 **Purpose:** Governance-compatible alternative to BLAKE3 key derivation. Used when
 `CryptoConfigToml.hkdf = "hkdf-sha256"` (`core-config/src/schema_crypto.rs`).
 
-**Implementation:** `core-crypto/src/hkdf.rs`, function `derive_32_hkdf_sha256`. Uses the
-`hkdf` crate with `sha2::Sha256`.
+**Implementation:** `core-crypto/src/derive.rs`, the `HkdfAlgorithm::HkdfSha256` arm of the
+derivation. Uses the `hkdf` crate with `sha2::Sha256`.
 
-The same context strings listed above for BLAKE3 are used as the HKDF info parameter. The
-salt is extracted from the master key. Output is 32 bytes.
+The same context strings listed above for BLAKE3 are used as the HKDF info parameter. No salt
+is given (RFC 5869 then uses a zero-filled salt). Output is 32 bytes.
 
 ## AES-256-GCM (Key Wrapping)
 
@@ -92,17 +95,21 @@ an authentication factor.
 
 **Used in:**
 
-- `PasswordWrapBlob` -- master key wrapped under the Argon2id-derived KEK. Stored on disk
-  in the vault metadata.
-- `EnrollmentBlob` -- master key wrapped under the SSH agent-derived KEK. Stored on disk
-  for SSH agent factor.
+- `WrappedKey` (`core-auth/src/wrapped_key.rs`) -- the master key wrapped under a KEK, in
+  two vault files:
+  - `<profile>.password-wrap`: under the password KEK (the vault's password KDF, Argon2id or
+    PBKDF2-SHA256);
+  - `<profile>.keyring-enrollment`: under a random 256-bit KEK held in the platform
+    credential store (the Secret Service on Linux).
+- `EnrollmentBlob` (`<profile>.ssh-enrollment`) -- the master key wrapped under the KEK
+  derived from the SSH agent's challenge signature.
 
 **Parameters:**
 
 | Parameter | Value |
-|-----------|-------|
+| --- | --- |
 | Key size | 256 bits (32 bytes) |
-| Nonce | 96 bits (12 bytes), random per wrap |
+| Nonce | 96 bits (12 bytes), random per encryption (`EncryptionKey::seal`) |
 | Tag | 128 bits (16 bytes) |
 
 ## AES-256-CBC + HMAC-SHA512 (SQLCipher)
@@ -115,7 +122,7 @@ database is independently encrypted and authenticated.
 **Parameters:**
 
 | Parameter | Value |
-|-----------|-------|
+| --- | --- |
 | Encryption | AES-256-CBC per page |
 | Authentication | HMAC-SHA512 per page |
 | Key derivation | Per-page key from vault key via SQLCipher's internal KDF |
@@ -136,7 +143,7 @@ encryption, and forward secrecy.
 **Default cipher suite:** `Noise_IK_25519_ChaChaPoly_BLAKE2s`
 
 | Component | Default (LeadingEdge) | Governance-Compatible |
-|-----------|-----------------------|----------------------|
+| --- | --- | --- |
 | Key agreement | X25519 (RFC 7748) | X25519 (RFC 7748) |
 | Cipher | ChaChaPoly (RFC 7539) | AES-256-GCM (NIST SP 800-38D) |
 | Hash | BLAKE2s (RFC 7693) | SHA-256 (FIPS 180-4) |
@@ -163,7 +170,7 @@ delegations. The 64-byte signature is stored in `DelegationGrant.signature`
 The following table summarizes FIPS 140 validation status for each algorithm:
 
 | Algorithm | FIPS-Validated Implementations Available | Open Sesame Profile |
-|-----------|----------------------------------------|---------------------|
+| --- | --- | --- |
 | Argon2id | No FIPS 140 validation exists | LeadingEdge only |
 | PBKDF2-SHA256 | Yes (multiple vendors) | GovernanceCompatible |
 | BLAKE3 | No FIPS 140 validation exists | LeadingEdge only |
@@ -208,10 +215,9 @@ Adding a new algorithm requires:
 2. Adding the string mapping in `core-config/src/schema_crypto.rs`.
 3. Implementing the algorithm in the corresponding `core-crypto` function.
 
-The `minimum_peer_profile` field in `CryptoConfig` allows heterogeneous crypto profiles
-within a federation: each installation selects its own algorithms but can set a floor for
-what it accepts from peers. This enables gradual migration from one algorithm to another
-without a coordinated cutover.
+The `minimum_peer_profile` field in `CryptoConfig` is the floor an installation is to
+accept from federation peers. It is parsed and validated but read by nothing: federation is
+not implemented, so it constrains no connection today.
 
 ## PBKDF2-SHA256
 
@@ -223,13 +229,14 @@ Used when `CryptoConfigToml.kdf = "pbkdf2-sha256"`.
 **Parameters:**
 
 | Parameter | Value |
-|-----------|-------|
+| --- | --- |
 | Hash | SHA-256 |
 | Iterations | 600,000 |
 | Output | 32 bytes |
 | Salt | 16 bytes, per-profile, random |
 
-**Implementation:** `core-crypto/src/kdf.rs`, function `derive_key_pbkdf2`.
+**Implementation:** `core-crypto/src/kdf.rs`, function `derive_password_key` with
+`KdfAlgorithm::Pbkdf2Sha256`.
 
 PBKDF2-SHA256 provides FIPS 140 compliance for the KDF layer but is significantly less
 resistant to GPU/ASIC attacks than Argon2id due to its lack of memory-hardness. It should
