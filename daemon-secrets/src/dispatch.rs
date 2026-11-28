@@ -15,13 +15,38 @@ pub(crate) struct MessageContext<'a> {
     pub(crate) client: &'a mut BusClient,
     pub(crate) vault_state: &'a mut VaultState,
     pub(crate) rate_limiter: &'a mut SecretRateLimiter,
-    pub(crate) config: &'a core_config::Config,
+    pub(crate) config: &'a core_daemon::ConfigApplicationState,
 }
 
 /// Handle one inbound IPC message: the handler's response, when it has
 /// one, is sent correlated to `msg` after the lock-state announcement it
 /// implies.
 pub(crate) async fn handle_message(msg: &Message<EventKind>, ctx: &mut MessageContext<'_>) {
+    // Unlock and activation increase authority. Lock, deactivation, and
+    // inventory remain available while configuration is rejected.
+    if matches!(
+        msg.payload,
+        EventKind::FactorSubmit { .. } | EventKind::ProfileActivate { .. }
+    ) && let Err(error) = ctx.config.policy()
+    {
+        let response = match &msg.payload {
+            EventKind::FactorSubmit { profile, .. } => EventKind::FactorResponse {
+                accepted: false,
+                unlock_complete: false,
+                remaining_factors: vec![],
+                remaining_additional: 0,
+                profile: profile.clone(),
+                error: Some(format!("authorization policy unavailable: {error}")),
+            },
+            EventKind::ProfileActivate { .. } => {
+                EventKind::ProfileActivateResponse { success: false }
+            }
+            _ => unreachable!("only authority-increasing requests enter policy admission"),
+        };
+        tracing::warn!(%error, "authority-increasing request denied: policy unavailable");
+        respond(ctx, msg, response).await;
+        return;
+    }
     let response = match &msg.payload {
         EventKind::FactorSubmit {
             factor_id,

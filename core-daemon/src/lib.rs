@@ -21,17 +21,16 @@ mod bus;
 mod config_watch;
 mod event_loop;
 mod logging;
+mod reload;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
 mod signals;
 
-pub use bus::{
-    DaemonIdentity, announce_config_reloaded, announce_started, announce_stopped, connect_bus,
-    reply,
-};
+pub use bus::{DaemonIdentity, announce_started, announce_stopped, connect_bus, reply};
 pub use config_watch::{ConfigWatch, watch_config};
 pub use event_loop::{EventLoop, Wake};
 pub use logging::{LogFormat, init_cli_logging, init_logging};
+pub use reload::{ConfigApplicationState, Reload};
 pub use signals::{Shutdown, ShutdownSignal};
 
 use anyhow::Context;

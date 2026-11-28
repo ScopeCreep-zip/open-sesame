@@ -27,13 +27,27 @@ pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// (daemon-profile is not running), the handshake fails, or the
 /// installation file exists but cannot be read.
 pub(crate) async fn connect(layout: &Layout) -> anyhow::Result<BusClient> {
+    let mut client = connect_transport(layout).await?;
+    if let Some(installation) = core_config::load_installation(layout)? {
+        client.set_installation(installation.identity()?);
+    }
+    Ok(client)
+}
+
+/// Connect using transport authentication alone for authority-reducing operations.
+/// Revocation must remain available when installation identity is unreadable.
+///
+/// # Errors
+///
+/// The socket, endpoint, key generation, and handshake errors.
+pub(crate) async fn connect_transport(layout: &Layout) -> anyhow::Result<BusClient> {
     let socket_path = layout.bus_socket()?;
     let endpoint = core_ipc::noise::read_bus_endpoint(layout)
         .await
         .context("cannot read the bus endpoint; is daemon-profile running?")?;
     let client_keypair =
         core_ipc::noise::generate_keypair().context("failed to generate ephemeral keypair")?;
-    let mut client = BusClient::connect_encrypted(
+    let client = BusClient::connect_encrypted(
         DaemonId::new(),
         &socket_path,
         &endpoint,
@@ -41,9 +55,6 @@ pub(crate) async fn connect(layout: &Layout) -> anyhow::Result<BusClient> {
     )
     .await
     .context("failed to connect to the IPC bus; is daemon-profile running?")?;
-    if let Some(installation) = core_config::load_installation(layout)? {
-        client.set_installation(installation.identity()?);
-    }
     Ok(client)
 }
 

@@ -135,14 +135,14 @@ async fn assert_transparent_rotation(
     // The daemon client's recv() must NOT have returned None during rotation.
     let probe = Message::new(
         &core_ipc::MessageContext::new(observer_id),
-        EventKind::StatusRequest,
+        EventKind::WmActivateOverlay,
         SecurityLevel::Internal,
         std::time::Instant::now(),
     );
     observer.send(&probe).await.unwrap();
     let received = next(daemon_client).await;
     assert!(
-        matches!(received.payload, EventKind::StatusRequest),
+        matches!(received.payload, EventKind::WmActivateOverlay),
         "daemon should receive the probe message after transparent rotation"
     );
 }
@@ -278,7 +278,7 @@ async fn request_response_correlation() {
     let (a, b) = (key(), key());
     let bus = serve(registry(&[
         ("a", &a, SecurityLevel::Internal),
-        ("b", &b, SecurityLevel::Internal),
+        ("daemon-secrets", &b, SecurityLevel::Internal),
     ]))
     .await;
     let client_a = bus.connect(did(1), &a).await;
@@ -323,7 +323,7 @@ async fn launch_execute_outcomes_roundtrip() {
         let (cli, launcher_key) = (key(), key());
         let bus = serve(registry(&[
             ("cli", &cli, SecurityLevel::Internal),
-            ("launcher", &launcher_key, SecurityLevel::Internal),
+            ("daemon-launcher", &launcher_key, SecurityLevel::Internal),
         ]))
         .await;
         let cli_client = bus.connect(did(1), &cli).await;
@@ -395,8 +395,13 @@ async fn client_connect_retry_on_missing_socket() {
 
 #[tokio::test]
 async fn request_timeout() {
-    let a = key();
-    let bus = serve(registry(&[("a", &a, SecurityLevel::Internal)])).await;
+    let (a, responder) = (key(), key());
+    let bus = serve(registry(&[
+        ("a", &a, SecurityLevel::Internal),
+        ("daemon-profile", &responder, SecurityLevel::Internal),
+    ]))
+    .await;
+    let _responder = bus.connect(did(2), &responder).await;
     let client = bus.connect(did(1), &a).await;
     settle().await;
 
@@ -442,7 +447,7 @@ async fn secret_response_not_received_by_bystander() {
     let bus = serve(registry(&[
         ("requester", &a, SecurityLevel::Internal),
         ("bystander", &b, SecurityLevel::Internal),
-        ("secrets", &c, SecurityLevel::Internal),
+        ("daemon-secrets", &c, SecurityLevel::Internal),
     ]))
     .await;
     let client_a = bus.connect(did(1), &a).await;
@@ -464,11 +469,21 @@ async fn secret_response_not_received_by_bystander() {
 
     let request_msg = next(&mut secrets_daemon).await;
     assert!(matches!(request_msg.payload, EventKind::SecretList { .. }));
-    // The bystander also receives the broadcast request.
-    assert!(matches!(
-        next(&mut bystander).await.payload,
-        EventKind::SecretList { .. }
-    ));
+    assert!(
+        silent(&mut bystander).await,
+        "requests are delivered only to their owner"
+    );
+    let forged = Message::new(
+        &core_ipc::MessageContext::new(did(2)),
+        EventKind::SecretListResponse {
+            keys: vec!["forged".into()],
+            denial: None,
+        },
+        SecurityLevel::Internal,
+        bystander.epoch(),
+    )
+    .with_correlation(request_msg.msg_id);
+    bystander.send(&forged).await.unwrap();
 
     let response = Message::new(
         &core_ipc::MessageContext::new(did(3)),
@@ -483,10 +498,9 @@ async fn secret_response_not_received_by_bystander() {
     secrets_daemon.send(&response).await.unwrap();
 
     let result = response_handle.await.unwrap().unwrap();
-    assert!(matches!(
-        result.payload,
-        EventKind::SecretListResponse { .. }
-    ));
+    assert!(
+        matches!(result.payload, EventKind::SecretListResponse { keys, .. } if keys == ["api-key"])
+    );
     assert!(
         silent(&mut bystander).await,
         "bystander must not receive correlated response (unicast routing)"
@@ -522,6 +536,21 @@ async fn uncorrelated_response_is_dropped() {
         silent(&mut client_b).await,
         "orphan response (no matching pending request) must be dropped, not broadcast"
     );
+
+    client_a
+        .publish(
+            EventKind::SecretListResponse {
+                keys: vec!["missing-correlation-must-not-broadcast".into()],
+                denial: None,
+            },
+            SecurityLevel::Internal,
+        )
+        .await
+        .unwrap();
+    assert!(
+        silent(&mut client_b).await,
+        "omitting correlation must not turn a response into a broadcast"
+    );
 }
 
 #[tokio::test]
@@ -542,7 +571,7 @@ async fn multiple_clients_receive_broadcast() {
         .publish(
             EventKind::ConfigReloaded {
                 daemon_id: did(1),
-                changed_keys: vec!["theme".into()],
+                revision: core_types::ConfigRevision([1; 32]),
             },
             SecurityLevel::Internal,
         )
@@ -666,7 +695,7 @@ async fn verified_sender_name_stamped() {
 async fn ephemeral_client_gets_secrets_only_clearance() {
     let observer = key();
     let bus = serve(registry(&[(
-        "observer",
+        "daemon-profile",
         &observer,
         SecurityLevel::SecretsOnly,
     )]))

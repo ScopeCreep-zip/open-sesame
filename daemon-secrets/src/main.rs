@@ -108,15 +108,16 @@ fn main() -> anyhow::Result<()> {
 async fn run(
     cli: Cli,
     layout: core_layout::Layout,
-    mut config: core_config::Config,
+    config: core_config::Config,
 ) -> anyhow::Result<()> {
-    // ACL rules are read from `config`, replaced on every reload so policy
-    // changes apply without a restart.
+    // Authorization requires both accepted observation and consumer adoption.
     let mut events = EventLoop::new(
+        IDENTITY.daemon,
         Shutdown::register()?,
-        core_daemon::watch_config(&layout, config.clone())?,
+        core_daemon::watch_config(&layout, config)?,
     );
     let mut client = core_daemon::connect_bus(&layout, &IDENTITY).await?;
+    events.candidate()?.applied(&client).await;
     tracing::info!("connected to IPC bus (Noise IK encrypted)");
     core_daemon::announce_started(&client, &IDENTITY).await;
     #[cfg(target_os = "linux")]
@@ -140,13 +141,14 @@ async fn run(
                     client: &mut client,
                     vault_state: &mut vault_state,
                     rate_limiter: &mut rate_limiter,
-                    config: &config,
+                    config: events.application(),
                 };
                 dispatch::handle_message(&msg, &mut ctx).await;
             }
             Wake::ConfigReloaded(reloaded) => {
-                config = reloaded;
-                core_daemon::announce_config_reloaded(&client, &["secrets"]).await;
+                // ACLs are acquired coherently at request admission. Vault
+                // keying comes from each vault's metadata, not these layers.
+                reloaded.applied(&client).await;
             }
             Wake::Shutdown(_) => break Ok(()),
         }

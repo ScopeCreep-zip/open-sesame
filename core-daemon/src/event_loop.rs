@@ -3,11 +3,9 @@
 //! daemon's own event source.
 
 use std::future::Future;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
-use core_config::Config;
 use core_ipc::{BusClient, Message};
 use core_types::EventKind;
 
@@ -21,8 +19,9 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
 pub enum Wake<T> {
     /// A bus message from another daemon or a client.
     Message(Message<EventKind>),
-    /// The configuration was reloaded: the new configuration.
-    ConfigReloaded(Config),
+    /// A configuration candidate to apply and acknowledge
+    /// (`crate::Reload`).
+    ConfigReloaded(crate::Reload),
     /// The daemon's own event source produced a value.
     Own(T),
     /// A termination signal: the daemon stops.
@@ -31,6 +30,7 @@ pub enum Wake<T> {
 
 /// The loop a bus client daemon waits in.
 pub struct EventLoop {
+    daemon: core_types::Daemon,
     shutdown: Shutdown,
     config: ConfigWatch,
     watchdog: tokio::time::Interval,
@@ -39,18 +39,28 @@ pub struct EventLoop {
 impl EventLoop {
     /// The loop over `shutdown`'s signals and `config`'s reloads.
     #[must_use]
-    pub fn new(shutdown: Shutdown, config: ConfigWatch) -> Self {
+    pub fn new(daemon: core_types::Daemon, shutdown: Shutdown, config: ConfigWatch) -> Self {
         Self {
+            daemon,
             shutdown,
             config,
             watchdog: tokio::time::interval(WATCHDOG_INTERVAL),
         }
     }
 
-    /// The live configuration, replaced on each reload.
+    /// The consumer's committed configuration and application status.
     #[must_use]
-    pub fn config_state(&self) -> &Arc<RwLock<Config>> {
-        &self.config.state
+    pub fn application(&self) -> &crate::ConfigApplicationState {
+        self.config.application()
+    }
+
+    /// Acquire the startup candidate before initializing resources.
+    ///
+    /// # Errors
+    ///
+    /// The current observation failed.
+    pub fn candidate(&mut self) -> anyhow::Result<crate::Reload> {
+        self.config.candidate()
     }
 
     /// Wait for what the daemon handles next: a message from another
@@ -78,19 +88,24 @@ impl EventLoop {
                 }
                 msg = client.recv() => {
                     let msg = msg.context("the IPC bus connection was lost")?;
+                    if let EventKind::ConfigStatusRequest { daemon } = &msg.payload {
+                        if *daemon == self.daemon {
+                            crate::reply(client, &msg, EventKind::ConfigStatusResponse {
+                                daemon: self.daemon,
+                                status: self.config.application().status()?,
+                            }).await;
+                        }
+                        continue;
+                    }
                     if msg.sender != client.daemon_id() {
                         return Ok(Wake::Message(msg));
                     }
                 }
-                Some(()) = self.config.reloads.recv() => {
-                    let config = self
-                        .config
-                        .state
-                        .read()
-                        .map_err(|e| anyhow::anyhow!("configuration state lock poisoned: {e}"))?
-                        .clone();
-                    tracing::info!("config reloaded");
-                    return Ok(Wake::ConfigReloaded(config));
+                reload = self.config.reload() => {
+                    match reload {
+                        Ok(reload) => return Ok(Wake::ConfigReloaded(reload)),
+                        Err(error) => tracing::warn!(%error, "configuration observation unavailable"),
+                    }
                 }
                 signal = self.shutdown.wait() => {
                     let signal = signal.context("the termination signal listener failed")?;

@@ -19,16 +19,11 @@ pub(crate) async fn cmd_status(layout: &Layout) -> anyhow::Result<()> {
     };
 
     match lock_state {
-        None => println!(
-            "Vaults: {}",
-            "unknown (daemon-secrets is not answering; every vault is treated as locked)"
-                .red()
-                .bold()
-        ),
-        Some(lock_state) if lock_state.is_empty() => {
-            println!("Vaults: {}", "none configured".dimmed());
+        Err(error) => println!("Vaults: {}", format!("unknown ({error})").red().bold()),
+        Ok(lock_state) if lock_state.is_empty() => {
+            println!("Vaults: {}", "none found".dimmed());
         }
-        Some(lock_state) => print_vaults(&lock_state),
+        Ok(lock_state) => print_vaults(&lock_state),
     }
 
     println!("Default profile: {}", default_profile.as_ref().bold());

@@ -144,10 +144,9 @@ pub(crate) async fn cmd_init(
 
 fn init_config(layout: &Layout) -> anyhow::Result<()> {
     let config_path = layout.config_file()?;
-    if config_path
-        .try_exists()
-        .with_context(|| format!("failed to check {}", config_path.display()))?
-    {
+    let mut transaction = core_config::Transaction::for_update(layout)?;
+    if transaction.read(&config_path)?.is_some() {
+        transaction.commit()?;
         step_skip("Config exists");
         return Ok(());
     }
@@ -158,11 +157,8 @@ fn init_config(layout: &Layout) -> anyhow::Result<()> {
         core_config::ProfileConfig::default(),
     );
     let toml_str = toml::to_string_pretty(&config).context("failed to serialize default config")?;
-    core_layout::file::write(
-        &config_path,
-        toml_str.as_bytes(),
-        core_layout::file::Mode::OwnerOnly,
-    )?;
+    transaction.write(&config_path, toml_str.as_bytes())?;
+    transaction.commit()?;
 
     step_done(&format!("Creating {}", config_path.display()));
     println!("        Default profile: {}", "\"default\"".green());
@@ -441,7 +437,14 @@ async fn init_vault(
     let EventKind::StatusResponse { lock_state, .. } = response else {
         return Err(unexpected(&response));
     };
-    if lock_state.as_ref().and_then(|state| state.get(&profile)) == Some(&false) {
+    // An unavailable inventory is not an unlocked vault: the salt decides
+    // between unlocking and creating.
+    if lock_state
+        .as_ref()
+        .ok()
+        .and_then(|state| state.get(&profile))
+        == Some(&false)
+    {
         step_skip("Vault already unlocked");
     } else if core_auth::salt::load(layout, &profile)?.is_some() {
         // An initialized vault keeps its key: it is unlocked, never

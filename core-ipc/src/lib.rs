@@ -12,6 +12,7 @@ mod message;
 pub mod noise;
 mod noise_keys;
 mod registry;
+mod rpc;
 mod server;
 mod transport;
 

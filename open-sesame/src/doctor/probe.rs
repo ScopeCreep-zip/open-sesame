@@ -5,44 +5,6 @@ use anyhow::Context;
 use core_layout::Layout;
 use std::path::{Path, PathBuf};
 
-/// One Open Sesame daemon: its check name and systemd user unit.
-pub(super) struct Daemon {
-    pub name: &'static str,
-    pub unit: &'static str,
-}
-
-/// Every Open Sesame daemon.
-pub(super) const DAEMONS: &[Daemon] = &[
-    Daemon {
-        name: "profile",
-        unit: "open-sesame-profile.service",
-    },
-    Daemon {
-        name: "secrets",
-        unit: "open-sesame-secrets.service",
-    },
-    Daemon {
-        name: "wm",
-        unit: "open-sesame-wm.service",
-    },
-    Daemon {
-        name: "launcher",
-        unit: "open-sesame-launcher.service",
-    },
-    Daemon {
-        name: "clipboard",
-        unit: "open-sesame-clipboard.service",
-    },
-    Daemon {
-        name: "input",
-        unit: "open-sesame-input.service",
-    },
-    Daemon {
-        name: "snippets",
-        unit: "open-sesame-snippets.service",
-    },
-];
-
 /// Property `prop` of user unit `unit` (`systemctl --user show`); `None`
 /// when systemd reports it empty or `[not set]`.
 ///
@@ -82,6 +44,50 @@ pub(super) fn main_pid(unit: &str) -> anyhow::Result<Option<u32>> {
     }
 }
 
+/// Core daemons are always expected. Desktop daemons are expected while
+/// their target is active, or individually when started or failed.
+/// An unavailable service manager is a probe error, never evidence of headless mode.
+pub(super) fn expected_daemons() -> anyhow::Result<Vec<core_types::Daemon>> {
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "list-units",
+            "--all",
+            "--output=json",
+            "open-sesame-*",
+        ])
+        .output()
+        .context("failed to list daemon units")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "systemctl list-units failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let units: Vec<UnitState> = serde_json::from_slice(&output.stdout)
+        .context("systemctl list-units returned invalid JSON")?;
+    Ok(expected_from_units(&units))
+}
+
+#[derive(serde::Deserialize)]
+struct UnitState {
+    unit: String,
+    active: String,
+}
+
+fn expected_from_units(units: &[UnitState]) -> Vec<core_types::Daemon> {
+    let required = |name: &str| {
+        units
+            .iter()
+            .any(|unit| unit.unit == name && unit.active != "inactive")
+    };
+    let desktop = required("open-sesame-desktop.target");
+    core_types::Daemon::ALL
+        .into_iter()
+        .filter(|daemon| !daemon.desktop() || desktop || required(&daemon.unit()))
+        .collect()
+}
+
 /// The main PIDs of every running daemon.
 ///
 /// # Errors
@@ -89,9 +95,9 @@ pub(super) fn main_pid(unit: &str) -> anyhow::Result<Option<u32>> {
 /// The [`main_pid`] errors of any daemon.
 pub(super) fn running_daemon_pids() -> anyhow::Result<Vec<(&'static str, u32)>> {
     let mut pids = Vec::new();
-    for daemon in DAEMONS {
-        if let Some(pid) = main_pid(daemon.unit)? {
-            pids.push((daemon.name, pid));
+    for daemon in expected_daemons()? {
+        if let Some(pid) = main_pid(&daemon.unit())? {
+            pids.push((daemon.short_name(), pid));
         }
     }
     Ok(pids)
@@ -209,6 +215,47 @@ pub(super) fn kib(value: &str) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inactive_desktop_units_are_optional_but_failures_are_not() {
+        use core_types::Daemon;
+        let headless: Vec<_> = Daemon::ALL
+            .into_iter()
+            .filter(|daemon| !daemon.desktop())
+            .collect();
+        assert_eq!(expected_from_units(&[]), headless);
+        assert_eq!(
+            expected_from_units(&[UnitState {
+                unit: Daemon::Wm.unit(),
+                active: "inactive".into(),
+            }]),
+            headless
+        );
+        for state in [
+            "active",
+            "activating",
+            "deactivating",
+            "reloading",
+            "failed",
+        ] {
+            assert!(
+                expected_from_units(&[UnitState {
+                    unit: Daemon::Wm.unit(),
+                    active: state.into(),
+                }])
+                .contains(&Daemon::Wm),
+                "{state}"
+            );
+            assert_eq!(
+                expected_from_units(&[UnitState {
+                    unit: "open-sesame-desktop.target".into(),
+                    active: state.into(),
+                }]),
+                Daemon::ALL,
+                "{state}"
+            );
+        }
+    }
 
     #[test]
     fn status_fields_match_whole_names() {

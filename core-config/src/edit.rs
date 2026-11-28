@@ -6,9 +6,9 @@
 //! Loading merges the layers; writing must not. Every edit targets the
 //! single file that defines the key, parsed and rewritten with
 //! `toml_edit` so comments, ordering, and formatting survive. This module
-//! is the only configuration write path.
+//! uses the shared transaction publication path.
 //!
-//! Every failure is `core_types::Error::Config` naming the file or path.
+//! Planning errors name the affected file; publication errors retain their typed causes.
 
 use std::path::{Path, PathBuf};
 
@@ -16,8 +16,25 @@ use core_layout::Layout;
 use core_types::Error;
 use toml_edit::{DocumentMut, Item, Value};
 
-use crate::loader::{system_policy_file, toml_files_in};
+use crate::loader::{LayerSpec, path_error};
 use crate::loader_workspace::workspace_config_files;
+use crate::transaction::Transaction;
+
+/// The plan of an edit: with `apply`, interrupted publications are
+/// recovered first; a dry run only reads.
+fn plan(layout: &Layout, apply: bool) -> core_types::Result<Transaction<'_>> {
+    if apply {
+        Transaction::for_update(layout)
+    } else {
+        Transaction::begin(layout)
+    }
+}
+
+/// End `txn`: with `apply`, publish it; a dry run only checks that its
+/// observations still hold.
+fn conclude(txn: Transaction<'_>, apply: bool) -> core_types::Result<()> {
+    if apply { txn.commit() } else { txn.validate() }
+}
 
 /// One key whose value (or, for links, whose name) changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,30 +56,23 @@ pub struct LaunchPathRewrites {
     pub read_only: Vec<ConfigRewrite>,
 }
 
-/// Parse a file into an editable document; a missing file is empty.
-fn read_document(path: &Path) -> core_types::Result<DocumentMut> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(Error::Config(format!(
-                "failed to read {}: {e}",
-                path.display()
-            )));
-        }
-    };
-    contents
+/// Parse a file into an editable document, read in `txn`; a missing file is
+/// empty.
+fn read_document(txn: &mut Transaction<'_>, path: &Path) -> core_types::Result<DocumentMut> {
+    txn.read(path)?
+        .unwrap_or_default()
         .parse()
-        .map_err(|e| Error::Config(format!("failed to parse {}: {e}", path.display())))
+        .map_err(|e| path_error(path, format!("cannot parse: {e}")))
 }
 
-fn write_document(path: &Path, doc: &DocumentMut) -> core_types::Result<()> {
-    core_layout::file::write(
-        path,
-        doc.to_string().as_bytes(),
-        core_layout::file::Mode::OwnerOnly,
-    )
-    .map_err(|e| Error::Config(e.to_string()))
+/// Write `doc` to `path` in `txn`, which refuses a file changed since it
+/// was read.
+fn write_document(
+    txn: &mut Transaction<'_>,
+    path: &Path,
+    doc: &DocumentMut,
+) -> core_types::Result<()> {
+    txn.write(path, doc.to_string().as_bytes())
 }
 
 /// The table `key` of `doc`, created when absent.
@@ -74,15 +84,19 @@ fn table_mut<'d>(
     doc.entry(key)
         .or_insert_with(toml_edit::table)
         .as_table_like_mut()
-        .ok_or_else(|| Error::Config(format!("{}: `{key}` is not a table", file.display())))
+        .ok_or_else(|| path_error(file, format!("`{key}` is not a table")))
 }
 
 /// The file among `files` whose `links` table defines `key`; the last
 /// one wins, because fragments load after the base and override it.
-fn link_owner(files: &[PathBuf], key: &str) -> core_types::Result<Option<PathBuf>> {
+fn link_owner(
+    txn: &mut Transaction<'_>,
+    files: &[PathBuf],
+    key: &str,
+) -> core_types::Result<Option<PathBuf>> {
     let mut owner = None;
     for file in files {
-        let doc = read_document(file)?;
+        let doc = read_document(txn, file)?;
         if doc
             .get("links")
             .and_then(Item::as_table_like)
@@ -123,14 +137,16 @@ pub fn set_workspace_link(
     profile: &core_types::TrustProfileName,
 ) -> core_types::Result<()> {
     let key = link_key(path)?;
+    let mut txn = Transaction::for_update(layout)?;
     let files = workspace_config_files(layout)?;
-    let target = match link_owner(&files, &key)? {
+    let target = match link_owner(&mut txn, &files, &key)? {
         Some(owner) => owner,
         None => layout.workspaces_file()?,
     };
-    let mut doc = read_document(&target)?;
+    let mut doc = read_document(&mut txn, &target)?;
     table_mut(&mut doc, "links", &target)?.insert(&key, toml_edit::value(profile.as_ref()));
-    write_document(&target, &doc)
+    write_document(&mut txn, &target, &doc)?;
+    txn.commit()
 }
 
 /// Remove a workspace-to-profile link from every file that defines it.
@@ -142,19 +158,21 @@ pub fn set_workspace_link(
 /// or written.
 pub fn remove_workspace_link(layout: &Layout, path: &Path) -> core_types::Result<bool> {
     let key = link_key(path)?;
+    let mut txn = Transaction::for_update(layout)?;
     let mut removed = false;
     for file in workspace_config_files(layout)? {
-        let mut doc = read_document(&file)?;
+        let mut doc = read_document(&mut txn, &file)?;
         let changed = doc
             .get_mut("links")
             .and_then(Item::as_table_like_mut)
             .and_then(|links| links.remove(&key))
             .is_some();
         if changed {
-            write_document(&file, &doc)?;
+            write_document(&mut txn, &file, &doc)?;
             removed = true;
         }
     }
+    txn.commit()?;
     Ok(removed)
 }
 
@@ -169,11 +187,13 @@ pub fn set_workspace_settings(layout: &Layout, root: &Path, user: &str) -> core_
     let root = root
         .to_str()
         .ok_or_else(|| Error::Config(format!("workspace root is not UTF-8: {}", root.display())))?;
-    let mut doc = read_document(&path)?;
+    let mut txn = Transaction::for_update(layout)?;
+    let mut doc = read_document(&mut txn, &path)?;
     let settings = table_mut(&mut doc, "settings", &path)?;
     settings.insert("root", toml_edit::value(root));
     settings.insert("user", toml_edit::value(user));
-    write_document(&path, &doc)
+    write_document(&mut txn, &path, &doc)?;
+    txn.commit()
 }
 
 /// Rename link keys across `workspaces.toml` and its fragments.
@@ -190,9 +210,10 @@ pub fn rewrite_workspace_links(
     map: &dyn Fn(&str) -> Option<String>,
     apply: bool,
 ) -> core_types::Result<Vec<ConfigRewrite>> {
+    let mut txn = plan(layout, apply)?;
     let mut rewrites = Vec::new();
     for file in workspace_config_files(layout)? {
-        let mut doc = read_document(&file)?;
+        let mut doc = read_document(&mut txn, &file)?;
         let Some(links) = doc.get_mut("links").and_then(Item::as_table_like_mut) else {
             continue;
         };
@@ -202,10 +223,10 @@ pub fn rewrite_workspace_links(
             .collect();
         for (from, to) in &renames {
             if links.contains_key(to) {
-                return Err(Error::Config(format!(
-                    "{}: cannot rename link {from} to {to}: {to} is already linked",
-                    file.display()
-                )));
+                return Err(path_error(
+                    &file,
+                    format!("cannot rename link {from} to {to}: {to} is already linked"),
+                ));
             }
             if let Some(item) = links.remove(from) {
                 links.insert(to, item);
@@ -217,56 +238,12 @@ pub fn rewrite_workspace_links(
                 to: to.clone(),
             });
         }
-        if apply && !renames.is_empty() {
-            write_document(&file, &doc)?;
+        if !renames.is_empty() {
+            write_document(&mut txn, &file, &doc)?;
         }
     }
+    conclude(txn, apply)?;
     Ok(rewrites)
-}
-
-/// Every `config.toml` layer, each with whether this process may write
-/// it: the system policy (read-only), the user config, its drop-ins, and
-/// every profile override (all profiles, not only an active one).
-///
-/// A directory under `profiles` whose name is not a valid profile name is
-/// an error: no profile can own it, so its contents are not configuration.
-fn config_layers(layout: &Layout) -> core_types::Result<Vec<(PathBuf, bool)>> {
-    let mut layers: Vec<(PathBuf, bool)> = system_policy_file(layout)?
-        .map(|p| (p, false))
-        .into_iter()
-        .collect();
-    layers.push((layout.config_file()?, true));
-    layers.extend(
-        toml_files_in(&layout.config_drop_in_dir()?)?
-            .into_iter()
-            .map(|p| (p, true)),
-    );
-    let profiles = layout.profiles_dir()?;
-    let list_failed =
-        |e: std::io::Error| Error::Config(format!("failed to list {}: {e}", profiles.display()));
-    let mut overrides = Vec::new();
-    match std::fs::read_dir(&profiles) {
-        Ok(entries) => {
-            for entry in entries {
-                let name = entry.map_err(list_failed)?.file_name();
-                let profile = name
-                    .to_str()
-                    .and_then(|name| core_types::TrustProfileName::try_from(name).ok())
-                    .ok_or_else(|| {
-                        Error::Config(format!(
-                            "{}: not a valid profile name",
-                            profiles.join(&name).display()
-                        ))
-                    })?;
-                overrides.push(layout.profile_config_file(&profile)?);
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(list_failed(e)),
-    }
-    overrides.sort();
-    layers.extend(overrides.into_iter().map(|p| (p, true)));
-    Ok(layers)
 }
 
 /// Map the path portion of a launch-profile value. `devshell` values may
@@ -286,24 +263,26 @@ fn map_launch_value(
 
 /// Rewrite `cwd` and `devshell` paths in every launch profile.
 ///
-/// Scans `profiles.*.launch_profiles.*.{cwd,devshell}` in each layer.
+/// Scans `profiles.*.launch_profiles.*.{cwd,devshell}` in every layer
+/// (`LayerSpec::layers`): the system policy, the user config, its
+/// drop-ins, and every profile override, not only an active one's.
 /// Values in user-owned files are rewritten with `apply`; values in the
 /// system policy are reported as read-only and never written.
 ///
 /// # Errors
 ///
-/// When a file cannot be listed, read, parsed, or written.
+/// When a file cannot be listed, read, parsed, or written, or a directory
+/// under `profiles` is not a valid profile name (no profile can own it).
 pub fn rewrite_launch_paths(
     layout: &Layout,
     map: &dyn Fn(&str) -> Option<String>,
     apply: bool,
 ) -> core_types::Result<LaunchPathRewrites> {
+    let mut txn = plan(layout, apply)?;
     let mut result = LaunchPathRewrites::default();
-    for (file, writable) in config_layers(layout)? {
-        if !crate::loader::exists(&file)? {
-            continue;
-        }
-        let mut doc = read_document(&file)?;
+    for layer in LayerSpec::of(layout)?.layers()? {
+        let (file, writable) = (layer.path, layer.writable);
+        let mut doc = read_document(&mut txn, &file)?;
         let mut found = Vec::new();
         if let Some(profiles) = doc.get_mut("profiles").and_then(Item::as_table_like_mut) {
             for (profile, item) in profiles.iter_mut() {
@@ -328,7 +307,7 @@ pub fn rewrite_launch_paths(
                         let Some(to) = map_launch_value(field, &current, map) else {
                             continue;
                         };
-                        if writable && apply {
+                        if writable {
                             let decor = value.decor().clone();
                             *value = Value::from(to.as_str());
                             *value.decor_mut() = decor;
@@ -347,14 +326,13 @@ pub fn rewrite_launch_paths(
             continue;
         }
         if writable {
-            if apply {
-                write_document(&file, &doc)?;
-            }
+            write_document(&mut txn, &file, &doc)?;
             result.writable.extend(found);
         } else {
             result.read_only.extend(found);
         }
     }
+    conclude(txn, apply)?;
     Ok(result)
 }
 
@@ -384,6 +362,27 @@ mod tests {
 
     fn profile(name: &str) -> core_types::TrustProfileName {
         core_types::TrustProfileName::try_from(name).unwrap()
+    }
+
+    #[test]
+    fn a_late_collision_leaves_every_layer_unchanged() {
+        let (_root, layout) = layout();
+        let base = layout.workspaces_file().unwrap();
+        let frag = fragment(&layout, "10-team.toml");
+        let original = "[links]\n\"/Org\" = \"work\"\n";
+        write(&base, original);
+        write(&frag, "[links]\n\"/Org\" = \"work\"\n\"/org\" = \"home\"\n");
+        let map = |key: &str| (key == "/Org").then(|| "/org".into());
+        assert!(rewrite_workspace_links(&layout, &map, true).is_err());
+        assert_eq!(read(&base), original);
+    }
+
+    #[test]
+    fn dry_run_does_not_create_a_configuration_directory() {
+        let (_root, layout) = layout();
+        rewrite_workspace_links(&layout, &|_| None, false).unwrap();
+        rewrite_launch_paths(&layout, &|_| None, false).unwrap();
+        assert!(!layout.config_dir().unwrap().exists());
     }
 
     #[test]

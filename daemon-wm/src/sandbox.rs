@@ -120,8 +120,6 @@ pub fn apply_sandbox(layout: &Layout, config: &core_config::Config) -> anyhow::R
             "accept4",
             "bind",
             "listen",
-            "nanosleep",
-            "clock_nanosleep",
             "sched_yield",
             "sched_get_priority_max",
             "timerfd_create",

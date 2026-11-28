@@ -83,6 +83,9 @@ pub const BASE_SYSCALLS: &[&str] = &[
     "poll",
     "ppoll",
     "clock_gettime",
+    // Read-only configuration capture backs off while a writer publishes.
+    "nanosleep",
+    "clock_nanosleep",
     "timer_create",
     "timer_settime",
     "timer_delete",
@@ -196,18 +199,16 @@ pub fn ipc_client_rules(layout: &Layout) -> anyhow::Result<Vec<LandlockRule>> {
 }
 
 /// Configuration access: the configuration directory with `access`, and
-/// read access to the directories configuration symlinks resolve into
-/// (for example `/nix/store`), so hot-reload can follow them.
+/// read access to declared stable deployment roots, including system policy.
 ///
 /// # Errors
 ///
-/// When the configuration directory cannot be placed or its symlinks
-/// cannot be resolved.
+/// When a configuration root cannot be placed or is malformed.
 pub fn config_rules(layout: &Layout, access: FsAccess) -> anyhow::Result<Vec<LandlockRule>> {
     let mut rules = vec![rule(layout.config_dir()?, access)];
     rules.extend(
-        core_config::resolve_config_real_dirs(layout)
-            .context("cannot resolve config symlink targets")?
+        layout
+            .config_read_roots()?
             .into_iter()
             .map(|dir| rule(dir, FsAccess::ReadOnly)),
     );
@@ -369,7 +370,34 @@ mod tests {
         let layout = Layout::under(root.path());
         layout.bootstrap().unwrap();
         let rules = config_rules(&layout, FsAccess::ReadOnly).unwrap();
-        assert_eq!(paths(&rules), [layout.config_dir().unwrap()]);
+        let mut expected = vec![layout.config_dir().unwrap()];
+        expected.extend(layout.config_read_roots().unwrap());
+        assert_eq!(paths(&rules), expected);
+    }
+
+    #[test]
+    fn replacing_config_symlink_targets_never_changes_declared_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = Layout::under(root.path());
+        layout.bootstrap().unwrap();
+        let before = paths(&config_rules(&layout, FsAccess::ReadOnly).unwrap());
+        let link = layout.config_file().unwrap();
+        for generation in ["generation-one", "generation-two"] {
+            let target_dir = root.path().join(generation);
+            std::fs::create_dir(&target_dir).unwrap();
+            let target = target_dir.join("config.toml");
+            std::fs::write(&target, "[profiles.work]\n").unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let granted = paths(&config_rules(&layout, FsAccess::ReadOnly).unwrap());
+            assert_eq!(granted, before);
+            assert!(!granted.contains(&target_dir));
+            assert!(!granted.contains(&target));
+            std::fs::remove_file(&link).unwrap();
+        }
+        assert_eq!(
+            paths(&config_rules(&layout, FsAccess::ReadOnly).unwrap()),
+            before
+        );
     }
 
     #[test]

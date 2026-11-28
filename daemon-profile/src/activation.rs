@@ -227,8 +227,13 @@ impl Hub {
         // Routed here until dropped.
         let _route = self
             .bus
-            .register_confirmation(msg_id, self.confirm_tx.clone())
-            .await;
+            .register_confirmation(
+                msg_id,
+                Daemon::Secrets,
+                &msg.payload,
+                self.confirm_tx.clone(),
+            )
+            .await?;
         while self.confirm_rx.try_recv().is_ok() {}
         self.send_to_secrets(&frame).await?;
 

@@ -11,15 +11,14 @@ use tokio::sync::mpsc;
 
 use crate::activation::{Transition, TransitionError};
 use crate::key_rotation::PendingRotation;
-use crate::{DaemonTracker, KEY_ROTATION_GRACE, KNOWN_DAEMONS};
+use crate::{DaemonTracker, KEY_ROTATION_GRACE};
 
 /// The hash-chained audit log daemon-profile appends to.
 pub(crate) type AuditLog = AuditLogger<std::io::BufWriter<std::fs::File>>;
 
 /// The message in `frame` from a host channel, unless it is malformed
-/// (logged) or `own` sent it: `bus.publish()` delivers to every connection,
-/// this host channel included, and re-processing daemon-profile's own
-/// broadcasts (activation's `ProfileActivate`) would loop forever.
+/// (logged) or `own` sent it. Host announcements exclude their publisher;
+/// this check also prevents an explicitly unicasted self-message from looping.
 pub(crate) fn decode_host_frame(frame: &[u8], own: DaemonId) -> Option<Message<EventKind>> {
     match core_ipc::decode_frame::<Message<EventKind>>(frame) {
         Ok(msg) => (msg.sender != own).then_some(msg),
@@ -35,15 +34,20 @@ pub(crate) fn decode_host_frame(frame: &[u8], own: DaemonId) -> Option<Message<E
 /// (`SecretGetResponse`). A requester that disconnected before its reply
 /// (it gave up waiting) is expected; a reply to a request the bus never
 /// tracked is an error. Either way nothing is delivered.
-pub(crate) async fn send_reply(bus: &BusServer, msg_id: &uuid::Uuid, reply: &Message<EventKind>) {
-    let mut reply_bytes = match core_ipc::encode_frame(reply) {
+pub(crate) async fn send_reply(
+    bus: &BusServer,
+    msg_id: &uuid::Uuid,
+    mut reply: Message<EventKind>,
+) {
+    reply.verified_sender_name = Some(Daemon::Profile.name().into());
+    let mut reply_bytes = match core_ipc::encode_frame(&reply) {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!(error = %e, %msg_id, "failed to encode response");
             return;
         }
     };
-    match bus.take_pending_request(msg_id).await {
+    match bus.take_pending_request(msg_id, &reply.payload).await {
         core_ipc::Requester::Connected(origin_conn) => {
             if !bus.send_to(origin_conn, &reply_bytes).await {
                 tracing::warn!(
@@ -69,6 +73,7 @@ pub(crate) async fn send_reply(bus: &BusServer, msg_id: &uuid::Uuid, reply: &Mes
 
 /// Profile, lock, and key state served over the bus.
 pub(crate) struct Hub {
+    pub(crate) application: core_daemon::ConfigApplicationState,
     /// Daemon keypair locations.
     pub(crate) layout: Layout,
     pub(crate) bus: BusServer,
@@ -123,28 +128,32 @@ impl Hub {
         if let Some(response) = self.handle(&msg).await {
             let reply = Message::new(&self.ctx, response, msg.security_level, self.bus.epoch())
                 .with_correlation(msg.msg_id);
-            send_reply(&self.bus, &msg.msg_id, &reply).await;
+            send_reply(&self.bus, &msg.msg_id, reply).await;
         }
     }
 
-    /// Rebuild the context engine, the default profile, and the
-    /// activatable profile names from the live configuration. Shared by
-    /// the configuration watcher and SIGHUP (`systemctl reload`).
-    pub(crate) fn reload(&mut self, live: &std::sync::RwLock<core_config::Config>) {
-        let config = match live.read() {
-            Ok(config) => config,
-            Err(e) => {
-                tracing::error!(error = %e, "config state lock poisoned, context engine not rebuilt");
-                return;
-            }
-        };
-        self.context_engine = crate::context::context_engine(&config, &self.install_ns);
+    /// Apply `reload`: rebuild the context engine, the default profile, and
+    /// the activatable profile names from its configuration, then
+    /// acknowledge and announce it. Shared by the configuration watcher,
+    /// SIGHUP (`systemctl reload`), and startup.
+    pub(crate) async fn reload(&mut self, reload: core_daemon::Reload) {
+        let previous = ProfileId::of_profile(&self.install_ns, self.default_profile_name.as_ref());
+        let config = &reload.snapshot.config;
+        self.context_engine = crate::context::context_engine(config, &self.install_ns);
         self.default_profile_name = config.global.default_profile.clone();
-        self.config_profile_names = crate::context::profile_names(&config);
+        self.config_profile_names = crate::context::profile_names(config);
         tracing::info!(
             default_profile = %self.default_profile_name,
             "context engine rebuilt from reloaded config"
         );
+        if let Some(event) = reload.applied_event(self.ctx.sender) {
+            self.announce(event).await;
+            let current =
+                ProfileId::of_profile(&self.install_ns, self.default_profile_name.as_ref());
+            if current != previous {
+                self.default_changed(previous, current).await;
+            }
+        }
     }
 
     /// Evaluate a context signal: a changed default profile is the default
@@ -192,6 +201,18 @@ impl Hub {
                 None
             }
             EventKind::StatusRequest => Some(self.status().await),
+            EventKind::ConfigStatusRequest {
+                daemon: Daemon::Profile,
+            } => match self.application.status() {
+                Ok(status) => Some(EventKind::ConfigStatusResponse {
+                    daemon: Daemon::Profile,
+                    status,
+                }),
+                Err(error) => {
+                    tracing::error!(%error, "configuration status unavailable");
+                    None
+                }
+            },
             EventKind::ProfileList => Some(self.profile_list()),
             EventKind::ProfileActivate {
                 profile_name,
@@ -286,19 +307,17 @@ impl Hub {
 
     /// Activate a configured profile: whether it is now active.
     async fn activate(&mut self, target: ProfileId, profile_name: &TrustProfileName) -> bool {
+        if let Err(error) = self.application.policy() {
+            tracing::warn!(%error, %profile_name, "activation denied: policy unavailable");
+            return false;
+        }
         self.configured(profile_name, "activate")
             && self.apply(Transition::Activate, target, profile_name).await
     }
 
-    /// Deactivate a configured, active profile: whether it is now inactive.
+    /// Revoke access even after configuration removes the profile. The secrets
+    /// daemon owns activation state, so a stale local shadow cannot veto revocation.
     async fn deactivate(&mut self, target: ProfileId, profile_name: &TrustProfileName) -> bool {
-        if !self.configured(profile_name, "deactivate") {
-            return false;
-        }
-        if !self.active_profiles.contains(profile_name) {
-            tracing::warn!(profile = %profile_name, "deactivate requested but profile not active");
-            return false;
-        }
         self.apply(Transition::Deactivate, target, profile_name)
             .await
     }
@@ -391,8 +410,12 @@ impl Hub {
                 tracing::info!(profile = %profile_name, ?transition, duration_ms, "profile transition applied");
                 true
             }
+            // An authoritative refusal (daemon-secrets' state is unchanged;
+            // `transition` announced and audited it) is a denial, logged
+            // as this daemon's own policy denials are; only an unknown
+            // outcome is a fault.
             Err(e @ TransitionError::Rejected) => {
-                tracing::error!(profile = %profile_name, ?transition, error = %e, "profile transition rejected");
+                tracing::warn!(profile = %profile_name, ?transition, error = %e, "profile transition rejected");
                 false
             }
             Err(e @ TransitionError::Unconfirmed(_)) => {
@@ -402,7 +425,10 @@ impl Hub {
                     error = %e,
                     "profile transition unconfirmed, reconciling with daemon-secrets"
                 );
-                self.reconcile_secrets_state().await;
+                if let Err(error) = self.reconcile_secrets_state().await {
+                    tracing::warn!(%error, "vault inventory unavailable after transition");
+                    return false;
+                }
                 self.active_profiles.contains(profile_name) == wanted_active
             }
         }
@@ -421,15 +447,14 @@ impl Hub {
             "daemon restart detected — revoking old key and generating new keypair"
         );
 
-        let Some(&(daemon, security_level)) =
-            KNOWN_DAEMONS.iter().find(|(known, _)| known.name() == name)
-        else {
+        let Some(daemon) = crate::client_daemons().find(|known| known.name() == name) else {
             tracing::warn!(
                 daemon = name,
                 "restarted daemon is not a known daemon, no key issued"
             );
             return;
         };
+        let security_level = daemon.clearance();
 
         // daemon-secrets restarts locked with no active profiles.
         if daemon == Daemon::Secrets {
@@ -498,11 +523,11 @@ impl Hub {
     /// Overwrite the shadow lock and active-profile state with
     /// daemon-secrets' authoritative state, returning its per-profile lock
     /// state. A daemon-secrets that cannot be reached or does not answer
-    /// with its state fails closed: locked, no active profiles, and `None`
-    /// (unknown) per-profile state.
+    /// with its state fails closed: locked, no active profiles, and an explicit
+    /// per-profile inventory error.
     pub(crate) async fn reconcile_secrets_state(
         &mut self,
-    ) -> Option<std::collections::BTreeMap<TrustProfileName, bool>> {
+    ) -> Result<std::collections::BTreeMap<TrustProfileName, bool>, String> {
         match self
             .confirmed_rpc(EventKind::SecretsStateRequest)
             .await
@@ -531,17 +556,17 @@ impl Hub {
                 }
                 self.locked = locked;
                 self.active_profiles = authoritative;
-                Some(lock_state)
+                lock_state
             }
             Ok(other) => {
                 tracing::warn!(payload = ?other, "reconciliation: unexpected response, assuming locked");
                 self.fail_closed();
-                None
+                Err(format!("unexpected secrets state response: {other:?}"))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "reconciliation: daemon-secrets did not answer, assuming locked");
                 self.fail_closed();
-                None
+                Err(format!("daemon-secrets did not answer: {e}"))
             }
         }
     }

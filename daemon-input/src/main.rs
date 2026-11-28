@@ -124,12 +124,14 @@ async fn run(
     mut xkb: Option<keyboard::XkbContext>,
 ) -> anyhow::Result<()> {
     let mut events = EventLoop::new(
+        IDENTITY.daemon,
         Shutdown::register()?,
         core_daemon::watch_config(&layout, config)?,
     );
     let mut keyboard_rx = keyboard::spawn_keyboard_readers();
     let mut grab: Option<DaemonId> = None;
     let mut client = core_daemon::connect_bus(&layout, &IDENTITY).await?;
+    events.candidate()?.applied(&client).await;
 
     core_daemon::announce_started(&client, &IDENTITY).await;
     #[cfg(target_os = "linux")]
@@ -163,8 +165,10 @@ async fn run(
                     core_daemon::reply(&client, &msg, response).await;
                 }
             }
-            Wake::ConfigReloaded(_) => {
-                core_daemon::announce_config_reloaded(&client, &["input"]).await;
+            Wake::ConfigReloaded(reload) => {
+                // Capture is configured by XKB and the CLI; profile input fields
+                // do not currently control these resources.
+                reload.applied(&client).await;
             }
             Wake::Shutdown(_) => break,
         }

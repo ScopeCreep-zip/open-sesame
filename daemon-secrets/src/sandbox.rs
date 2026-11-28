@@ -32,13 +32,11 @@ pub(crate) fn apply_sandbox(
             "fdatasync",
             "rename",
             "unlink",
-            // Vectored socket I/O, sleeps, and runtime queries.
+            // Vectored socket I/O and runtime queries.
             "writev",
             "readv",
             "readlinkat",
             "uname",
-            "nanosleep",
-            "clock_nanosleep",
         ],
     );
     core_daemon::sandbox::apply(layout, config, &rules, &seccomp)

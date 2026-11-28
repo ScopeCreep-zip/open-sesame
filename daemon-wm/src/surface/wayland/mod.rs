@@ -52,7 +52,14 @@ pub enum OverlayCmd {
     },
     ResetGrace,
     ConfirmKeyboardInput,
-    UpdateTheme(Box<crate::render::OverlayTheme>),
+    /// Replace every renderer-owned setting: a configuration application,
+    /// acknowledged on `reply` once the renderer holds them, or a theme
+    /// refresh from the desktop (`reply` `None`).
+    Reconfigure {
+        theme: Box<crate::render::OverlayTheme>,
+        columns: crate::render::Columns,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    },
     Quit,
 }
 

@@ -55,6 +55,15 @@ async fn gate(
         Request::List => None,
     };
     let requester = msg.verified_sender_name.as_deref();
+    // Admission is linearized at this single acquisition: policy and
+    // observation health are from the same read lock.
+    let policy = match ctx.config.policy() {
+        Ok(policy) => policy,
+        Err(error) => {
+            audit(ctx, msg, action, profile, key, "denied-policy-unavailable").await;
+            return Some(SecretDenialReason::PolicyUnavailable(error.to_string()));
+        }
+    };
     let (outcome, reason) = if ctx.vault_state.master_keys.is_empty() {
         ("denied-locked", SecretDenialReason::Locked)
     } else if !ctx.vault_state.active_profiles.contains(profile) {
@@ -67,7 +76,7 @@ async fn gate(
         if !ctx.rate_limiter.check(requester) {
             tracing::warn!(audit = "rate-limit", requester = %msg.sender, %profile, ?request, "secret request rate limit exceeded");
             ("rate-limited", SecretDenialReason::RateLimited)
-        } else if !check_access(ctx.config, profile, requester, request) {
+        } else if !check_access(&policy, profile, requester, request) {
             tracing::warn!(audit = "access-denied", requester = %msg.sender, daemon_name = requester.unwrap_or("unknown"), %profile, ?request, "secret request denied by per-profile ACL");
             ("denied-acl", SecretDenialReason::AccessDenied)
         } else if let Some(Err(e)) = key.map(core_types::validate_secret_key) {
@@ -348,26 +357,10 @@ pub(crate) async fn handle_profile_deactivate(
 }
 
 /// The `SecretsStateResponse`: whether every vault is locked, the active
-/// profiles, and the lock state of every configured profile. An invalid
-/// configured name has no vault; it is logged and left out.
+/// profiles, and the disk-backed vault inventory, including listing errors.
 pub(crate) fn secrets_state(ctx: &MessageContext<'_>) -> EventKind {
     let state = &ctx.vault_state;
-    let lock_state = ctx
-        .config
-        .profiles
-        .keys()
-        .filter_map(|name| match TrustProfileName::try_from(name.as_str()) {
-            Ok(profile) => Some(profile),
-            Err(e) => {
-                tracing::error!(profile = %name, error = %e, "invalid profile name in config, excluded from lock state");
-                None
-            }
-        })
-        .map(|profile| {
-            let locked = !state.master_keys.contains_key(&profile);
-            (profile, locked)
-        })
-        .collect();
+    let lock_state = state.inventory().map_err(|error| error.to_string());
     EventKind::SecretsStateResponse {
         locked: state.master_keys.is_empty(),
         active_profiles: state.active_profiles(),

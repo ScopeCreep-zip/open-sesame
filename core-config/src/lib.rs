@@ -16,13 +16,17 @@ mod schema_peripheral;
 mod schema_secrets;
 mod schema_wm;
 mod schema_workspace;
+mod transaction;
 mod validation;
 mod watcher;
 
 pub use loader::{
     load_config, load_installation, load_workspace_config, read_machine_id, resolve_config_paths,
-    resolve_config_real_dirs, system_policy_file, write_installation,
+    source_revision, write_installation,
 };
 pub use schema::*;
+pub use transaction::{RecoveryError, Transaction};
 pub use validation::{ConfigDiagnostic, DiagnosticSeverity, validate};
-pub use watcher::ConfigWatcher;
+pub use watcher::{
+    ConfigSnapshot, ConfigState, ConfigWatcher, RECONCILE_INTERVAL, ReconcileTrigger,
+};

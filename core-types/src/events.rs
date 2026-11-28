@@ -207,7 +207,14 @@ pub enum EventKind {
     },
     ConfigReloaded {
         daemon_id: DaemonId,
-        changed_keys: Vec<String>,
+        revision: crate::ConfigRevision,
+    },
+    ConfigStatusRequest {
+        daemon: crate::Daemon,
+    },
+    ConfigStatusResponse {
+        daemon: crate::Daemon,
+        status: crate::ConfigConsumerStatus,
     },
     PolicyApplied {
         source: String,
@@ -313,10 +320,9 @@ pub enum EventKind {
         /// True if ALL vaults are locked. Convenience for callers that don't need per-profile granularity.
         locked: bool,
         /// Per-profile lock state from daemon-secrets. Key = profile name,
-        /// value = true if locked. `None` when daemon-secrets did not
-        /// answer: the state is unknown and every vault is treated as
-        /// locked.
-        lock_state: Option<BTreeMap<TrustProfileName, bool>>,
+        /// value = true if locked. Errors preserve inventory acquisition or
+        /// responder failure rather than representing an empty inventory.
+        lock_state: Result<BTreeMap<TrustProfileName, bool>, String>,
     },
 
     // -- RPC: Unlock/Lock --
@@ -354,7 +360,7 @@ pub enum EventKind {
         locked: bool,
         active_profiles: Vec<TrustProfileName>,
         /// Per-profile lock state.
-        lock_state: BTreeMap<TrustProfileName, bool>,
+        lock_state: Result<BTreeMap<TrustProfileName, bool>, String>,
     },
 
     // -- RPC: Window Manager --
@@ -702,7 +708,9 @@ impl_event_debug! {
         KeyRotationRequestResponse { success, error },
         KeyRotationPending { daemon_name, new_pubkey, grace_period_s },
         KeyRotationComplete { daemon_name },
-        ConfigReloaded { daemon_id, changed_keys },
+        ConfigReloaded { daemon_id, revision },
+        ConfigStatusRequest { daemon },
+        ConfigStatusResponse { daemon, status },
         PolicyApplied { source, locked_keys },
         SecretGet { profile, key },
         SecretSetResponse { success, denial },

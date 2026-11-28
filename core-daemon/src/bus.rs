@@ -80,21 +80,6 @@ pub async fn announce_started(client: &BusClient, identity: &DaemonIdentity) {
         .await;
 }
 
-/// Announce that the daemon applied a configuration reload affecting
-/// `changed_keys`.
-pub async fn announce_config_reloaded(client: &BusClient, changed_keys: &[&str]) {
-    client
-        .publish_or_log(
-            "ConfigReloaded",
-            EventKind::ConfigReloaded {
-                daemon_id: client.daemon_id(),
-                changed_keys: changed_keys.iter().map(|&k| k.to_owned()).collect(),
-            },
-            SecurityLevel::Internal,
-        )
-        .await;
-}
-
 /// Announce that the daemon is stopping.
 pub async fn announce_stopped(client: &BusClient) {
     client

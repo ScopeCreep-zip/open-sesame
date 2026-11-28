@@ -141,7 +141,7 @@ pub struct SandboxConfig {
 }
 
 /// IPC bus configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IpcConfig {
     /// Custom socket path override. `None` uses platform default.
@@ -165,7 +165,7 @@ impl Default for IpcConfig {
 }
 
 /// Logging configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
     /// Default log level.

@@ -78,9 +78,19 @@ impl OverlayApp {
             OverlayCmd::ShowUnlockProgress { message } => self.show(View::UnlockProgress(message)),
             OverlayCmd::ResetGrace => self.activation = Activation::now(),
             OverlayCmd::ConfirmKeyboardInput => self.activation.confirm_ipc(),
-            OverlayCmd::UpdateTheme(theme) => {
+            OverlayCmd::Reconfigure {
+                theme,
+                columns,
+                reply,
+            } => {
                 self.theme = *theme;
+                self.columns = columns;
                 self.needs_redraw = true;
+                // The renderer now holds both settings. A closed receiver
+                // means the daemon abandoned the attempt and restarts.
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(()));
+                }
             }
             OverlayCmd::Quit => self.running = false,
         }

@@ -66,8 +66,10 @@ pub(crate) fn apply_sandbox(
             "listen",
             "accept4",
             // Audit log, keys, endpoint: owner-only files written atomically.
+            // `core_layout::file::write` publishes with tempfile's `persist`,
+            // whose rustix `rename` is `renameat` (`renameat2` on riscv64).
             "unlink",
-            "rename",
+            "renameat",
             "chmod",
             "fchmod",
             "fchown",
@@ -85,8 +87,6 @@ pub(crate) fn apply_sandbox(
             "readlinkat",
             "uname",
             "memfd_create",
-            "nanosleep",
-            "clock_nanosleep",
             "sched_yield",
             "timerfd_create",
             "timerfd_settime",

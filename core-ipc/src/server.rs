@@ -8,7 +8,7 @@
 //! Every socket connection performs a Noise IK handshake, under the suite
 //! the server was bound with, before any application data flows.
 
-use core_types::{DaemonId, EventKind, SecurityLevel, TrustVector};
+use core_types::{Daemon, DaemonId, EventKind, SecurityLevel, TrustVector};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +22,7 @@ use crate::framing::{decode_frame, encode_frame};
 use crate::message::Message;
 use crate::noise::{BusEndpoint, Connection, NoiseSuite};
 use crate::registry::ClearanceRegistry;
+use crate::rpc::Rpc;
 use crate::transport::{PeerCredentials, extract_ucred, local_credentials};
 
 /// How long a request waits for its response before the bus forgets its
@@ -46,8 +47,17 @@ struct ConnectionState {
 /// A request awaiting its response: the connection that sent it, `None`
 /// once that connection has closed, and when it was sent.
 struct PendingRequest {
+    rpc: Rpc,
     conn_id: Option<u64>,
     sent_at: Instant,
+}
+
+#[derive(Clone)]
+struct Confirmation {
+    registration: Uuid,
+    responder: Daemon,
+    rpc: Rpc,
+    tx: mpsc::Sender<Vec<u8>>,
 }
 
 /// Where the response to a request goes.
@@ -82,7 +92,7 @@ struct ServerState {
     /// Confirmed RPC routing: maps `correlation_id` -> channel for host-side waiters.
     /// When a correlated response matches a registered confirmation, the raw frame is
     /// sent to the confirmation channel instead of the normal host delivery path.
-    confirmations: RwLock<HashMap<Uuid, mpsc::Sender<Vec<u8>>>>,
+    confirmations: RwLock<HashMap<Uuid, Confirmation>>,
     /// Maps verified daemon name -> connection ID for O(1) unicast.
     /// Populated when `route_frame()` processes `DaemonStarted` with a `verified_sender_name`.
     /// Invalidated on connection disconnect.
@@ -96,6 +106,7 @@ struct ServerState {
 /// This prevents stale entries from accumulating if the caller times out or errors.
 pub struct ConfirmationGuard {
     correlation_id: Uuid,
+    registration: Uuid,
     state: Arc<ServerState>,
 }
 
@@ -104,15 +115,30 @@ impl Drop for ConfirmationGuard {
         // Use try_write to avoid blocking in Drop. If the lock is held,
         // the entry will be cleaned up by the next write operation.
         if let Ok(mut confirmations) = self.state.confirmations.try_write() {
-            confirmations.remove(&self.correlation_id);
+            remove_confirmation(&mut confirmations, self.correlation_id, self.registration);
         } else {
             // Spawn a task to clean up asynchronously if we can't get the lock.
             let id = self.correlation_id;
+            let registration = self.registration;
             let state = Arc::clone(&self.state);
             tokio::spawn(async move {
-                state.confirmations.write().await.remove(&id);
+                remove_confirmation(&mut *state.confirmations.write().await, id, registration);
             });
         }
+    }
+}
+
+/// A delayed guard cleanup must not remove a replacement route.
+fn remove_confirmation(
+    confirmations: &mut HashMap<Uuid, Confirmation>,
+    id: Uuid,
+    registration: Uuid,
+) {
+    if confirmations
+        .get(&id)
+        .is_some_and(|route| route.registration == registration)
+    {
+        confirmations.remove(&id);
     }
 }
 
@@ -264,7 +290,7 @@ impl BusServer {
         let conn_id = self.state.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let state = ConnectionState {
             daemon_id: Some(daemon_id),
-            verified_name: None, // In-process subscribers have no Noise handshake.
+            verified_name: Some(Daemon::Profile.name().into()),
             tx,
             security_clearance,
             trust_vector: None,
@@ -280,19 +306,37 @@ impl BusServer {
         tracing::info!(%daemon_id, "subscriber unregistered");
     }
 
-    /// Publish an already-encoded frame to all matching subscribers.
+    /// Publish an encoded announcement to matching subscribers.
+    /// Malformed frames, RPC payloads, and mismatched security levels are dropped.
     pub async fn publish(&self, frame: &[u8], security_level: SecurityLevel) {
+        let mut msg = match decode_frame::<Message<EventKind>>(frame) {
+            Ok(msg) => msg,
+            Err(error) => {
+                tracing::warn!(%error, "malformed host announcement dropped");
+                return;
+            }
+        };
+        if msg.security_level != security_level
+            || msg.correlation_id.is_some()
+            || msg.expects_response
+            || Rpc::of(&msg.payload).is_some()
+            || Rpc::is_response(&msg.payload)
+        {
+            tracing::warn!(msg_id = %msg.msg_id, "non-announcement host publication dropped");
+            return;
+        }
+        msg.verified_sender_name = Some(Daemon::Profile.name().into());
+        let frame = match encode_frame(&msg) {
+            Ok(frame) => zeroize::Zeroizing::new(frame),
+            Err(error) => {
+                tracing::error!(%error, "host announcement encoding failed");
+                return;
+            }
+        };
         let conns = self.state.connections.read().await;
-        // Decode sender from the frame to skip echoing back to the publisher.
-        // This mirrors route_frame()'s `cid == sender_conn_id` skip for socket clients.
-        let sender_id: Option<DaemonId> = decode_frame::<Message<EventKind>>(frame)
-            .ok()
-            .map(|msg| msg.sender);
         for (id, state) in conns.iter() {
             // Skip the publisher's own connection to prevent feedback loops.
-            if let Some(sid) = sender_id
-                && state.daemon_id == Some(sid)
-            {
+            if state.daemon_id == Some(msg.sender) {
                 continue;
             }
             if state.security_clearance >= security_level
@@ -327,8 +371,18 @@ impl BusServer {
 
     /// Look up and forget the requester of request `correlation_id`, so its
     /// response is unicast back to it instead of broadcast.
-    pub async fn take_pending_request(&self, correlation_id: &uuid::Uuid) -> Requester {
-        take_requester(&self.state, correlation_id).await
+    pub async fn take_pending_request(
+        &self,
+        correlation_id: &uuid::Uuid,
+        response: &EventKind,
+    ) -> Requester {
+        take_requester(
+            &self.state,
+            correlation_id,
+            Some(Daemon::Profile.name()),
+            response,
+        )
+        .await
     }
 
     /// Register a confirmation route for confirmed RPC.
@@ -336,20 +390,56 @@ impl BusServer {
     /// When a response with matching `correlation_id` arrives at `route_frame()`,
     /// the raw frame is sent to `confirm_tx` instead of the normal host delivery path.
     /// Returns a [`ConfirmationGuard`] that deregisters the route on drop (RAII cleanup).
+    ///
+    /// # Errors
+    ///
+    /// The correlation ID already has a confirmation route, the request has
+    /// no RPC contract, or the responder does not own that contract.
     pub async fn register_confirmation(
         &self,
         correlation_id: Uuid,
+        responder: Daemon,
+        request: &EventKind,
         confirm_tx: mpsc::Sender<Vec<u8>>,
-    ) -> ConfirmationGuard {
-        self.state
-            .confirmations
-            .write()
-            .await
-            .insert(correlation_id, confirm_tx);
-        ConfirmationGuard {
-            correlation_id,
-            state: Arc::clone(&self.state),
+    ) -> core_types::Result<ConfirmationGuard> {
+        let rpc = Rpc::of(request).ok_or_else(|| {
+            core_types::Error::Ipc("confirmation payload has no RPC contract".into())
+        })?;
+        if responder != rpc.owner()
+            && !matches!(
+                (rpc, responder),
+                (
+                    Rpc::ProfileActivate | Rpc::ProfileDeactivate,
+                    Daemon::Secrets
+                )
+            )
+        {
+            return Err(core_types::Error::Ipc(
+                "confirmation responder does not own this RPC".into(),
+            ));
         }
+        let registration = Uuid::new_v4();
+        let mut confirmations = self.state.confirmations.write().await;
+        match confirmations.entry(correlation_id) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(core_types::Error::Ipc(format!(
+                    "confirmation {correlation_id} is already registered"
+                )));
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Confirmation {
+                    registration,
+                    responder,
+                    rpc,
+                    tx: confirm_tx,
+                });
+            }
+        }
+        Ok(ConfirmationGuard {
+            correlation_id,
+            registration,
+            state: Arc::clone(&self.state),
+        })
     }
 
     /// Send a frame to the connection of the daemon `daemon_name` (the
@@ -635,13 +725,77 @@ async fn route_frame(state: &ServerState, sender_conn_id: u64, payload: &[u8]) {
     };
 
     if let Some(correlation_id) = msg.correlation_id {
-        deliver_response(state, correlation_id, &stamped).await;
+        deliver_response(
+            state,
+            correlation_id,
+            msg.verified_sender_name.as_deref(),
+            &msg.payload,
+            &stamped,
+        )
+        .await;
         return;
     }
-    if msg.expects_response {
-        track_request(state, msg.msg_id, sender_conn_id).await;
+    if Rpc::is_response(&msg.payload) {
+        tracing::warn!(msg_id = %msg.msg_id, "response without correlation dropped");
+        return;
+    }
+    let rpc = Rpc::of(&msg.payload);
+    if msg.expects_response && rpc.is_none() {
+        deny(
+            state,
+            sender_conn_id,
+            msg.msg_id,
+            "payload has no request owner".into(),
+        )
+        .await;
+        return;
+    }
+    if let Some(rpc) = rpc {
+        let owner = rpc.owner();
+        if msg.expects_response && !track_request(state, msg.msg_id, sender_conn_id, rpc).await {
+            deny(
+                state,
+                sender_conn_id,
+                msg.msg_id,
+                "request ID is already pending".into(),
+            )
+            .await;
+            return;
+        }
+        let delivered = {
+            let conns = state.connections.read().await;
+            let targets: Vec<_> = conns
+                .values()
+                .filter(|conn| {
+                    conn.verified_name.as_deref() == Some(owner.name())
+                        && conn.security_clearance >= msg.security_level
+                })
+                .collect();
+            matches!(targets.as_slice(), [target] if target.tx.try_send(stamped.to_vec()).is_ok())
+        };
+        if !delivered {
+            if msg.expects_response {
+                state.pending_requests.write().await.remove(&msg.msg_id);
+            }
+            deny(
+                state,
+                sender_conn_id,
+                msg.msg_id,
+                format!("{}: no unique available responder", owner.name()),
+            )
+            .await;
+        }
+        return;
     }
     broadcast(state, sender_conn_id, msg.security_level, &stamped).await;
+}
+
+/// Refuse request `msg_id` of connection `conn_id` with `reason`
+/// (`send_access_denied`); a connection already gone has no one to tell.
+async fn deny(state: &ServerState, conn_id: u64, msg_id: Uuid, reason: String) {
+    if let Some(conn) = state.connections.read().await.get(&conn_id) {
+        send_access_denied(conn, msg_id, state.epoch, reason);
+    }
 }
 
 /// Admit `msg` from connection `sender_conn_id`, returning the sender's
@@ -660,9 +814,7 @@ async fn admit(
     msg: &Message<EventKind>,
 ) -> Option<(Option<String>, Option<TrustVector>)> {
     let mut conns = state.connections.write().await;
-    let Some(conn) = conns.get_mut(&sender_conn_id) else {
-        return Some((None, None));
-    };
+    let conn = conns.get_mut(&sender_conn_id)?;
     match conn.daemon_id {
         Some(known) if known != msg.sender => {
             tracing::warn!(
@@ -714,6 +866,23 @@ async fn admit(
         );
         return None;
     }
+    let payload_identity_matches = match &msg.payload {
+        EventKind::ConfigStatusResponse { daemon, .. } => {
+            conn.verified_name.as_deref() == Some(daemon.name())
+        }
+        EventKind::DaemonStarted { daemon_id, .. }
+        | EventKind::ConfigReloaded { daemon_id, .. } => *daemon_id == msg.sender,
+        _ => true,
+    };
+    if !payload_identity_matches {
+        send_access_denied(
+            conn,
+            msg.msg_id,
+            state.epoch,
+            "payload identity differs from authenticated sender".into(),
+        );
+        return None;
+    }
     Some((conn.verified_name.clone(), conn.trust_vector.clone()))
 }
 
@@ -744,22 +913,39 @@ async fn bind_name(state: &ServerState, name: &str, conn_id: u64) {
 /// Remember that connection `conn_id` waits for the response to request
 /// `msg_id`, forgetting requests older than [`PENDING_REQUEST_TTL`]: their
 /// requesters have given up.
-async fn track_request(state: &ServerState, msg_id: Uuid, conn_id: u64) {
+async fn track_request(state: &ServerState, msg_id: Uuid, conn_id: u64, rpc: Rpc) -> bool {
     let now = Instant::now();
     let mut pending = state.pending_requests.write().await;
     pending.retain(|_, request| now.duration_since(request.sent_at) < PENDING_REQUEST_TTL);
-    pending.insert(
-        msg_id,
-        PendingRequest {
-            conn_id: Some(conn_id),
-            sent_at: now,
-        },
-    );
+    match pending.entry(msg_id) {
+        std::collections::hash_map::Entry::Occupied(_) => false,
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(PendingRequest {
+                rpc,
+                conn_id: Some(conn_id),
+                sent_at: now,
+            });
+            true
+        }
+    }
 }
 
 /// Forget request `correlation_id` and return its requester.
-async fn take_requester(state: &ServerState, correlation_id: &Uuid) -> Requester {
-    match state.pending_requests.write().await.remove(correlation_id) {
+async fn take_requester(
+    state: &ServerState,
+    correlation_id: &Uuid,
+    responder: Option<&str>,
+    response: &EventKind,
+) -> Requester {
+    let mut pending = state.pending_requests.write().await;
+    if !pending.get(correlation_id).is_some_and(|request| {
+        responder == Some(request.rpc.owner().name())
+            && request.rpc.accepts(response)
+            && request.sent_at.elapsed() < PENDING_REQUEST_TTL
+    }) {
+        return Requester::Unknown;
+    }
+    match pending.remove(correlation_id) {
         Some(PendingRequest {
             conn_id: Some(conn_id),
             ..
@@ -772,19 +958,33 @@ async fn take_requester(state: &ServerState, correlation_id: &Uuid) -> Requester
 /// Deliver the response to request `correlation_id`: to a confirmed-RPC
 /// waiter of the host when one is registered, and to the connection that
 /// sent the request.
-async fn deliver_response(state: &ServerState, correlation_id: Uuid, frame: &[u8]) {
-    let confirmation = state
-        .confirmations
-        .read()
-        .await
-        .get(&correlation_id)
-        .cloned();
-    if let Some(tx) = &confirmation
-        && tx.try_send(frame.to_vec()).is_err()
+async fn deliver_response(
+    state: &ServerState,
+    correlation_id: Uuid,
+    responder: Option<&str>,
+    response: &EventKind,
+    frame: &[u8],
+) {
+    let confirmation = {
+        let mut confirmations = state.confirmations.write().await;
+        if confirmations
+            .get(&correlation_id)
+            .is_some_and(|confirmation| {
+                responder == Some(confirmation.responder.name())
+                    && confirmation.rpc.accepts(response)
+            })
+        {
+            confirmations.remove(&correlation_id)
+        } else {
+            None
+        }
+    };
+    if let Some(confirmation) = &confirmation
+        && confirmation.tx.try_send(frame.to_vec()).is_err()
     {
         tracing::warn!(%correlation_id, "confirmed RPC response dropped: confirmation channel full");
     }
-    match take_requester(state, &correlation_id).await {
+    match take_requester(state, &correlation_id, responder, response).await {
         Requester::Connected(target) => {
             let conns = state.connections.read().await;
             if let Some(conn) = conns.get(&target)
@@ -855,6 +1055,12 @@ mod tests {
         encode_frame(msg).unwrap()
     }
 
+    fn denied() -> EventKind {
+        EventKind::AccessDenied {
+            reason: "test denial".into(),
+        }
+    }
+
     #[tokio::test]
     async fn only_requests_awaiting_a_response_are_tracked() {
         let state = state_with_one_connection().await;
@@ -879,6 +1085,17 @@ mod tests {
             state.epoch,
         )
         .expecting_response();
+        let (tx, _rx) = mpsc::channel(8);
+        state.connections.write().await.insert(
+            2,
+            ConnectionState {
+                daemon_id: None,
+                verified_name: Some(Daemon::Profile.name().into()),
+                tx,
+                security_clearance: SecurityLevel::Internal,
+                trust_vector: None,
+            },
+        );
         route_frame(&state, 1, &frame(&request)).await;
         let pending = state.pending_requests.read().await;
         assert_eq!(pending.len(), 1);
@@ -889,25 +1106,31 @@ mod tests {
     async fn a_requester_that_disconnected_is_told_apart_from_no_request() {
         let state = state_with_one_connection().await;
         let (answered, abandoned) = (Uuid::now_v7(), Uuid::now_v7());
-        track_request(&state, answered, 1).await;
+        track_request(&state, answered, 1, Rpc::Status).await;
         assert_eq!(
-            take_requester(&state, &answered).await,
+            take_requester(&state, &answered, Some(Daemon::Profile.name()), &denied()).await,
             Requester::Connected(1)
         );
         assert_eq!(
-            take_requester(&state, &answered).await,
+            take_requester(&state, &answered, Some(Daemon::Profile.name()), &denied()).await,
             Requester::Unknown,
             "a response is delivered once"
         );
 
-        track_request(&state, abandoned, 1).await;
+        track_request(&state, abandoned, 1, Rpc::Status).await;
         close(&state, 1, Instant::now()).await;
         assert_eq!(
-            take_requester(&state, &abandoned).await,
+            take_requester(&state, &abandoned, Some(Daemon::Profile.name()), &denied()).await,
             Requester::Disconnected
         );
         assert_eq!(
-            take_requester(&state, &Uuid::now_v7()).await,
+            take_requester(
+                &state,
+                &Uuid::now_v7(),
+                Some(Daemon::Profile.name()),
+                &denied()
+            )
+            .await,
             Requester::Unknown
         );
     }
@@ -919,6 +1142,7 @@ mod tests {
         state.pending_requests.write().await.insert(
             expired,
             PendingRequest {
+                rpc: Rpc::Status,
                 conn_id: Some(1),
                 sent_at: Instant::now()
                     .checked_sub(PENDING_REQUEST_TTL)
@@ -926,12 +1150,411 @@ mod tests {
             },
         );
         let current = Uuid::now_v7();
-        track_request(&state, current, 1).await;
+        track_request(&state, current, 1, Rpc::Status).await;
         let pending = state.pending_requests.read().await;
         assert!(
             !pending.contains_key(&expired),
             "a request past the TTL is forgotten"
         );
         assert!(pending.contains_key(&current));
+    }
+
+    #[tokio::test]
+    async fn wrong_responder_cannot_consume_a_pending_request() {
+        let state = state_with_one_connection().await;
+        let id = Uuid::now_v7();
+        track_request(&state, id, 1, Rpc::SecretList).await;
+        for name in [None, Some(Daemon::Launcher.name())] {
+            assert_eq!(
+                take_requester(&state, &id, name, &denied()).await,
+                Requester::Unknown
+            );
+            assert!(state.pending_requests.read().await.contains_key(&id));
+        }
+        assert_eq!(
+            take_requester(&state, &id, Some(Daemon::Secrets.name()), &denied()).await,
+            Requester::Connected(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_request_ids_preserve_the_original_route() {
+        let state = state_with_one_connection().await;
+        let id = Uuid::now_v7();
+        assert!(track_request(&state, id, 1, Rpc::SecretList).await);
+        assert!(!track_request(&state, id, 2, Rpc::LaunchQuery).await);
+        assert_eq!(
+            take_requester(&state, &id, Some(Daemon::Secrets.name()), &denied()).await,
+            Requester::Connected(1)
+        );
+    }
+
+    fn config_response(daemon: Daemon) -> EventKind {
+        EventKind::ConfigStatusResponse {
+            daemon,
+            status: core_types::ConfigConsumerStatus {
+                accepted: None,
+                applied: None,
+                observation: core_types::ConfigStatus {
+                    reconciliation: core_types::ReconcileStatus::Pending,
+                    watch: core_types::WatchStatus::Native,
+                },
+                application: core_types::ConfigApplication::Pending,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn host_publication_only_delivers_uncorrelated_announcements() {
+        let root = tempfile::tempdir().unwrap();
+        let bus = BusServer::bind(
+            &root.path().join("bus.sock"),
+            crate::noise::generate_keypair().unwrap().into_inner(),
+            ClearanceRegistry::new(),
+            NoiseSuite::default(),
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        bus.register(DaemonId::new(), SecurityLevel::Internal, tx)
+            .await;
+        let ctx = crate::message::MessageContext::new(DaemonId::new());
+        let announcement = Message::new(
+            &ctx,
+            EventKind::WmActivateOverlay,
+            SecurityLevel::Internal,
+            bus.epoch(),
+        );
+        bus.publish(b"malformed", SecurityLevel::Internal).await;
+        for message in [
+            Message::new(
+                &ctx,
+                EventKind::StatusRequest,
+                SecurityLevel::Internal,
+                bus.epoch(),
+            ),
+            Message::new(
+                &ctx,
+                config_response(Daemon::Profile),
+                SecurityLevel::Internal,
+                bus.epoch(),
+            ),
+            Message::new(
+                &ctx,
+                EventKind::WmActivateOverlay,
+                SecurityLevel::Internal,
+                bus.epoch(),
+            )
+            .with_correlation(Uuid::new_v4()),
+            Message::new(
+                &ctx,
+                EventKind::WmActivateOverlay,
+                SecurityLevel::Internal,
+                bus.epoch(),
+            )
+            .expecting_response(),
+        ] {
+            bus.publish(&frame(&message), SecurityLevel::Internal).await;
+            assert!(rx.try_recv().is_err());
+        }
+        bus.publish(&frame(&announcement), SecurityLevel::Open)
+            .await;
+        assert!(rx.try_recv().is_err());
+        bus.publish(&frame(&announcement), SecurityLevel::Internal)
+            .await;
+        let received: Message<EventKind> = decode_frame(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(received.msg_id, announcement.msg_id);
+        assert_eq!(
+            received.verified_sender_name.as_deref(),
+            Some(Daemon::Profile.name())
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmation_registration_validates_contract_and_preserves_existing_waiter() {
+        let root = tempfile::tempdir().unwrap();
+        let bus = BusServer::bind(
+            &root.path().join("bus.sock"),
+            crate::noise::generate_keypair().unwrap().into_inner(),
+            ClearanceRegistry::new(),
+            NoiseSuite::default(),
+        )
+        .unwrap();
+        let id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel(4);
+        for (responder, request) in [
+            (Daemon::Secrets, EventKind::WmActivateOverlay),
+            (Daemon::Launcher, EventKind::SecretsStateRequest),
+        ] {
+            assert!(
+                bus.register_confirmation(id, responder, &request, tx.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(bus.state.confirmations.read().await.is_empty());
+        }
+        let guard = bus
+            .register_confirmation(id, Daemon::Secrets, &EventKind::SecretsStateRequest, tx)
+            .await
+            .unwrap();
+        let (other_tx, mut other_rx) = mpsc::channel(4);
+        assert!(
+            bus.register_confirmation(
+                id,
+                Daemon::Secrets,
+                &EventKind::SecretsStateRequest,
+                other_tx,
+            )
+            .await
+            .is_err()
+        );
+        deliver_response(
+            &bus.state,
+            id,
+            Some(Daemon::Secrets.name()),
+            &denied(),
+            b"original",
+        )
+        .await;
+        assert_eq!(rx.try_recv().unwrap(), b"original");
+        assert!(other_rx.try_recv().is_err());
+        drop(guard);
+        assert!(bus.state.confirmations.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn socket_answers_preserve_the_route_until_the_schema_matches() {
+        let state = state_with_one_connection().await;
+        let (request_tx, mut request_rx) = mpsc::channel(8);
+        state.connections.write().await.get_mut(&1).unwrap().tx = request_tx;
+        let (tx, mut responder_rx) = mpsc::channel(8);
+        state.connections.write().await.insert(
+            2,
+            ConnectionState {
+                daemon_id: None,
+                verified_name: Some(Daemon::Secrets.name().into()),
+                tx,
+                security_clearance: SecurityLevel::SecretsOnly,
+                trust_vector: None,
+            },
+        );
+        let request = Message::new(
+            &crate::message::MessageContext::new(DaemonId::new()),
+            EventKind::ConfigStatusRequest {
+                daemon: Daemon::Secrets,
+            },
+            SecurityLevel::Internal,
+            state.epoch,
+        )
+        .expecting_response();
+        route_frame(&state, 1, &frame(&request)).await;
+        assert!(responder_rx.try_recv().is_ok());
+        let ctx = crate::message::MessageContext::new(DaemonId::new());
+        for payload in [
+            EventKind::SecretListResponse {
+                keys: vec![],
+                denial: None,
+            },
+            config_response(Daemon::Launcher),
+        ] {
+            let reply = Message::new(&ctx, payload, SecurityLevel::Internal, state.epoch)
+                .with_correlation(request.msg_id);
+            route_frame(&state, 2, &frame(&reply)).await;
+            assert!(request_rx.try_recv().is_err());
+            assert!(
+                state
+                    .pending_requests
+                    .read()
+                    .await
+                    .contains_key(&request.msg_id)
+            );
+        }
+        let reply = Message::new(
+            &ctx,
+            config_response(Daemon::Secrets),
+            SecurityLevel::Internal,
+            state.epoch,
+        )
+        .with_correlation(request.msg_id);
+        route_frame(&state, 2, &frame(&reply)).await;
+        let received: Message<EventKind> = decode_frame(&request_rx.try_recv().unwrap()).unwrap();
+        assert_eq!(received.msg_id, reply.msg_id);
+        assert_eq!(
+            received.verified_sender_name.as_deref(),
+            Some(Daemon::Secrets.name())
+        );
+        assert!(
+            !state
+                .pending_requests
+                .read()
+                .await
+                .contains_key(&request.msg_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_answers_preserve_pending_and_confirmation_routes() {
+        let state = state_with_one_connection().await;
+        let id = Uuid::now_v7();
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        state.connections.write().await.get_mut(&1).unwrap().tx = request_tx;
+        assert!(track_request(&state, id, 1, Rpc::ConfigStatus(Daemon::Secrets)).await);
+        let (tx, mut confirmation_rx) = mpsc::channel(4);
+        state.confirmations.write().await.insert(
+            id,
+            Confirmation {
+                registration: Uuid::new_v4(),
+                responder: Daemon::Secrets,
+                rpc: Rpc::ConfigStatus(Daemon::Secrets),
+                tx,
+            },
+        );
+        for response in [
+            EventKind::SecretListResponse {
+                keys: vec![],
+                denial: None,
+            },
+            config_response(Daemon::Launcher),
+        ] {
+            deliver_response(
+                &state,
+                id,
+                Some(Daemon::Secrets.name()),
+                &response,
+                b"invalid",
+            )
+            .await;
+            assert!(request_rx.try_recv().is_err());
+            assert!(confirmation_rx.try_recv().is_err());
+            assert!(state.pending_requests.read().await.contains_key(&id));
+            assert!(state.confirmations.read().await.contains_key(&id));
+        }
+        deliver_response(
+            &state,
+            id,
+            Some(Daemon::Secrets.name()),
+            &config_response(Daemon::Secrets),
+            b"valid",
+        )
+        .await;
+        assert_eq!(request_rx.try_recv().unwrap(), b"valid");
+        assert_eq!(confirmation_rx.try_recv().unwrap(), b"valid");
+        assert!(!state.pending_requests.read().await.contains_key(&id));
+        assert!(!state.confirmations.read().await.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn disconnected_senders_are_not_admitted() {
+        let state = state_with_one_connection().await;
+        let message = Message::new(
+            &crate::message::MessageContext::new(DaemonId::new()),
+            EventKind::StatusRequest,
+            SecurityLevel::Internal,
+            state.epoch,
+        );
+        assert!(admit(&state, 2, &message).await.is_none());
+        close(&state, 1, Instant::now()).await;
+        assert!(admit(&state, 1, &message).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmations_are_consumed_once_by_the_authenticated_owner() {
+        let state = state_with_one_connection().await;
+        let id = Uuid::now_v7();
+        let (tx, mut rx) = mpsc::channel(4);
+        state.confirmations.write().await.insert(
+            id,
+            Confirmation {
+                registration: Uuid::new_v4(),
+                responder: Daemon::Secrets,
+                rpc: Rpc::SecretsState,
+                tx,
+            },
+        );
+        deliver_response(
+            &state,
+            id,
+            Some(Daemon::Launcher.name()),
+            &denied(),
+            b"forged",
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+        assert!(state.confirmations.read().await.contains_key(&id));
+        deliver_response(
+            &state,
+            id,
+            Some(Daemon::Secrets.name()),
+            &denied(),
+            b"accepted",
+        )
+        .await;
+        assert_eq!(rx.try_recv().unwrap(), b"accepted");
+        assert!(!state.confirmations.read().await.contains_key(&id));
+        deliver_response(
+            &state,
+            id,
+            Some(Daemon::Secrets.name()),
+            &denied(),
+            b"duplicate",
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn delayed_confirmation_cleanup_preserves_a_replacement_route() {
+        let id = Uuid::new_v4();
+        let old = Uuid::new_v4();
+        let current = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut routes = HashMap::from([(
+            id,
+            Confirmation {
+                registration: current,
+                responder: Daemon::Secrets,
+                rpc: Rpc::SecretsState,
+                tx,
+            },
+        )]);
+        remove_confirmation(&mut routes, id, old);
+        assert!(routes.contains_key(&id));
+        remove_confirmation(&mut routes, id, current);
+        assert!(routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn published_requests_are_private_without_creating_pending_routes() {
+        let state = state_with_one_connection().await;
+        let (owner_tx, mut owner_rx) = mpsc::channel(1);
+        let (other_tx, mut other_rx) = mpsc::channel(1);
+        for (id, name, tx) in [
+            (2, Daemon::Secrets.name(), owner_tx),
+            (3, Daemon::Launcher.name(), other_tx),
+        ] {
+            state.connections.write().await.insert(
+                id,
+                ConnectionState {
+                    daemon_id: None,
+                    verified_name: Some(name.into()),
+                    tx,
+                    security_clearance: SecurityLevel::SecretsOnly,
+                    trust_vector: None,
+                },
+            );
+        }
+        let request = Message::new(
+            &crate::message::MessageContext::new(DaemonId::new()),
+            EventKind::SecretList {
+                profile: core_types::TrustProfileName::try_from("work").unwrap(),
+            },
+            SecurityLevel::Internal,
+            state.epoch,
+        );
+        assert!(!request.expects_response);
+        route_frame(&state, 1, &frame(&request)).await;
+        let delivered: Message<EventKind> = decode_frame(&owner_rx.try_recv().unwrap()).unwrap();
+        assert_eq!(delivered.msg_id, request.msg_id);
+        assert!(other_rx.try_recv().is_err());
+        assert!(state.pending_requests.read().await.is_empty());
     }
 }

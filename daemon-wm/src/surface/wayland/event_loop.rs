@@ -187,6 +187,14 @@ fn run_stub_loop(
     let mut warned = false;
     while let Ok(cmd) = cmd_rx.recv() {
         let reply = match cmd {
+            // No renderer holds settings here; the controller's settings
+            // are the daemon's, so the configuration is applied.
+            OverlayCmd::Reconfigure { reply, .. } => {
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(()));
+                }
+                continue;
+            }
             OverlayCmd::Quit => break,
             OverlayCmd::HideAndSync => OverlayEvent::SurfaceUnmapped,
             OverlayCmd::ShowBorder | OverlayCmd::ShowFull { .. } => {

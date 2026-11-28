@@ -12,12 +12,12 @@ use crate::mru::MruStore;
 use crate::surface::wayland::{OverlayCmd, OverlayEvent};
 use crate::winlist::{Refresh, Windows};
 use anyhow::Context;
-use core_config::{Config, WmConfig};
+use core_config::WmConfig;
 use core_crypto::SecureVec;
 use core_ipc::BusClient;
 use core_layout::Layout;
 use core_types::{EventKind, LaunchOutcome, SecurityLevel, Window};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Longest wait for the overlay to unmap before a window is activated.
 const UNMAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -43,7 +43,7 @@ pub struct Runtime {
     pub backend: Backend,
     pub client: BusClient,
     /// The live configuration (default profile for launches).
-    pub config_state: Arc<RwLock<Config>>,
+    pub config_state: core_daemon::ConfigApplicationState,
     pub controller: OverlayController,
     /// The compositor's window list.
     pub windows: Windows,
@@ -321,8 +321,8 @@ impl Runtime {
     /// Ask daemon-launcher to launch `request` under the configured default
     /// profile. A request daemon-launcher does not answer is `Failed`.
     async fn launch(&self, request: &LaunchRequest) -> LaunchOutcome {
-        let profile = match self.config_state.read() {
-            Ok(config) => config.global.default_profile.clone(),
+        let profile = match self.config_state.snapshot() {
+            Ok(snapshot) => snapshot.config.global.default_profile.clone(),
             Err(e) => {
                 return LaunchOutcome::Failed {
                     reason: format!("configuration state unavailable: {e}"),

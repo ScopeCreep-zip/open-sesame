@@ -1,24 +1,22 @@
 # Protocol Evolution
 
-This page documents how the Open Sesame IPC protocol is versioned and how its schema
-changes. The governing rule: every binary on a bus is built from one compilation unit and
-deployed together, so there is exactly one wire format at a time and no decode path for any
-other.
+This page documents how the Open Sesame IPC protocol is versioned and how its schema changes. The
+governing rule: every binary on a bus is built from one compilation unit and deployed together, so
+there is exactly one wire format at a time and no decode path for any other.
 
 ## One Format, No Compatibility Decode
 
-The schema is the `EventKind` enum in `core-types/src/events.rs`, carried in the
-`Message<T>` envelope of `core-ipc/src/message.rs`. Neither has a compatibility path:
+The schema is the `EventKind` enum in `core-types/src/events.rs`, carried in the `Message<T>`
+envelope of `core-ipc/src/message.rs`. Neither has a compatibility path:
 
-- `EventKind` has no catch-all variant. A discriminant the decoder does not know is a decode
-  error, not a silently ignored event.
-- No field carries `#[serde(default)]`. A message missing a field is a decode error, not a
-  message completed with defaults.
+- `EventKind` has no catch-all variant. A discriminant the decoder does not know is a decode error,
+  not a silently ignored event.
+- No field carries `#[serde(default)]`. A message missing a field is a decode error, not a message
+  completed with defaults.
 
-A bus where one binary is older than another is a deployment fault, and it fails loudly at
-the first message rather than misinterpreting one. `core-types` tests pin both properties:
-`an_unknown_variant_is_a_decode_error` (JSON and postcard) and
-`a_missing_field_is_a_decode_error`.
+A bus where one binary is older than another is a deployment fault, and it fails loudly at the first
+message rather than misinterpreting one. `core-types` tests pin both properties:
+`an_unknown_variant_is_a_decode_error` (JSON and postcard) and `a_missing_field_is_a_decode_error`.
 
 ## Postcard Encoding Properties
 
@@ -28,71 +26,70 @@ necessary.
 ### Externally-Tagged Enums
 
 `EventKind` uses serde's default externally-tagged representation; postcard does not support
-adjacently tagged enums (`#[serde(tag = "...", content = "...")]`). Postcard encodes the
-variant as a varint index, followed by the variant's fields in declaration order. A variant
-is identified by its position in the enum.
+adjacently tagged enums (`#[serde(tag = "...", content = "...")]`). Postcard encodes the variant as
+a varint index, followed by the variant's fields in declaration order. A variant is identified by
+its position in the enum.
 
 ### Positional Field Encoding
 
-Postcard encodes struct and variant fields positionally, by declaration order, not by name.
-Every field is always serialized: an `Option` field is written as its `None` tag, never
-skipped (`skip_serializing_if` would shift every later field). A decoder built from other
-source reads a different sequence of fields; the wire version and the single compilation
-unit exist so that this never happens on a running bus.
+Postcard encodes struct and variant fields positionally, by declaration order, not by name. Every
+field is always serialized: an `Option` field is written as its `None` tag, never skipped
+(`skip_serializing_if` would shift every later field). A decoder built from other source reads a
+different sequence of fields; the wire version and the single compilation unit exist so that this
+never happens on a running bus.
 
 ## Wire Version Field
 
-`Message<T>` begins with `wire_version: u8`, the `WIRE_VERSION` constant of `message.rs`
-(currently `4`), stamped by `Message::new()`. The source documents the contract:
+`Message<T>` begins with `wire_version: u8`, the `WIRE_VERSION` constant of `message.rs` (currently
+`5`), stamped by `Message::new()`. The source documents the contract:
 
 > WIRE FORMAT CONTRACT:
 >
-> Fields in positional order: `wire_version`, `msg_id`, `correlation_id`,
-> `sender`, `timestamp`, `payload`, `security_level`,
-> `verified_sender_name`, `origin_installation`, `agent_id`,
+> Fields in positional order: `wire_version`, `msg_id`, `correlation_id`, `sender`, `timestamp`,
+> `payload`, `security_level`, `verified_sender_name`, `origin_installation`, `agent_id`,
 > `trust_snapshot` (v3), `expects_response` (v4).
 >
-> Every binary on a bus is built from one compilation unit and deployed
-> together; there is no decode path for other versions.
+> Every binary on a bus is built from one compilation unit and deployed together; there is no decode
+> path for other versions.
 
-The version records the envelope's generations:
+The version records envelope and payload schema generations:
 
 - **v2:** 8 fields (`wire_version` through `verified_sender_name`).
 - **v3:** 11 fields (adds `origin_installation`, `agent_id`, `trust_snapshot`).
-- **v4:** 12 fields (adds `expects_response`: the bus records a pending request only for a
-  sender that waits for its response).
+- **v4:** 12 fields (adds `expects_response`: the bus records a pending request only for a sender
+  that waits for its response).
+- **v5:** configuration status requests and responses, revision-bearing `ConfigReloaded`, explicit
+  inventory errors in status responses, and `PolicyUnavailable` secret denials. The envelope retains
+  its twelve fields.
 
-There is no version negotiation and no version-conditional decoding: every daemon on a bus
-runs the same version.
+There is no version negotiation and no version-conditional decoding: every daemon on a bus runs the
+same version.
 
 ## Changing the Schema
 
-Any change to `EventKind` or `Message<T>` (a variant added, removed, or reordered; a field
-added, removed, reordered, or retyped) changes the wire format. The procedure is the same for
-all of them:
+Any change to `EventKind` or `Message<T>` (a variant added, removed, or reordered; a field added,
+removed, reordered, or retyped) changes the wire format. The procedure is the same for all of them:
 
 1. Make the change in `core-types` or `core-ipc`.
-2. For an `EventKind` variant, add or update its arm in the `impl_event_debug!` invocation at
-   the bottom of `events.rs`. The macro is exhaustive, so a missing arm is a compile error. A
-   variant carrying secret material goes in the `sensitive` section with its secret fields
-   marked `REDACTED`; every other variant goes in the `transparent` section.
-3. For a `Message<T>` field, increment `WIRE_VERSION` and update `MessageContext` when the
-   sender populates the field.
+2. For an `EventKind` variant, add or update its arm in the `impl_event_debug!` invocation at the
+   bottom of `events.rs`. The macro is exhaustive, so a missing arm is a compile error. A variant
+   carrying secret material goes in the `sensitive` section with its secret fields marked
+   `REDACTED`; every other variant goes in the `transparent` section.
+3. Increment `WIRE_VERSION` for every wire schema change, including payload changes. Update
+   `MessageContext` when a new envelope field is populated by the sender.
 4. Rebuild and deploy every binary together.
 
 ## Sensitivity Redaction
 
-The `Debug` implementation of `EventKind` is generated by `impl_event_debug!`, which
-separates sensitive variants from transparent ones. The sensitive variants are
-`SecretGetResponse` (`value`), `SecretSet` (`value`), and `FactorSubmit` (`key_material`):
-their secret-bearing fields render as `[REDACTED; N bytes]`. The secret bytes themselves
-travel in `SensitiveBytes`, whose own `Debug` is redacted and whose storage is protected
-memory.
+The `Debug` implementation of `EventKind` is generated by `impl_event_debug!`, which separates
+sensitive variants from transparent ones. The sensitive variants are `SecretGetResponse` (`value`),
+`SecretSet` (`value`), and `FactorSubmit` (`key_material`): their secret-bearing fields render as
+`[REDACTED; N bytes]`. The secret bytes themselves travel in `SensitiveBytes`, whose own `Debug` is
+redacted and whose storage is protected memory.
 
 ## What a Deployment Must Change Together
 
-Because there is one wire format, these change only by rebuilding and redeploying every
-binary:
+Because there is one wire format, these change only by rebuilding and redeploying every binary:
 
 - `EventKind` variants and their fields.
 - The `Message<T>` envelope.

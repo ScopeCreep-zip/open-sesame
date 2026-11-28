@@ -4,6 +4,7 @@
 //! cannot be completed is a failed check carrying the error as its value,
 //! never a guessed value.
 
+mod config;
 mod daemon;
 mod memory;
 mod network;
@@ -77,8 +78,9 @@ pub enum Status {
 
 /// The categories `selection` names, in their canonical order, each once.
 fn expand(selection: &[DoctorCategory]) -> Vec<DoctorCategory> {
-    const ORDER: [DoctorCategory; 5] = [
+    const ORDER: [DoctorCategory; 6] = [
         DoctorCategory::Daemon,
+        DoctorCategory::Config,
         DoctorCategory::Memory,
         DoctorCategory::Network,
         DoctorCategory::Sandbox,
@@ -100,7 +102,7 @@ fn expand(selection: &[DoctorCategory]) -> Vec<DoctorCategory> {
 /// # Errors
 ///
 /// When the clock is before the Unix epoch or JSON cannot be written.
-pub fn cmd_doctor(
+pub async fn cmd_doctor(
     layout: &Layout,
     categories: &[DoctorCategory],
     format: DoctorFormat,
@@ -111,6 +113,7 @@ pub fn cmd_doctor(
     for category in expand(categories) {
         checks.extend(match category {
             DoctorCategory::Daemon => daemon::checks(layout),
+            DoctorCategory::Config => config::checks(layout).await,
             DoctorCategory::Memory => memory::checks(layout),
             DoctorCategory::Network => network::checks(),
             DoctorCategory::Sandbox => sandbox::checks(layout),
@@ -248,6 +251,6 @@ mod tests {
             ]),
             [DoctorCategory::Daemon, DoctorCategory::Platform]
         );
-        assert_eq!(expand(&[DoctorCategory::All]).len(), 5);
+        assert_eq!(expand(&[DoctorCategory::All]).len(), 6);
     }
 }
