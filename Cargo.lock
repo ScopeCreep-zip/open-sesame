@@ -1385,6 +1385,8 @@ checksum = "ef3ce06df3ac230a4f5c91bfd3e3961cd66f177bd9964c87deb3cce59a54fb7b"
 dependencies = [
  "curl-sys",
  "libc",
+ "openssl-probe",
+ "openssl-sys",
  "schannel",
  "socket2",
  "windows-sys 0.61.2",
@@ -1399,6 +1401,7 @@ dependencies = [
  "cc",
  "libc",
  "libz-sys",
+ "openssl-sys",
  "pkg-config",
  "vcpkg",
  "windows-sys 0.61.2",
