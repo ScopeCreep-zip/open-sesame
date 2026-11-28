@@ -35,9 +35,29 @@ fn shortcuts(launcher: &KeyCombo) -> Vec<NewShortcut> {
 /// Whether the portal on `connection` (a session bus) implements
 /// `GlobalShortcuts`.
 pub async fn available(connection: &zbus::Connection) -> bool {
-    GlobalShortcuts::with_connection(connection.clone())
+    // ashpd defaults failed version reads to version 1, so constructing its
+    // proxy does not establish that the service or interface exists.
+    let proxy: zbus::Proxy<'_> = match zbus::proxy::Builder::new(connection)
+        .destination("org.freedesktop.portal.Desktop")
+        .path("/org/freedesktop/portal/desktop")
+        .interface("org.freedesktop.portal.GlobalShortcuts")
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
         .await
-        .is_ok()
+    {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            tracing::debug!(%error, "GlobalShortcuts portal proxy invalid");
+            return false;
+        }
+    };
+    match proxy.get_property::<u32>("version").await {
+        Ok(version) => version > 0,
+        Err(error) => {
+            tracing::debug!(%error, "GlobalShortcuts portal unavailable");
+            false
+        }
+    }
 }
 
 /// Whether this session's portal implements `GlobalShortcuts`; `false`
