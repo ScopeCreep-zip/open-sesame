@@ -132,7 +132,9 @@ fi
 echo "Verifying the default vault is unlocked..."
 status_out=$(sesame status 2>&1) || true
 echo "$status_out"
-if ! grep -Eq '^ *default +unlocked' <<<"$status_out"; then
+# CLI status styles the vault state even when captured from a non-TTY.
+status_plain=$(printf '%s\n' "$status_out" | sed 's/\x1b\[[0-9;]*m//g')
+if ! grep -Eq '^ *default +unlocked' <<<"$status_plain"; then
     echo "ERROR: the default vault is not unlocked after sesame-init" >&2
     journalctl --user -u sesame-init.service --no-pager -n 50 2>&1 || true
     exit 1

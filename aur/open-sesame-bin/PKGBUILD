@@ -18,7 +18,7 @@ makedepends=(
     'glibc'
     'libseccomp'
     'libxkbcommon'
-    'openssl'
+    'openssl-3'
     'wayland'
 )
 options=('!strip' '!debug')
@@ -37,8 +37,8 @@ sha256sums_aarch64=('HEADLESS_AARCH64_SHA' 'DESKTOP_AARCH64_SHA')
 package_open-sesame-bin() {
     install=open-sesame-bin.install
     pkgdesc="Encrypted secret vaults, trust profiles, application launching, and snippet expansion"
-    # openssl: libcrypto.so.3, which daemon-secrets' SQLCipher store links.
-    depends=('glibc' 'gcc-libs' 'libseccomp' 'openssl')
+    # Release binaries link OpenSSL 3; Arch's default openssl provides ABI 4.
+    depends=('glibc' 'gcc-libs' 'libseccomp' 'openssl-3')
     optdepends=(
         'openssh: SSH agent authentication'
         'open-sesame-desktop: window switcher, clipboard, input capture'

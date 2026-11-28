@@ -332,9 +332,15 @@ spawn() {
     --setenv=XDG_CACHE_HOME="$XDG_CACHE_HOME" --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" \
     --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     --setenv=XDG_SESSION_TYPE="$XDG_SESSION_TYPE" --setenv=PDS_LOG_FORMAT="$PDS_LOG_FORMAT" \
-    "$LIFECYCLE_BIN/$daemon" || fail "$daemon did not start (journalctl --user -u $unit)"
+    "$LIFECYCLE_BIN/$daemon" || {
+      host journalctl --user --unit="$unit" --output=cat --no-pager >&2 || true
+      fail "$daemon did not start (journalctl --user -u $unit)"
+    }
   pid=$(host "$HOST_SYSTEMCTL" --user show --property=MainPID --value "$unit")
-  [[ "$pid" != 0 ]] || fail "$daemon is not running (journalctl --user -u $unit)"
+  if [[ "$pid" == 0 ]]; then
+    host journalctl --user --unit="$unit" --output=cat --no-pager >&2 || true
+    fail "$daemon is not running (journalctl --user -u $unit)"
+  fi
   echo "$pid" >"$LIFECYCLE_ROOT/pids/$daemon"
   caps_of "$pid" >"$LIFECYCLE_ROOT/caps/$daemon"
 }
