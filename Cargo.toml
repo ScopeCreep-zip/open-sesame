@@ -212,7 +212,7 @@ assert_cmd = "2"
 predicates = "3"
 
 # -- Git (pure-Rust + bundled libgit2) --
-gix = { version = "0.91", default-features = false, features = ["sha1", "blocking-network-client", "blocking-http-transport-curl", "worktree-mutation", "status"] }
+gix = { version = "0.91", default-features = false, features = ["sha1", "blocking-network-client", "blocking-http-transport-curl-openssl", "worktree-mutation", "status"] }
 git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 
 # -- HTTP client (forge API calls) --
