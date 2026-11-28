@@ -154,3 +154,17 @@ case "$doctor" in
     exit 1
     ;;
 esac
+
+# Exercise the installed Git transport: a system libcurl can hide missing
+# TLS features that leave the release's bundled libcurl unable to use HTTPS.
+echo "Verifying HTTPS repository cloning..."
+(
+    clone_root=$(mktemp -d)
+    trap 'rm -rf "$clone_root"' EXIT
+    export SESAME_WORKSPACE_ROOT=$clone_root
+    # Clone prints the checkout path resolved from the workspace configuration.
+    checkout=$(sesame workspace clone --no-workspace https://github.com/octocat/Hello-World)
+    printf '%s\n' "$checkout"
+    test -d "$checkout/.git"
+    test -s "$checkout/README"
+)
