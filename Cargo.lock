@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "core-auth"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "async-trait",
  "core-crypto",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "blake3",
  "core-layout",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "core-crypto"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "core-daemon"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "core-fuzzy"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "core-types",
  "criterion",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "core-ipc"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "blake3",
  "core-layout",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "core-layout"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "core-types",
  "dirs",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "core-memory"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "core-profile"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "blake3",
  "core-types",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "core-secrets"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "core-crypto",
  "core-types",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "core-memory",
  "postcard",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "core-workspace-types"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-clipboard"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-input"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-launcher"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-profile"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-secrets"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-snippets"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-wm"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1947,11 +1947,11 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "1.19.0"
+version = "1.20.0"
 
 [[package]]
 name = "extension-sdk"
-version = "1.19.0"
+version = "1.20.0"
 
 [[package]]
 name = "fallible-iterator"
@@ -4634,7 +4634,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open-sesame"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4725,9 +4725,9 @@ dependencies = [
 
 [[package]]
 name = "owo-colors"
-version = "4.4.0"
+version = "4.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
+checksum = "83aa311bb2fea0015723819d8bb5a009ed8587a124a6e05e5d2a7462b23f7edc"
 
 [[package]]
 name = "p256"
@@ -4966,7 +4966,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-linux"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "ashpd",
  "core-layout",
@@ -4996,11 +4996,11 @@ dependencies = [
 
 [[package]]
 name = "platform-macos"
-version = "1.19.0"
+version = "1.20.0"
 
 [[package]]
 name = "platform-windows"
-version = "1.19.0"
+version = "1.20.0"
 
 [[package]]
 name = "plotters"
@@ -5825,7 +5825,7 @@ dependencies = [
 
 [[package]]
 name = "sesame-workspace"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "core-config",
  "core-layout",
@@ -7435,7 +7435,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "clap",

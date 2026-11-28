@@ -100,6 +100,128 @@ gh attestation verify "open-sesame-desktop-v${TAG#v}-$(uname -m).tar.gz" --owner
 
 ---
 
+## [1.20.0](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.19.0...v1.20.0) (2026-11-28)
+
+### ⚠ BREAKING CHANGES
+
+* **config:** wire version 5; ConfigWatcher::new/with_callback no
+longer take paths and return ConfigState; system_policy_file,
+resolve_config_real_dirs and announce_config_reloaded removed;
+file::write returns WriteError; register_confirmation and
+take_pending_request signatures changed; lock_state is a Result.
+
+### ✨ Features
+
+* **config:** journaled config transactions and acknowledged reloads ([8dd67a1](https://github.com/ScopeCreep-zip/open-sesame/commit/8dd67a1597bbe04b609624f1c1a4954ebf4ab0cc))
+
+### 🐛 Bug Fixes
+
+* **runtime:** verify portal availability and packaged startup ([2710e17](https://github.com/ScopeCreep-zip/open-sesame/commit/2710e17d231267ba15903a0b5807084c4a920631))
+* start every daemon under its shipped unit and gate releases on it ([39f9795](https://github.com/ScopeCreep-zip/open-sesame/commit/39f97951e5d59247ddcb44b595045e31725aec87))
+* **units:** start daemon-launcher where user namespaces lack capabilities ([204fced](https://github.com/ScopeCreep-zip/open-sesame/commit/204fceda68bde6b0da7e78ff3ac584b84d0eaa93))
+
+## Quick Install
+
+### APT Repository (Pop!_OS / Ubuntu / Debian)
+
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/open-sesame.gpg
+echo "deb [signed-by=/usr/share/keyrings/open-sesame.gpg] https://scopecreep-zip.github.io/open-sesame noble main" \
+  | sudo tee /etc/apt/sources.list.d/open-sesame.list
+sudo apt update
+```
+
+**Desktop** (window switcher + clipboard + input + headless):
+```bash
+sudo apt install -y open-sesame open-sesame-desktop
+```
+
+**Headless** (secrets, profiles, launcher, snippets — no GUI):
+```bash
+sudo apt install -y open-sesame
+```
+
+### DNF Repository (Fedora / RHEL)
+
+```bash
+sudo curl -fsSL https://scopecreep-zip.github.io/open-sesame/RPM-GPG-KEY \
+  -o /etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+sudo tee /etc/yum.repos.d/open-sesame.repo << 'EOF'
+[open-sesame]
+name=Open Sesame RPMs (GitHub Pages)
+baseurl=https://scopecreep-zip.github.io/open-sesame/repo/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-open-sesame
+EOF
+```
+
+**Desktop** (window switcher + clipboard + input + headless):
+```bash
+sudo dnf install -y open-sesame open-sesame-desktop
+```
+
+**Headless** (secrets, profiles, launcher, snippets — no GUI):
+```bash
+sudo dnf install -y open-sesame
+```
+
+### AUR (Arch Linux)
+
+```bash
+yay -S open-sesame-bin open-sesame-desktop-bin
+```
+
+Or from the self-hosted pacman repo:
+```bash
+curl -fsSL https://scopecreep-zip.github.io/open-sesame/gpg.key | sudo pacman-key --add -
+sudo pacman-key --lsign-key 2B8C6081C58479B3FB7DA66F8581D8C7DCEF93E3
+# Add to /etc/pacman.conf:
+# [open-sesame]
+# SigLevel = Required DatabaseRequired
+# Server = https://scopecreep-zip.github.io/open-sesame/arch/$arch
+sudo pacman -Syu open-sesame-bin open-sesame-desktop-bin
+```
+
+### Direct Download
+
+See release assets below for `.deb` and `.rpm` packages (amd64/arm64) with SHA256 checksums.
+
+## What You Get
+
+### open-sesame (headless)
+- **Encrypted secret vaults** with multi-factor auth (password + SSH agent)
+- **Trust profiles** with context-driven activation
+- **Application launcher** with fuzzy search and secret injection
+- **Snippet expansion** with variable substitution
+
+### open-sesame-desktop (requires open-sesame)
+- **Alt+Space** — Window switcher overlay with Vimium-style letter hints
+- **Alt+Tab** — Quick-switch to previous window
+- **Clipboard manager** with security classification
+- **Keyboard input capture** for compositor-independent shortcuts
+
+## Documentation
+
+- **[User Guide](https://scopecreep-zip.github.io/open-sesame/book/)** — Configuration, keybindings, theming
+- **[API Docs](https://scopecreep-zip.github.io/open-sesame/doc/open_sesame/)** — Library reference
+
+## Supply Chain Security
+
+All release artifacts include [SLSA Build Provenance](https://slsa.dev/) attestations. Verify with:
+```bash
+gh attestation verify "open-sesame-linux-$(uname -m).deb" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-linux-$(uname -m).deb" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-linux-$(uname -m).rpm" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-linux-$(uname -m).rpm" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-v${TAG#v}-$(uname -m).tar.gz" --owner ScopeCreep-zip
+gh attestation verify "open-sesame-desktop-v${TAG#v}-$(uname -m).tar.gz" --owner ScopeCreep-zip
+```
+
+---
+
 ## [1.19.0](https://github.com/ScopeCreep-zip/open-sesame/compare/v1.18.0...v1.19.0) (2026-11-27)
 
 ### ✨ Features
