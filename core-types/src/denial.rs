@@ -11,7 +11,6 @@ pub enum UnlockRejectedReason {
 
 /// Why a secret operation was denied (typed denial, replaces ambiguous empty responses).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum SecretDenialReason {
     Locked,
     ProfileNotActive,
@@ -19,6 +18,8 @@ pub enum SecretDenialReason {
     RateLimited,
     NotFound,
     VaultError(String),
+    /// No accepted, applicable authorization policy is available at admission.
+    PolicyUnavailable(String),
 }
 
 /// Why a launch was denied. Machine-readable so the WM can take action

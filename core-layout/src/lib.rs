@@ -103,6 +103,9 @@ pub struct Environment {
     pub session_type: Option<OsString>,
     /// The system data directories, colon-separated (`$XDG_DATA_DIRS`).
     pub data_dirs: Option<OsString>,
+    /// Explicit extra configuration read roots (`$SESAME_CONFIG_READ_ROOTS`,
+    /// platform path-list syntax). These grant entire directory trees.
+    pub config_read_roots: Option<OsString>,
 }
 
 impl Environment {
@@ -132,6 +135,7 @@ impl Environment {
             login_shell: var("SHELL").map(PathBuf::from),
             session_type: var("XDG_SESSION_TYPE"),
             data_dirs: var("XDG_DATA_DIRS"),
+            config_read_roots: var("SESAME_CONFIG_READ_ROOTS"),
         }
     }
 }
@@ -228,6 +232,7 @@ pub struct Layout {
     boot_dir: Option<PathBuf>,
     /// The system D-Bus socket when `$DBUS_SYSTEM_BUS_ADDRESS` is unset.
     system_bus: Option<PathBuf>,
+    deployment_root: PathBuf,
 }
 
 /// The platform's system files, or `None` where the platform has none.
@@ -322,6 +327,7 @@ impl Layout {
             group_database: PLATFORM_FILES.group_database.map(PathBuf::from),
             boot_dir: PLATFORM_FILES.boot_dir.map(PathBuf::from),
             system_bus: PLATFORM_FILES.system_bus.map(PathBuf::from),
+            deployment_root: PathBuf::from("/nix/store"),
         }
     }
 
@@ -354,6 +360,7 @@ impl Layout {
                 login_shell: None,
                 session_type: None,
                 data_dirs: Some(root.join("share").into_os_string()),
+                config_read_roots: None,
             },
             system_policy: Some(root.join("etc").join(PDS).join("policy.toml")),
             machine_id: Some(root.join("etc").join("machine-id")),
@@ -361,6 +368,7 @@ impl Layout {
             group_database: Some(root.join("etc").join("group")),
             boot_dir: Some(root.join("boot")),
             system_bus: Some(root.join("run").join("dbus").join("system_bus_socket")),
+            deployment_root: root.join("nix/store"),
         }
     }
 
@@ -428,6 +436,42 @@ impl Layout {
     /// The [`user_config_base`](Self::user_config_base) errors.
     pub fn config_dir(&self) -> Result<PathBuf> {
         Ok(self.user_config_base()?.join(PDS))
+    }
+
+    /// Declared read-only deployment roots, independent of current symlink targets.
+    ///
+    /// The immutable Nix store is an intentional whole-tree grant. Additional
+    /// deployments declare stable roots in the service environment before startup.
+    /// Roots must exist when Landlock is installed; adding a root requires restart.
+    ///
+    /// # Errors
+    ///
+    /// An explicitly declared root is relative or contains a parent traversal.
+    pub fn config_read_roots(&self) -> Result<Vec<PathBuf>> {
+        let mut roots = vec![self.deployment_root.clone()];
+        if let Some(parent) = self.system_policy_file().and_then(Path::parent) {
+            roots.push(parent.to_path_buf());
+        }
+        if let Some(value) = &self.env.config_read_roots {
+            for root in std::env::split_paths(value) {
+                if !root.is_absolute()
+                    || root
+                        .components()
+                        .any(|part| part == std::path::Component::ParentDir)
+                {
+                    return Err(Error::Malformed {
+                        location: "configuration read roots",
+                        input: "$SESAME_CONFIG_READ_ROOTS",
+                        value: value.to_string_lossy().into_owned(),
+                        expected: "absolute paths without parent traversal",
+                    });
+                }
+                roots.push(root);
+            }
+        }
+        roots.sort();
+        roots.dedup();
+        Ok(roots)
     }
 
     /// The user configuration file (`<config dir>/config.toml`).
@@ -535,6 +579,27 @@ impl Layout {
     /// The [`config_dir`](Self::config_dir) errors.
     pub fn installation_file(&self) -> Result<PathBuf> {
         Ok(self.config_dir()?.join("installation.toml"))
+    }
+
+    /// The lock cooperating configuration writers hold during commit and
+    /// interrupted-publication recovery (`<config dir>/.lock`).
+    ///
+    /// # Errors
+    ///
+    /// The [`config_dir`](Self::config_dir) errors.
+    pub fn config_lock_file(&self) -> Result<PathBuf> {
+        Ok(self.config_dir()?.join(".lock"))
+    }
+
+    /// The configuration journal (`<config dir>/.revision`), containing a
+    /// stable revision or pending publication's undo records. Readers accept
+    /// only observations bounded by the same stable revision.
+    ///
+    /// # Errors
+    ///
+    /// The [`config_dir`](Self::config_dir) errors.
+    pub fn config_revision_file(&self) -> Result<PathBuf> {
+        Ok(self.config_dir()?.join(".revision"))
     }
 
     /// The hash-chained audit log (`<config dir>/audit.jsonl`).
@@ -920,6 +985,14 @@ mod tests {
         assert_eq!(
             layout.audit_log().unwrap(),
             root.join("config/pds/audit.jsonl")
+        );
+        assert_eq!(
+            layout.config_lock_file().unwrap(),
+            root.join("config/pds/.lock")
+        );
+        assert_eq!(
+            layout.config_revision_file().unwrap(),
+            root.join("config/pds/.revision")
         );
         assert_eq!(
             layout.workspaces_file().unwrap(),

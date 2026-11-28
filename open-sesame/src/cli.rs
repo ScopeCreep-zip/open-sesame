@@ -141,6 +141,8 @@ pub enum DoctorCategory {
     All,
     /// Daemon units: running state, memory, restarts, uptime.
     Daemon,
+    /// Accepted source revision, watcher health, and acknowledged consumer application.
+    Config,
     /// Secret memory: `memfd_secret`, core dumps, swap.
     Memory,
     /// The environment proxy policy of git and forge transports.

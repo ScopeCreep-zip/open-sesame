@@ -2,6 +2,8 @@
 
 use core_layout::Layout;
 
+use crate::loader::{path_error, read_optional, utf8};
+
 /// The installation identity from `installation.toml`, or `None` before
 /// `sesame init` has created it.
 ///
@@ -12,20 +14,28 @@ use core_layout::Layout;
 pub fn load_installation(
     layout: &Layout,
 ) -> core_types::Result<Option<crate::schema::InstallationConfig>> {
+    crate::transaction::consistent(layout, || read_installation(layout))
+}
+
+fn read_installation(
+    layout: &Layout,
+) -> core_types::Result<Option<crate::schema::InstallationConfig>> {
     let path = layout.installation_file()?;
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(core_types::Error::Config(format!(
-                "failed to read {}: {e}",
-                path.display()
-            )));
-        }
-    };
-    toml::from_str(&contents)
-        .map(Some)
-        .map_err(|e| core_types::Error::Config(format!("failed to parse {}: {e}", path.display())))
+    read_optional(&path)?
+        .as_deref()
+        .map(|bytes| parse_installation(&path, bytes))
+        .transpose()
+}
+
+/// The installation identity `bytes` of `path` hold, checked to be one.
+pub(crate) fn parse_installation(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> core_types::Result<crate::InstallationConfig> {
+    let installation: crate::InstallationConfig = toml::from_str(utf8(path, bytes)?)
+        .map_err(|e| path_error(path, format!("cannot parse: {e}")))?;
+    installation.identity().map_err(|e| path_error(path, e))?;
+    Ok(installation)
 }
 
 /// The machine ID from `Layout::machine_id_file`, or `None` when the
@@ -40,17 +50,11 @@ pub fn read_machine_id(layout: &Layout) -> core_types::Result<Option<String>> {
     let Some(path) = layout.machine_id_file() else {
         return Ok(None);
     };
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let machine_id = contents.trim();
-            Ok((!machine_id.is_empty()).then(|| machine_id.to_owned()))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(core_types::Error::Config(format!(
-            "failed to read {}: {e}",
-            path.display()
-        ))),
-    }
+    let Some(bytes) = read_optional(path)? else {
+        return Ok(None);
+    };
+    let machine_id = utf8(path, &bytes)?.trim();
+    Ok((!machine_id.is_empty()).then(|| machine_id.to_owned()))
 }
 
 /// Write installation identity to `installation.toml` atomically,
@@ -68,12 +72,10 @@ pub fn write_installation(
     let contents = toml::to_string_pretty(config).map_err(|e| {
         core_types::Error::Config(format!("failed to serialize installation config: {e}"))
     })?;
-    core_layout::file::write(
-        &path,
-        contents.as_bytes(),
-        core_layout::file::Mode::OwnerOnly,
-    )
-    .map_err(|e| core_types::Error::Config(e.to_string()))
+    let mut transaction = crate::Transaction::for_update(layout)?;
+    transaction.read(&path)?;
+    transaction.write(&path, contents.as_bytes())?;
+    transaction.commit()
 }
 
 #[cfg(test)]

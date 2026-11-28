@@ -11,9 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use core_layout::Layout;
-use core_types::Error;
 
-use crate::loader::toml_files_in;
+use crate::loader::{LayerSpec, path_error, read_optional, utf8};
 use crate::schema::{WorkspaceConfig, WorkspaceConfigFragment};
 
 /// The workspace config files: `workspaces.toml`, then `workspaces.d/*.toml`
@@ -24,15 +23,21 @@ use crate::schema::{WorkspaceConfig, WorkspaceConfigFragment};
 /// The layout errors when the config directory cannot be placed, and
 /// `Error::Config` when `workspaces.d` exists but cannot be listed.
 pub(crate) fn workspace_config_files(layout: &Layout) -> core_types::Result<Vec<PathBuf>> {
-    let mut files = vec![layout.workspaces_file()?];
-    files.extend(toml_files_in(&layout.workspaces_drop_in_dir()?)?);
-    Ok(files)
+    Ok(LayerSpec::workspace(layout)?
+        .layers()?
+        .into_iter()
+        .map(|layer| layer.path)
+        .collect())
 }
 
-/// `contents` of `path` parsed as `T`.
-fn parse<T: serde::de::DeserializeOwned>(path: &Path, contents: &str) -> core_types::Result<T> {
-    toml::from_str(contents)
-        .map_err(|e| Error::Config(format!("failed to parse {}: {e}", path.display())))
+/// The `T` that `path` holds; `None` when it does not exist.
+fn parse<T: serde::de::DeserializeOwned>(path: &Path) -> core_types::Result<Option<T>> {
+    read_optional(path)?
+        .map(|bytes| {
+            toml::from_str(utf8(path, &bytes)?)
+                .map_err(|e| path_error(path, format!("cannot parse: {e}")))
+        })
+        .transpose()
 }
 
 /// Load workspace configuration from `workspaces.toml`.
@@ -41,33 +46,33 @@ fn parse<T: serde::de::DeserializeOwned>(path: &Path, contents: &str) -> core_ty
 /// order. Fragment links are additive. Fragment settings override only
 /// explicitly present fields.
 ///
-/// Returns a default config if no file exists.
+/// Returns a default config if no file exists. The files are read outside
+/// any cooperating writer's transaction, so the result never holds half of
+/// one. A fragment removed between listing and reading is absent.
 ///
 /// # Errors
 ///
 /// The layout errors when the config directory cannot be placed, and
 /// `Error::Config` naming the file when one exists but cannot be read or
-/// parsed, or `workspaces.d` cannot be listed.
+/// parsed, or `workspaces.d` cannot be listed, or when every read
+/// overlapped a transaction.
 pub fn load_workspace_config(layout: &Layout) -> core_types::Result<WorkspaceConfig> {
-    let base = layout.workspaces_file()?;
-    let mut config = match std::fs::read_to_string(&base) {
-        Ok(contents) => parse(&base, &contents)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => WorkspaceConfig::default(),
-        Err(e) => {
-            return Err(Error::Config(format!(
-                "failed to read {}: {e}",
-                base.display()
-            )));
-        }
-    };
+    crate::transaction::consistent(layout, || read_workspace_config(layout))
+}
 
-    for frag_path in toml_files_in(&layout.workspaces_drop_in_dir()?)? {
-        let contents = std::fs::read_to_string(&frag_path)
-            .map_err(|e| Error::Config(format!("failed to read {}: {e}", frag_path.display())))?;
-        let fragment: WorkspaceConfigFragment = parse(&frag_path, &contents)?;
+/// [`load_workspace_config`]'s read, outside the transaction check.
+fn read_workspace_config(layout: &Layout) -> core_types::Result<WorkspaceConfig> {
+    let files = workspace_config_files(layout)?;
+    let Some((base, fragments)) = files.split_first() else {
+        return Ok(WorkspaceConfig::default());
+    };
+    let mut config: WorkspaceConfig = parse(base)?.unwrap_or_default();
+    for path in fragments {
+        let Some(fragment) = parse::<WorkspaceConfigFragment>(path)? else {
+            continue;
+        };
         config.settings.apply_override(&fragment.settings);
         config.links.extend(fragment.links);
     }
-
     Ok(config)
 }

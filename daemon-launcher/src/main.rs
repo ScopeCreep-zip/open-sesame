@@ -107,54 +107,51 @@ struct PortalBinding {
 
 /// Bind the overlay shortcuts with `launcher` through this session's
 /// `GlobalShortcuts` portal; `None` (logged) without a session bus or a
-/// portal implementing it, or when binding fails.
+/// portal implementing it. Binding and activation-stream failures are errors.
 #[cfg(target_os = "linux")]
-async fn bind_portal(launcher: &KeyCombo) -> Option<PortalBinding> {
+async fn bind_portal(launcher: &KeyCombo) -> anyhow::Result<Option<PortalBinding>> {
     use platform_linux::global_shortcuts::{PortalShortcuts, available};
     let connection = match zbus::Connection::session().await {
         Ok(connection) => connection,
         Err(e) => {
             tracing::info!(error = %e, "no session bus: overlay shortcuts are not bound through a portal");
-            return None;
+            return Ok(None);
         }
     };
     if !available(&connection).await {
         tracing::info!(
             "the desktop portal does not implement GlobalShortcuts: the overlay shortcuts are the desktop's own bindings"
         );
-        return None;
+        return Ok(None);
     }
     let shortcuts = match PortalShortcuts::bind(&connection, launcher).await {
         Ok(shortcuts) => shortcuts,
         Err(e) => {
             tracing::warn!(error = %e, "overlay shortcuts not bound through the portal");
-            return None;
+            return Err(e.into());
         }
     };
     match shortcuts.activations().await {
-        Ok(activations) => Some(PortalBinding {
+        Ok(activations) => Ok(Some(PortalBinding {
             _connection: connection,
             _shortcuts: shortcuts,
             activations: Box::pin(activations),
             launcher: launcher.clone(),
-        }),
+        })),
         Err(e) => {
             tracing::warn!(error = %e, "portal shortcut activations unavailable");
-            None
+            Err(e.into())
         }
     }
 }
 
-/// The next overlay request a portal shortcut activates; never, without a
-/// binding or once its stream ends.
+/// The next shortcut activation, or `None` when an established binding is lost.
+/// Without a binding, reconciliation owns recovery.
 #[cfg(target_os = "linux")]
-async fn next_activation(portal: &mut Option<PortalBinding>) -> OverlayRequest {
+async fn next_activation(portal: &mut Option<PortalBinding>) -> Option<OverlayRequest> {
     use futures_util::StreamExt;
     match portal {
-        Some(binding) => match binding.activations.next().await {
-            Some(request) => request,
-            None => std::future::pending().await,
-        },
+        Some(binding) => binding.activations.next().await,
         None => std::future::pending().await,
     }
 }
@@ -167,6 +164,9 @@ struct Daemon {
     client: BusClient,
     #[cfg(target_os = "linux")]
     portal: Option<PortalBinding>,
+    /// Once adopted, portal shortcuts remain required across resource loss.
+    #[cfg(target_os = "linux")]
+    portal_required: bool,
 }
 
 impl Daemon {
@@ -320,21 +320,34 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             let own = next_activation(&mut self.portal);
             #[cfg(not(target_os = "linux"))]
-            let own = std::future::pending::<OverlayRequest>();
+            let own = std::future::pending::<Option<OverlayRequest>>();
             match events.next(&mut self.client, own).await? {
                 Wake::Message(msg) => self.handle(&msg).await,
-                Wake::ConfigReloaded(config) => {
+                Wake::ConfigReloaded(reload) => {
                     #[cfg(target_os = "linux")]
-                    self.rebind_if_changed(&config.global.launcher_key).await;
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = config;
-                    core_daemon::announce_config_reloaded(&self.client, &["launcher"]).await;
+                    if let Err(error) = self
+                        .rebind_if_changed(&reload.snapshot.config.global.launcher_key)
+                        .await
+                    {
+                        reload.reject(error.to_string());
+                        continue;
+                    }
+                    reload.applied(&self.client).await;
                 }
-                Wake::Own(request) => {
+                Wake::Own(Some(request)) => {
                     tracing::info!(request = request.id(), "overlay shortcut activated");
                     self.client
                         .publish_or_log("overlay request", request.event(), SecurityLevel::Internal)
                         .await;
+                }
+                Wake::Own(None) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.portal = None;
+                        events
+                            .application()
+                            .resource_lost("shortcut portal activation stream ended".into());
+                    }
                 }
                 Wake::Shutdown(_) => return Ok(()),
             }
@@ -342,19 +355,25 @@ impl Daemon {
     }
 
     /// Bind the portal shortcuts again when the reloaded `launcher` key
-    /// differs from the bound one: a portal session binds once, so the
-    /// old session is ended and a new one bound.
+    /// differs from the bound one or the binding was lost. Prepare the
+    /// replacement before releasing an existing session.
     #[cfg(target_os = "linux")]
-    async fn rebind_if_changed(&mut self, launcher: &KeyCombo) {
+    async fn rebind_if_changed(&mut self, launcher: &KeyCombo) -> anyhow::Result<()> {
         if self
             .portal
             .as_ref()
-            .is_some_and(|binding| binding.launcher != *launcher)
+            .is_none_or(|binding| binding.launcher != *launcher)
         {
             tracing::info!(%launcher, "launcher key changed: rebinding the portal shortcuts");
-            self.portal = None;
-            self.portal = bind_portal(launcher).await;
+            let replacement = bind_portal(launcher).await?;
+            anyhow::ensure!(
+                !self.portal_required || replacement.is_some(),
+                "shortcut portal disappeared during reconfiguration"
+            );
+            self.portal_required |= replacement.is_some();
+            self.portal = replacement;
         }
+        Ok(())
     }
 }
 
@@ -377,9 +396,14 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = Shutdown::register()?;
     let (layout, config) = core_daemon::startup()?;
+    let mut events = EventLoop::new(
+        IDENTITY.daemon,
+        shutdown,
+        core_daemon::watch_config(&layout, config)?,
+    );
+    let initial = events.candidate()?;
     #[cfg(target_os = "linux")]
-    let launcher_key = config.global.launcher_key.clone();
-    let mut events = EventLoop::new(shutdown, core_daemon::watch_config(&layout, config)?);
+    let launcher_key = initial.snapshot.config.global.launcher_key.clone();
 
     // Desktop entries are scanned once (blocking I/O); launches use the
     // cached Exec lines.
@@ -402,25 +426,29 @@ async fn main() -> anyhow::Result<()> {
     let client = core_daemon::connect_bus(&layout, &IDENTITY).await?;
     let launcher = launch::Launcher {
         cache: entry_cache,
-        config_state: Arc::clone(events.config_state()),
+        config_state: events.application().clone(),
         bus_socket: layout.bus_socket()?,
     };
 
     // Secure memory before any ProtectedAlloc use (fetched secrets).
     core_types::init_secure_memory();
-    core_daemon::announce_started(&client, &IDENTITY).await;
     #[cfg(target_os = "linux")]
-    platform_linux::systemd::notify_ready();
-    tracing::info!("daemon-launcher ready, entering event loop");
-
+    let portal = bind_portal(&launcher_key).await?;
     let mut daemon = Daemon {
         layout,
         engine,
         launcher,
         client,
         #[cfg(target_os = "linux")]
-        portal: bind_portal(&launcher_key).await,
+        portal_required: portal.is_some(),
+        #[cfg(target_os = "linux")]
+        portal,
     };
+    initial.applied(&daemon.client).await;
+    core_daemon::announce_started(&daemon.client, &IDENTITY).await;
+    #[cfg(target_os = "linux")]
+    platform_linux::systemd::notify_ready();
+    tracing::info!("daemon-launcher ready, entering event loop");
     daemon.serve(&mut events).await?;
 
     core_daemon::announce_stopped(&daemon.client).await;

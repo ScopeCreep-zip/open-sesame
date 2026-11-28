@@ -2,8 +2,8 @@
 
 Launch profiles define composable environment bundles that attach to application launches. Each
 profile specifies environment variables, secret references, an optional Nix devshell, and an
-optional working directory. Profiles are scoped to trust profiles and composed at launch time
-via tags.
+optional working directory. Profiles are scoped to trust profiles and composed at launch time via
+tags.
 
 ## Profile Structure
 
@@ -19,17 +19,15 @@ cwd = "/workspace/alice/github.com/org/repo"
 
 Each field is optional and defaults to empty:
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `env` | `BTreeMap<String, String>` | Static environment variables injected into the child process. |
-| `secrets` | `Vec<String>` | Secret names fetched from the vault and converted to env vars. |
-| `devshell` | `Option<String>` | Nix flake devshell reference. Wraps the command in `nix develop`. |
-| `cwd` | `Option<String>` | Absolute path used as the working directory for the spawned process. |
+- `env` (`BTreeMap<String, String>`): static environment variables injected into the child process.
+- `secrets` (`Vec<String>`): secret names fetched from the vault and converted to env vars.
+- `devshell` (`Option<String>`): Nix flake devshell reference. Wraps the command in `nix develop`.
+- `cwd` (`Option<String>`): absolute path used as the working directory for the spawned process.
 
 ## Tag System
 
-Key bindings in the window manager configuration reference launch profiles through the `tags`
-field on `WmKeyBinding`:
+Key bindings in the window manager configuration reference launch profiles through the `tags` field
+on `WmKeyBinding`:
 
 ```toml
 [profiles.default.wm.key_bindings.g]
@@ -39,27 +37,25 @@ tags = ["dev-rust", "ai-tools"]
 launch_args = ["--working-directory=/workspace/user/github.com/org/repo"]
 ```
 
-When a key binding triggers a launch, daemon-launcher resolves each tag against the configuration
-to compose the final environment. Tags are processed in order; the composition rules are
-described below.
+When a key binding triggers a launch, daemon-launcher resolves each tag against the configuration to
+compose the final environment. Tags are processed in order; the composition rules are described
+below.
 
 ## Cross-Profile Tag References
 
-Tags support qualified cross-profile references using the `profile:name` syntax. An unqualified
-tag resolves against the default (or explicitly specified) trust profile. A qualified tag
-resolves against a different trust profile.
+Tags support qualified cross-profile references using the `profile:name` syntax. An unqualified tag
+resolves against the default (or explicitly specified) trust profile. A qualified tag resolves
+against a different trust profile.
 
-| Tag | Resolution |
-| --- | --- |
-| `dev-rust` | Resolves `dev-rust` in the current trust profile. |
-| `work:corp` | Resolves `corp` in the `work` trust profile. |
+- `dev-rust` resolves `dev-rust` in the current trust profile.
+- `work:corp` resolves `corp` in the `work` trust profile.
 
-The parsing logic in `daemon-launcher/src/launch.rs` (`parse_tag`) splits on the first colon.
-If no colon is present, the tag is unqualified and uses the default profile.
+The parsing logic in `daemon-launcher/src/launch.rs` (`parse_tag`) splits on the first colon. If no
+colon is present, the tag is unqualified and uses the default profile.
 
 Cross-profile references allow a single key binding to compose environments from multiple trust
-boundaries. For example, a terminal binding might combine a personal development environment
-with corporate secrets:
+boundaries. For example, a terminal binding might combine a personal development environment with
+corporate secrets:
 
 ```toml
 tags = ["dev-rust", "work:corp-secrets"]
@@ -69,15 +65,15 @@ tags = ["dev-rust", "work:corp-secrets"]
 
 When multiple tags are specified, they are processed sequentially. The composition semantics are:
 
-- **Environment variables**: merged into a single `BTreeMap`. When the same key appears in
-  multiple tags, the later tag wins.
-- **Secrets**: accumulated. Duplicate secret names (same name, same trust profile) are
-  deduplicated; secrets from different trust profiles are kept independently.
+- **Environment variables**: merged into a single `BTreeMap`. When the same key appears in multiple
+  tags, the later tag wins.
+- **Secrets**: accumulated. Duplicate secret names (same name, same trust profile) are deduplicated;
+  secrets from different trust profiles are kept independently.
 - **Devshell**: last tag with a non-`None` devshell wins.
 - **Working directory**: last tag with a non-`None` `cwd` wins.
 
-This is implemented in `daemon-launcher/src/launch.rs` in the `launch_entry` function. The
-composed environment is applied to the child process after secret fetching completes.
+This is implemented in `daemon-launcher/src/launch.rs` in the `launch_entry` function. The composed
+environment is applied to the child process after secret fetching completes.
 
 ## Configuration Schema
 
@@ -99,14 +95,28 @@ secrets = ["anthropic-api-key"]
 ```
 
 The full path in the config tree is
-`profiles.<trust_profile_name>.launch_profiles.<launch_profile_name>`. Daemon-launcher reads
-these from the hot-reloaded configuration state (`ConfigWatcher`) at launch time, so changes
-take effect without daemon restart.
+`profiles.<trust_profile_name>.launch_profiles.<launch_profile_name>`. Daemon-launcher reads these
+from the hot-reloaded configuration state (`ConfigWatcher`) at launch time, so changes take effect
+without daemon restart.
+
+Configuration loads in this order: system policy, user `config.toml`, sorted `config.d/*.toml`
+fragments, then sorted `profiles/<trust-profile>/config.toml` overrides under the PDS configuration
+directory. An override may contain only its own `[profiles.<trust-profile>]` table and nested
+tables. Global settings or another trust profile in that file reject the configuration. Startup and
+reload use the same schema and semantic validation; a rejected reload retains the last accepted
+configuration.
+
+Configuration editors stage their complete changeset before publication. Dry-run performs the same
+in-memory edits and conflict checks without creating files or acquiring a writer lock. Commit checks
+all recorded reads under the writer lock, records a durable undo journal, and publishes the files.
+Readers reject pending journals. The next updating command recovers interrupted writes; unexpected
+external contents stop recovery and remain untouched. External editors do not acquire this lock, so
+an edit after a conflict check cannot be protected by this protocol.
 
 ## Denial Handling
 
-If a tag references a trust profile or launch profile that does not exist, daemon-launcher
-returns a structured `LaunchDenial` to the window manager:
+If a tag references a trust profile or launch profile that does not exist, daemon-launcher returns a
+structured `LaunchDenial` to the window manager:
 
 - `LaunchDenial::ProfileNotFound` -- the trust profile name in a qualified tag does not exist.
 - `LaunchDenial::LaunchProfileNotFound` -- the launch profile name does not exist within the

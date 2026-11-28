@@ -56,6 +56,12 @@ pub struct Respawns {
 }
 
 impl Respawns {
+    /// Whether resource recovery must finish before configuration application.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        self.due.is_some()
+    }
+
     /// Schedule a respawn of the overlay thread that just died.
     ///
     /// # Errors
@@ -195,6 +201,8 @@ impl Runtime {
     /// released.
     pub async fn overlay_died(&mut self, respawns: &mut Respawns) -> anyhow::Result<()> {
         tracing::error!("overlay thread has died (event channel closed), scheduling respawn");
+        self.config_state
+            .resource_lost("overlay thread exited".into());
         respawns.schedule()?;
         self.controller.force_idle();
         self.password_buffer.clear();
@@ -218,17 +226,64 @@ impl Runtime {
         Ok(())
     }
 
-    /// Adopt a reloaded configuration's window-manager settings.
-    pub async fn reconfigure(&mut self, config: &Config) {
-        self.wm_config = wm_config_of(config);
-        self.refresh_theme();
-        core_daemon::announce_config_reloaded(&self.client, &["wm"]).await;
+    /// The overlay command installing `config`'s renderer settings, the
+    /// acknowledgement sent on `reply` when there is one.
+    fn reconfiguration(
+        config: &WmConfig,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) -> OverlayCmd {
+        OverlayCmd::Reconfigure {
+            theme: Box::new(OverlayTheme::from_config(config)),
+            columns: crate::render::Columns::of(config),
+            reply,
+        }
     }
 
-    /// Send the overlay the theme of the current settings and desktop.
+    /// Apply a reloaded configuration's window-manager settings: the
+    /// controller adopts them once the overlay acknowledges its renderer
+    /// settings, and only then is the reload acknowledged applied.
+    ///
+    /// # Errors
+    ///
+    /// When the overlay is gone or does not acknowledge in time: the
+    /// controller and renderer may disagree, so the daemon stops for a
+    /// restart.
+    pub async fn reconfigure(&mut self, reload: core_daemon::Reload) -> anyhow::Result<()> {
+        let candidate = wm_config_of(&reload.snapshot.config);
+        let (reply, acknowledged) = tokio::sync::oneshot::channel();
+        if self
+            .overlay_cmd_tx
+            .send(Self::reconfiguration(&candidate, Some(reply)))
+            .is_err()
+        {
+            reload.reject("overlay command channel closed".into());
+            anyhow::bail!("overlay unavailable during configuration application");
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), acknowledged).await;
+        match result {
+            Ok(Ok(Ok(()))) => {
+                self.wm_config = candidate;
+                reload.applied(&self.client).await;
+                Ok(())
+            }
+            Ok(Ok(Err(reason))) => {
+                reload.reject(reason);
+                Ok(())
+            }
+            other => {
+                let reason = format!("overlay configuration acknowledgement failed: {other:?}");
+                reload.reject(reason.clone());
+                // An unconfirmed renderer may still apply the queued command;
+                // restarting prevents serving a mixed controller/renderer state.
+                anyhow::bail!(reason)
+            }
+        }
+    }
+
+    /// Send the overlay the renderer settings of the applied configuration
+    /// and the desktop theme as it is now.
     fn refresh_theme(&self) {
-        let theme = OverlayTheme::from_config(&self.wm_config);
-        self.overlay(OverlayCmd::UpdateTheme(Box::new(theme)));
+        self.overlay(Self::reconfiguration(&self.wm_config, None));
     }
 
     /// Handle a bus message from another daemon: overlay activations, key

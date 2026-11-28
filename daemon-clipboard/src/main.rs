@@ -365,6 +365,8 @@ impl History {
 struct Scope {
     namespace: Option<uuid::Uuid>,
     default: TrustProfileName,
+    /// Latest authenticated default, retained across configuration notifications.
+    reported_default: Option<ProfileId>,
 }
 
 impl Scope {
@@ -396,6 +398,7 @@ impl Scope {
             );
             return;
         }
+        self.reported_default = Some(current);
         let Some(name) = self.name_of(config, current) else {
             tracing::warn!(
                 profile = %current,
@@ -406,24 +409,29 @@ impl Scope {
         tracing::info!(profile = %name, "new selections go to the new default profile");
         self.default = name;
     }
-}
 
-/// The installation namespace from `installation.toml`, `None` before
-/// `sesame init` writes it.
-fn installation_namespace(layout: &core_layout::Layout) -> Option<uuid::Uuid> {
-    match core_config::load_installation(layout) {
-        Ok(Some(installation)) => Some(installation.namespace),
-        Ok(None) => {
-            tracing::info!(
-                "no installation identity yet (sesame init): selections are not recorded"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "installation identity unreadable: selections are not recorded");
-            None
+    /// Resolve an announcement that arrived before its configuration.
+    fn adopt_config(&mut self, config: &Config) {
+        self.default = config.global.default_profile.clone();
+        if let Some(current) = self.reported_default
+            && let Some(name) = self.name_of(config, current)
+        {
+            self.default = name;
         }
     }
+}
+
+/// The namespace of the installation identity applied with `snapshot`'s
+/// configuration, `None` before `sesame init` writes it.
+fn installation_namespace(snapshot: &core_config::ConfigSnapshot) -> Option<uuid::Uuid> {
+    let namespace = snapshot
+        .installation
+        .as_ref()
+        .map(|installation| installation.namespace);
+    if namespace.is_none() {
+        tracing::info!("no installation identity yet (sesame init): selections are not recorded");
+    }
+    namespace
 }
 
 /// The response to `payload` when it is a clipboard request. A failed
@@ -584,20 +592,25 @@ async fn run(
     config: Config,
     mut history: History,
 ) -> anyhow::Result<()> {
-    let mut scope = Scope {
-        namespace: installation_namespace(layout),
-        default: config.global.default_profile.clone(),
-    };
-    let mut config_now = config.clone();
     let mut events = EventLoop::new(
+        IDENTITY.daemon,
         Shutdown::register()?,
         core_daemon::watch_config(layout, config)?,
     );
+    let initial = events.candidate()?;
+    let mut scope = Scope {
+        namespace: installation_namespace(&initial.snapshot),
+        default: initial.snapshot.config.global.default_profile.clone(),
+        reported_default: None,
+    };
+    let mut config_now = initial.snapshot.config.clone();
     let mut captures = start_capture(layout);
     let mut client = core_daemon::connect_bus(layout, &IDENTITY).await?;
     if let Some(default) = reported_default(&client).await {
+        scope.reported_default = scope.id(&default);
         scope.default = default;
     }
+    initial.applied(&client).await;
 
     core_daemon::announce_started(&client, &IDENTITY).await;
     #[cfg(target_os = "linux")]
@@ -615,9 +628,10 @@ async fn run(
                 }
             }
             Wake::ConfigReloaded(reloaded) => {
-                config_now = reloaded;
-                scope.namespace = installation_namespace(layout);
-                core_daemon::announce_config_reloaded(&client, &["clipboard"]).await;
+                scope.namespace = installation_namespace(&reloaded.snapshot);
+                scope.adopt_config(&reloaded.snapshot.config);
+                config_now = reloaded.snapshot.config.clone();
+                reloaded.applied(&client).await;
             }
             #[cfg(target_os = "linux")]
             Wake::Own(Source::Captured(mut capture)) => {
@@ -655,6 +669,13 @@ async fn record(
     config: &Config,
     capture: &platform_linux::clipboard::Capture,
 ) {
+    if scope
+        .reported_default
+        .is_some_and(|id| scope.name_of(config, id).is_none())
+    {
+        tracing::debug!("selection not recorded while the reported default profile is unresolved");
+        return;
+    }
     let Some(profile) = scope.id(&scope.default) else {
         tracing::debug!("selection not recorded before sesame init");
         return;
@@ -802,6 +823,7 @@ mod tests {
         Scope {
             namespace: Some(ns()),
             default: profile(default),
+            reported_default: None,
         }
     }
 
@@ -1067,6 +1089,7 @@ mod tests {
         let scope = Scope {
             namespace: None,
             default: profile("work"),
+            reported_default: None,
         };
         let mut history = History::new(schema());
         assert_eq!(scope.id(&profile("work")), None);
@@ -1093,5 +1116,45 @@ mod tests {
         assert_eq!(scope.name_of(&config, work), Some(profile("work")));
         let unknown = ProfileId::of_profile(&ns(), "elsewhere");
         assert_eq!(scope.name_of(&config, unknown), None);
+    }
+
+    #[test]
+    fn authenticated_default_announcements_wait_for_their_configuration() {
+        let mut scope = scope("work");
+        let old: Config = toml::from_str("[profiles.work]\n").unwrap();
+        let new: Config = toml::from_str("[profiles.work]\n[profiles.home]\n").unwrap();
+        let current = ProfileId::of_profile(&ns(), "home");
+        let mut message = Message::new(
+            &core_ipc::MessageContext::new(core_types::DaemonId::new()),
+            EventKind::DefaultProfileChanged {
+                previous: ProfileId::of_profile(&ns(), "work"),
+                current,
+            },
+            SecurityLevel::Internal,
+            Instant::now(),
+        );
+        scope.follow_default(&old, &message, current);
+        assert!(
+            scope.reported_default.is_none(),
+            "unverified announcements cannot pause capture"
+        );
+        message.verified_sender_name = Some(Daemon::Profile.name().into());
+        scope.follow_default(&old, &message, current);
+        assert_eq!(scope.reported_default, Some(current));
+        scope.adopt_config(&old);
+        assert_eq!(scope.reported_default, Some(current));
+        scope.adopt_config(&new);
+        assert_eq!(scope.default, profile("home"));
+        scope.adopt_config(&new);
+        assert_eq!(
+            scope.default,
+            profile("home"),
+            "reload must retain the reported default"
+        );
+        scope.adopt_config(&old);
+        assert_eq!(scope.name_of(&old, current), None);
+        assert_eq!(scope.reported_default, Some(current));
+        scope.adopt_config(&new);
+        assert_eq!(scope.default, profile("home"));
     }
 }

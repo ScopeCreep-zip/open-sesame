@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use core_profile::AuditAction;
 use core_types::{Daemon, EventKind};
 
+use crate::KEY_ROTATION_GRACE;
 use crate::dispatch::Hub;
-use crate::{KEY_ROTATION_GRACE, KNOWN_DAEMONS};
 
 /// A rotation between its phases: each daemon phase 1 issued a pending key
 /// to, with its registry generation then.
@@ -44,7 +44,7 @@ impl Hub {
         let generations = self.bus.registry_mut().await.snapshot_generations();
         let mut pending = PendingRotation::default();
         let mut failed = Vec::new();
-        for &(daemon, _) in KNOWN_DAEMONS {
+        for daemon in crate::client_daemons() {
             let Some(&generation) = generations.get(daemon.name()) else {
                 tracing::error!(%daemon, "known daemon not registered, not rotated");
                 failed.push(daemon.name());

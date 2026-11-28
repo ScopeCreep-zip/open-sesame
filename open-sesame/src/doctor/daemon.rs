@@ -3,17 +3,28 @@
 use anyhow::Context;
 use core_layout::Layout;
 
-use super::probe::{self, DAEMONS};
+use super::probe;
 use super::{Check, Status};
 
 const CATEGORY: &str = "daemon";
 
 pub fn checks(layout: &Layout) -> Vec<Check> {
     let mut results = Vec::new();
-    for daemon in DAEMONS {
-        let id = |check: &str| format!("daemon.{}.{check}", daemon.name);
+    let daemons = match probe::expected_daemons() {
+        Ok(daemons) => daemons,
+        Err(error) => {
+            return vec![Check::probe_failed(
+                "daemon.applicability",
+                CATEGORY,
+                &error,
+            )];
+        }
+    };
+    for daemon in daemons {
+        let unit = daemon.unit();
+        let id = |check: &str| format!("daemon.{}.{check}", daemon.short_name());
 
-        let active = match probe::unit_property(daemon.unit, "ActiveState") {
+        let active = match probe::unit_property(&unit, "ActiveState") {
             Ok(active) => active,
             Err(e) => {
                 results.push(Check::probe_failed(id("running"), CATEGORY, &e));
@@ -29,14 +40,14 @@ pub fn checks(layout: &Layout) -> Vec<Check> {
             if running {
                 String::new()
             } else {
-                format!("systemctl --user status {}", daemon.unit)
+                format!("systemctl --user status {unit}")
             },
         ));
         if !running {
             continue;
         }
 
-        let pid = match probe::main_pid(daemon.unit) {
+        let pid = match probe::main_pid(&unit) {
             Ok(Some(pid)) => pid,
             Ok(None) => {
                 results.push(Check::new(
@@ -55,12 +66,12 @@ pub fn checks(layout: &Layout) -> Vec<Check> {
         };
 
         results.push(
-            memory_check(layout, daemon.unit, pid)
+            memory_check(layout, &unit, pid)
                 .unwrap_or_else(|e| Check::probe_failed(id("memory"), CATEGORY, &e))
                 .with_id(id("memory")),
         );
         results.push(
-            restart_check(daemon.unit)
+            restart_check(&unit)
                 .unwrap_or_else(|e| Check::probe_failed(id("restarts"), CATEGORY, &e))
                 .with_id(id("restarts")),
         );

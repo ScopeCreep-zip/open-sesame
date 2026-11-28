@@ -51,6 +51,8 @@ pub(crate) fn format_denial_reason(
             format!("secret '{key}' not found in profile '{profile}'")
         }
         SecretDenialReason::VaultError(e) => format!("vault error: {e}"),
-        _ => format!("secret access denied for '{key}': {reason:?}"),
+        SecretDenialReason::PolicyUnavailable(reason) => {
+            format!("authorization policy unavailable: {reason}")
+        }
     }
 }

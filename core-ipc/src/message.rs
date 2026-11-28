@@ -17,7 +17,7 @@ use uuid::Uuid;
 ///
 /// Every binary on a bus is built from one compilation unit and deployed
 /// together; there is no decode path for other versions.
-pub const WIRE_VERSION: u8 = 4;
+pub const WIRE_VERSION: u8 = 5;
 
 /// The IPC bus message envelope wrapping any payload type.
 ///
@@ -169,7 +169,7 @@ mod tests {
     fn message_new_sets_wire_version() {
         let msg = make_test_message();
         assert_eq!(msg.wire_version, WIRE_VERSION);
-        assert_eq!(msg.wire_version, 4);
+        assert_eq!(msg.wire_version, 5);
     }
 
     #[test]

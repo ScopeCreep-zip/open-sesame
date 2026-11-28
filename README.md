@@ -1296,7 +1296,7 @@ All-mode (both factors required):
 | `core-ipc` | Noise IK transport (X25519 + ChaChaPoly + BLAKE2s), BusServer/BusClient, clearance registry, postcard framing, UCred binding |
 | `core-types` | Canonical type system: `EventKind` protocol schema, `DaemonId`, `SecurityLevel`, `TrustProfileName`, `SensitiveBytes` with ProtectedAlloc backing and custom serde Visitor |
 | `core-crypto` | Argon2id KDF, BLAKE3 HKDF, AES-256-GCM encryption, `SecureBytes`/`SecureVec` with ProtectedAlloc backing and zero-copy transfer |
-| `core-config` | TOML configuration schema with XDG layered inheritance, inotify hot-reload watcher, config validation |
+| `core-config` | TOML configuration schema with XDG layered inheritance, hot-reload reconciliation (directory watches and a 5 s timer), config validation |
 | `core-auth` | Multi-factor authentication: `PasswordBackend` (Argon2id KEK wrapping), `SshAgentBackend` (deterministic signature KEK), `AuthDispatcher`, `VaultMetadata` persistence |
 | `core-secrets` | SQLCipher database abstraction (`SqlCipherStore`), `SecretsStore` trait, JIT secret delivery |
 | `core-profile` | Profile context evaluation, hash-chained BLAKE3 audit logger |

@@ -167,7 +167,7 @@ pub(crate) async fn cmd_lock(
     layout: &Layout,
     profile: Option<TrustProfileName>,
 ) -> anyhow::Result<()> {
-    let client = connect(layout).await?;
+    let client = crate::ipc::connect_transport(layout).await?;
     match rpc(
         &client,
         EventKind::LockRequest { profile },

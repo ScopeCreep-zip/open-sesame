@@ -157,6 +157,64 @@ pub(crate) struct VaultState {
 }
 
 impl VaultState {
+    /// Inventory comes from persisted vault files and held runtime state,
+    /// never from configuration profiles. Listing failures are not emptiness.
+    pub(crate) fn inventory(
+        &self,
+    ) -> core_types::Result<std::collections::BTreeMap<TrustProfileName, bool>> {
+        let dir = self.layout.vaults_dir()?;
+        let mut names = std::collections::BTreeSet::new();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(core_types::Error::Secrets(format!(
+                    "{}: {error}",
+                    dir.display()
+                )));
+            }
+        };
+        if let Some(entries) = entries {
+            for entry in entries {
+                let path = entry?.path();
+                if !VaultFile::ALL
+                    .iter()
+                    .any(|kind| path.extension().is_some_and(|ext| ext == kind.extension()))
+                {
+                    continue;
+                }
+                let name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        core_types::Error::Secrets(format!(
+                            "{}: invalid vault filename",
+                            path.display()
+                        ))
+                    })?;
+                let profile = TrustProfileName::try_from(name)?;
+                if !std::fs::metadata(&path)?.is_file() {
+                    return Err(core_types::Error::Secrets(format!(
+                        "{}: vault entry is not a file",
+                        path.display()
+                    )));
+                }
+                names.insert(profile);
+            }
+        }
+        names.extend(self.master_keys.keys().cloned());
+        names.extend(self.vaults.keys().cloned());
+        names.extend(self.partial_unlocks.keys().cloned());
+        names.extend(self.active_profiles.iter().cloned());
+        Ok(names
+            .into_iter()
+            .map(|profile| {
+                let locked = !self.master_keys.contains_key(&profile);
+                (profile, locked)
+            })
+            .collect())
+    }
+
     /// Every vault locked, under `layout`, caching secrets for `ttl`.
     pub(crate) fn new(layout: Layout, ttl: Duration) -> Self {
         Self {
@@ -316,5 +374,53 @@ impl VaultState {
         wire: &[u8],
     ) -> core_types::Result<SecureBytes> {
         self.ipc_encryption_key(profile)?.open_wire(wire)
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+
+    #[test]
+    fn disk_inventory_recognizes_every_vault_artifact_without_config_profiles() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = Layout::under(root.path());
+        let dir = layout.vaults_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = VaultState::new(layout, Duration::from_secs(30));
+        for (index, kind) in VaultFile::ALL.into_iter().enumerate() {
+            std::fs::write(dir.join(format!("vault{index}.{}", kind.extension())), []).unwrap();
+        }
+        std::fs::write(dir.join("ignored.db-wal"), []).unwrap();
+        std::fs::write(dir.join("ignored.tmp"), []).unwrap();
+        let inventory = state.inventory().unwrap();
+        assert_eq!(inventory.len(), VaultFile::ALL.len());
+        for index in 0..VaultFile::ALL.len() {
+            let profile = TrustProfileName::try_from(format!("vault{index}").as_str()).unwrap();
+            assert_eq!(inventory.get(&profile), Some(&true));
+        }
+    }
+
+    #[test]
+    fn missing_directory_preserves_runtime_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = VaultState::new(Layout::under(root.path()), Duration::from_secs(30));
+        let profile = TrustProfileName::try_from("runtime").unwrap();
+        state.active_profiles.insert(profile.clone());
+        assert_eq!(state.inventory().unwrap().get(&profile), Some(&true));
+    }
+
+    #[test]
+    fn inventory_errors_are_not_empty_successes() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = Layout::under(root.path());
+        let dir = layout.vaults_dir().unwrap();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, []).unwrap();
+        let state = VaultState::new(layout, Duration::from_secs(30));
+        assert!(state.inventory().is_err());
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("invalid.db")).unwrap();
+        assert!(state.inventory().is_err());
     }
 }

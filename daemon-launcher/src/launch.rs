@@ -10,7 +10,6 @@ use core_ipc::BusClient;
 use core_types::{EventKind, LaunchDenial, SecretDenialReason, SecurityLevel, TrustProfileName};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// A launched process's composed environment. Every value zeroizes on
@@ -112,7 +111,7 @@ impl LaunchContext<'_> {
 /// endpoint children reach through `SESAME_SOCKET`.
 pub(crate) struct Launcher {
     pub(crate) cache: HashMap<String, scanner::CachedEntry>,
-    pub(crate) config_state: Arc<std::sync::RwLock<core_config::Config>>,
+    pub(crate) config_state: core_daemon::ConfigApplicationState,
     pub(crate) bus_socket: std::path::PathBuf,
 }
 
@@ -219,8 +218,14 @@ async fn fetch_secrets(
             Some(SecretDenialReason::RateLimited) => {
                 return Err(LaunchDenial::RateLimited.into());
             }
-            Some(reason) => {
-                return Err(anyhow::anyhow!("secret access denied: {reason:?}").into());
+            Some(SecretDenialReason::AccessDenied) => {
+                return Err(anyhow::anyhow!("secret access denied by policy").into());
+            }
+            Some(SecretDenialReason::PolicyUnavailable(reason)) => {
+                return Err(anyhow::anyhow!("authorization policy unavailable: {reason}").into());
+            }
+            Some(SecretDenialReason::VaultError(reason)) => {
+                return Err(anyhow::anyhow!("vault error: {reason}").into());
             }
         }
     }
@@ -354,9 +359,9 @@ pub(crate) async fn launch_entry(
     let mut composition = {
         let config = launcher
             .config_state
-            .read()
+            .snapshot()
             .map_err(|e| anyhow::anyhow!("config state lock poisoned: {e}"))?;
-        compose(&config, tags, default_profile)?
+        compose(&config.config, tags, default_profile)?
     };
     tracing::info!(
         entry_id,

@@ -53,8 +53,9 @@ pub fn require(layout: &Layout, profile: &TrustProfileName) -> Result<[u8; SALT_
 ///
 /// # Errors
 ///
-/// The layout errors, a random-source failure, and the
-/// `core_layout::file::write` errors.
+/// The layout errors, a random-source failure, and [`AuthError::Write`].
+/// `PublishedNotDurable` leaves the generated salt published and stops
+/// initialization; callers must not regenerate or remove it on that error.
 pub fn create(layout: &Layout, profile: &TrustProfileName) -> Result<[u8; SALT_LEN], AuthError> {
     let salt = core_crypto::random_bytes::<SALT_LEN>()?;
     core_layout::file::write(

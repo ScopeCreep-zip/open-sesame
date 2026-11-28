@@ -125,11 +125,13 @@ fn main() -> anyhow::Result<()> {
 /// The daemon, from bus connection to shutdown, inside the sandbox.
 async fn run(layout: core_layout::Layout, config: core_config::Config) -> anyhow::Result<()> {
     let mut events = EventLoop::new(
+        IDENTITY.daemon,
         Shutdown::register()?,
         core_daemon::watch_config(&layout, config)?,
     );
     let mut client = core_daemon::connect_bus(&layout, &IDENTITY).await?;
     let mut snippets = SnippetMap::new();
+    events.candidate()?.applied(&client).await;
 
     core_daemon::announce_started(&client, &IDENTITY).await;
     #[cfg(target_os = "linux")]
@@ -146,8 +148,9 @@ async fn run(layout: core_layout::Layout, config: core_config::Config) -> anyhow
                     core_daemon::reply(&client, &msg, response).await;
                 }
             }
-            Wake::ConfigReloaded(_) => {
-                core_daemon::announce_config_reloaded(&client, &["snippets"]).await;
+            Wake::ConfigReloaded(reload) => {
+                // Snippet contents belong to the RPC store, not configuration.
+                reload.applied(&client).await;
             }
             Wake::Own(never) => match never {},
             Wake::Shutdown(_) => break,

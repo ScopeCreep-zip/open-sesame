@@ -9,6 +9,7 @@
 // `keysym` and `secret_env` are public namespaces whose items are named
 // through them (`keysym::TAB`, `secret_env::env_var_name`).
 mod auth;
+mod config;
 mod constants;
 mod credential;
 mod crypto;
@@ -31,6 +32,7 @@ mod shortcut;
 mod window;
 
 pub use auth::*;
+pub use config::*;
 pub use constants::*;
 pub use credential::*;
 pub use crypto::*;
@@ -1188,13 +1190,13 @@ mod tests {
             default_profile: TrustProfileName::try_from("work").unwrap(),
             daemon_uptimes_ms: vec![],
             locked: false,
-            lock_state: Some(lock_state.clone()),
+            lock_state: Ok(lock_state.clone()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: EventKind = serde_json::from_str(&json).unwrap();
         match decoded {
             EventKind::StatusResponse { lock_state: ls, .. } => {
-                assert_eq!(ls, Some(lock_state));
+                assert_eq!(ls, Ok(lock_state));
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -1209,7 +1211,10 @@ mod tests {
             locked: true,
             lock_state,
         };
-        for lock_state in [None, Some(std::collections::BTreeMap::new())] {
+        for lock_state in [
+            Err("inventory unavailable".into()),
+            Ok(std::collections::BTreeMap::new()),
+        ] {
             let wire = postcard::to_allocvec(&status(lock_state.clone())).unwrap();
             match postcard::from_bytes::<EventKind>(&wire).unwrap() {
                 EventKind::StatusResponse { lock_state: ls, .. } => assert_eq!(ls, lock_state),

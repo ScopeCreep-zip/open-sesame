@@ -149,6 +149,14 @@ pub enum CloneFailureKind {
     Other,
 }
 
+/// A link file write that failed, or published without confirmed
+/// durability: an I/O error whose message says which.
+impl From<core_layout::file::WriteError> for WorkspaceError {
+    fn from(e: core_layout::file::WriteError) -> Self {
+        Self::Io(e.into())
+    }
+}
+
 impl WorkspaceError {
     /// A stable machine-readable name for the error's variant, used in
     /// structured output (`sesame workspace list --format json` issues).

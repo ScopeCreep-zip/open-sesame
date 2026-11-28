@@ -79,6 +79,10 @@ pub enum AuthError {
     Keyring(#[from] core_types::CredentialError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Publication state of a vault-file write. A published but non-durable
+    /// write must not be retried as though the destination were unchanged.
+    #[error(transparent)]
+    Write(#[from] core_layout::file::WriteError),
     #[error(transparent)]
     Layout(#[from] core_layout::Error),
     #[error("system clock is before the Unix epoch: {0}")]
@@ -104,9 +108,41 @@ impl From<AuthError> for core_types::Error {
     fn from(e: AuthError) -> Self {
         match e {
             AuthError::Io(io) => Self::Io(io),
+            AuthError::Write(write) => Self::Io(write.into()),
             AuthError::Layout(layout) => layout.into(),
             AuthError::Crypto(crypto) => crypto,
             other => Self::Secrets(other.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn publication_state_survives_authentication_and_core_error_boundaries() {
+        for published in [false, true] {
+            let source = std::io::Error::other("directory sync failed");
+            let write = if published {
+                core_layout::file::WriteError::PublishedNotDurable(source)
+            } else {
+                core_layout::file::WriteError::NotPublished(source)
+            };
+            let auth = AuthError::from(write);
+            assert!(matches!(&auth, AuthError::Write(_)));
+            let core_types::Error::Io(io) = core_types::Error::from(auth) else {
+                panic!("write publication state lost");
+            };
+            let write = io
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<core_layout::file::WriteError>()
+                .unwrap();
+            assert_eq!(
+                matches!(write, core_layout::file::WriteError::PublishedNotDurable(_)),
+                published,
+            );
         }
     }
 }

@@ -107,7 +107,7 @@ async fn run(layout: &Layout, cli: Cli) -> anyhow::Result<ExitCode> {
         } => match (rotate_keys, doctor) {
             (true, _) => done(status::cmd_rotate_keys(layout).await),
             (false, Some(categories)) => {
-                doctor::cmd_doctor(layout, &categories, output, exit_code || quiet, quiet)
+                doctor::cmd_doctor(layout, &categories, output, exit_code || quiet, quiet).await
             }
             (false, None) => done(status::cmd_status(layout).await),
         },

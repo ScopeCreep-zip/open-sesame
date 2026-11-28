@@ -121,6 +121,7 @@ async fn run(
         "wm config loaded"
     );
     let mut events = EventLoop::new(
+        IDENTITY.daemon,
         Shutdown::register()?,
         core_daemon::watch_config(&layout, config)?,
     );
@@ -143,7 +144,7 @@ async fn run(
         #[cfg(target_os = "linux")]
         backend,
         client,
-        config_state: Arc::clone(events.config_state()),
+        config_state: events.application().clone(),
         controller: OverlayController::new(mru_store),
         windows,
         refresh,
@@ -155,6 +156,7 @@ async fn run(
         password_buffer: SecureVec::for_password(),
     };
     let mut respawns = Respawns::default();
+    rt.reconfigure(events.candidate()?).await?;
 
     #[cfg(target_os = "linux")]
     platform_linux::systemd::notify_ready();
@@ -169,7 +171,16 @@ async fn run(
         match events.next(&mut rt.client, local).await? {
             Wake::Own(Local::Overlay(Some(event))) => rt.overlay_event(event).await?,
             Wake::Own(Local::Overlay(None)) => rt.overlay_died(&mut respawns).await?,
-            Wake::Own(Local::Respawn) => rt.respawn_overlay(&mut respawns)?,
+            Wake::Own(Local::Respawn) => {
+                rt.respawn_overlay(&mut respawns)?;
+                match events.candidate() {
+                    Ok(reload) => rt.reconfigure(reload).await?,
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "overlay restored with previous settings; current configuration unavailable"
+                    ),
+                }
+            }
             // Stops the daemon; systemd restarts it (Restart=on-failure).
             Wake::Own(Local::CompositorLost) => {
                 if rt.overlay_cmd_tx.send(OverlayCmd::Quit).is_err() {
@@ -180,7 +191,13 @@ async fn run(
             }
             Wake::Own(Local::Deadline) => rt.handle(Event::DwellTimeout).await?,
             Wake::Message(msg) => rt.message(&msg).await?,
-            Wake::ConfigReloaded(config) => rt.reconfigure(&config).await,
+            Wake::ConfigReloaded(reload) => {
+                if respawns.pending() {
+                    reload.reject("overlay recovery is pending".into());
+                } else {
+                    rt.reconfigure(reload).await?;
+                }
+            }
             Wake::Shutdown(_) => break,
         }
     }

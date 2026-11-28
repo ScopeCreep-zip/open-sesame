@@ -60,7 +60,7 @@ pub(crate) async fn cmd_profile_deactivate(
     layout: &Layout,
     profile_name: TrustProfileName,
 ) -> anyhow::Result<()> {
-    let client = connect(layout).await?;
+    let client = crate::ipc::connect_transport(layout).await?;
     let name = profile_name.clone();
     let event = EventKind::ProfileDeactivate {
         target: ProfileId::new(),

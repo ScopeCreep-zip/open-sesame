@@ -33,15 +33,12 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Every bus client daemon and its security clearance.
-const KNOWN_DAEMONS: &[(Daemon, SecurityLevel)] = &[
-    (Daemon::Secrets, SecurityLevel::SecretsOnly),
-    (Daemon::Wm, SecurityLevel::Internal),
-    (Daemon::Launcher, SecurityLevel::Internal),
-    (Daemon::Clipboard, SecurityLevel::Internal),
-    (Daemon::Input, SecurityLevel::Internal),
-    (Daemon::Snippets, SecurityLevel::Internal),
-];
+/// Client identities derive from the canonical daemon registry.
+fn client_daemons() -> impl Iterator<Item = Daemon> {
+    Daemon::ALL
+        .into_iter()
+        .filter(|daemon| *daemon != Daemon::Profile)
+}
 
 /// Key rotation interval.
 const KEY_ROTATION_INTERVAL: Duration = Duration::from_hours(1);
@@ -51,9 +48,6 @@ const KEY_ROTATION_GRACE: u32 = 30;
 
 /// Watchdog notification interval: half of the units' `WatchdogSec=30`.
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
-
-/// How often `installation.toml` is looked for before `sesame init`.
-const INSTALLATION_POLL: Duration = Duration::from_millis(500);
 
 /// Tracks which `DaemonId` is associated with each daemon name.
 /// Detects crash-restarts when a new `DaemonStarted` arrives for an already-registered name.
@@ -189,7 +183,8 @@ async fn issue_keys(layout: &core_layout::Layout) -> anyhow::Result<ClearanceReg
         .await
         .context("failed to create keys directory")?;
     let mut registry = ClearanceRegistry::new();
-    for &(daemon, security_level) in KNOWN_DAEMONS {
+    for daemon in client_daemons() {
+        let security_level = daemon.clearance();
         let pubkey = core_ipc::noise::issue_daemon_keypair(layout, daemon.name())
             .await
             .with_context(|| format!("failed to issue keypair for {daemon}"))?;
@@ -230,31 +225,40 @@ async fn bind_bus(
 /// `StatusRequest` as locked with no active profiles, so `sesame status`
 /// does not time out.
 async fn await_installation(
-    layout: &core_layout::Layout,
+    config_watch: &mut core_daemon::ConfigWatch,
     bus: &BusServer,
     shutdown: &mut Shutdown,
     default_profile: &TrustProfileName,
-) -> anyhow::Result<Option<core_config::InstallationConfig>> {
-    if let Some(installation) = core_config::load_installation(layout)? {
-        return Ok(Some(installation));
+) -> anyhow::Result<Option<core_daemon::Reload>> {
+    let initial = config_watch.candidate()?;
+    if initial.snapshot.installation.is_some() {
+        return Ok(Some(initial));
     }
     tracing::info!("waiting for sesame init — installation.toml not found");
 
     let pre_init = core_ipc::MessageContext::new(DaemonId::new());
+    let _ = initial.applied_event(pre_init.sender);
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(256);
     bus.register(pre_init.sender, SecurityLevel::Internal, tx)
         .await;
-    let mut poll = tokio::time::interval(INSTALLATION_POLL);
     let mut watchdog = tokio::time::interval(WATCHDOG_INTERVAL);
     let installation = loop {
         tokio::select! {
-            _ = poll.tick() => {
-                if let Some(installation) = core_config::load_installation(layout)? {
+            candidate = config_watch.reload() => {
+                let reload = match candidate {
+                    Ok(reload) => reload,
+                    Err(error) => {
+                        tracing::warn!(%error, "configuration candidate unavailable");
+                        continue;
+                    }
+                };
+                if reload.snapshot.installation.is_some() {
                     tracing::info!("installation.toml found, transitioning to full mode");
                     #[cfg(target_os = "linux")]
                     platform_linux::systemd::notify_reloading();
-                    break Some(installation);
+                    break Some(reload);
                 }
+                let _ = reload.applied_event(pre_init.sender);
             }
             _ = watchdog.tick() => {
                 #[cfg(target_os = "linux")]
@@ -271,12 +275,20 @@ async fn await_installation(
                         default_profile: default_profile.clone(),
                         daemon_uptimes_ms: vec![],
                         locked: true,
-                        // Before `sesame init` no vault exists.
-                        lock_state: Some(std::collections::BTreeMap::new()),
+                        lock_state: Err("installation is not initialized; vault inventory unavailable".into()),
                     };
                     let reply = Message::new(&pre_init, status, SecurityLevel::Internal, bus.epoch())
                         .with_correlation(msg.msg_id);
-                    dispatch::send_reply(bus, &msg.msg_id, &reply).await;
+                    dispatch::send_reply(bus, &msg.msg_id, reply).await;
+                }
+                if matches!(msg.payload, EventKind::ConfigStatusRequest { daemon: Daemon::Profile }) {
+                    let response = EventKind::ConfigStatusResponse {
+                        daemon: Daemon::Profile,
+                        status: config_watch.application().status()?,
+                    };
+                    let reply = Message::new(&pre_init, response, SecurityLevel::Internal, bus.epoch())
+                        .with_correlation(msg.msg_id);
+                    dispatch::send_reply(bus, &msg.msg_id, reply).await;
                 }
             }
             signal = shutdown.wait() => {
@@ -348,8 +360,10 @@ impl Hub {
                 _ = watchdog.tick() => {
                     #[cfg(target_os = "linux")]
                     platform_linux::systemd::notify_watchdog();
-                    if reconcile_due {
-                        self.reconcile_secrets_state().await;
+                    if reconcile_due
+                        && let Err(error) = self.reconcile_secrets_state().await
+                    {
+                        tracing::warn!(%error, "vault inventory unavailable");
                     }
                     reconcile_due = !reconcile_due;
                 }
@@ -364,15 +378,24 @@ impl Hub {
                 never = self.bus.run() => match never {},
                 Some(frame) = sources.host_rx.recv() => self.host_frame(&frame).await,
                 Some(signal) = sources.context_rx.recv() => self.context_changed(&signal).await,
-                Some(()) = sources.config_watch.reloads.recv() => {
-                    self.reload(&sources.config_watch.state);
+                candidate = sources.config_watch.reload() => {
+                    match candidate {
+                        Ok(reload) => self.reload(reload).await,
+                        Err(error) => tracing::warn!(%error, "configuration candidate unavailable"),
+                    }
                 }
                 Some(()) = sources.sighup.recv() => {
                     // Type=notify-reload protocol: RELOADING=1 -> work -> READY=1.
                     tracing::info!("SIGHUP received, triggering config reload");
                     #[cfg(target_os = "linux")]
                     platform_linux::systemd::notify_reloading();
-                    self.reload(&sources.config_watch.state);
+                    match sources.config_watch.reconcile().await {
+                        Ok(()) => match sources.config_watch.candidate() {
+                            Ok(reload) => self.reload(reload).await,
+                            Err(error) => tracing::warn!(%error, "configuration candidate unavailable"),
+                        },
+                        Err(error) => tracing::warn!(%error, "explicit reload rejected; retaining applied configuration"),
+                    }
                     #[cfg(target_os = "linux")]
                     platform_linux::systemd::notify_ready();
                 }
@@ -393,6 +416,8 @@ async fn run(
     let mut shutdown = Shutdown::register()?;
     let registry = issue_keys(&layout).await?;
     let bus = bind_bus(&layout, &startup_config, registry).await?;
+    let default_profile = startup_config.global.default_profile.clone();
+    let mut config_watch = core_daemon::watch_config(&layout, startup_config)?;
 
     // Registered before the first READY=1: systemd checks for a SIGHUP
     // handler then under Type=notify-reload.
@@ -403,21 +428,18 @@ async fn run(
     #[cfg(target_os = "linux")]
     platform_linux::systemd::notify_ready();
 
-    let Some(installation) = await_installation(
-        &layout,
-        &bus,
-        &mut shutdown,
-        &startup_config.global.default_profile,
-    )
-    .await?
+    let Some(initial) =
+        await_installation(&mut config_watch, &bus, &mut shutdown, &default_profile).await?
     else {
         return Ok(());
     };
+    let installation = initial
+        .snapshot
+        .installation
+        .clone()
+        .context("installation discovery returned a snapshot without an identity")?;
     let install_ns = installation.namespace;
-
-    // The startup load may predate config.toml: `sesame init` writes it
-    // alongside installation.toml.
-    let config = core_config::load_config(&layout).context("failed to reload config after init")?;
+    let config = initial.snapshot.config.clone();
     tracing::info!(default_profile = %config.global.default_profile, "config loaded");
 
     let uid = rustix::process::getuid().as_raw();
@@ -449,6 +471,7 @@ async fn run(
     let context_engine = context::context_engine(&config, &install_ns);
     tracing::info!(profile = %context_engine.default_profile(), "context engine initialized with default profile");
     let mut hub = Hub {
+        application: config_watch.application().clone(),
         layout: layout.clone(),
         bus,
         ctx,
@@ -465,8 +488,7 @@ async fn run(
         rotation_done_tx,
         pending_rotation: None,
     };
-    let config_watch = core_daemon::watch_config(&layout, config)?;
-
+    hub.reload(initial).await;
     // The second READY=1 ends the pre-install -> full mode reload cycle
     // (Type=notify-reload), making SubState observable by post-install.sh.
     #[cfg(target_os = "linux")]
@@ -516,7 +538,7 @@ mod tests {
 
     #[test]
     fn every_client_daemon_has_a_clearance() {
-        let mut known: Vec<Daemon> = KNOWN_DAEMONS.iter().map(|(d, _)| *d).collect();
+        let mut known: Vec<Daemon> = client_daemons().collect();
         known.sort();
         let clients: Vec<Daemon> = Daemon::ALL
             .into_iter()

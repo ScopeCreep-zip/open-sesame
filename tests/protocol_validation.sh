@@ -97,9 +97,9 @@ while (($#)); do
 done
 BIN=$(cd -- "$BIN" && pwd)
 
-DAEMONS_HEADLESS=(daemon-profile daemon-secrets daemon-launcher daemon-snippets)
-DAEMONS_DESKTOP=(daemon-wm daemon-clipboard daemon-input)
-SANDBOXED=(daemon-profile daemon-secrets daemon-snippets daemon-wm daemon-clipboard daemon-input)
+DAEMONS_HEADLESS=()
+DAEMONS_DESKTOP=()
+SANDBOXED=()
 PASSWORD="lifecycle-$RANDOM-$RANDOM"
 PROFILE=default
 
@@ -113,11 +113,28 @@ require() {
     exit 2
 }
 
+UNITS=$(realpath -- "$SCRIPT_DIR/../contrib/systemd")
+# Target membership comes from the units exercised by this harness.
+# Reject ambiguous membership rather than silently skipping a shipped daemon.
+for unit in "$UNITS"/open-sesame-*.service; do
+    daemon=$(basename "$unit" .service)
+    daemon=daemon-${daemon#open-sesame-}
+    target=$(sed -n 's/^WantedBy=//p' "$unit")
+    case "$target" in
+    open-sesame-headless.target) DAEMONS_HEADLESS+=("$daemon") ;;
+    open-sesame-desktop.target) DAEMONS_DESKTOP+=("$daemon") ;;
+    *) require "unsupported target membership in $unit: $target" ;;
+    esac
+    # Launcher deliberately permits its children to run without inherited
+    # in-process restrictions; every other daemon installs the sandbox.
+    [[ "$daemon" == daemon-launcher ]] || SANDBOXED+=("$daemon")
+done
+((${#DAEMONS_HEADLESS[@]} && ${#DAEMONS_DESKTOP[@]})) \
+    || require "shipped daemon target membership is empty"
 for binary in sesame "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
     [[ -x "$BIN/$binary" ]] || require "$BIN/$binary is missing (cargo build --workspace --bins)"
 done
 command -v jq >/dev/null || require "jq is not on PATH"
-UNITS=$(cd -- "$SCRIPT_DIR/../contrib/systemd" && pwd)
 
 HOST_RUNTIME=/run/user/$(id -u)
 [[ -d "$HOST_RUNTIME" ]] || require "no session runtime directory $HOST_RUNTIME"
@@ -231,6 +248,8 @@ export XDG_SESSION_TYPE=wayland
 export PDS_LOG_FORMAT=pretty
 unset NOTIFY_SOCKET DBUS_SYSTEM_BUS_ADDRESS
 export LIFECYCLE_ROOT=$ROOT LIFECYCLE_BIN=$BIN LIFECYCLE_UNITS=$UNITS LIFECYCLE_ID=$$
+printf '%s\n' "${DAEMONS_HEADLESS[@]}" >"$ROOT/headless"
+printf '%s\n' "${DAEMONS_DESKTOP[@]}" >"$ROOT/desktop"
 export LIFECYCLE_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 export HOST_SYSTEMCTL HOST_SYSTEMD_RUN
 export PATH="$ROOT/bin:$BIN:$PATH"
@@ -242,8 +261,8 @@ export PATH="$ROOT/bin:$BIN:$PATH"
 cat >"$ROOT/bin/systemctl" <<'STANDIN'
 #!/usr/bin/env bash
 set -euo pipefail
-HEADLESS=(daemon-profile daemon-secrets daemon-launcher daemon-snippets)
-DESKTOP=(daemon-wm daemon-clipboard daemon-input)
+mapfile -t HEADLESS < "$LIFECYCLE_ROOT/headless"
+mapfile -t DESKTOP < "$LIFECYCLE_ROOT/desktop"
 host() { env -u LD_LIBRARY_PATH "$@"; }
 fail() { echo "systemctl stand-in: $*" >&2; exit 1; }
 running() {
@@ -326,6 +345,25 @@ start() {
   done
 }
 case "$*" in
+  "--user list-units --all --output=json open-sesame-*")
+    {
+      if [[ -e "$LIFECYCLE_ROOT/desktop-started" ]]; then
+        echo '{"unit":"open-sesame-desktop.target","active":"active"}'
+      fi
+      for daemon in "${HEADLESS[@]}" "${DESKTOP[@]}"; do
+        [[ -f "$LIFECYCLE_ROOT/units/$daemon" ]] || continue
+        unit=$(tail -n 1 "$LIFECYCLE_ROOT/units/$daemon")
+        state=$(host "$HOST_SYSTEMCTL" --user show "$unit" -pActiveState --value)
+        jq -cn --arg unit "open-sesame-${daemon#daemon-}.service" --arg active "$state" \
+          '{unit:$unit,active:$active}'
+      done
+    } | jq -s . ;;
+  "--user show open-sesame-"*)
+    daemon=daemon-${3#open-sesame-}
+    daemon=${daemon%.service}
+    [[ -f "$LIFECYCLE_ROOT/units/$daemon" ]] || fail "no transient unit for $daemon"
+    unit=$(tail -n 1 "$LIFECYCLE_ROOT/units/$daemon")
+    host "$HOST_SYSTEMCTL" --user show "$unit" "${@:4}" ;;
   "--user is-active --quiet open-sesame-headless.target") active "${HEADLESS[@]}" ;;
   "--user daemon-reload") exit 0 ;;
   "--user list-unit-files open-sesame-desktop.target --no-pager --no-legend")
@@ -335,8 +373,10 @@ case "$*" in
     # The other daemons are After=open-sesame-profile.service: they start
     # once daemon-profile, which issues their keys, is ready.
     start daemon-profile
-    start "${HEADLESS[@]:1}" ;;
-  "--user start open-sesame-desktop.target") start "${DESKTOP[@]}" ;;
+    start "${HEADLESS[@]}" ;;
+   "--user start open-sesame-desktop.target")
+     start "${DESKTOP[@]}"
+     touch "$LIFECYCLE_ROOT/desktop-started" ;;
   *) echo "systemctl stand-in: unexpected call: $*" >&2; exit 1 ;;
 esac
 STANDIN
@@ -433,6 +473,25 @@ wait_for() {
     done
 }
 
+# Convergence must include every daemon started by this harness, not merely
+# a successful subset of responders.
+expect_convergence() {
+    local name=$1
+    for _ in $(seq 20); do
+        sesame_run status --doctor config --output json --exit-code
+        [[ "$STATUS" -eq 0 ]] && break
+        sleep 0.5
+    done
+    if [[ "$STATUS" -eq 0 ]] && jq -e \
+        --argjson expected "$((${#DAEMONS_HEADLESS[@]} + ${#DAEMONS_DESKTOP[@]}))" \
+        '[.checks[] | select(.category == "config")] | length == $expected' \
+        <<<"$OUT" >/dev/null; then
+        pass "$name"
+    else
+        fail "$name" "$OUT"
+    fi
+}
+
 # -- Lifecycle ----------------------------------------------------------------
 
 echo "========================================"
@@ -455,8 +514,14 @@ case "$kernel" in
 *) ENFORCEMENT=NotEnforced ;;
 esac
 
+systemctl --user start open-sesame-headless.target
+systemctl --user start open-sesame-desktop.target
+sesame_run status
+expect_match "L-02: pre-init daemons answer status" "installation is not initialized"
 sesame_with "$PASSWORD" init --no-keybinding
 expect_match "L-02: sesame init sets up config, daemons, and the vault" 'Setup complete'
+
+expect_convergence "L-02: every pre-init daemon converges after init"
 
 for daemon in "${DAEMONS_HEADLESS[@]}" "${DAEMONS_DESKTOP[@]}"; do
     if alive "$daemon"; then
@@ -556,9 +621,33 @@ expect_match "V-005/V-010: deactivate, activate, then the secret is served" "^li
 sesame_with "$PASSWORD" init --no-keybinding
 expect_match "V-011: sesame init re-run completes" "Setup complete"
 
+# -- Configuration rejection and recovery -------------------------------------
+
+mkdir -p "$XDG_CONFIG_HOME/pds/config.d"
+printf '[invalid\n' >"$XDG_CONFIG_HOME/pds/config.d/lifecycle-invalid.toml"
+wait_for "failed to activate profile" 10 profile activate "$PROFILE"
+expect_match "C-01: rejected configuration prevents activation" "failed to activate profile" 1
+sesame_run status
+expect_match "C-02: rejected configuration does not hide vault inventory" "$PROFILE +unlocked"
+cp "$XDG_CONFIG_HOME/pds/installation.toml" "$ROOT/installation.saved"
+printf 'namespace = 7\n' >"$XDG_CONFIG_HOME/pds/installation.toml"
+sesame_run profile deactivate "$PROFILE"
+expect_match "C-03: rejected configuration and identity permit deactivation" "deactivated"
+sesame_run lock -p "$PROFILE"
+expect_match "C-04: rejected configuration and identity permit lock" "locked"
+mv "$ROOT/installation.saved" "$XDG_CONFIG_HOME/pds/installation.toml"
+rm "$XDG_CONFIG_HOME/pds/config.d/lifecycle-invalid.toml"
+expect_convergence "C-05: removing invalid sources restores consumer convergence"
+sesame_with "$PASSWORD" unlock -p "$PROFILE"
+expect_match "C-06: recovered policy permits unlock" "unlocked via password"
+sesame_run profile activate "$PROFILE"
+expect_match "C-07: recovered policy permits activation" "activated"
+sesame_run secret get -p "$PROFILE" lifecycle-key
+expect_match "C-08: recovery preserves vault contents" "^lifecycle-value$"
+
 alive daemon-secrets && kill -TERM "$(<"$ROOT/pids/daemon-secrets")"
-wait_for "treated as locked" 40 status
-expect_match "V-009: with daemon-secrets gone, status reports every vault locked" "daemon-secrets is not answering; every vault is treated as locked"
+wait_for "daemon-secrets did not answer" 40 status
+expect_match "V-009: with daemon-secrets gone, status reports unknown inventory" "daemon-secrets did not answer"
 
 # -- Containment and shutdown -------------------------------------------------
 
