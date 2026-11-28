@@ -561,7 +561,8 @@ sesame_run secret get -p "$PROFILE" lifecycle-key
 expect_match "L-06: daemon-secrets returns it" "^lifecycle-value$"
 
 sesame_run wm list
-expect_match "L-07: daemon-wm lists the compositor's windows" "ID"
+# A headless compositor can legitimately have no application windows.
+expect_match "L-07: daemon-wm lists the compositor's windows" 'ID|^No windows tracked\.$'
 sesame_run launch search a
 expect_match "L-07: daemon-launcher searches desktop entries" "Name|No "
 sesame_run clipboard history -p "$PROFILE"
