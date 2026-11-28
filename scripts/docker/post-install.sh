@@ -162,8 +162,11 @@ echo "Verifying HTTPS repository cloning..."
     clone_root=$(mktemp -d)
     trap 'rm -rf "$clone_root"' EXIT
     export SESAME_WORKSPACE_ROOT=$clone_root
+    # docker exec --user selects the UID without setting the login environment.
+    USER=$(id -un)
+    export USER
     sesame workspace clone --no-workspace https://github.com/octocat/Hello-World
-    checkout="$clone_root/$(id -un)/github.com/octocat/hello-world"
+    checkout="$clone_root/$USER/github.com/octocat/hello-world"
     test -d "$checkout/.git"
     test -s "$checkout/README"
 )
